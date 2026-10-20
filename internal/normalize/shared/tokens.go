@@ -163,7 +163,8 @@ func capU32(v uint64) uint32 {
 	return uint32(min(v, uint64(^uint32(0))))
 }
 
-func satSub(a, b uint64) uint64 {
+// SatSub is u64 saturating_sub, which the upstream token arithmetic leans on.
+func SatSub(a, b uint64) uint64 {
 	if b > a {
 		return 0
 	}
@@ -204,24 +205,24 @@ func OpenAIGeneration(usage JSON) TokenAccounting {
 	outputTextDetail := ToU64(Get(outputDetails, "text_tokens"))
 	inputText := inputTextDetail
 	if inputText == 0 {
-		inputText = satSub(inputTotal, cacheRead+cacheWrite+inputImage+inputAudio)
+		inputText = SatSub(inputTotal, cacheRead+cacheWrite+inputImage+inputAudio)
 	}
 	outputText := outputTextDetail
 	if outputText == 0 {
-		outputText = satSub(outputTotal, outputImage+outputAudio+reasoning+serverToolUse)
+		outputText = SatSub(outputTotal, outputImage+outputAudio+reasoning+serverToolUse)
 	}
 
 	return t.WithBuckets(
-		BucketValue{"input_text", inputText},
-		BucketValue{"output_text", outputText},
-		BucketValue{"input_cache_read", cacheRead},
-		BucketValue{"input_cache_write", cacheWrite},
-		BucketValue{"input_image", inputImage},
-		BucketValue{"output_image", outputImage},
-		BucketValue{"input_audio", inputAudio},
-		BucketValue{"output_audio", outputAudio},
-		BucketValue{"reasoning", reasoning},
-		BucketValue{"server_tool_use", serverToolUse},
+		BucketValue{Key: "input_text", Value: inputText},
+		BucketValue{Key: "output_text", Value: outputText},
+		BucketValue{Key: "input_cache_read", Value: cacheRead},
+		BucketValue{Key: "input_cache_write", Value: cacheWrite},
+		BucketValue{Key: "input_image", Value: inputImage},
+		BucketValue{Key: "output_image", Value: outputImage},
+		BucketValue{Key: "input_audio", Value: inputAudio},
+		BucketValue{Key: "output_audio", Value: outputAudio},
+		BucketValue{Key: "reasoning", Value: reasoning},
+		BucketValue{Key: "server_tool_use", Value: serverToolUse},
 	).WithLegacyScalars(inputTotal, outputTotal, cacheRead, cacheWrite).
 		WithRawUsage(usage)
 }

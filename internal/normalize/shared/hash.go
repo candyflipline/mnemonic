@@ -256,6 +256,7 @@ func compactStrings(values []string) []byte {
 		}
 		writeJSONString(&b, v)
 	}
+	b.WriteByte(']')
 	return []byte(b.String())
 }
 
