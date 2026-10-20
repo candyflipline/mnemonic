@@ -51,7 +51,7 @@ func lsSelectPage(ctx context.Context, db *sql.DB, a *lsArgs, cursor *lsCursor) 
 	if a.Mode != "" {
 		columns = append(columns, "event_kind", "payload_type", "tool_name", "source_name")
 		aggregates += ",\n    " + lsModeAggregate() + " AS session_mode"
-		having = append(having, "session_mode = "+qQuote(a.Mode))
+		having = append(having, "session_mode = "+sqlQuote(a.Mode))
 	}
 	if a.Harness != nil || a.Source != nil {
 		columns = append(columns, "event_ts", "event_uid")
@@ -59,14 +59,14 @@ func lsSelectPage(ctx context.Context, db *sql.DB, a *lsArgs, cursor *lsCursor) 
 	if a.Harness != nil {
 		columns = append(columns, "harness")
 		aggregates += ",\n    " + lsArgMax("nullif(harness, '')") + " AS latest_harness"
-		having = append(having, "latest_harness = "+qQuote(*a.Harness))
+		having = append(having, "latest_harness = "+sqlQuote(*a.Harness))
 	}
 	if a.Source != nil {
 		if !contains(columns, "source_name") {
 			columns = append(columns, "source_name")
 		}
 		aggregates += ",\n    " + lsArgMax("nullif(source_name, '')") + " AS latest_source_name"
-		having = append(having, "latest_source_name = "+qQuote(*a.Source))
+		having = append(having, "latest_source_name = "+sqlQuote(*a.Source))
 	}
 	cmp := ">"
 	if a.Sort == "desc" {
@@ -76,7 +76,7 @@ func lsSelectPage(ctx context.Context, db *sql.DB, a *lsArgs, cursor *lsCursor) 
 		ms := strconv.FormatInt(cursor.LastEventUnixMs, 10)
 		having = append(having, "(epoch_ms(last_event_time) "+cmp+" "+ms+
 			" OR (epoch_ms(last_event_time) = "+ms+
-			" AND session_id "+cmp+" "+qQuote(cursor.SessionID)+"))")
+			" AND session_id "+cmp+" "+sqlQuote(cursor.SessionID)+"))")
 	}
 
 	q := "SELECT session_id, first_event_time, last_event_time\nFROM (\n" +
@@ -269,7 +269,7 @@ func strPtr(s string) *string {
 func qQuoteJoin(ids []string) string {
 	quoted := make([]string, len(ids))
 	for i, id := range ids {
-		quoted[i] = qQuote(id)
+		quoted[i] = sqlQuote(id)
 	}
 	return strings.Join(quoted, ", ")
 }

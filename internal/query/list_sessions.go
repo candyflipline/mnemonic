@@ -126,10 +126,10 @@ func lsParseArgs(raw json.RawMessage) (*lsArgs, error) {
 		a.Limit = int(*in.limit)
 	}
 	if a.Limit < lsMinLimit || a.Limit > maxLimit {
-		return nil, qErr("limit must be between 1 and %d", maxLimit)
+		return nil, argErrorf("limit must be between 1 and %d", maxLimit)
 	}
 	if in.start == nil || in.end == nil {
-		return nil, qErr("list_sessions requires start_datetime and end_datetime with explicit timezones")
+		return nil, argErrorf("list_sessions requires start_datetime and end_datetime with explicit timezones")
 	}
 	a.StartDatetime = strings.TrimSpace(*in.start)
 	a.EndDatetime = strings.TrimSpace(*in.end)
@@ -141,12 +141,12 @@ func lsParseArgs(raw json.RawMessage) (*lsArgs, error) {
 		return nil, aerr
 	}
 	if a.EndUnixMs <= a.StartUnixMs {
-		return nil, qErr("end_datetime must be later than start_datetime")
+		return nil, argErrorf("end_datetime must be later than start_datetime")
 	}
 	if in.cursor != nil {
 		a.Cursor = strings.TrimSpace(*in.cursor)
 		if a.Cursor == "" {
-			return nil, qErr("cursor must be a non-empty string when provided")
+			return nil, argErrorf("cursor must be a non-empty string when provided")
 		}
 	}
 	if a.Harness, aerr = qNonEmptyFilter("harness", derefStr(in.harness), in.harness != nil); aerr != nil {
@@ -165,7 +165,7 @@ func lsParseArgs(raw json.RawMessage) (*lsArgs, error) {
 }
 
 func lsSerdeError() error {
-	return qErr("list_sessions expects a JSON object with start_datetime and end_datetime")
+	return argErrorf("list_sessions expects a JSON object with start_datetime and end_datetime")
 }
 
 func derefStr(s *string) string {
@@ -191,7 +191,7 @@ func lsObjectFields(raw json.RawMessage, allowed ...string) (map[string]json.Raw
 			}
 		}
 		if !ok {
-			return nil, qErr("unknown field %q", key)
+			return nil, argErrorf("unknown field %q", key)
 		}
 	}
 	return fields, nil
@@ -270,18 +270,18 @@ func lsEncodeCursor(c *lsCursor) (*string, error) {
 	if err != nil {
 		return nil, err
 	}
-	token := qB64URL(b)
+	token := b64RawURL.EncodeToString(b)
 	return &token, nil
 }
 
 func lsDecodeCursor(token string) (*lsCursor, error) {
 	raw, err := qDecodeB64URL(token)
 	if err != nil {
-		return nil, qErr("invalid base64 cursor")
+		return nil, argErrorf("invalid base64 cursor")
 	}
 	var c lsCursor
 	if err := json.Unmarshal(raw, &c); err != nil {
-		return nil, qErr("invalid cursor payload")
+		return nil, argErrorf("invalid cursor payload")
 	}
 	return &c, nil
 }
@@ -294,10 +294,10 @@ func lsQueryPage(ctx context.Context, db *sql.DB, a *lsArgs) (*lsPage, error) {
 			return nil, err
 		}
 		if c.FilterSig != lsFilterSig(a) {
-			return nil, qErr("cursor does not match current list_sessions filter")
+			return nil, argErrorf("cursor does not match current list_sessions filter")
 		}
 		if c.Sort != a.Sort {
-			return nil, qErr("cursor sort does not match requested sort order")
+			return nil, argErrorf("cursor sort does not match requested sort order")
 		}
 		cursor = c
 	}
@@ -345,8 +345,8 @@ func lsDataJSON(a *lsArgs, page *lsPage) map[string]any {
 				"display_label":   item.DisplayLabel,
 				"harness":         nilPtr(item.Harness),
 				"source":          nilPtr(item.Source),
-				"started_at":      qFormatMillis(item.FirstEventUnixMs),
-				"updated_at":      qFormatMillis(item.LastEventUnixMs),
+				"started_at":      formatRFC3339UTCMillis(item.FirstEventUnixMs),
+				"updated_at":      formatRFC3339UTCMillis(item.LastEventUnixMs),
 				"completed":       item.Completed,
 				"turn_count":      item.TotalTurns,
 				"event_count":     item.TotalEvents,

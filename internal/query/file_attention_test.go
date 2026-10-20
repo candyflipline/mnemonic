@@ -188,7 +188,7 @@ func TestFaBuildDataEventsGranularity(t *testing.T) {
 	if event["timestamp"] != "2026-04-29T12:00:01.123Z" {
 		t.Fatalf("timestamp = %v", event["timestamp"])
 	}
-	wantTurn := "turn:" + qB64URL([]byte("sess-ev")) + ":7"
+	wantTurn := "turn:" + b64RawURL.EncodeToString([]byte("sess-ev")) + ":7"
 	if item["open"].(map[string]any)["turn_id"] != wantTurn {
 		t.Fatalf("turn_id = %v", item["open"].(map[string]any)["turn_id"])
 	}
@@ -314,7 +314,7 @@ func TestFaSessionRollupsRankContiguousWhenMiddleRowSkipped(t *testing.T) {
 	if len(sessions) != 2 {
 		t.Fatalf("sessions = %d", len(sessions))
 	}
-	for i, want := range []string{"session:" + qB64URL([]byte("sess-a")), "session:" + qB64URL([]byte("sess-b"))} {
+	for i, want := range []string{"session:" + b64RawURL.EncodeToString([]byte("sess-a")), "session:" + b64RawURL.EncodeToString([]byte("sess-b"))} {
 		item := sessions[i].(map[string]any)
 		if item["rank"] != i+1 || item["id"] != want {
 			t.Fatalf("sessions[%d] = %#v, want rank %d id %s", i, item, i+1, want)

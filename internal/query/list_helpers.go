@@ -5,33 +5,17 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
 
-func qErr(format string, args ...any) *ArgError {
-	return &ArgError{Msg: fmt.Sprintf(format, args...)}
-}
-
-// qQuote renders a Go string as a single-quoted SQL literal. Filter values
-// reach this only after parse validation; every events read still goes
-// through here so quoting lives in one place.
-func qQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
-}
-
 func qOptQuote(s *string) string {
 	if s == nil {
 		return "NULL"
 	}
-	return qQuote(*s)
-}
-
-func qFormatMillis(unixMs int64) string {
-	return time.UnixMilli(unixMs).UTC().Format("2006-01-02T15:04:05.000Z")
+	return sqlQuote(*s)
 }
 
 // qFormatDateTime renders a cached TIMESTAMP the way ClickHouse
@@ -76,7 +60,7 @@ func qValidateMillisecondPrecision(field, input string) *ArgError {
 		fraction++
 	}
 	if fraction > 3 {
-		return qErr("%s supports millisecond precision at most", field)
+		return argErrorf("%s supports millisecond precision at most", field)
 	}
 	return nil
 }
@@ -84,14 +68,14 @@ func qValidateMillisecondPrecision(field, input string) *ArgError {
 // qParseExplicitTimezone: the wrapped parse error text is Go's, not chrono's.
 func qParseExplicitTimezone(field, input string) (int64, *ArgError) {
 	if input == "" {
-		return 0, qErr("%s must be a non-empty RFC 3339 datetime", field)
+		return 0, argErrorf("%s must be a non-empty RFC 3339 datetime", field)
 	}
 	if !qHasExplicitTimezone(input) {
-		return 0, qErr("%s must include an explicit timezone offset or Z", field)
+		return 0, argErrorf("%s must include an explicit timezone offset or Z", field)
 	}
 	t, err := time.Parse(time.RFC3339, input)
 	if err != nil {
-		return 0, qErr("%s must be a valid RFC 3339 datetime: %v", field, err)
+		return 0, argErrorf("%s must be a valid RFC 3339 datetime: %v", field, err)
 	}
 	return t.UnixMilli(), nil
 }
@@ -126,12 +110,10 @@ func qNonEmptyFilter(field, raw string, present bool) (*string, *ArgError) {
 	}
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
-		return nil, qErr("%s must be a non-empty string when provided", field)
+		return nil, argErrorf("%s must be a non-empty string when provided", field)
 	}
 	return &trimmed, nil
 }
-
-func qB64URL(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 
 // qDecodeB64URL keeps upstream's padding-rejected strictness.
 func qDecodeB64URL(s string) ([]byte, error) {
@@ -143,13 +125,9 @@ func qDecodeB64URL(s string) ([]byte, error) {
 
 func qTypedID(prefix, raw string) (string, error) {
 	if strings.TrimSpace(raw) == "" {
-		return "", qErr("%s_id must be a non-empty string", strings.TrimSuffix(prefix, ":"))
+		return "", argErrorf("%s_id must be a non-empty string", strings.TrimSuffix(prefix, ":"))
 	}
-	return prefix + qB64URL([]byte(raw)), nil
-}
-
-func qTurnID(sessionID string, turnSeq uint32) string {
-	return "turn:" + qB64URL([]byte(sessionID)) + ":" + fmt.Sprint(turnSeq)
+	return prefix + b64RawURL.EncodeToString([]byte(raw)), nil
 }
 
 func qProjectIDForRoot(root string) string {

@@ -110,7 +110,7 @@ func faParseArgs(raw json.RawMessage) (*faArgs, error) {
 		"path", "scope", "granularity", "start_datetime", "end_datetime",
 		"mutations_only", "limit", "tool", "harness", "source")
 	if err != nil {
-		return nil, qErr("file_attention expects a JSON object with valid fields")
+		return nil, argErrorf("file_attention expects a JSON object with valid fields")
 	}
 	a := &faArgs{Scope: "project", Granularity: "sessions"}
 	getStr := func(key string) (*string, bool, error) {
@@ -126,23 +126,23 @@ func faParseArgs(raw json.RawMessage) (*faArgs, error) {
 	}
 	pathPtr, present, err := getStr("path")
 	if err != nil {
-		return nil, qErr("file_attention expects a JSON object with valid fields")
+		return nil, argErrorf("file_attention expects a JSON object with valid fields")
 	}
 	if !present || pathPtr == nil {
-		return nil, qErr("path is required")
+		return nil, argErrorf("path is required")
 	}
 	path := *pathPtr
 	if path != strings.TrimSpace(path) {
-		return nil, qErr("path must not have leading or trailing whitespace")
+		return nil, argErrorf("path must not have leading or trailing whitespace")
 	}
 	if strings.HasPrefix(path, "file://") {
-		return nil, qErr("file:// URIs are not supported; pass a filesystem path")
+		return nil, argErrorf("file:// URIs are not supported; pass a filesystem path")
 	}
 	if strings.HasSuffix(path, "/") {
-		return nil, qErr("path must name a file, not a directory-style path ending in '/'")
+		return nil, argErrorf("path must name a file, not a directory-style path ending in '/'")
 	}
 	if path == "" {
-		return nil, qErr("path must be a non-empty string")
+		return nil, argErrorf("path must be a non-empty string")
 	}
 	a.Path = path
 
@@ -150,11 +150,11 @@ func faParseArgs(raw json.RawMessage) (*faArgs, error) {
 	if v, ok := fields["limit"]; ok && string(v) != "null" {
 		var n json.Number
 		if err := json.Unmarshal(v, &n); err != nil {
-			return nil, qErr("file_attention expects a JSON object with valid fields")
+			return nil, argErrorf("file_attention expects a JSON object with valid fields")
 		}
 		lim, perr := n.Int64()
 		if perr != nil {
-			return nil, qErr("file_attention expects a JSON object with valid fields")
+			return nil, argErrorf("file_attention expects a JSON object with valid fields")
 		}
 		a.Limit = int(lim)
 		a.limitSet = true
@@ -166,13 +166,13 @@ func faParseArgs(raw json.RawMessage) (*faArgs, error) {
 		}
 	}
 	if a.Limit < faMinLimit || a.Limit > maxLimit {
-		return nil, qErr("limit must be between 1 and %d", maxLimit)
+		return nil, argErrorf("limit must be between 1 and %d", maxLimit)
 	}
 
 	if v, ok := fields["start_datetime"]; ok && string(v) != "null" {
 		var s string
 		if err := json.Unmarshal(v, &s); err != nil {
-			return nil, qErr("file_attention expects a JSON object with valid fields")
+			return nil, argErrorf("file_attention expects a JSON object with valid fields")
 		}
 		ms, trimmed, aerr := qParseOptionalDatetime("start_datetime", s)
 		if aerr != nil {
@@ -185,7 +185,7 @@ func faParseArgs(raw json.RawMessage) (*faArgs, error) {
 	if v, ok := fields["end_datetime"]; ok && string(v) != "null" {
 		var s string
 		if err := json.Unmarshal(v, &s); err != nil {
-			return nil, qErr("file_attention expects a JSON object with valid fields")
+			return nil, argErrorf("file_attention expects a JSON object with valid fields")
 		}
 		ms, trimmed, aerr := qParseOptionalDatetime("end_datetime", s)
 		if aerr != nil {
@@ -196,7 +196,7 @@ func faParseArgs(raw json.RawMessage) (*faArgs, error) {
 		}
 	}
 	if a.StartUnixMs != nil && a.EndUnixMs != nil && *a.EndUnixMs <= *a.StartUnixMs {
-		return nil, qErr("end_datetime must be later than start_datetime")
+		return nil, argErrorf("end_datetime must be later than start_datetime")
 	}
 
 	enum := func(key string, allowed map[string]bool) *string {
@@ -222,15 +222,15 @@ func faParseArgs(raw json.RawMessage) (*faArgs, error) {
 		badEnum = true
 	}
 	if badEnum {
-		return nil, qErr("file_attention expects a JSON object with valid fields")
+		return nil, argErrorf("file_attention expects a JSON object with valid fields")
 	}
 	if v, ok := fields["mutations_only"]; ok && string(v) != "null" {
 		if err := json.Unmarshal(v, &a.MutationsOnly); err != nil {
-			return nil, qErr("file_attention expects a JSON object with valid fields")
+			return nil, argErrorf("file_attention expects a JSON object with valid fields")
 		}
 	}
 	if v, present, err := getStr("tool"); err != nil {
-		return nil, qErr("file_attention expects a JSON object with valid fields")
+		return nil, argErrorf("file_attention expects a JSON object with valid fields")
 	} else if present && v != nil {
 		a.Tool = strings.TrimSpace(*v)
 	}
@@ -253,11 +253,11 @@ func faFilterField(fields map[string]json.RawMessage, field string) (string, err
 	}
 	var s string
 	if err := json.Unmarshal(v, &s); err != nil {
-		return "", qErr("file_attention expects a JSON object with valid fields")
+		return "", argErrorf("file_attention expects a JSON object with valid fields")
 	}
 	trimmed := strings.TrimSpace(s)
 	if trimmed == "" {
-		return "", qErr("%s must be a non-empty string when provided", field)
+		return "", argErrorf("%s must be a non-empty string when provided", field)
 	}
 	return trimmed, nil
 }

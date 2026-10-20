@@ -146,7 +146,7 @@ func searchMcpCandidates(ctx context.Context, db *sql.DB, q searchQuery, terms [
 	}
 	if q.turnOK {
 		filters = append(filters, "e.event_uid IN (SELECT event_uid FROM trace WHERE session_id = "+
-			sqlQuote(q.sessionID)+" AND turn_seq = "+sqlQuoteInt(int(q.turnSeq))+")")
+			sqlQuote(q.sessionID)+" AND turn_seq = "+strconv.Itoa(int(q.turnSeq))+")")
 	}
 
 	sqlStr := `WITH p AS (SELECT term, doc, tf, doc_len FROM all_postings WHERE term IN ` + termsSQL + `),
@@ -168,10 +168,10 @@ SELECT event_uid, session_id, doc, raw_score, matched_terms, event_unix_ms FROM 
   JOIN events e ON e.doc = p.doc
   WHERE ` + strings.Join(filters, "\n    AND ") + `
   GROUP BY e.event_uid
-  HAVING matched_terms >= ` + sqlQuoteInt(minShouldMatch) +
+  HAVING matched_terms >= ` + strconv.Itoa(minShouldMatch) +
 		` AND raw_score >= 0.000000
   ORDER BY raw_score DESC, event_unix_ms DESC, event_uid ASC
-  LIMIT ` + sqlQuoteInt(limit) + `
+  LIMIT ` + strconv.Itoa(limit) + `
 ) ORDER BY raw_score DESC, event_unix_ms DESC, event_uid ASC`
 
 	rows, err := db.QueryContext(ctx, sqlStr)
@@ -197,7 +197,7 @@ func scopeExistsFor(ctx context.Context, db *sql.DB, q searchQuery) (bool, error
 	}
 	s := "SELECT count(*) FROM trace WHERE session_id = " + sqlQuote(q.sessionID)
 	if q.turnOK {
-		s += " AND turn_seq = " + sqlQuoteInt(int(q.turnSeq))
+		s += " AND turn_seq = " + strconv.Itoa(int(q.turnSeq))
 	}
 	var n int64
 	if err := db.QueryRowContext(ctx, s).Scan(&n); err != nil {

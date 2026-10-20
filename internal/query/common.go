@@ -31,8 +31,6 @@ func sqlQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
-func sqlQuoteInt(n int) string { return fmt.Sprintf("%d", n) }
-
 var b64RawURL = base64.RawURLEncoding
 
 func argErrorf(format string, args ...any) *ArgError {
@@ -57,11 +55,11 @@ type mcpID struct {
 func (id mcpID) String() string {
 	switch id.kind {
 	case kindSession:
-		return "session:" + b64RawURL.EncodeToString([]byte(id.session))
+		return formatSessionID(id.session)
 	case kindTurn:
-		return "turn:" + b64RawURL.EncodeToString([]byte(id.session)) + ":" + fmt.Sprintf("%d", id.turnSeq)
+		return formatTurnID(id.session, id.turnSeq)
 	default:
-		return "event:" + b64RawURL.EncodeToString([]byte(id.eventUID))
+		return formatEventID(id.eventUID)
 	}
 }
 

@@ -159,7 +159,7 @@ func faFormatMillisPtr(ms *int64) any {
 	if ms == nil {
 		return nil
 	}
-	return qFormatMillis(*ms)
+	return formatRFC3339UTCMillis(*ms)
 }
 
 func faSortedSet(values map[string]bool) []string {
@@ -253,7 +253,7 @@ func faSessionRollups(touches []faTouch, limit int) ([]any, int, int) {
 			"event_id":   latestEventID,
 		}
 		if agg.latestTurnSeq != nil {
-			open["turn_id"] = qTurnID(sessionID, *agg.latestTurnSeq)
+			open["turn_id"] = formatTurnID(sessionID, *agg.latestTurnSeq)
 		}
 		sessions = append(sessions, map[string]any{
 			"rank": len(sessions) + 1,
@@ -299,7 +299,7 @@ func faEventTimeline(touches []faTouch, limit int) ([]any, int, int) {
 			"session_id": sessionID,
 		}
 		if touch.TurnSeq != nil {
-			open["turn_id"] = qTurnID(touch.SessionID, *touch.TurnSeq)
+			open["turn_id"] = formatTurnID(touch.SessionID, *touch.TurnSeq)
 		}
 		var worktreeRoot any
 		if touch.WorktreeRoot != "" {

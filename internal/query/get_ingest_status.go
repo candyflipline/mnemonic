@@ -24,7 +24,7 @@ func init() { register(getIngestStatus{}) }
 
 func (getIngestStatus) Call(ctx context.Context, db *sql.DB, args json.RawMessage) (any, string, error) {
 	if !stEmptyArgs(args) {
-		return nil, "", qErr("get_ingest_status expects an empty JSON object")
+		return nil, "", argErrorf("get_ingest_status expects an empty JSON object")
 	}
 	read, err := stReadSources(ctx, db)
 	if err != nil {

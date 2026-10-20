@@ -52,7 +52,7 @@ var faPathKeys = []string{
 
 func faTouches(ctx context.Context, db *sql.DB, q faQuery) ([]faTouch, error) {
 	if q.Rel == "" {
-		return nil, qErr("file_attention requires a non-empty path tail")
+		return nil, argErrorf("file_attention requires a non-empty path tail")
 	}
 	if q.ProjectScope && q.NormalizedPID == "" {
 		return []faTouch{}, nil
@@ -102,10 +102,10 @@ func faFilters(prefix string, q faQuery) []string {
 		"NOT (lower(" + toolName + ") = 'file_attention' OR ends_with(lower(" + toolName + "), '_file_attention'))",
 	}
 	if q.Tool != "" {
-		clauses = append(clauses, "lower("+toolName+") = lower("+qQuote(q.Tool)+")")
+		clauses = append(clauses, "lower("+toolName+") = lower("+sqlQuote(q.Tool)+")")
 	}
 	if q.Harness != "" {
-		clauses = append(clauses, prefix+"harness = "+qQuote(q.Harness))
+		clauses = append(clauses, prefix+"harness = "+sqlQuote(q.Harness))
 	}
 	if q.MutationsOnly {
 		clauses = append(clauses, "lower("+toolName+") NOT IN ("+faReadToolNames+")")
@@ -122,7 +122,7 @@ func faTimeClauses(q faQuery) []string {
 		outer = append(outer, "epoch_ms(tr.event_time) < "+strconv.FormatInt(*q.EndUnixMs, 10))
 	}
 	if q.SourceName != "" {
-		outer = append(outer, "ti.source_name = "+qQuote(q.SourceName))
+		outer = append(outer, "ti.source_name = "+sqlQuote(q.SourceName))
 	}
 	return outer
 }
@@ -137,9 +137,9 @@ func faOuterWhere(q faQuery) string {
 func faExact(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTouch, error) {
 	pred := "e.project_id != ''"
 	if q.ProjectScope {
-		pred = "e.project_id = " + qQuote(q.NormalizedPID)
+		pred = "e.project_id = " + sqlQuote(q.NormalizedPID)
 	}
-	clauses := append(faFilters("e.", q), pred+" AND e.repo_rel_path = "+qQuote(q.Rel))
+	clauses := append(faFilters("e.", q), pred+" AND e.repo_rel_path = "+sqlQuote(q.Rel))
 	single := faSinglePath("ti.worktree_root")
 
 	qry := "WITH\nmatched AS (\n" +
@@ -178,8 +178,8 @@ func faJStr(input, key string) string {
 
 func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTouch, error) {
 	rel := q.Rel
-	relQ := qQuote(rel)
-	slashRelQ := qQuote("/" + rel)
+	relQ := sqlQuote(rel)
+	slashRelQ := sqlQuote("/" + rel)
 	relRe := regexp.QuoteMeta(rel)
 	slashRelRe := regexp.QuoteMeta("/" + rel)
 
@@ -189,8 +189,8 @@ func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTo
 		keyMatch = append(keyMatch, "(ends_with("+v+", "+slashRelQ+") OR "+v+" = "+relQ+")")
 	}
 	keyRe := strings.Join(faPathKeys, "|")
-	nestedScalarRe := qQuote("\"(?:" + keyRe + ")\"[[:space:]]*:[[:space:]]*\"((?:[^\"\\\\]|\\\\.)*" + slashRelRe + "|" + relRe + ")\"")
-	nestedArrayRe := qQuote("\"(?:" + keyRe + ")\"[[:space:]]*:[[:space:]]*\\[[^\\]]*\"((?:[^\"\\\\]|\\\\.)*" + slashRelRe + "|" + relRe + ")\"")
+	nestedScalarRe := sqlQuote("\"(?:" + keyRe + ")\"[[:space:]]*:[[:space:]]*\"((?:[^\"\\\\]|\\\\.)*" + slashRelRe + "|" + relRe + ")\"")
+	nestedArrayRe := sqlQuote("\"(?:" + keyRe + ")\"[[:space:]]*:[[:space:]]*\\[[^\\]]*\"((?:[^\"\\\\]|\\\\.)*" + slashRelRe + "|" + relRe + ")\"")
 	nestedScalarExtract := "regexp_extract(ti.input_json, " + nestedScalarRe + ", 1)"
 	nestedArrayExtract := "regexp_extract(ti.input_json, " + nestedArrayRe + ", 1)"
 	nestedPathExpr := "ifnull(nullif(" + nestedScalarExtract + ", ''), " + nestedArrayExtract + ")"
@@ -201,7 +201,7 @@ func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTo
 		"      THEN json_extract_string(ti.input_json, '$.command')\n" +
 		"      ELSE coalesce(json_extract_string(ti.input_json, '$.cmd'), '') END\n" +
 		"    ELSE '' END"
-	shellRe := qQuote("(^|[[:space:]'\"`=(])(/[^/][^[:space:]'\"`<>|;&),]*" + slashRelRe + "|/" + relRe + "|" + relRe + ")([[:space:]'\"`,;|&<>)]|$)")
+	shellRe := sqlQuote("(^|[[:space:]'\"`=(])(/[^/][^[:space:]'\"`<>|;&),]*" + slashRelRe + "|/" + relRe + "|" + relRe + ")([[:space:]'\"`,;|&<>)]|$)")
 	shellMatch := "(json_valid(ti.input_json) AND regexp_matches(" + commandExpr + ", " + shellRe + "))"
 
 	toolEvents := "(SELECT\n" +
@@ -228,7 +228,7 @@ func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTo
 	legacyList := "[" + strings.Join(scalarPaths, ", ") + "]"
 	legacyFirst := "coalesce(list_filter(" + legacyList + ", lambda p: ends_with(p, " + slashRelQ + ") OR p = " + relQ + ")[1], '')"
 
-	provenanceRe := qQuote("\"(?:" + keyRe + "|command|cmd)\"[[:space:]]*:")
+	provenanceRe := sqlQuote("\"(?:" + keyRe + "|command|cmd)\"[[:space:]]*:")
 	provenanceCount := "len(regexp_extract_all(ti.input_json, " + provenanceRe + "))"
 	legacyScalarSingle := faSinglePath("legacy_scalar_path")
 	cwdSingle := faSinglePath("coalesce(ti.cwd, '')")
@@ -261,7 +261,7 @@ func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTo
 		roots = dedupAdjacent(roots)
 		quoted := make([]string, len(roots))
 		for i, root := range roots {
-			quoted[i] = qQuote(root)
+			quoted[i] = sqlQuote(root)
 		}
 		rootsLiteral := "[" + strings.Join(quoted, ", ") + "]"
 		withProjectRoots = rootsLiteral + " AS project_roots,\n"
@@ -271,9 +271,9 @@ func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTo
 			faSinglePath("ti.worktree_root") + " AND list_contains(" + rootsLiteral + ", ti.worktree_root))"
 		legacyEventScope := "(ti.event_project_id != '' AND NOT starts_with(ti.event_project_id, 'git:') AND " +
 			faSinglePath(eventRootExpr) + " AND list_contains(" + rootsLiteral + ", " + eventRootExpr + "))"
-		outer = append(outer, "(ti.project_id = "+qQuote(q.NormalizedPID)+"\n"+
+		outer = append(outer, "(ti.project_id = "+sqlQuote(q.NormalizedPID)+"\n"+
 			"      OR "+legacyToolScope+"\n"+
-			"      OR (ti.project_id = '' AND ti.event_project_id = "+qQuote(q.NormalizedPID)+")\n"+
+			"      OR (ti.project_id = '' AND ti.event_project_id = "+sqlQuote(q.NormalizedPID)+")\n"+
 			"      OR (ti.project_id = '' AND legacy_candidate_root != ''\n"+
 			"          AND ("+legacyEventScope+" OR (ti.event_project_id = '' AND verified_project_root != ''))))")
 		legacyRoot = "verified_project_root"
