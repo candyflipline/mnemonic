@@ -46,11 +46,11 @@ func (fileAttention) Call(ctx context.Context, db *sql.DB, args json.RawMessage)
 			"%q is a generic tail (depth %d); results may include unrelated files. Pass a longer project-relative path, and check the surfaced roots.",
 			tail.Rel, depth))
 	}
-	if a.Scope == "project" && tail.ProjID == "" {
+	if a.Scope == faScopeProject && tail.ProjID == "" {
 		warnings = append(warnings,
 			"scope=\"project\" could not establish the launch project's normalized identity; the project query remains closed rather than widening across projects.")
 	}
-	if a.Scope == "project" && strings.HasPrefix(tail.ProjID, "git:") {
+	if a.Scope == faScopeProject && strings.HasPrefix(tail.ProjID, "git:") {
 		warnings = append(warnings,
 			"pre-digest worktree roots pruned before durable project mapping was installed cannot be attributed safely and remain excluded; currently registered roots are migrated and future normalized roots remain durable.")
 	}
@@ -60,7 +60,7 @@ func (fileAttention) Call(ctx context.Context, db *sql.DB, args json.RawMessage)
 		NormalizedPID:   tail.ProjID,
 		NormalizedRoots: faRootsFor(tail.Root),
 		DeriveLegacy:    tail.Root != "",
-		ProjectScope:    a.Scope == "project",
+		ProjectScope:    a.Scope == faScopeProject,
 		StartUnixMs:     a.StartUnixMs,
 		EndUnixMs:       a.EndUnixMs,
 		Tool:            a.Tool,
@@ -89,10 +89,24 @@ func faRootsFor(root string) []string {
 	return qWorktreeRootsForRepoRoot(root)
 }
 
+type faScope string
+
+const (
+	faScopeProject faScope = "project"
+	faScopeAll     faScope = "all"
+)
+
+type faGranularity string
+
+const (
+	faGranularitySessions faGranularity = "sessions"
+	faGranularityEvents   faGranularity = "events"
+)
+
 type faArgs struct {
 	Path          string
-	Scope         string // "project" | "all"
-	Granularity   string // "sessions" | "events"
+	Scope         faScope
+	Granularity   faGranularity
 	StartDatetime *string
 	EndDatetime   *string
 	StartUnixMs   *int64
@@ -112,7 +126,7 @@ func faParseArgs(raw json.RawMessage) (*faArgs, error) {
 	if err != nil {
 		return nil, argErrorf("file_attention expects a JSON object with valid fields")
 	}
-	a := &faArgs{Scope: "project", Granularity: "sessions"}
+	a := &faArgs{Scope: faScopeProject, Granularity: faGranularitySessions}
 	getStr := func(key string) (*string, bool, error) {
 		v, ok := fields[key]
 		if !ok || string(v) == "null" {
@@ -211,13 +225,13 @@ func faParseArgs(raw json.RawMessage) (*faArgs, error) {
 		return &s
 	}
 	badEnum := false
-	if s := enum("scope", map[string]bool{"project": true, "all": true}); s != nil {
-		a.Scope = *s
+	if s := enum("scope", map[string]bool{string(faScopeProject): true, string(faScopeAll): true}); s != nil {
+		a.Scope = faScope(*s)
 	} else if v, ok := fields["scope"]; ok && string(v) != "null" {
 		badEnum = true
 	}
-	if s := enum("granularity", map[string]bool{"sessions": true, "events": true}); s != nil {
-		a.Granularity = *s
+	if s := enum("granularity", map[string]bool{string(faGranularitySessions): true, string(faGranularityEvents): true}); s != nil {
+		a.Granularity = faGranularity(*s)
 	} else if v, ok := fields["granularity"]; ok && string(v) != "null" {
 		badEnum = true
 	}
@@ -267,8 +281,8 @@ func faFilterField(fields map[string]json.RawMessage, field string) (string, err
 func faCanonicalRequest(a *faArgs) map[string]any {
 	req := map[string]any{
 		"path":           a.Path,
-		"scope":          a.Scope,
-		"granularity":    a.Granularity,
+		"scope":          string(a.Scope),
+		"granularity":    string(a.Granularity),
 		"tool":           strOrNil(a.Tool),
 		"harness":        strOrNil(a.Harness),
 		"source":         strOrNil(a.Source),

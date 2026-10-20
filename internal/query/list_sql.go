@@ -48,10 +48,10 @@ func lsSelectPage(ctx context.Context, db *sql.DB, a *lsArgs, cursor *lsCursor) 
 		"epoch_ms(last_event_time) >= " + strconv.FormatInt(a.StartUnixMs, 10),
 		"epoch_ms(first_event_time) < " + strconv.FormatInt(a.EndUnixMs, 10),
 	}
-	if a.Mode != "" {
+	if a.Mode != nil {
 		columns = append(columns, "event_kind", "payload_type", "tool_name", "source_name")
 		aggregates += ",\n    " + lsModeAggregate() + " AS session_mode"
-		having = append(having, "session_mode = "+sqlQuote(a.Mode))
+		having = append(having, "session_mode = "+sqlQuote(*a.Mode))
 	}
 	if a.Harness != nil || a.Source != nil {
 		columns = append(columns, "event_ts", "event_uid")
@@ -69,7 +69,7 @@ func lsSelectPage(ctx context.Context, db *sql.DB, a *lsArgs, cursor *lsCursor) 
 		having = append(having, "latest_source_name = "+sqlQuote(*a.Source))
 	}
 	cmp := ">"
-	if a.Sort == "desc" {
+	if a.Sort == lsSortDesc {
 		cmp = "<"
 	}
 	if cursor != nil {
@@ -112,8 +112,8 @@ func lsSelectPage(ctx context.Context, db *sql.DB, a *lsArgs, cursor *lsCursor) 
 	return lsSummarizePage(ctx, db, ids, a.Sort)
 }
 
-func dirSQL(sort string) string {
-	if sort == "asc" {
+func dirSQL(sort lsSort) string {
+	if sort == lsSortAsc {
 		return "ASC"
 	}
 	return "DESC"
@@ -128,7 +128,7 @@ func contains(xs []string, s string) bool {
 	return false
 }
 
-func lsSummarizePage(ctx context.Context, db *sql.DB, ids []string, sort string) ([]lsItem, error) {
+func lsSummarizePage(ctx context.Context, db *sql.DB, ids []string, sort lsSort) ([]lsItem, error) {
 	idsSQL := qQuoteJoin(ids)
 	modeAgg := lsModeAggregate()
 	q := "WITH\n" +

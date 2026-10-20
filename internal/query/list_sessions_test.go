@@ -22,8 +22,8 @@ func TestListSessionsParsesAndCanonicalizes(t *testing.T) {
 	if a.StartUnixMs != 1777554000000 || a.EndUnixMs != 1777568400000 {
 		t.Fatalf("range = %d..%d, want 1777554000000..1777568400000", a.StartUnixMs, a.EndUnixMs)
 	}
-	if a.Mode != "chat" || a.Sort != "asc" || a.Limit != 12 || a.Cursor != "abc" {
-		t.Fatalf("mode/sort/limit/cursor = %q/%q/%d/%q", a.Mode, a.Sort, a.Limit, a.Cursor)
+	if a.Mode == nil || *a.Mode != "chat" || a.Sort != "asc" || a.Limit != 12 || a.Cursor != "abc" {
+		t.Fatalf("mode/sort/limit/cursor = %v/%q/%d/%q", a.Mode, a.Sort, a.Limit, a.Cursor)
 	}
 }
 

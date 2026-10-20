@@ -25,10 +25,16 @@ type lsArgs struct {
 	StartUnixMs, EndUnixMs     int64
 	Limit                      int
 	Cursor                     string
-	Mode                       string // "" = unset
-	Harness, Source            *string
-	Sort                       string // "asc" | "desc"
+	Mode, Harness, Source      *string
+	Sort                       lsSort
 }
+
+type lsSort string
+
+const (
+	lsSortAsc  lsSort = "asc"
+	lsSortDesc lsSort = "desc"
+)
 
 var lsModes = map[string]bool{"web_search": true, "mcp_internal": true, "tool_calling": true, "chat": true}
 
@@ -109,11 +115,11 @@ func lsParseArgs(raw json.RawMessage) (*lsArgs, error) {
 	if in.sort, err = str("sort"); err != nil {
 		return nil, lsSerdeError()
 	}
-	if in.sort != nil && *in.sort != "asc" && *in.sort != "desc" {
+	if in.sort != nil && lsSort(*in.sort) != lsSortAsc && lsSort(*in.sort) != lsSortDesc {
 		return nil, lsSerdeError()
 	}
 
-	a := &lsArgs{Sort: "desc"}
+	a := &lsArgs{Sort: lsSortDesc}
 	maxLimit := lsMaxResults
 	if maxLimit < lsMinLimit {
 		maxLimit = lsMinLimit
@@ -155,11 +161,9 @@ func lsParseArgs(raw json.RawMessage) (*lsArgs, error) {
 	if a.Source, aerr = qNonEmptyFilter("source", derefStr(in.src), in.src != nil); aerr != nil {
 		return nil, aerr
 	}
-	if in.mode != nil {
-		a.Mode = *in.mode
-	}
+	a.Mode = in.mode
 	if in.sort != nil {
-		a.Sort = *in.sort
+		a.Sort = lsSort(*in.sort)
 	}
 	return a, nil
 }
@@ -201,7 +205,7 @@ func lsCanonicalRequest(a *lsArgs) map[string]any {
 	req := map[string]any{
 		"start_datetime": a.StartDatetime,
 		"end_datetime":   a.EndDatetime,
-		"sort":           a.Sort,
+		"sort":           string(a.Sort),
 		"limit":          a.Limit,
 		"cursor":         nil,
 		"harness":        nil,
@@ -210,8 +214,8 @@ func lsCanonicalRequest(a *lsArgs) map[string]any {
 	if a.Cursor != "" {
 		req["cursor"] = a.Cursor
 	}
-	if a.Mode != "" {
-		req["mode"] = a.Mode
+	if a.Mode != nil {
+		req["mode"] = *a.Mode
 	} else {
 		req["mode"] = nil
 	}
@@ -244,25 +248,18 @@ type lsPage struct {
 }
 
 func lsFilterSig(a *lsArgs) string {
-	b, err := json.Marshal([]any{a.StartUnixMs, a.EndUnixMs, optStr(a.Mode), a.Harness, a.Source, a.Sort, nil})
+	b, err := json.Marshal([]any{a.StartUnixMs, a.EndUnixMs, a.Mode, a.Harness, a.Source, a.Sort, nil})
 	if err != nil {
 		return ""
 	}
 	return string(b)
 }
 
-func optStr(s string) any {
-	if s == "" {
-		return nil
-	}
-	return s
-}
-
 type lsCursor struct {
 	LastEventUnixMs int64
 	SessionID       string
 	FilterSig       string
-	Sort            string
+	Sort            lsSort
 }
 
 func lsEncodeCursor(c *lsCursor) (*string, error) {

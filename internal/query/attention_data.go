@@ -116,7 +116,7 @@ func faBuildData(a *faArgs, tail *faTail, touches []faTouch, warnings *[]string)
 	var bodyKey string
 	var body []any
 	var encodable, rollupSkipped int
-	if a.Granularity == "events" {
+	if a.Granularity == faGranularityEvents {
 		bodyKey = "events"
 		body, encodable, rollupSkipped = faEventTimeline(touches, limit)
 	} else {
@@ -133,8 +133,8 @@ func faBuildData(a *faArgs, tail *faTail, touches []faTouch, warnings *[]string)
 		"tail":             tail.Rel,
 		"tail_is_absolute": strings.HasPrefix(tail.Rel, "/"),
 		"stripped_root":    nil,
-		"scope":            a.Scope,
-		"granularity":      a.Granularity,
+		"scope":            string(a.Scope),
+		"granularity":      string(a.Granularity),
 		"summary":          summary,
 		"roots":            roots,
 		"result_count":     len(body),
