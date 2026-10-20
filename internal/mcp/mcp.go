@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -328,7 +329,8 @@ func acceptsJSON(h http.Header) bool {
 			disabled := false
 			for _, param := range parts[1:] {
 				name, value, _ := strings.Cut(param, "=")
-				if strings.EqualFold(strings.TrimSpace(name), "q") && strings.TrimSpace(value) == "0" {
+				if q, err := strconv.ParseFloat(strings.TrimSpace(value), 64); err == nil && q == 0 &&
+					strings.EqualFold(strings.TrimSpace(name), "q") {
 					disabled = true
 				}
 			}

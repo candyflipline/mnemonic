@@ -21,7 +21,7 @@ var commands = map[string]func(args []string) error{
 
 func main() {
 	if len(os.Args) < 2 || commands[os.Args[1]] == nil {
-		fmt.Fprintln(os.Stderr, "usage: mnemonic push|serve|import-ch [flags]")
+		fmt.Fprintln(os.Stderr, "usage: mnemonic push|serve|import-ch|token [flags]")
 		os.Exit(2)
 	}
 	if err := commands[os.Args[1]](os.Args[2:]); err != nil {
