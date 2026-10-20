@@ -1,5 +1,5 @@
 // Package normalize turns one whole raw source file into event rows. Parsers
-// are ports of upstream moraine's crates/moraine-ingest-core/src/sources/*
+// are ports of the upstream ingest-core/src/sources/*
 // (read them with `git show upstream/main:<path>`); testdata/goldens pins
 // their output.
 package normalize

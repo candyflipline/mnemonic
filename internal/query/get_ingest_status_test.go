@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// Ports of the tests in upstream crates/moraine-mcp-core/src/
+// Ports of the tests in upstream mcp-core/src/
 // get_ingest_status_v1.rs: the projection must never leak raw-heartbeat
 // fields, and unknown arguments are rejected with the upstream message.
 

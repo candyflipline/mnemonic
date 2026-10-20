@@ -1,8 +1,8 @@
 package query
 
 // search_sessions: BM25 keyword search over the cache, ported from upstream
-// crates/moraine-conversations/src/clickhouse_repo/search.rs (the MCP event
-// search path) and crates/moraine-mcp-core/src/search_sessions_v1.rs (args,
+// upstream conversations/src/clickhouse_repo/search.rs (the MCP event
+// search path) and upstream mcp-core/src/search_sessions_v1.rs (args,
 // data shape, prose). Owned by lane cache.
 
 import (

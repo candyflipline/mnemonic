@@ -1,7 +1,7 @@
 // Package query answers the five MCP tools from the cache. Each tool owns its
 // args, SQL, data shape (tools.json outputSchema "data") and prose text,
-// ported from upstream crates/moraine-conversations/src/clickhouse_repo/*
-// and crates/moraine-mcp-core/src/*_v1.rs.
+// ported from upstream conversations/src/clickhouse_repo/*
+// and upstream mcp-core/src/*_v1.rs.
 package query
 
 import (

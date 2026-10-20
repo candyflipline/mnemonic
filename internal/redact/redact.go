@@ -1,5 +1,5 @@
 // Package redact removes secrets from raw lines on the client, before they
-// leave the machine. Port of upstream crates/moraine-ingest-core/src/redaction.rs:
+// leave the machine. Port of upstream ingest-core/src/redaction.rs:
 // the 26 built-in rules, the keyword prefilter and the non-overlapping span
 // selection, with the same [REDACTED:<rule_id>] replacement text.
 //

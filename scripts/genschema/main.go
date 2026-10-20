@@ -1,5 +1,5 @@
 // genschema writes internal/schema/events.go from docs/clickhouse/events.tsv,
-// the column list of ClickHouse moraine_personal.events (name<TAB>type).
+// the column list of the retired ClickHouse events table (name<TAB>type).
 //
 //	go run ./scripts/genschema
 package main

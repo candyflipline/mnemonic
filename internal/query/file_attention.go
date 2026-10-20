@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// file_attention ports crates/moraine-mcp-core/src/file_attention_v1.rs over
+// file_attention ports upstream mcp-core/src/file_attention_v1.rs over
 // the DuckDB cache, with the touch SQL from clickhouse_repo/file_attention.rs.
 // The mcp_event_locator/navigation tables have no cache counterpart, so the
 // exact pass reads the canonical events columns directly and the suffix pass

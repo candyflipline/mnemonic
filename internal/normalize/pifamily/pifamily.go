@@ -1,4 +1,4 @@
-// Package pifamily ports upstream crates/moraine-ingest-core/src/sources/pi_family.rs,
+// Package pifamily ports upstream ingest-core/src/sources/pi_family.rs,
 // the record normalizer shared by the pi-coding-agent and prime-agent
 // harnesses.
 package pifamily

@@ -1,5 +1,5 @@
 // Package cursor parses cursor sources. Port of upstream
-// crates/moraine-ingest-core/src/sources/cursor.rs plus the shared helpers it
+// upstream ingest-core/src/sources/cursor.rs plus the shared helpers it
 // calls; testdata/goldens pins the output.
 package cursor
 

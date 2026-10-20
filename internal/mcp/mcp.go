@@ -29,8 +29,8 @@ var toolsJSON []byte
 // build overrides it with -ldflags.
 var Version = "dev"
 
-// The protocol versions moraine-mcp 0.7.x speaks
-// (crates/moraine-mcp-core/src/lib.rs SUPPORTED_PROTOCOL_VERSIONS); a
+// The protocol versions the upstream MCP 0.7.x speaks
+// (upstream mcp-core/src/lib.rs SUPPORTED_PROTOCOL_VERSIONS); a
 // requested version outside the list negotiates the default.
 const defaultProtocolVersion = "2024-11-05"
 
@@ -48,8 +48,8 @@ const maxRequestBytes = 32 << 20 // tool args are small; pushes go to /v1/
 // query, so a test cannot install a tool there).
 var lookup = query.Lookup
 
-// Envelope field names, order and schema_version values follow upstream
-// crates/moraine-mcp-core/src/contract.rs ToolEnvelope / ToolErrorEnvelope.
+// Envelope field names, order and schema_version values follow the upstream
+// mcp-core/src/contract.rs ToolEnvelope / ToolErrorEnvelope.
 type performance struct {
 	ElapsedMS int64 `json:"elapsed_ms"`
 }
@@ -78,9 +78,9 @@ type errorEnvelope struct {
 	Performance   performance     `json:"performance"`
 }
 
-func toolSchemaVersion(tool string) string { return "moraine.mcp." + tool + ".v1" }
+func toolSchemaVersion(tool string) string { return "mnemonic.mcp." + tool + ".v1" }
 
-const errorSchemaVersion = "moraine.mcp.error.v1"
+const errorSchemaVersion = "mnemonic.mcp.error.v1"
 
 type contentBlock struct {
 	Type string `json:"type"`
@@ -213,7 +213,7 @@ func Handler(open func() (*sql.DB, error)) http.Handler {
 
 type handler struct{ open func() (*sql.DB, error) }
 
-// toolsCall runs one tool and wraps it in the moraine envelope. Only a params
+// toolsCall runs one tool and wraps it in the tool envelope. Only a params
 // payload that cannot decode is a JSON-RPC error; like upstream, every
 // tool-level failure — unknown name, unreachable cache — is an isError result
 // so the client sees the message as tool output, not a protocol failure.

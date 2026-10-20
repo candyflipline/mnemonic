@@ -5,7 +5,7 @@ import (
 	"sort"
 )
 
-// The ingest-status domain, ported from moraine-conversations domain.rs. The
+// The ingest-status domain, ported from the upstream conversations domain.rs. The
 // read side (stStatusRead) carries raw heartbeats that must never serialize;
 // only the projection in get_ingest_status.go reaches the wire.
 

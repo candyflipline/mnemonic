@@ -8,9 +8,9 @@ import (
 	"strings"
 )
 
-// list_sessions ports upstream crates/moraine-mcp-core/src/list_sessions_v1.rs
+// list_sessions ports upstream mcp-core/src/list_sessions_v1.rs
 // over the DuckDB cache, with the page SQL from
-// crates/moraine-conversations/src/clickhouse_repo/{list,session_page}.rs.
+// upstream conversations/src/clickhouse_repo/{list,session_page}.rs.
 type listSessions struct{}
 
 func (listSessions) Name() string { return "list_sessions" }

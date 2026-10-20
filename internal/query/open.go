@@ -1,7 +1,7 @@
 package query
 
 // open: MCP open tool, ported from upstream
-// crates/moraine-mcp-core/src/open_v1.rs (args, data shapes, prose) over the
+// upstream mcp-core/src/open_v1.rs (args, data shapes, prose) over the
 // scan engine in open_repo.go. Owned by lane cache.
 
 import (

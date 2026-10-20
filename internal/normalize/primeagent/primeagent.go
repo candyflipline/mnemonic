@@ -1,5 +1,5 @@
 // Package primeagent parses prime-agent sources. Port of upstream
-// crates/moraine-ingest-core/src/sources/prime_agent.rs onto the shared
+// upstream ingest-core/src/sources/prime_agent.rs onto the shared
 // pi_family normalizer; testdata/goldens pins the output.
 package primeagent
 

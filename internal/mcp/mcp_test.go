@@ -183,8 +183,8 @@ func TestToolsCallWrapsStubInEnvelope(t *testing.T) {
 		t.Errorf("isError = %v, want false", result["isError"])
 	}
 	env, _ := result["structuredContent"].(map[string]any)
-	if env["schema_version"] != "moraine.mcp.open.v1" {
-		t.Errorf("schema_version = %v, want moraine.mcp.open.v1", env["schema_version"])
+	if env["schema_version"] != "mnemonic.mcp.open.v1" {
+		t.Errorf("schema_version = %v, want mnemonic.mcp.open.v1", env["schema_version"])
 	}
 	if env["tool"] != "open" {
 		t.Errorf("tool = %v, want open", env["tool"])
@@ -219,8 +219,8 @@ func TestToolsCallArgErrorIsErrorResult(t *testing.T) {
 		t.Fatalf("isError = %v, want true", result["isError"])
 	}
 	env, _ := result["structuredContent"].(map[string]any)
-	if env["schema_version"] != "moraine.mcp.error.v1" {
-		t.Errorf("schema_version = %v, want moraine.mcp.error.v1", env["schema_version"])
+	if env["schema_version"] != "mnemonic.mcp.error.v1" {
+		t.Errorf("schema_version = %v, want mnemonic.mcp.error.v1", env["schema_version"])
 	}
 	if env["tool"] != "search_sessions" {
 		t.Errorf("tool = %v, want search_sessions", env["tool"])

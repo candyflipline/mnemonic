@@ -213,7 +213,7 @@ func stripRoot(path, root string) string {
 	return strings.TrimPrefix(path, root+"/")
 }
 
-// ProjectIDForRoot mirrors moraine_config::project_id_for_repo_root: git
+// ProjectIDForRoot mirrors upstream config::project_id_for_repo_root: git
 // repositories key on their common dir, non-git directories on their
 // canonical path.
 func ProjectIDForRoot(root string) (string, bool) {
@@ -238,7 +238,7 @@ func hashPathDomain(domain, path string) string {
 }
 
 // gitCommonDir resolves a worktree-aware git common directory, mirroring
-// moraine_config::git_common_dir.
+// upstream config::git_common_dir.
 func gitCommonDir(root string) (string, bool) {
 	marker := filepath.Join(root, ".git")
 	var gitDir string

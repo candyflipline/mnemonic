@@ -1,7 +1,7 @@
 package query
 
 // The open engine: one ordered pass over a session's trace, ported from
-// upstream crates/moraine-conversations/src/clickhouse_repo/canonical_open.rs
+// upstream conversations/src/clickhouse_repo/canonical_open.rs
 // (scan_canonical_session, update_turn, session_labels, preview_from_wide,
 // event_mode_rank, adjacent_turn_ref). The cache is one immutable snapshot per
 // file, so the upstream version paging, FINAL/reconcile and
@@ -654,7 +654,7 @@ func modeFromRank(rank uint8) string {
 	}
 }
 
-// isMcpInternalToolName ports moraine-clickhouse/src/mcp_tool_names.rs
+// isMcpInternalToolName ports the upstream clickhouse/src/mcp_tool_names.rs
 // is_mcp_internal_tool_name (the Go twin of the SQL predicate in common.go).
 func isMcpInternalToolName(name string) bool {
 	n := strings.ToLower(strings.TrimSpace(name))
@@ -666,7 +666,7 @@ func isMcpInternalToolName(name string) bool {
 		return true
 	}
 	parts := strings.Split(n, "__")
-	if len(parts) != 3 || parts[0] != "mcp" || parts[1] != "moraine" {
+	if len(parts) != 3 || parts[0] != "mcp" || (parts[1] != "moraine" && parts[1] != "mnemonic") {
 		return false
 	}
 	return strings.Contains("\x00"+names+"\x00", "\x00"+parts[2]+"\x00")

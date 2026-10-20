@@ -1,5 +1,5 @@
 // Package codex parses codex sources. Port of upstream
-// crates/moraine-ingest-core/src/sources/codex.rs plus the shared helpers it
+// upstream ingest-core/src/sources/codex.rs plus the shared helpers it
 // calls; testdata/goldens pins the output.
 package codex
 

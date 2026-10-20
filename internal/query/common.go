@@ -2,8 +2,8 @@ package query
 
 // Shared helpers for the query tools: MCP IDs, timestamps, tokenization and
 // the event-type machinery, ported from upstream
-// crates/moraine-mcp-core/src/contract.rs and
-// crates/moraine-conversations/src/clickhouse_repo/helpers.rs. Owned by lane
+// upstream mcp-core/src/contract.rs and
+// upstream conversations/src/clickhouse_repo/helpers.rs. Owned by lane
 // cache (search_sessions and open).
 
 import (
@@ -18,14 +18,14 @@ import (
 )
 
 const (
-	// Upstream RepoConfig defaults (moraine-conversations domain.rs).
+	// Upstream RepoConfig defaults (upstream conversations domain.rs).
 	bm25K1            = 1.2
 	bm25B             = 0.75
 	bm25MaxQueryTerms = 16
 	minShouldMatch    = 1
 	minScore          = 0.0
 	previewChars      = 220
-	// moraine-mcp-core contract.rs.
+	// upstream mcp-core contract.rs.
 	maxSnippetChars        = 600
 	summaryPreviewChars    = 240
 	summaryMaxTools        = 25
@@ -513,14 +513,15 @@ func mcpEventTypeFilterClause(class, payload, actor string, eventTypes []string)
 	return "(" + strings.Join(clauses, " OR ") + ")"
 }
 
-// mcpToolNamesPredicate ports moraine-clickhouse/src/mcp_tool_names.rs
-// sql_predicate: the internal tool names, bare or mcp__moraine__-qualified.
+// mcpToolNamesPredicate ports the upstream clickhouse/src/mcp_tool_names.rs
+// sql_predicate: the internal tool names, bare or mcp__<server>__-qualified
+// (transcripts say either server name).
 func mcpToolNamesPredicate(column string) string {
 	const names = "'search', 'search_sessions', 'open', 'list_sessions', 'file_attention'"
 	norm := "lower(trim(" + column + "))"
 	parts := "str_split(" + norm + ", '__')"
 	return "(" + norm + " IN (" + names + ") OR (len(" + parts + ") = 3 AND " +
-		"list_extract(" + parts + ", 1) = 'mcp' AND list_extract(" + parts + ", 2) = 'moraine' AND " +
+		"list_extract(" + parts + ", 1) = 'mcp' AND list_extract(" + parts + ", 2) IN ('moraine', 'mnemonic') AND " +
 		"list_extract(" + parts + ", 3) IN (" + names + ")))"
 }
 

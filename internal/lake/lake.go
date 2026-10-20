@@ -102,8 +102,9 @@ func Run(dataDir string) (Stats, error) {
 	return st, nil
 }
 
-// ImportClickHouse reads per-month parquet exports of moraine events (all 59
-// columns) from exportDir into events/author=<author>/machine=archive-ch/,
+// ImportClickHouse reads per-month parquet exports of the retired ClickHouse
+// events (all 59 columns) from exportDir into
+// events/author=<author>/machine=archive-ch/,
 // one ch-<export base>.parquet per harness in the export. Rows whose
 // source_file already lives in a non-archive parquet of that author are
 // skipped; everything else is rewritten on every call, so reruns converge.

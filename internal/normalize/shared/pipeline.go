@@ -6,7 +6,7 @@ import (
 )
 
 // Source is one harness's parsing behavior, ported from upstream
-// IngestSource (crates/moraine-ingest-core/src/sources/mod.rs). NormalizeRecord
+// IngestSource (upstream ingest-core/src/sources/mod.rs). NormalizeRecord
 // runs the shared pipeline around it; parser packages implement the hooks.
 type Source interface {
 	Harness() string

@@ -3,7 +3,7 @@
     "annotations": {
       "readOnlyHint": true
     },
-    "description": "Search Moraine session history and return compact event-ranked handles. By default, searches user_input and assistant_response events. Select tool_call or tool_response with event_types for raw tool evidence, then use open on a returned turn_id or session_id for full context.",
+    "description": "Search session history and return compact event-ranked handles. By default, searches user_input and assistant_response events. Select tool_call or tool_response with event_types for raw tool evidence, then use open on a returned turn_id or session_id for full context.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -80,7 +80,7 @@
               "type": "object"
             },
             "schema_version": {
-              "const": "moraine.mcp.search_sessions.v1"
+              "const": "mnemonic.mcp.search_sessions.v1"
             }
           },
           "required": [
@@ -90,7 +90,7 @@
         {
           "properties": {
             "schema_version": {
-              "const": "moraine.mcp.error.v1"
+              "const": "mnemonic.mcp.error.v1"
             }
           },
           "required": [
@@ -175,7 +175,7 @@
     "annotations": {
       "readOnlyHint": true
     },
-    "description": "Open a Moraine session, turn, or event ID. Session and turn opens are summary-only by default so they stay small. Add limit to expand a bounded first page, then continue with {\"cursor\": next_cursor}. Open an event ID for its full content.",
+    "description": "Open a session, turn, or event ID. Session and turn opens are summary-only by default so they stay small. Add limit to expand a bounded first page, then continue with {\"cursor\": next_cursor}. Open an event ID for its full content.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -188,7 +188,7 @@
           ]
         },
         "id": {
-          "description": "A session:..., turn:..., or event:... Moraine MCP ID. Use alone for a bounded summary, or pair a session/turn ID with limit to start expansion.",
+          "description": "A session:..., turn:..., or event:... mnemonic ID. Use alone for a bounded summary, or pair a session/turn ID with limit to start expansion.",
           "type": [
             "string",
             "null"
@@ -215,7 +215,7 @@
               "type": "object"
             },
             "schema_version": {
-              "const": "moraine.mcp.open.v1"
+              "const": "mnemonic.mcp.open.v1"
             }
           },
           "required": [
@@ -225,7 +225,7 @@
         {
           "properties": {
             "schema_version": {
-              "const": "moraine.mcp.error.v1"
+              "const": "mnemonic.mcp.error.v1"
             }
           },
           "required": [
@@ -328,7 +328,7 @@
     "annotations": {
       "readOnlyHint": true
     },
-    "description": "List Moraine sessions that overlap a start/end datetime range. Returns typed session IDs, compact metadata, pagination, and open handles. Use this for metadata browsing by time; use search_sessions for content search and open to inspect a selected session.",
+    "description": "List sessions that overlap a start/end datetime range. Returns typed session IDs, compact metadata, pagination, and open handles. Use this for metadata browsing by time; use search_sessions for content search and open to inspect a selected session.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -419,7 +419,7 @@
               "type": "object"
             },
             "schema_version": {
-              "const": "moraine.mcp.list_sessions.v1"
+              "const": "mnemonic.mcp.list_sessions.v1"
             }
           },
           "required": [
@@ -429,7 +429,7 @@
         {
           "properties": {
             "schema_version": {
-              "const": "moraine.mcp.error.v1"
+              "const": "mnemonic.mcp.error.v1"
             }
           },
           "required": [
@@ -568,7 +568,7 @@
           ]
         },
         "path": {
-          "description": "File to trace. Absolute paths are reduced to a repo-relative tail (by walking up to .moraine.toml/.git); a repo-relative path is used as the tail directly and gives the best cross-worktree coverage.",
+          "description": "File to trace. Absolute paths are reduced to a repo-relative tail (by walking up to .git); a repo-relative path is used as the tail directly and gives the best cross-worktree coverage.",
           "type": "string"
         },
         "scope": {
@@ -623,7 +623,7 @@
               "type": "object"
             },
             "schema_version": {
-              "const": "moraine.mcp.file_attention.v1"
+              "const": "mnemonic.mcp.file_attention.v1"
             }
           },
           "required": [
@@ -633,7 +633,7 @@
         {
           "properties": {
             "schema_version": {
-              "const": "moraine.mcp.error.v1"
+              "const": "mnemonic.mcp.error.v1"
             }
           },
           "required": [
@@ -736,7 +736,7 @@
               "type": "object"
             },
             "schema_version": {
-              "const": "moraine.mcp.get_ingest_status.v1"
+              "const": "mnemonic.mcp.get_ingest_status.v1"
             }
           },
           "required": [
@@ -746,7 +746,7 @@
         {
           "properties": {
             "schema_version": {
-              "const": "moraine.mcp.error.v1"
+              "const": "mnemonic.mcp.error.v1"
             }
           },
           "required": [

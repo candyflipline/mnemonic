@@ -1,5 +1,5 @@
 // Package pi parses pi-coding-agent sources. Port of upstream
-// crates/moraine-ingest-core/src/sources/pi.rs onto the shared pi_family
+// upstream ingest-core/src/sources/pi.rs onto the shared pi_family
 // normalizer; testdata/goldens pins the output.
 package pi
 

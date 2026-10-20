@@ -10,7 +10,7 @@ import (
 )
 
 // Ports of the resolve_tail, build_data and format_text tests in upstream
-// crates/moraine-mcp-core/src/file_attention_v1.rs.
+// upstream mcp-core/src/file_attention_v1.rs.
 
 func TestFaRejectsNegativeLimit(t *testing.T) {
 	raw := json.RawMessage(`{"path": "crates/foo/tee.rs", "limit": -1}`)

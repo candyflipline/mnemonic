@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// get_ingest_status ports crates/moraine-mcp-core/src/get_ingest_status_v1.rs.
+// get_ingest_status ports upstream mcp-core/src/get_ingest_status_v1.rs.
 // Upstream reads ClickHouse ingest heartbeats; this server has no heartbeats,
 // so the read side maps the `sources` table (per author/machine: newest
 // updated_ms, source count, total size, sources without a parser) onto the

@@ -9,8 +9,8 @@ import (
 
 // The path-side half of file_attention: reduce a query path to the
 // project-relative tail used for suffix matching, and enumerate a repo root's
-// worktrees. Ports file_attention_v1.rs's resolve_tail_from and
-// moraine-config's worktree_roots_for_repo_root.
+// worktrees. Ports file_attention_v1.rs's resolve_tail_from and the upstream
+// config worktree_roots_for_repo_root.
 
 type faTail struct {
 	Rel    string
@@ -76,7 +76,7 @@ func faLaunchProject(launchDir string) (string, string) {
 	if launchDir == "" {
 		return "", ""
 	}
-	root := qFindProjectRoot(filepath.Join(launchDir, ".moraine-project-scope"))
+	root := qFindProjectRoot(filepath.Join(launchDir, ".mnemonic-project-scope"))
 	if root == "" {
 		if !qIsDir(launchDir) {
 			return "", ""
@@ -145,7 +145,7 @@ func faTailSegments(rel string) int {
 	return n
 }
 
-// qWorktreeRootsForRepoRoot ports moraine-config
+// qWorktreeRootsForRepoRoot ports the upstream config
 // worktree_roots_for_repo_root (without a pwd): the root itself, the common
 // dir's parent for linked worktrees, and every registered worktree that still
 // resolves to the same common dir — canonicalized, sorted, deduped.

@@ -9,8 +9,8 @@
 -- names it. The cache holds the live rows (live_events, live_docs,
 -- live_postings) and the archive docs a live row supersedes (dropped).
 --
--- Column names and meanings follow ClickHouse moraine_personal so the query
--- package ports upstream crates/moraine-conversations/src/clickhouse_repo/*
+-- Column names and meanings follow the retired ClickHouse events table so the
+-- query package ports upstream conversations/src/clickhouse_repo/*
 -- and docs/clickhouse/*.sql with dialect changes only.
 
 -- events: one row per event_uid (the highest event_version, ties broken by the

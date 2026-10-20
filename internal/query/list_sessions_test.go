@@ -7,7 +7,7 @@ import (
 )
 
 // Ports of the formatter and argument tests in upstream
-// crates/moraine-mcp-core/src/list_sessions_v1.rs, with the server cap pinned
+// upstream mcp-core/src/list_sessions_v1.rs, with the server cap pinned
 // to 25 (tools.json), so the over-limit cases use 26/25 where upstream used
 // 51/50.
 

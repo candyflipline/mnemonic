@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Export moraine's ClickHouse events to per-month parquet for `mnemonic
+# Export the retired ClickHouse events to per-month parquet for `mnemonic
 # import-ch`: one <out_dir>/events-<YYYYMM>.parquet per month, all 59
 # events.tsv columns in order.
 #
@@ -13,7 +13,7 @@ out_dir=${1:?usage: export_ch.sh <out_dir>}
 url=${CH_URL:?CH_URL is required}
 user=${CH_USER:?CH_USER is required}
 password=${CH_PASSWORD:?CH_PASSWORD is required}
-db=${CH_DB:-moraine_personal}
+db=${CH_DB:?set CH_DB to the ClickHouse database}
 
 conf=$(mktemp)
 trap 'rm -f "$conf"' EXIT
