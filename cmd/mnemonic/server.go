@@ -82,15 +82,15 @@ func serve(args []string) error {
 			log.Printf("cache: %s lake_files=%d events=%d docs=%d postings=%d",
 				stats.Path, stats.LakeFiles, stats.Events, stats.Docs, stats.Postings)
 		}
+		newest, err := cache.NewestPath(cfg.DataDir)
+		dbMu.Lock()
+		defer dbMu.Unlock()
+		if err == nil && newest == dbPath && db != nil {
+			return // nothing changed; keep the open handle
+		}
 		conn, path, err := cache.OpenNewest(cfg.DataDir)
 		if err != nil {
 			log.Printf("cache: open newest: %v", err)
-			return
-		}
-		dbMu.Lock()
-		defer dbMu.Unlock()
-		if path == dbPath && db != nil {
-			conn.Close() // nothing changed; keep the open handle
 			return
 		}
 		old := db

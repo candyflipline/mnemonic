@@ -680,17 +680,27 @@ func insertSources(ctx context.Context, c *sql.Conn, dataDir string, live []lake
 	return stmt.Close()
 }
 
+// NewestPath is the cache OpenNewest would open. A caller holding that path
+// open must not reopen it: DuckDB shares one instance per file in a process,
+// so the second ATTACH of the archive fails.
+func NewestPath(dataDir string) (string, error) {
+	caches, err := cacheFiles(dataDir)
+	if err != nil {
+		return "", err
+	}
+	if len(caches) == 0 {
+		return "", fmt.Errorf("no cache in %s: run cache.Build first", layout.CacheDir(dataDir))
+	}
+	return caches[len(caches)-1].path, nil
+}
+
 // OpenNewest opens the newest complete cache read-only with its archive
 // index attached as arch, which its views read.
 func OpenNewest(dataDir string) (*sql.DB, string, error) {
-	caches, err := cacheFiles(dataDir)
+	path, err := NewestPath(dataDir)
 	if err != nil {
 		return nil, "", err
 	}
-	if len(caches) == 0 {
-		return nil, "", fmt.Errorf("no cache in %s: run cache.Build first", layout.CacheDir(dataDir))
-	}
-	path := caches[len(caches)-1].path
 	db, err := newDB(path + "?access_mode=READ_ONLY")
 	if err != nil {
 		return nil, "", err
