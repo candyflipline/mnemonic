@@ -37,10 +37,6 @@ var supportedProtocolVersions = []string{
 
 const maxRequestBytes = 32 << 20
 
-// lookup is the seam the in-package test stubs (register is unexported in
-// query, so a test cannot install a tool there).
-var lookup = query.Lookup
-
 type performance struct {
 	ElapsedMS int64 `json:"elapsed_ms"`
 }
@@ -98,7 +94,7 @@ type rpcResponse struct {
 
 // Handler answers /mcp with the newest cache from open. open runs once per
 // tools/call; initialize and tools/list never touch it.
-func Handler(open func() (*sql.DB, error)) http.Handler {
+func Handler(open func() (*sql.DB, error), lookup func(name string) (query.Tool, bool)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", "POST")
@@ -181,7 +177,7 @@ func Handler(open func() (*sql.DB, error)) http.Handler {
 				w.WriteHeader(http.StatusAccepted)
 				return
 			}
-			h := handler{open: open}
+			h := handler{open: open, lookup: lookup}
 			result := h.toolsCall(r, paramsJSON)
 			switch result := result.(type) {
 			case *rpcErrorObj:
@@ -202,7 +198,10 @@ func Handler(open func() (*sql.DB, error)) http.Handler {
 	})
 }
 
-type handler struct{ open func() (*sql.DB, error) }
+type handler struct {
+	open   func() (*sql.DB, error)
+	lookup func(name string) (query.Tool, bool)
+}
 
 // toolsCall runs one tool and wraps it in the tool envelope. Only a params
 // payload that cannot decode is a JSON-RPC error; like upstream, every
@@ -220,7 +219,7 @@ func (h handler) toolsCall(r *http.Request, paramsJSON json.RawMessage) any {
 	if len(args) == 0 {
 		args = json.RawMessage("null")
 	}
-	tool, ok := lookup(p.Name)
+	tool, ok := h.lookup(p.Name)
 	if !ok {
 		return unstructuredToolError(fmt.Sprintf("unknown tool: %s", p.Name))
 	}

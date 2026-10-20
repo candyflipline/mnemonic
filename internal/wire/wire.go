@@ -7,9 +7,16 @@ package wire
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"regexp"
 )
 
 const HeadCap = 64 << 10
+
+var segmentRe = regexp.MustCompile(`^[a-z0-9._-]+$`)
+
+func ValidSegment(s string) bool {
+	return s != "." && s != ".." && segmentRe.MatchString(s)
+}
 
 // SrcID names a source file on the server: the first 16 hex chars of
 // sha256(absolute path on the client).
@@ -40,6 +47,8 @@ type Source struct {
 	HeadHash   string `json:"head_hash"`
 	UpdatedMs  int64  `json:"updated_ms"`
 }
+
+const ManifestPath = "/v1/manifest"
 
 // Manifest answers GET /v1/manifest?machine=M for the caller's author.
 type Manifest struct {

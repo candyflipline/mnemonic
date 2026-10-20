@@ -23,6 +23,7 @@ import (
 	"github.com/candyflipline/mnemonic/internal/lake"
 	"github.com/candyflipline/mnemonic/internal/mcp"
 	_ "github.com/candyflipline/mnemonic/internal/normalize/all"
+	"github.com/candyflipline/mnemonic/internal/query"
 	"github.com/candyflipline/mnemonic/internal/store"
 )
 
@@ -116,7 +117,7 @@ func serve(args []string) error {
 	mux := http.NewServeMux()
 	st := store.Store{DataDir: cfg.DataDir}
 	mux.Handle("/v1/", auth.Middleware(authors)(st.Handler()))
-	mux.Handle("/mcp", auth.Middleware(authors)(mcp.Handler(open)))
+	mux.Handle("/mcp", auth.Middleware(authors)(mcp.Handler(open, query.Lookup)))
 	srv := &http.Server{Addr: cfg.Listen, Handler: mux}
 	go func() {
 		<-ctx.Done()

@@ -10,9 +10,7 @@ import (
 	"strings"
 )
 
-// Lake-only columns the normalizer never emits: the lake writer stamps
-// ingested_at, and author belongs to the shared ClickHouse only.
-var skip = map[string]bool{"ingested_at": true, "author": true}
+var lakeStampedColumns = map[string]bool{"ingested_at": true, "author": true}
 
 type mapping struct{ goType, duckType string }
 
@@ -41,7 +39,7 @@ func main() {
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		name, chType, ok := strings.Cut(sc.Text(), "\t")
-		if !ok || skip[name] {
+		if !ok || lakeStampedColumns[name] {
 			continue
 		}
 		m, ok := types[chType]

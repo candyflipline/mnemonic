@@ -305,7 +305,7 @@ func newRealStore(t *testing.T) *realStore {
 
 func realManifestSource(t *testing.T, rs *realStore, path string) wire.Source {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, rs.srv.URL+manifestPath+"?machine=testbox", nil)
+	req, err := http.NewRequest(http.MethodGet, rs.srv.URL+wire.ManifestPath+"?machine=testbox", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -29,22 +29,22 @@ func (s stubTool) Call(_ context.Context, _ *sql.DB, _ json.RawMessage) (any, st
 	return s.data, s.text, s.err
 }
 
-func withLookup(t *testing.T, name string, tool query.Tool) {
+func mcpServer(t *testing.T, tools ...query.Tool) *httptest.Server {
 	t.Helper()
-	prev := lookup
-	lookup = func(n string) (query.Tool, bool) {
-		if n == name {
-			return tool, true
+	return mcpServerWithOpen(t, func() (*sql.DB, error) { return nil, nil }, tools...)
+}
+
+func mcpServerWithOpen(t *testing.T, open func() (*sql.DB, error), tools ...query.Tool) *httptest.Server {
+	t.Helper()
+	lookup := func(name string) (query.Tool, bool) {
+		for _, tool := range tools {
+			if tool.Name() == name {
+				return tool, true
+			}
 		}
 		return nil, false
 	}
-	t.Cleanup(func() { lookup = prev })
-}
-
-func mcpServer(t *testing.T) *httptest.Server {
-	t.Helper()
-	open := func() (*sql.DB, error) { return nil, nil }
-	srv := httptest.NewServer(auth.Middleware(map[string]string{auth.Hash("tok"): "chris"})(Handler(open)))
+	srv := httptest.NewServer(auth.Middleware(map[string]string{auth.Hash("tok"): "chris"})(Handler(open, lookup)))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -154,8 +154,7 @@ func TestToolsListServesToolsJSONVerbatim(t *testing.T) {
 }
 
 func TestToolsCallWrapsStubInEnvelope(t *testing.T) {
-	srv := mcpServer(t)
-	withLookup(t, "open", stubTool{
+	srv := mcpServer(t, stubTool{
 		name: "open",
 		data: map[string]any{"kind": "session", "turns": []any{}},
 		text: "Opened session abc.",
@@ -205,8 +204,7 @@ func TestToolsCallWrapsStubInEnvelope(t *testing.T) {
 }
 
 func TestToolsCallArgErrorIsErrorResult(t *testing.T) {
-	srv := mcpServer(t)
-	withLookup(t, "search_sessions", stubTool{
+	srv := mcpServer(t, stubTool{
 		name: "search_sessions",
 		err:  &query.ArgError{Msg: "query must be a non-empty string"},
 	})
@@ -255,9 +253,7 @@ func TestToolsCallUnknownToolIsErrorResult(t *testing.T) {
 
 func TestToolsCallCacheUnavailableIsErrorResult(t *testing.T) {
 	open := func() (*sql.DB, error) { return nil, errors.New("no cache yet") }
-	srv := httptest.NewServer(auth.Middleware(map[string]string{auth.Hash("tok"): "chris"})(Handler(open)))
-	t.Cleanup(srv.Close)
-	withLookup(t, "open", stubTool{name: "open"})
+	srv := mcpServerWithOpen(t, open, stubTool{name: "open"})
 	resp := postRPC(t, srv, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"open","arguments":{"id":"session:abc"}}}`)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status %d, want 200", resp.StatusCode)

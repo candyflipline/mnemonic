@@ -1,11 +1,19 @@
 package ops
 
-import _ "embed"
+import (
+	_ "embed"
+	"strings"
+	"text/template"
+)
 
-// LaunchdPlist is launchd/com.mnemonic.push.plist verbatim. An installer must
-// rewrite /usr/local/bin/mnemonic and the /Users/USERNAME placeholders in it
-// before writing it to ~/Library/LaunchAgents: launchd does not expand ~ in
-// ProgramArguments or StandardOutPath.
-//
 //go:embed launchd/com.mnemonic.push.plist
-var LaunchdPlist string
+var launchdPlist string
+
+var launchdTemplate = template.Must(template.New("launchd").Parse(launchdPlist))
+
+// launchd does not expand ~ in ProgramArguments or StandardOutPath.
+func RenderLaunchd(exe, home string) (string, error) {
+	var b strings.Builder
+	err := launchdTemplate.Execute(&b, struct{ Exe, Home string }{exe, home})
+	return b.String(), err
+}

@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"sync"
@@ -18,14 +17,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/layout"
 	"github.com/candyflipline/mnemonic/internal/wire"
 )
-
-// segment bounds a machine, harness or src_id to one safe path piece; "." and
-// ".." pass the class but must never resolve as path elements.
-var segment = regexp.MustCompile(`^[a-z0-9._-]+$`)
-
-func validSegment(s string) bool {
-	return s != "." && s != ".." && segment.MatchString(s)
-}
 
 // manifestBody is what a Key.Manifest file holds: the wire.Source the protocol
 // answers with, plus zst_size, the raw-file length Source.Size is known to
@@ -61,8 +52,8 @@ func (s *Store) lockKey(k layout.Key) func() {
 
 func (s *Store) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("GET /v1/manifest", http.HandlerFunc(s.serveManifest))
-	mux.Handle("PUT /v1/raw/{machine}/{harness}/{src_id}", http.HandlerFunc(s.servePut))
+	mux.Handle("GET "+wire.ManifestPath, http.HandlerFunc(s.serveManifest))
+	mux.Handle("PUT "+wire.RawPathPrefix+"{machine}/{harness}/{src_id}", http.HandlerFunc(s.servePut))
 	return mux
 }
 
@@ -72,7 +63,7 @@ func (s *Store) serveManifest(w http.ResponseWriter, r *http.Request) {
 	}
 	author := auth.Author(r.Context())
 	machine := r.URL.Query().Get("machine")
-	if !validSegment(machine) {
+	if !wire.ValidSegment(machine) {
 		http.Error(w, "bad machine", http.StatusBadRequest)
 		return
 	}
@@ -104,7 +95,7 @@ func (s *Store) servePut(w http.ResponseWriter, r *http.Request) {
 	author := auth.Author(r.Context())
 	machine, harness, srcID := r.PathValue("machine"), r.PathValue("harness"), r.PathValue("src_id")
 	for _, seg := range [...]string{machine, harness, srcID} {
-		if !validSegment(seg) {
+		if !wire.ValidSegment(seg) {
 			http.Error(w, "bad path segment", http.StatusBadRequest)
 			return
 		}

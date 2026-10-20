@@ -31,9 +31,6 @@ type Stats struct {
 	Bytes                                          int64
 }
 
-// manifestPath is the only wire path without a constant in internal/wire.
-const manifestPath = "/v1/manifest"
-
 // skewMs is the mtime-vs-UpdatedMs margin the skip needs, because the client
 // and server clocks need not agree.
 const skewMs = 5 * 60 * 1000
@@ -62,7 +59,7 @@ func Run(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client) 
 }
 
 func fetchManifest(ctx context.Context, cfg config.Client, hc *http.Client) (map[string]*wire.Source, error) {
-	u := strings.TrimSuffix(cfg.Server, "/") + manifestPath + "?" + url.Values{"machine": {cfg.Machine}}.Encode()
+	u := strings.TrimSuffix(cfg.Server, "/") + wire.ManifestPath + "?" + url.Values{"machine": {cfg.Machine}}.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
@@ -234,10 +231,6 @@ func rawEndOf(rawEnds []int64, redacted []byte, start int64, body []byte) int64 
 	return rawEnds[lines-1]
 }
 
-// putSource sends one PUT and decodes the updated Source just to validate the
-// 200 body. rawEnd is the offset in the client's raw file the body ends at;
-// a server that predates raw_end ignores it. A 409 is not an error: the
-// Conflict body comes back so the caller can re-decide.
 func putSource(ctx context.Context, cfg config.Client, hc *http.Client, f fileRef, srcID string, offset int64, head string, body []byte, rawEnd int64) (*wire.Conflict, error) {
 	q := url.Values{
 		"offset":      {strconv.FormatInt(offset, 10)},
@@ -259,21 +252,18 @@ func putSource(ctx context.Context, cfg config.Client, hc *http.Client, f fileRe
 		return nil, err
 	}
 	defer resp.Body.Close()
-	switch {
-	case resp.StatusCode == http.StatusConflict:
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return nil, nil
+	case http.StatusConflict:
 		var c wire.Conflict
 		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&c); err != nil {
 			return nil, fmt.Errorf("put %s: 409 body: %w", srcID, err)
 		}
 		return &c, nil
-	case resp.StatusCode != http.StatusOK:
+	default:
 		return nil, fmt.Errorf("put %s: %s: %s", srcID, resp.Status, readErrBody(resp.Body))
 	}
-	var src wire.Source
-	if err := json.NewDecoder(resp.Body).Decode(&src); err != nil {
-		return nil, fmt.Errorf("put %s: response: %w", srcID, err)
-	}
-	return nil, nil
 }
 
 func readErrBody(r io.Reader) string {
@@ -284,9 +274,6 @@ func readErrBody(r io.Reader) string {
 	return strings.TrimSpace(string(b))
 }
 
-// scan lists every file the globs match — absolute, regular, deduped — with
-// the first source that matches a path owning it. A source whose glob cannot
-// be evaluated matches nothing this pass.
 func scan(sources []config.SourceGlob) []fileRef {
 	seen := make(map[string]bool)
 	var files []fileRef

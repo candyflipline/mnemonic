@@ -5,13 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
-	"strings"
 
 	"github.com/BurntSushi/toml"
 
 	"github.com/candyflipline/mnemonic/internal/config"
+	"github.com/candyflipline/mnemonic/internal/wire"
 	"github.com/candyflipline/mnemonic/ops"
 )
 
@@ -19,8 +18,6 @@ const launchdLabel = "com.mnemonic.push"
 
 // machineRe mirrors the check config.LoadClient applies, so a bad --machine
 // fails here at setup instead of on the teammate's first push.
-var machineRe = regexp.MustCompile(`^[a-z0-9._-]+$`)
-
 func initCmd(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	server := fs.String("server", "", "base URL of the mnemonic server (required)")
@@ -53,12 +50,9 @@ func initCmd(args []string) error {
 		if err != nil {
 			return fmt.Errorf("init: machine: %w", err)
 		}
-		if i := strings.IndexByte(host, '.'); i >= 0 {
-			host = host[:i]
-		}
-		*machine = strings.ToLower(host)
+		*machine = config.ShortHost(host)
 	}
-	if !machineRe.MatchString(*machine) {
+	if !wire.ValidSegment(*machine) {
 		return fmt.Errorf("machine %q must match [a-z0-9._-]+", *machine)
 	}
 	if _, err := os.Stat(configPath); err == nil && !*force {
@@ -71,7 +65,7 @@ func initCmd(args []string) error {
 		return fmt.Errorf("init: %s: %w", dir, err)
 	}
 
-	src, err := expandHome(*tokenFile)
+	src, err := config.ExpandHome(*tokenFile)
 	if err != nil {
 		return err
 	}
@@ -129,8 +123,10 @@ func initCmd(args []string) error {
 func initLaunchd(home, exe string, force bool) error {
 	agents := filepath.Join(home, "Library", "LaunchAgents")
 	plistPath := filepath.Join(agents, launchdLabel+".plist")
-	plist := strings.ReplaceAll(ops.LaunchdPlist, "/usr/local/bin/mnemonic", exe)
-	plist = strings.ReplaceAll(plist, "/Users/USERNAME", home)
+	plist, err := ops.RenderLaunchd(exe, home)
+	if err != nil {
+		return fmt.Errorf("init: plist: %w", err)
+	}
 	if err := os.MkdirAll(agents, 0o755); err != nil {
 		return fmt.Errorf("init: %s: %w", agents, err)
 	}
@@ -182,22 +178,6 @@ func runningBinary() (string, error) {
 		return "", fmt.Errorf("init: %s: %w", exe, err)
 	}
 	return real, nil
-}
-
-// expandHome rewrites a leading ~ with the home directory, matching how
-// config.LoadClient re-reads token_file.
-func expandHome(p string) (string, error) {
-	if p != "~" && !strings.HasPrefix(p, "~"+string(os.PathSeparator)) {
-		return p, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("init: ~: %w", err)
-	}
-	if p == "~" {
-		return home, nil
-	}
-	return home + p[1:], nil
 }
 
 // writeToken creates at 0600 and then chmods: the create mode passes through
