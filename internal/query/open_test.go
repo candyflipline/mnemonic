@@ -52,8 +52,8 @@ func TestOpenArgValidation(t *testing.T) {
 	if args.target.kind != kindSession || args.target.session != "sess-1" {
 		t.Fatalf("cursor target: %v", args.target)
 	}
-	if args.cursorDecoded.Limit != 3 || args.cursorDecoded.After.EventOrdinal != 1 {
-		t.Fatalf("cursor decode: %+v", args.cursorDecoded)
+	if args.page.limit != 3 || args.page.after.EventOrdinal != 1 {
+		t.Fatalf("cursor decode: %+v", args.page)
 	}
 }
 

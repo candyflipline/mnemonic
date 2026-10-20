@@ -186,7 +186,7 @@ func TestShapedSearchOpenIdsAreValidOpenArgs(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", id, err)
 		}
-		if args.hasCursor {
+		if args.cursor != "" {
 			t.Fatalf("%s: parsed as continuation", id)
 		}
 		if got := args.target.String(); got != id {

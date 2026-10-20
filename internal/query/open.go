@@ -16,20 +16,21 @@ func (openTool) Name() string { return "open" }
 func init() { register(openTool{}) }
 
 type canonicalOpenArgs struct {
-	target        mcpID
-	limit         int
-	hasLimit      bool
-	cursor        string
-	hasCursor     bool
-	cursorDecoded openCursor
+	target mcpID
+	page   *openPage
+	cursor string
 }
 
-const openCursorMaxChars = 16384
+type openPage struct {
+	limit int
+	after *openCursorAfter
+}
 
-// openCursor is my v2 continuation: deterministic JSON, base64url without
-// padding. Upstream seals it with HMAC plus a snapshot generation; serve has
-// no cursor key and each cache file is one immutable snapshot, so the
-// integrity and staleness machinery has nothing to protect here.
+const (
+	openCursorMaxChars = 16384
+	openCursorVersion  = 2
+)
+
 type openCursor struct {
 	Version  int             `json:"version"`
 	TargetID string          `json:"target_id"`
@@ -53,7 +54,6 @@ func parseOpenArgs(raw json.RawMessage) (canonicalOpenArgs, error) {
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return canonicalOpenArgs{}, argErrorf("open expects id, optional limit, or a continuation cursor")
 	}
-	a := canonicalOpenArgs{}
 	if args.Cursor != nil {
 		if args.ID != nil || args.Limit != nil {
 			return canonicalOpenArgs{}, argErrorf("cursor must be provided without id or limit")
@@ -69,11 +69,7 @@ func parseOpenArgs(raw json.RawMessage) (canonicalOpenArgs, error) {
 		if err != nil {
 			return canonicalOpenArgs{}, err
 		}
-		maxLimit := openMaxResults
-		if maxLimit < 1 {
-			maxLimit = 1
-		}
-		if decoded.Limit < 1 || decoded.Limit > maxLimit {
+		if decoded.Limit < 1 || decoded.Limit > openMaxResults {
 			return canonicalOpenArgs{}, argErrorf("cursor page size is invalid; reopen the target")
 		}
 		target, err := parseMcpID(decoded.TargetID)
@@ -83,8 +79,7 @@ func parseOpenArgs(raw json.RawMessage) (canonicalOpenArgs, error) {
 		if target.kind == kindEvent {
 			return canonicalOpenArgs{}, argErrorf("cursor target kind is invalid; reopen the target")
 		}
-		a.cursor, a.hasCursor, a.cursorDecoded, a.target = cursor, true, decoded, target
-		return a, nil
+		return canonicalOpenArgs{target: target, page: &openPage{limit: decoded.Limit, after: &decoded.After}, cursor: cursor}, nil
 	}
 
 	if args.ID == nil {
@@ -97,19 +92,15 @@ func parseOpenArgs(raw json.RawMessage) (canonicalOpenArgs, error) {
 	if err != nil {
 		return canonicalOpenArgs{}, err
 	}
-	a.target = id
+	a := canonicalOpenArgs{target: id}
 	if args.Limit != nil {
-		maxLimit := openMaxResults
-		if maxLimit < 1 {
-			maxLimit = 1
-		}
-		if *args.Limit < 1 || *args.Limit > int64(maxLimit) {
-			return canonicalOpenArgs{}, argErrorf("limit must be between 1 and %d", maxLimit)
+		if *args.Limit < 1 || *args.Limit > openMaxResults {
+			return canonicalOpenArgs{}, argErrorf("limit must be between 1 and %d", openMaxResults)
 		}
 		if id.kind == kindEvent {
 			return canonicalOpenArgs{}, argErrorf("limit is only supported for session and turn IDs")
 		}
-		a.limit, a.hasLimit = int(*args.Limit), true
+		a.page = &openPage{limit: int(*args.Limit)}
 	}
 	return a, nil
 }
@@ -123,7 +114,7 @@ func decodeOpenCursor(token string) (openCursor, error) {
 	if err := json.Unmarshal(bytes, &cursor); err != nil {
 		return openCursor{}, argErrorf("cursor is malformed; reopen the target")
 	}
-	if cursor.Version != 2 {
+	if cursor.Version != openCursorVersion {
 		return openCursor{}, argErrorf("cursor snapshot is stale; reopen the target to restart expansion")
 	}
 	return cursor, nil
@@ -138,11 +129,11 @@ func encodeOpenCursor(cursor openCursor) (string, error) {
 }
 
 func (a canonicalOpenArgs) requestShape() map[string]any {
-	if a.hasCursor {
+	if a.cursor != "" {
 		return map[string]any{"cursor": a.cursor}
 	}
-	if a.hasLimit {
-		return map[string]any{"id": a.target.String(), "limit": a.limit}
+	if a.page != nil {
+		return map[string]any{"id": a.target.String(), "limit": a.page.limit}
 	}
 	return map[string]any{"id": a.target.String()}
 }
@@ -172,19 +163,15 @@ func openSessionFlow(ctx context.Context, db *sql.DB, request map[string]any, ar
 	if scan == nil {
 		return nil, "", argErrorf("session not found")
 	}
-	// A cursor carries its own page size; summary mode is id-only.
-	limit := args.limit
-	if args.hasCursor {
-		limit = args.cursorDecoded.Limit
-	}
-	if !args.hasLimit && !args.hasCursor {
+	page := args.page
+	if page == nil {
 		data := openSessionData(scan, nil, nil)
 		return data, openResultText(request, data), nil
 	}
+	limit := page.limit
 	afterSeq := uint32(0)
-	hasAfter := false
-	if args.hasCursor {
-		afterSeq, hasAfter = args.cursorDecoded.After.TurnSeq, true
+	if page.after != nil {
+		afterSeq = page.after.TurnSeq
 	}
 	var seqs []uint32
 	for _, seq := range scan.turnSeqs() {
@@ -192,7 +179,7 @@ func openSessionFlow(ctx context.Context, db *sql.DB, request map[string]any, ar
 			seqs = append(seqs, seq)
 		}
 	}
-	if hasAfter && len(seqs) == 0 {
+	if page.after != nil && len(seqs) == 0 {
 		// Upstream reports an exhausted continuation as a stale snapshot.
 		return nil, "", argErrorf("cursor snapshot is stale; reopen the target to restart expansion")
 	}
@@ -207,7 +194,7 @@ func openSessionFlow(ctx context.Context, db *sql.DB, request map[string]any, ar
 	var nextCursor any
 	if hasMore {
 		encoded, err := encodeOpenCursor(openCursor{
-			Version:  2,
+			Version:  openCursorVersion,
 			TargetID: args.target.String(),
 			Limit:    limit,
 			After:    openCursorAfter{Kind: "turn", TurnSeq: seqs[len(seqs)-1]},
@@ -233,21 +220,18 @@ func openTurnFlow(ctx context.Context, db *sql.DB, request map[string]any, args 
 	compact := compactTurn(turn, summaryPreviewChars)
 
 	afterOrdinal := uint32(0)
-	hasAfter := false
-	if args.hasCursor {
-		if args.cursorDecoded.After.Kind != "event" {
-			return nil, "", argErrorf("cursor is malformed; reopen the target")
-		}
-		afterOrdinal, hasAfter = args.cursorDecoded.After.EventOrdinal, true
-	}
-	limit := args.limit
-	if args.hasCursor {
-		limit = args.cursorDecoded.Limit
-	}
+	limit := 0
 	var pageRows []*navRow
-	if args.hasLimit || args.hasCursor {
+	if page := args.page; page != nil {
+		if page.after != nil {
+			if page.after.Kind != "event" {
+				return nil, "", argErrorf("cursor is malformed; reopen the target")
+			}
+			afterOrdinal = page.after.EventOrdinal
+		}
+		limit = page.limit
 		for _, row := range turn.selected {
-			if !hasAfter || row.eventOrdinal > afterOrdinal {
+			if row.eventOrdinal > afterOrdinal {
 				pageRows = append(pageRows, row)
 			}
 		}
@@ -263,7 +247,7 @@ func openTurnFlow(ctx context.Context, db *sql.DB, request map[string]any, args 
 	var nextCursor any
 	if hasMore {
 		encoded, err := encodeOpenCursor(openCursor{
-			Version:  2,
+			Version:  openCursorVersion,
 			TargetID: args.target.String(),
 			Limit:    limit,
 			After:    openCursorAfter{Kind: "event", EventOrdinal: pageRows[len(pageRows)-1].eventOrdinal},
