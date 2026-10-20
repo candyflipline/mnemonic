@@ -38,11 +38,17 @@ type Stats struct {
 // manifestPath is the only wire path without a constant in internal/wire.
 const manifestPath = "/v1/manifest"
 
-// fileRef is one matched file and the source it belongs to.
+// skewMs is the mtime-vs-UpdatedMs margin the skip needs, because the client
+// and server clocks need not agree.
+const skewMs = 5 * 60 * 1000
+
+// fileRef is one matched file and the source it belongs to. mtimeMs rides
+// along from the scan's stat so the skip costs no second stat.
 type fileRef struct {
 	path       string
 	harness    string
 	sourceName string
+	mtimeMs    int64
 }
 
 // Run does one pass. Per source: head hash equal and the redacted size grew
@@ -97,6 +103,14 @@ func fetchManifest(ctx context.Context, cfg config.Client, hc *http.Client) (map
 // missing. A 409 means our manifest view was stale; the Conflict body carries
 // the server's Size and head hash, and exactly one retry re-decides from it.
 func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client, manifest map[string]*wire.Source, f fileRef, st *Stats) error {
+	srcID := wire.SrcID(f.path)
+	// The server stamps UpdatedMs after it received the bytes, so a file whose
+	// last write is older than that stamp (with a 5-minute margin for
+	// client/server clock skew) has nothing new; skip it unread.
+	if entry := manifest[srcID]; entry != nil && f.mtimeMs < entry.UpdatedMs-skewMs {
+		st.Unchanged++
+		return nil
+	}
 	redacted, head, ok, err := redactComplete(f.path, red)
 	if err != nil {
 		return err
@@ -106,7 +120,6 @@ func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.C
 		st.Unchanged++
 		return nil
 	}
-	srcID := wire.SrcID(f.path)
 	entry := manifest[srcID]
 	for attempt := 0; ; attempt++ {
 		body, offset, noop := decide(entry, head, redacted)
@@ -225,7 +238,7 @@ func scan(sources []config.SourceGlob) []fileRef {
 				continue
 			}
 			seen[abs] = true
-			files = append(files, fileRef{path: abs, harness: src.Harness, sourceName: src.SourceName})
+			files = append(files, fileRef{path: abs, harness: src.Harness, sourceName: src.SourceName, mtimeMs: info.ModTime().UnixMilli()})
 		}
 	}
 	return files

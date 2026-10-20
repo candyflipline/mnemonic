@@ -91,6 +91,11 @@ func Run(dataDir string) (Stats, error) {
 			fmt.Fprintf(os.Stderr, "lake: %s: %v\n", mpath, err)
 			continue
 		}
+		if err := restampIfSuperseded(mpath, eventsPath, src); err != nil {
+			st.Failed++
+			fmt.Fprintf(os.Stderr, "lake: %s: %v\n", mpath, err)
+			continue
+		}
 		st.Rewrote++
 		st.Events += n
 	}
@@ -227,6 +232,27 @@ func parseAndWrite(db *sql.DB, dataDir string, key layout.Key, src manifest, par
 		return 0, err
 	}
 	return int64(len(events)), nil
+}
+
+// restampIfSuperseded re-reads the manifest after the parquet rename: when a
+// push landed while this source was parsing, the fresh mtime would make the
+// next Run call the parquet current and the appended lines would sit unparsed
+// until the source changed again, so pin the mtime to the manifest this run
+// parsed and let the next Run see it as stale.
+func restampIfSuperseded(mpath, eventsPath string, parsed manifest) error {
+	var now manifest
+	b, err := os.ReadFile(mpath)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(b, &now); err != nil {
+		return err
+	}
+	if now.UpdatedMs == parsed.UpdatedMs && now.ZstSize == parsed.ZstSize {
+		return nil
+	}
+	t := time.UnixMilli(parsed.UpdatedMs)
+	return os.Chtimes(eventsPath, t, t)
 }
 
 // dedupe keeps, per event_uid, the highest event_version — the in-file

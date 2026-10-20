@@ -28,7 +28,15 @@ type fakeParser struct{}
 
 func (fakeParser) Harness() string { return "test-fake" }
 
+// raceOnParse, when non-nil, fires once at the start of the next Parse: a
+// test's way to land a push while Run is mid-source.
+var raceOnParse func()
+
 func (fakeParser) Parse(r io.Reader, src normalize.SourceMeta) ([]schema.Event, error) {
+	if hook := raceOnParse; hook != nil {
+		raceOnParse = nil
+		hook()
+	}
 	var out []schema.Event
 	sc := bufio.NewScanner(r)
 	for lineNo := 1; sc.Scan(); lineNo++ {
@@ -224,6 +232,103 @@ func TestRun(t *testing.T) {
 	}
 	if st2 != (Stats{Sources: 3, Unchanged: 2, RawOnly: 1}) {
 		t.Fatalf("second run stats = %+v, want {3 0 2 1 0 0}", st2)
+	}
+}
+
+// appendFrame lands a push the way store does: one more zstd frame of lines
+// at the end of the raw file, then the manifest rewritten with the new size
+// and a strictly later UpdatedMs.
+func appendFrame(t *testing.T, dataDir string, key layout.Key, lines []string) {
+	t.Helper()
+	raw, err := os.OpenFile(key.Raw(dataDir), os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw, err := zstd.NewWriter(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range lines {
+		if _, err := zw.Write(append([]byte(line), '\n')); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(key.Raw(dataDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(key.Manifest(dataDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m manifest
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	// Store stamps UpdatedMs at receive, so take now, but never equal to the
+	// manifest's current stamp: the comparison is >= at millisecond grain.
+	if now := time.Now().UnixMilli(); now > m.UpdatedMs {
+		m.UpdatedMs = now
+	} else {
+		m.UpdatedMs++
+	}
+	m.Size += int64(len(lines))
+	m.ZstSize = info.Size()
+	if b, err = json.Marshal(m); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(key.Manifest(dataDir), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A push that lands while a source is parsing must not be lost to the mtime
+// comparison: the parquet written after it is restamped to the parsed
+// manifest's UpdatedMs, so the next Run rewrites it with the appended line.
+func TestRunRestampsParquetWhenPushLandsMidParse(t *testing.T) {
+	dataDir := t.TempDir()
+	key := layout.Key{Author: "alice", Machine: "chris-mbp", Harness: "test-fake", SrcID: "ffffffffffffffff"}
+	writeSource(t, dataDir, key.Author, key.Machine, key.Harness, key.SrcID, []string{
+		"uid-1|1|2024-01-02 03:04:05.000",
+		"uid-2|1|2024-01-02 03:04:06.000",
+	})
+
+	raceOnParse = func() {
+		appendFrame(t, dataDir, key, []string{"uid-3|1|2024-01-02 03:04:07.000"})
+	}
+	t.Cleanup(func() { raceOnParse = nil })
+
+	st1, err := Run(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st1 != (Stats{Sources: 1, Rewrote: 1, Events: 2}) {
+		t.Fatalf("first run stats = %+v, want {1 1 0 0 0 2}", st1)
+	}
+
+	st2, err := Run(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st2 != (Stats{Sources: 1, Rewrote: 1, Events: 3}) {
+		t.Fatalf("second run stats = %+v, want {1 1 0 0 0 3}", st2)
+	}
+	if n := countRows(t, openDB(t), key.Events(dataDir)); n != 3 {
+		t.Fatalf("rows = %d, want 3 including the mid-parse append", n)
+	}
+
+	st3, err := Run(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st3 != (Stats{Sources: 1, Unchanged: 1}) {
+		t.Fatalf("third run stats = %+v, want {1 0 1 0 0 0}", st3)
 	}
 }
 

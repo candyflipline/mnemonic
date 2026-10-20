@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/candyflipline/mnemonic/internal/config"
 	"github.com/candyflipline/mnemonic/internal/wire"
@@ -29,13 +30,14 @@ func (identityRedactor) Line(line []byte) []byte { return line }
 // a test serve a manifest whose sizes lag the store, as they do when another
 // writer lands between our manifest snapshot and our PUT.
 type fakeStore struct {
-	srv     *httptest.Server
-	mu      sync.Mutex
-	sources map[string]*fakeSource
-	stale   map[string]int64
-	puts    []fakePut
-	auth    string
-	machine string
+	srv       *httptest.Server
+	mu        sync.Mutex
+	sources   map[string]*fakeSource
+	stale     map[string]int64
+	puts      []fakePut
+	auth      string
+	machine   string
+	updatedMs int64
 }
 
 type fakeSource struct {
@@ -55,7 +57,7 @@ type fakePut struct {
 
 func newTestServer(t *testing.T) *fakeStore {
 	t.Helper()
-	s := &fakeStore{sources: map[string]*fakeSource{}, stale: map[string]int64{}}
+	s := &fakeStore{sources: map[string]*fakeSource{}, stale: map[string]int64{}, updatedMs: 1}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/manifest", s.serveManifest)
 	mux.HandleFunc("PUT /v1/raw/{machine}/{harness}/{srcid}", s.servePut)
@@ -77,7 +79,7 @@ func (s *fakeStore) serveManifest(w http.ResponseWriter, r *http.Request) {
 		}
 		man.Sources = append(man.Sources, wire.Source{
 			SrcID: id, Harness: src.harness, SourceName: src.srcName, Path: src.path,
-			Size: size, HeadHash: src.head, UpdatedMs: 1,
+			Size: size, HeadHash: src.head, UpdatedMs: s.updatedMs,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -234,6 +236,46 @@ func TestSecondPassSendsNothing(t *testing.T) {
 	if s.putCount() != before {
 		t.Fatalf("second pass made %d PUTs, want 0", s.putCount()-before)
 	}
+}
+
+// A file whose mtime is older than the manifest's UpdatedMs (minus skew) is
+// skipped unread; touching it puts it back in play.
+func TestOldMtimeSkipsRead(t *testing.T) {
+	dir := t.TempDir()
+	p1 := writeFile(t, dir, "a.jsonl", "alpha one\nalpha two\n") // 20 bytes
+	writeFile(t, dir, "b.jsonl", "beta\n")
+	s := newTestServer(t)
+	runPass(t, s, dir)
+
+	updated := time.Now().UnixMilli()
+	s.updatedMs = updated
+	// Same length, different first line: a read would re-send the whole file,
+	// so Bytes 0 proves the file was never opened.
+	writeFile(t, dir, "a.jsonl", "ALPHA one\nalpha two\n")
+	old := time.UnixMilli(updated - time.Hour.Milliseconds())
+	if err := os.Chtimes(p1, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	before := s.putCount()
+	st := runPass(t, s, dir)
+	if want := (Stats{Scanned: 2, Unchanged: 2}); st != want {
+		t.Fatalf("stats = %+v, want %+v", st, want)
+	}
+	if s.putCount() != before {
+		t.Fatalf("skip pass made %d PUTs, want 0", s.putCount()-before)
+	}
+	assertRaw(t, s, p1, "alpha one\nalpha two\n")
+
+	now := time.Now()
+	if err := os.Chtimes(p1, now, now); err != nil {
+		t.Fatal(err)
+	}
+	st = runPass(t, s, dir)
+	if want := (Stats{Scanned: 2, Replaced: 1, Unchanged: 1, Bytes: 20}); st != want {
+		t.Fatalf("stats = %+v, want %+v", st, want)
+	}
+	assertRaw(t, s, p1, "ALPHA one\nalpha two\n")
 }
 
 // Growing a file sends exactly the new line, at the server's old size.
