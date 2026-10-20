@@ -166,8 +166,8 @@ func faExact(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTou
 	qry := "WITH\nmatched AS (\n" +
 		"  SELECT e.session_id, e.event_uid, e.tool_call_id, e.harness, e.source_name,\n" +
 		"    e.tool_name, e.tool_phase,\n" +
-		"    coalesce(json_extract_string(json_extract(e.payload_json, '$.moraine_tool_io'), '$.input_preview'), '') AS input_preview,\n" +
-		"    coalesce(json_extract_string(json_extract(e.payload_json, '$.moraine_tool_io'), '$.output_preview'), '') AS output_preview,\n" +
+		"    coalesce(e.tool_io_input_preview, '') AS input_preview,\n" +
+		"    coalesce(e.tool_io_output_preview, '') AS output_preview,\n" +
 		"    e.repo_rel_path, e.worktree_root, e.cwd\n" +
 		"  FROM events e\n" +
 		"  WHERE " + strings.Join(clauses, "\n    AND ") + "\n" +
@@ -231,16 +231,16 @@ func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTo
 	toolEvents := "(SELECT\n" +
 		"  e.session_id AS session_id, e.event_uid AS event_uid, e.tool_call_id AS tool_call_id,\n" +
 		"  e.harness AS harness, e.tool_name AS tool_name, e.tool_phase AS tool_phase,\n" +
-		"  coalesce(json_extract_string(json_extract(e.payload_json, '$.moraine_tool_io'), '$.input_json'), '') AS input_json,\n" +
-		"  coalesce(json_extract_string(json_extract(e.payload_json, '$.moraine_tool_io'), '$.input_preview'), '') AS input_preview,\n" +
-		"  coalesce(json_extract_string(json_extract(e.payload_json, '$.moraine_tool_io'), '$.output_preview'), '') AS output_preview,\n" +
-		"  coalesce(json_extract_string(json_extract(e.payload_json, '$.moraine_tool_io'), '$.project_id'), '') AS project_id,\n" +
-		"  coalesce(json_extract_string(json_extract(e.payload_json, '$.moraine_tool_io'), '$.repo_rel_path'), '') AS repo_rel_path,\n" +
-		"  coalesce(json_extract_string(json_extract(e.payload_json, '$.moraine_tool_io'), '$.worktree_root'), '') AS worktree_root,\n" +
+		"  coalesce(e.tool_io_input_json, '') AS input_json,\n" +
+		"  coalesce(e.tool_io_input_preview, '') AS input_preview,\n" +
+		"  coalesce(e.tool_io_output_preview, '') AS output_preview,\n" +
+		"  coalesce(e.tool_io_project_id, '') AS project_id,\n" +
+		"  coalesce(e.tool_io_repo_rel_path, '') AS repo_rel_path,\n" +
+		"  coalesce(e.tool_io_worktree_root, '') AS worktree_root,\n" +
 		"  e.source_name AS source_name, e.cwd AS cwd,\n" +
 		"  e.project_id AS event_project_id, e.worktree_root AS event_worktree_root\n" +
 		"FROM events e\n" +
-		"WHERE json_extract(e.payload_json, '$.moraine_tool_io') IS NOT NULL)"
+		"WHERE e.tool_io_input_json IS NOT NULL)"
 
 	inner := append(faFilters("", q),
 		"("+strings.Join(keyMatch, "\n        OR ")+"\n        OR "+nestedMatch+"\n        OR "+shellMatch+")")

@@ -290,7 +290,7 @@ func openEventFlow(ctx context.Context, db *sql.DB, request map[string]any, args
 	uid := args.target.eventUID
 	var sessionID string
 	if err := db.QueryRowContext(ctx,
-		"SELECT session_id FROM trace WHERE event_uid = "+sqlQuote(uid)).Scan(&sessionID); err != nil {
+		"SELECT session_id FROM events WHERE event_uid = "+sqlQuote(uid)).Scan(&sessionID); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, "", argErrorf("event not found")
 		}

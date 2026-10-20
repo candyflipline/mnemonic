@@ -38,6 +38,8 @@ type navRow struct {
 	textContent       string
 	payloadJSON       string
 	tokenUsageJSON    string
+	lakeFile          string
+	lakeRow           int64
 	tokenUsageBuckets map[string]uint64
 	tokenUsageNative  map[string]float64
 	endpointKind      string
@@ -213,15 +215,15 @@ func loadSessionScan(ctx context.Context, db *sql.DB, sessionID string, selected
 	const scanSQL = `SELECT t.session_id, t.event_uid, epoch_ms(t.event_time),
        t.source_file, t.source_ref, t.event_class, t.actor_role, t.payload_type,
        t.call_id, t.name, t.phase, t.item_id,
-       t.text_content, t.payload_json, t.token_usage_json, t.endpoint_kind,
+       t.text_content, e.meta_json, e.lake_file, e.lake_row, t.endpoint_kind,
        cast(to_json(t.token_usage_buckets) AS VARCHAR),
        cast(to_json(t.token_usage_native_units) AS VARCHAR),
        e.source_name, e.harness, e.inference_provider,
        t.event_order, t.turn_seq
-FROM trace t LEFT JOIN events e ON e.event_uid = t.event_uid
+FROM trace t LEFT JOIN events e ON e.event_uid = t.event_uid AND e.session_id = %SID%
 WHERE t.session_id = %SID%
 ORDER BY t.event_order`
-	q := strings.Replace(scanSQL, "%SID%", sqlQuote(sessionID), 1)
+	q := strings.ReplaceAll(scanSQL, "%SID%", sqlQuote(sessionID))
 	rows, err := db.QueryContext(ctx, q)
 	if err != nil {
 		return nil, err
@@ -242,17 +244,18 @@ ORDER BY t.event_order`
 	for rows.Next() {
 		var r navRow
 		var bucketsJSON, nativeJSON sql.NullString
-		var srcName, harness, infProv sql.NullString
+		var srcName, harness, infProv, metaJSON sql.NullString
 		if err := rows.Scan(&r.sessionID, &r.eventUID, &r.eventUnixMs,
 			&r.sourceFile, &r.sourceRef, &r.eventClass, &r.actorRole, &r.payloadType,
 			&r.callID, &r.name, &r.phase, &r.itemID,
-			&r.textContent, &r.payloadJSON, &r.tokenUsageJSON, &r.endpointKind,
+			&r.textContent, &metaJSON, &r.lakeFile, &r.lakeRow, &r.endpointKind,
 			&bucketsJSON, &nativeJSON,
 			&srcName, &harness, &infProv,
 			&r.eventOrder, &r.turnSeq); err != nil {
 			return nil, err
 		}
 		r.eventTime = formatRFC3339UTCMillis(r.eventUnixMs)
+		r.payloadJSON = metaJSON.String
 		r.sourceName = srcName.String
 		r.harness = harness.String
 		r.inferenceProvider = infProv.String
@@ -342,6 +345,9 @@ ORDER BY t.event_order`
 	}
 	if first == nil || last == nil {
 		return nil, nil
+	}
+	if err := hydrateKept(ctx, db, sc); err != nil {
+		return nil, err
 	}
 	sort.Slice(sc.turnSeqs, func(i, j int) bool { return sc.turnSeqs[i] < sc.turnSeqs[j] })
 

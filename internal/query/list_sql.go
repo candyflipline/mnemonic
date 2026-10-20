@@ -267,7 +267,7 @@ func lsMetadataRollups(idsSQL string) string {
 		"    " + firstNonEmpty("session_slug", meta, slug) + "\n" +
 		"  FROM (\n" +
 		"    SELECT session_id, event_ts, event_uid, event_kind, source_name, source_file,\n" +
-		"      source_generation, source_offset, source_line_no, payload_json\n" +
+		"      source_generation, source_offset, source_line_no, meta_json AS payload_json\n" +
 		"    FROM events WHERE session_id IN (" + idsSQL + ")\n" +
 		"      AND (event_kind = 'session_meta' OR source_name = 'omp')\n" +
 		"  ) AS e\n" +

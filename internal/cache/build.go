@@ -2,8 +2,10 @@ package cache
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -27,23 +29,43 @@ type manifest struct {
 	ZSTSize int64 `json:"zst_size"`
 }
 
+// archiveFormat names the archive index layout; bump it when the SQL that
+// builds one changes, so a deploy rebuilds the index instead of reusing it.
+const archiveFormat = "archive-v1"
+
 // Build writes cache-<ms>.duckdb.tmp from the lake, renames it, and keeps the
 // newest two. It returns the zero Stats and no error when nothing changed
-// since the newest cache.
+// since the newest cache. Archive rows (machine=archive-ch) never change, so
+// their index lives in archive-<key>.duckdb, built once per set of archive
+// files and attached by every cache.
 func Build(dataDir string) (Stats, error) {
-	changed, lakeFiles, err := lakeChanged(dataDir)
+	changed, err := lakeChanged(dataDir)
 	if err != nil {
 		return Stats{}, err
 	}
 	if !changed {
 		return Stats{}, nil
 	}
+	archive, live, err := lakeFiles(dataDir)
+	if err != nil {
+		return Stats{}, err
+	}
 	if err := os.MkdirAll(layout.CacheDir(dataDir), 0o755); err != nil {
+		return Stats{}, err
+	}
+	spill := filepath.Join(layout.CacheDir(dataDir), "spill")
+	if err := os.MkdirAll(spill, 0o755); err != nil {
+		return Stats{}, err
+	}
+	defer os.RemoveAll(spill)
+
+	archPath, err := ensureArchive(dataDir, spill, archive)
+	if err != nil {
 		return Stats{}, err
 	}
 	ms := time.Now().UnixMilli()
 	tmp := layout.CacheFile(dataDir, ms) + ".tmp"
-	st, err := buildFile(tmp, dataDir, lakeFiles)
+	st, err := buildCache(tmp, spill, archPath, dataDir, live)
 	if err != nil {
 		os.Remove(tmp)
 		return Stats{}, err
@@ -52,47 +74,75 @@ func Build(dataDir string) (Stats, error) {
 	if err := os.Rename(tmp, final); err != nil {
 		return Stats{}, err
 	}
-	if err := prune(dataDir); err != nil {
+	if err := prune(dataDir, archPath); err != nil {
 		return Stats{}, err
 	}
+	st.LakeFiles = len(archive) + len(live)
 	st.Path = final
 	return st, nil
 }
 
 // lakeChanged reports whether any lake parquet or manifest is newer than the
-// newest complete cache file, and how many lake parquet files exist.
-func lakeChanged(dataDir string) (bool, int, error) {
+// newest complete cache file. A manifest the store deletes between the glob
+// and the stat is skipped, as lake.Run does.
+func lakeChanged(dataDir string) (bool, error) {
 	var newest int64
-	files := 0
 	for _, pat := range []string{
 		filepath.Join(dataDir, layout.EventsGlob),
 		filepath.Join(dataDir, "raw", "author=*", "machine=*", "harness=*", "*.json"),
 	} {
 		matches, err := filepath.Glob(pat)
 		if err != nil {
-			return false, 0, err
+			return false, err
 		}
 		for _, m := range matches {
 			info, err := os.Stat(m)
+			if os.IsNotExist(err) {
+				continue
+			}
 			if err != nil {
-				return false, 0, err
+				return false, err
 			}
-			if info.ModTime().UnixMilli() > newest {
-				newest = info.ModTime().UnixMilli()
-			}
-			if strings.HasSuffix(m, ".parquet") {
-				files++
-			}
+			newest = max(newest, info.ModTime().UnixMilli())
 		}
 	}
 	caches, err := cacheFiles(dataDir)
 	if err != nil {
-		return false, 0, err
+		return false, err
 	}
 	if len(caches) == 0 {
-		return true, files, nil
+		return true, nil
 	}
-	return newest > caches[len(caches)-1].ms, files, nil
+	return newest > caches[len(caches)-1].ms, nil
+}
+
+// lakeFile is one events parquet with the identity the archive key hashes.
+type lakeFile struct {
+	path  string
+	size  int64
+	mtime int64
+}
+
+// lakeFiles splits the lake into archive and live parquet, each sorted by path.
+func lakeFiles(dataDir string) (archive, live []lakeFile, err error) {
+	matches, err := filepath.Glob(filepath.Join(dataDir, layout.EventsGlob))
+	if err != nil {
+		return nil, nil, err
+	}
+	sort.Strings(matches)
+	for _, m := range matches {
+		info, err := os.Stat(m)
+		if err != nil {
+			return nil, nil, err
+		}
+		f := lakeFile{path: m, size: info.Size(), mtime: info.ModTime().UnixNano()}
+		if strings.Contains(filepath.ToSlash(m), "/machine="+layout.ArchiveMachine+"/") {
+			archive = append(archive, f)
+		} else {
+			live = append(live, f)
+		}
+	}
+	return archive, live, nil
 }
 
 type cacheFile struct {
@@ -119,8 +169,10 @@ func cacheFiles(dataDir string) ([]cacheFile, error) {
 	return out, nil
 }
 
-// prune deletes all but the newest two complete cache files.
-func prune(dataDir string) error {
+// prune deletes all but the newest two complete cache files and every archive
+// index but the current one. An open handle on a deleted file stays valid
+// until the server swaps to the newest cache.
+func prune(dataDir, archPath string) error {
 	caches, err := cacheFiles(dataDir)
 	if err != nil {
 		return err
@@ -130,61 +182,167 @@ func prune(dataDir string) error {
 			return err
 		}
 	}
+	archives, err := filepath.Glob(filepath.Join(layout.CacheDir(dataDir), "archive-*.duckdb"))
+	if err != nil {
+		return err
+	}
+	for _, a := range archives {
+		if a != archPath {
+			if err := os.Remove(a); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
-func buildFile(path, dataDir string, lakeFiles int) (Stats, error) {
-	db, err := newDB(path)
+// archiveKey names the archive index after the archive files' identity.
+func archiveKey(dataDir string, files []lakeFile) string {
+	h := sha256.New()
+	h.Write([]byte(archiveFormat + "\n"))
+	for _, f := range files {
+		rel, _ := filepath.Rel(dataDir, f.path)
+		fmt.Fprintf(h, "%s\t%d\t%d\n", rel, f.size, f.mtime)
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// ensureArchive returns the archive index for files, building it when absent.
+func ensureArchive(dataDir, spill string, files []lakeFile) (string, error) {
+	path := filepath.Join(layout.CacheDir(dataDir), "archive-"+archiveKey(dataDir, files)+".duckdb")
+	if _, err := os.Stat(path); err == nil {
+		return path, nil
+	}
+	tmp := path + ".tmp"
+	os.Remove(tmp)
+	err := withBuildConn(tmp, spill, "", func(ctx context.Context, c *sql.Conn) error {
+		stmts := []string{eventsDDL("events"), docsDDL("docs"), postingsDDL("postings")}
+		if len(files) > 0 {
+			src := parquetSource(files)
+			stmts = append(stmts,
+				"CREATE TEMP TABLE w AS SELECT filename, file_row_number, "+
+					"cast(row_number() OVER () AS UINTEGER) AS doc FROM ("+winnersSQL(src)+")",
+				insertEventsSQL("events", src),
+				"DROP TABLE w")
+			stmts = append(stmts, insertPostingsSQL("events", "docs", "postings")...)
+		}
+		return execAll(ctx, c, stmts)
+	})
 	if err != nil {
-		return Stats{}, err
+		os.Remove(tmp)
+		return "", err
+	}
+	return path, os.Rename(tmp, path)
+}
+
+// buildCache writes the per-cycle cache: the live rows' events, docs and
+// postings, the archive docs that live rows supersede, the corpus totals,
+// sources, and the contract views over archive and live together.
+func buildCache(path, spill, archPath, dataDir string, live []lakeFile) (Stats, error) {
+	var st Stats
+	err := withBuildConn(path, spill, archPath, func(ctx context.Context, c *sql.Conn) error {
+		stmts := []string{
+			"CREATE TABLE archive_ref AS SELECT " + sqlStr(filepath.Base(archPath)) + " AS name",
+			eventsDDL("live_events"), docsDDL("live_docs"), postingsDDL("live_postings"),
+			"CREATE TABLE dropped (doc UINTEGER NOT NULL)",
+		}
+		if len(live) > 0 {
+			src := parquetSource(live)
+			stmts = append(stmts,
+				"CREATE TEMP TABLE lw AS "+winnersSQL(src),
+				// A live row loses to an archive row only with a lower
+				// (event_version, ingested_at); otherwise the archive row
+				// is superseded and its doc dropped.
+				`DELETE FROM lw WHERE event_uid IN (
+  SELECT a.event_uid FROM arch.events a JOIN lw ON a.event_uid = lw.event_uid
+  WHERE a.event_version > lw.event_version
+     OR (a.event_version = lw.event_version AND a.ingested_at > lw.ingested_at))`,
+				"INSERT INTO dropped SELECT a.doc FROM arch.events a JOIN lw ON a.event_uid = lw.event_uid",
+				`CREATE TEMP TABLE w AS SELECT filename, file_row_number,
+  cast((SELECT coalesce(max(doc), 0) FROM arch.events) + row_number() OVER () AS UINTEGER) AS doc FROM lw`,
+				insertEventsSQL("live_events", src),
+				"DROP TABLE w", "DROP TABLE lw")
+			stmts = append(stmts, insertPostingsSQL("live_events", "live_docs", "live_postings")...)
+		}
+		stmts = append(stmts, viewsSQL...)
+		stmts = append(stmts, traceDDL, sessionsDDL, corpusDDL, sourcesDDL)
+		if err := execAll(ctx, c, stmts); err != nil {
+			return err
+		}
+		if err := insertSources(ctx, c, dataDir, live); err != nil {
+			return err
+		}
+		for _, q := range []struct {
+			sql string
+			n   *int64
+		}{
+			{"SELECT count(*) FROM events", &st.Events},
+			{"SELECT docs FROM corpus", &st.Docs},
+			{"SELECT count(*) FROM all_postings", &st.Postings},
+		} {
+			if err := c.QueryRowContext(ctx, q.sql).Scan(q.n); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return st, err
+}
+
+// withBuildConn runs fn on one connection of an in-memory DuckDB with path
+// attached as the default catalog, written at the latest storage version (the
+// only one that zstd-compresses long strings), and archPath attached
+// read-only as arch. One connection, because USE is per session.
+func withBuildConn(path, spill, archPath string, fn func(context.Context, *sql.Conn) error) error {
+	db, err := newDB("")
+	if err != nil {
+		return err
 	}
 	defer db.Close()
-	// The events dedupe windows over every payload column; at ten million
-	// archive rows that outgrows memory, so it must spill. The service sandbox
-	// lets DuckDB write only under the data dir.
-	spill := filepath.Join(layout.CacheDir(dataDir), "spill")
-	if err := os.MkdirAll(spill, 0o755); err != nil {
-		return Stats{}, err
+	ctx := context.Background()
+	c, err := db.Conn(ctx)
+	if err != nil {
+		return err
 	}
-	defer os.RemoveAll(spill)
-	for _, stmt := range []string{
-		"SET temp_directory = '" + spill + "'",
+	defer c.Close()
+	setup := []string{
+		"SET temp_directory = " + sqlStr(spill),
 		"SET preserve_insertion_order = false",
 		"SET threads = 2",
-		eventsDDL(),
-		insertEvents(dataDir, lakeFiles),
-		sourcesDDL,
-		traceDDL,
-		sessionsDDL,
-		docsDDL,
-		postingsDDL,
-		termStatsDDL,
-		corpusDDL,
-	} {
-		if _, err := db.Exec(stmt); err != nil {
-			return Stats{}, fmt.Errorf("%s: %w", firstLine(stmt), err)
+		"SET memory_limit = '4GB'",
+		"ATTACH " + sqlStr(path) + " AS out (STORAGE_VERSION 'latest')",
+		"USE out",
+	}
+	if archPath != "" {
+		setup = append(setup, "ATTACH "+sqlStr(archPath)+" AS arch (READ_ONLY)")
+	}
+	if err := execAll(ctx, c, setup); err != nil {
+		return err
+	}
+	if err := fn(ctx, c); err != nil {
+		return err
+	}
+	if _, err := c.ExecContext(ctx, "CHECKPOINT out"); err != nil {
+		return err
+	}
+	if _, err := c.ExecContext(ctx, "USE memory"); err != nil {
+		return err
+	}
+	_, err = c.ExecContext(ctx, "DETACH out")
+	return err
+}
+
+func execAll(ctx context.Context, c *sql.Conn, stmts []string) error {
+	for _, s := range stmts {
+		if _, err := c.ExecContext(ctx, s); err != nil {
+			return fmt.Errorf("%s: %w", firstLine(s), err)
 		}
 	}
-	if err := insertSources(db, dataDir); err != nil {
-		return Stats{}, err
-	}
-	var st Stats
-	st.LakeFiles = lakeFiles
-	for _, c := range []struct {
-		name string
-		n    *int64
-	}{{"events", &st.Events}, {"docs", &st.Docs}, {"postings", &st.Postings}} {
-		if err := db.QueryRow("SELECT count(*) FROM " + c.name).Scan(c.n); err != nil {
-			return Stats{}, err
-		}
-	}
-	if _, err := db.Exec("CHECKPOINT"); err != nil {
-		return Stats{}, err
-	}
-	return st, db.Close()
+	return nil
 }
 
 func firstLine(s string) string {
+	s = strings.TrimSpace(s)
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		return s[:i]
 	}
@@ -207,58 +365,152 @@ func newDB(dsn string) (*sql.DB, error) {
 	return sql.OpenDB(c), nil
 }
 
-// eventsDDL declares the events table even when the lake is empty; the column
-// list is the lake parquet column list, so an INSERT needs no type casts.
-func eventsDDL() string {
-	var b strings.Builder
-	b.WriteString("CREATE TABLE events (")
-	for i, c := range schema.EventColumns {
-		if i > 0 {
-			b.WriteString(", ")
-		}
-		b.WriteString(c.Name)
-		b.WriteByte(' ')
-		b.WriteString(c.DuckDB)
-	}
-	b.WriteString(", author VARCHAR, machine_id VARCHAR, ingested_at TIMESTAMP)")
-	return b.String()
-}
-
-// eventCols is every events column in lake order.
-func eventCols() []string {
-	cols := make([]string, 0, len(schema.EventColumns)+3)
-	for _, c := range schema.EventColumns {
-		cols = append(cols, c.Name)
-	}
-	return append(cols, "author", "machine_id", "ingested_at")
-}
-
-// insertEvents dedupes the lake into events: highest event_version per
-// event_uid, ties broken by newest ingested_at.
-func insertEvents(dataDir string, lakeFiles int) string {
-	if lakeFiles == 0 {
-		return "SELECT 1"
-	}
-	// The winner per event_uid is chosen over key columns only; a window over
-	// whole rows holds every payload in memory and fails at archive scale.
-	// Full rows then stream in through a semi-join on (file, row).
-	src := "read_parquet(" + sqlStr(filepath.Join(dataDir, layout.EventsGlob)) +
-		", hive_partitioning=false, filename=true, file_row_number=true)"
-	return "CREATE TEMP TABLE winners AS SELECT filename, file_row_number FROM " + src +
-		" QUALIFY row_number() OVER (PARTITION BY event_uid ORDER BY event_version DESC, ingested_at DESC) = 1;\n" +
-		"INSERT INTO events SELECT " + strings.Join(eventCols(), ", ") + " FROM " + src +
-		" WHERE (filename, file_row_number) IN (SELECT filename, file_row_number FROM winners);\n" +
-		"DROP TABLE winners"
-}
-
 // sqlStr quotes a literal for DuckDB SQL.
 func sqlStr(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
-// emissionExpr reads payload_json's moraine_emission_index the way
-// JSONExtractUInt does: missing or non-numeric is 0.
-const emissionExpr = "coalesce(try_cast(json_extract_string(payload_json, '$.moraine_emission_index') AS UINTEGER), 0)"
+func parquetSource(files []lakeFile) string {
+	paths := make([]string, len(files))
+	for i, f := range files {
+		paths[i] = sqlStr(f.path)
+	}
+	return "read_parquet([" + strings.Join(paths, ", ") +
+		"], hive_partitioning=false, filename=true, file_row_number=true)"
+}
+
+// winnersSQL picks one row per event_uid over key columns only: the highest
+// event_version, ties broken by the newest ingested_at.
+func winnersSQL(src string) string {
+	return "SELECT filename, file_row_number, event_uid, event_version, ingested_at FROM " + src +
+		" QUALIFY row_number() OVER (PARTITION BY event_uid ORDER BY event_version DESC, ingested_at DESC) = 1"
+}
+
+// heavyColumns stay in the lake; the open tool reads them by locator
+// (lake_file, lake_row) for the rows it renders.
+var heavyColumns = map[string]bool{"payload_json": true, "token_usage_json": true}
+
+// eventsDDL declares an events table: the lake columns minus heavyColumns,
+// a doc id shared by docs and postings, the lake locator, and the fields the
+// tools derive from payload_json. Long strings are zstd-compressed.
+func eventsDDL(table string) string {
+	var b strings.Builder
+	b.WriteString("CREATE TABLE " + table + " (doc UINTEGER NOT NULL")
+	for _, c := range schema.EventColumns {
+		if heavyColumns[c.Name] {
+			continue
+		}
+		b.WriteString(", " + c.Name + " " + c.DuckDB)
+		if c.Name == "text_content" {
+			b.WriteString(" USING COMPRESSION zstd")
+		}
+	}
+	b.WriteString(`, author VARCHAR, machine_id VARCHAR, ingested_at TIMESTAMP,
+  lake_file VARCHAR, lake_row UBIGINT, emission_index UINTEGER,
+  tool_io_input_json VARCHAR USING COMPRESSION zstd, tool_io_input_preview VARCHAR,
+  tool_io_output_preview VARCHAR, tool_io_project_id VARCHAR, tool_io_repo_rel_path VARCHAR,
+  tool_io_worktree_root VARCHAR, meta_json VARCHAR USING COMPRESSION zstd)`)
+	return b.String()
+}
+
+// insertEventsSQL copies the winners in temp table w (filename,
+// file_row_number, doc) from src into table, deriving the payload fields:
+//   - emission_index: payload_json's moraine_emission_index the way
+//     JSONExtractUInt reads it (missing or non-numeric is 0);
+//   - tool_io_*: the moraine_tool_io fields of tool requests, ” for a
+//     missing field and NULL when the request has no moraine_tool_io (the
+//     only rows file_attention reads);
+//   - meta_json: the whole payload of session_meta rows and omp title rows
+//     (the only rows session titles read).
+//
+// The contains() guards skip JSON parsing on the rows that cannot match.
+func insertEventsSQL(table, src string) string {
+	cols := make([]string, 0, len(schema.EventColumns))
+	for _, c := range schema.EventColumns {
+		if !heavyColumns[c.Name] {
+			cols = append(cols, "r."+c.Name)
+		}
+	}
+	tio := func(field string) string {
+		return "CASE WHEN tio IS NOT NULL THEN coalesce(json_extract_string(tio, '$." + field + "'), '') END"
+	}
+	return "INSERT INTO " + table + " SELECT w.doc, " + strings.Join(cols, ", ") + `,
+  r.author, r.machine_id, r.ingested_at, r.filename, r.file_row_number,
+  CASE WHEN contains(payload_json, 'moraine_emission_index')
+    THEN coalesce(try_cast(json_extract_string(payload_json, '$.moraine_emission_index') AS UINTEGER), 0)
+    ELSE 0 END,
+  ` + tio("input_json") + `,
+  ` + tio("input_preview") + `,
+  ` + tio("output_preview") + `,
+  ` + tio("project_id") + `,
+  ` + tio("repo_rel_path") + `,
+  ` + tio("worktree_root") + `,
+  CASE WHEN event_kind = 'session_meta' OR (source_name = 'omp' AND contains(payload_json, 'title')
+    AND json_extract_string(payload_json, '$.type') IN ('title', 'title_change')) THEN payload_json END
+FROM (SELECT *, CASE WHEN tool_phase = 'request' AND contains(payload_json, 'moraine_tool_io')
+    THEN json_extract(payload_json, '$.moraine_tool_io') END AS tio
+  FROM ` + src + `) r
+JOIN w ON w.filename = r.filename AND w.file_row_number = r.file_row_number`
+}
+
+// The BM25 inputs follow docs/clickhouse/mv_search_postings.sql with
+// schema.sql's term definition: a term is a 2..64 char token of
+// lower(text_content), doc_len counts only terms, and docs are the events
+// with at least one term. docs, postings and the query-side scorer must use
+// the same definition.
+const tokenList = "list_filter(regexp_extract_all(lower(text_content), '[a-z0-9_]+'), lambda tok: len(tok) >= 2 AND len(tok) <= 64)"
+
+func docsDDL(table string) string {
+	return "CREATE TABLE " + table + " (doc UINTEGER NOT NULL, doc_len UINTEGER NOT NULL)"
+}
+
+// postingsDDL: doc_len rides on every posting so scoring needs no docs join.
+func postingsDDL(table string) string {
+	return "CREATE TABLE " + table +
+		" (term VARCHAR NOT NULL, doc UINTEGER NOT NULL, tf USMALLINT NOT NULL, doc_len UINTEGER NOT NULL)"
+}
+
+// insertPostingsSQL counts each event's terms in one per-row histogram, so
+// no global (term, doc) aggregation spills, then writes postings sorted by
+// term: the search's term filter then reads only the row groups that hold
+// its terms. tf clamps to 65535 rather than letting the USMALLINT cast fail:
+// a term can occur more than 65535 times in one event's 200k-char
+// text_content, and upstream's toUInt16(count()) only wrapped silently.
+func insertPostingsSQL(events, docs, postings string) []string {
+	return []string{
+		"CREATE TEMP TABLE tok AS SELECT doc, list_aggregate(toks, 'histogram') AS h, len(toks) AS n FROM (SELECT doc, " +
+			tokenList + " AS toks FROM " + events + ")",
+		"INSERT INTO " + docs + " SELECT doc, cast(n AS UINTEGER) FROM tok WHERE n > 0",
+		"INSERT INTO " + postings + " SELECT term, doc, cast(least(tf, 65535) AS USMALLINT), cast(n AS UINTEGER) FROM (" +
+			"SELECT doc, n, unnest(map_keys(h)) AS term, unnest(map_values(h)) AS tf FROM tok WHERE n > 0) ORDER BY term",
+		"DROP TABLE tok",
+	}
+}
+
+// viewsSQL unions archive and live: an archive doc a live row supersedes is
+// in dropped and hidden everywhere.
+var viewsSQL = []string{
+	`CREATE VIEW events AS
+SELECT * FROM arch.events WHERE doc NOT IN (SELECT doc FROM dropped)
+UNION ALL SELECT * FROM live_events`,
+	`CREATE VIEW all_postings AS
+SELECT * FROM arch.postings WHERE doc NOT IN (SELECT doc FROM dropped)
+UNION ALL SELECT * FROM live_postings`,
+	`CREATE VIEW docs AS
+SELECT e.event_uid, d.doc_len FROM (
+  SELECT * FROM arch.docs WHERE doc NOT IN (SELECT doc FROM dropped)
+  UNION ALL SELECT * FROM live_docs) d
+JOIN events e ON e.doc = d.doc`,
+	`CREATE VIEW postings AS
+SELECT p.term, e.event_uid, p.tf FROM all_postings p JOIN events e ON e.doc = p.doc`,
+}
+
+const corpusDDL = `
+CREATE TABLE corpus AS
+SELECT cast(sum(n) AS UBIGINT) AS docs,
+       cast(coalesce(sum(len) / nullif(sum(n), 0), 0) AS DOUBLE) AS avg_doc_len
+FROM (SELECT count(*) AS n, sum(doc_len) AS len FROM arch.docs WHERE doc NOT IN (SELECT doc FROM dropped)
+      UNION ALL SELECT count(*), sum(doc_len) FROM live_docs)`
 
 // traceDDL ports docs/clickhouse/v_conversation_trace.sql; the v_all_events
 // renames (origin_event_id->compacted_parent_uid, actor_kind->actor_role,
@@ -266,10 +518,10 @@ const emissionExpr = "coalesce(try_cast(json_extract_string(payload_json, '$.mor
 // turn_index->turn_id, phase=tool_phase or op_status) are inlined. event_time
 // mirrors parseDateTime64BestEffortOrNull: TIMESTAMPTZ parsing honors a
 // trailing Z or numeric offset, and the connection runs with TimeZone='UTC'
-// so zoneless record_ts reads as UTC. json_extract_string+TRY_CAST replaces
-// JSONExtractUInt (NULL or non-numeric -> 0), try_cast(x AS UINTEGER)
-// replaces toUInt32OrZero.
-var traceDDL = fmt.Sprintf(`
+// so zoneless record_ts reads as UTC. emission_index replaces
+// JSONExtractUInt(payload_json, 'moraine_emission_index'). payload_json and
+// token_usage_json stay in the lake.
+const traceDDL = `
 CREATE VIEW trace AS
 WITH base AS (
     SELECT session_id, session_date, event_uid,
@@ -284,7 +536,7 @@ WITH base AS (
            tool_call_id AS call_id,
            tool_name AS name,
            coalesce(nullif(tool_phase, ''), op_status) AS phase,
-           item_id, text_content, payload_json, token_usage_json, endpoint_kind,
+           item_id, text_content, endpoint_kind, emission_index,
            token_usage_buckets, token_usage_native_units
     FROM events
 )
@@ -292,7 +544,7 @@ SELECT session_id, session_date, event_uid, compacted_parent_uid,
        source_file, source_generation, source_line_no, source_offset, source_ref,
        event_time,
        row_number() OVER (PARTITION BY session_id ORDER BY event_time, source_file,
-           source_generation, source_offset, source_line_no, %[1]s,
+           source_generation, source_offset, source_line_no, emission_index,
            event_uid) AS event_order,
        CASE WHEN coalesce(try_cast(turn_id AS UINTEGER), 0) > 0
             THEN cast(turn_id AS UINTEGER)
@@ -300,13 +552,13 @@ SELECT session_id, session_date, event_uid, compacted_parent_uid,
                                            THEN 1 ELSE 0 END) OVER (
                     PARTITION BY session_id ORDER BY event_time, source_file,
                     source_generation, source_offset, source_line_no,
-                    %[1]s, event_uid
+                    emission_index, event_uid
                     ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)) AS UINTEGER)
        END AS turn_seq,
        turn_id, actor_role, event_class, payload_type, call_id, name, phase, item_id,
-       text_content, payload_json, token_usage_json, endpoint_kind,
+       text_content, endpoint_kind,
        token_usage_buckets, token_usage_native_units
-FROM base`, emissionExpr)
+FROM base`
 
 // sessionsDDL ports docs/clickhouse/v_session_summary.sql.
 const sessionsDDL = `
@@ -323,42 +575,6 @@ SELECT session_id,
 FROM trace
 GROUP BY session_id`
 
-// The BM25 inputs follow docs/clickhouse/mv_search_postings.sql with
-// schema.sql's term definition: a term is a 2..64 char token of
-// lower(text_content), doc_len counts only terms, and docs are the events
-// with at least one term. docs, postings and the query-side scorer must use
-// the same definition.
-
-const tokenList = "list_filter(regexp_extract_all(lower(text_content), '[a-z0-9_]+'), lambda tok: len(tok) >= 2 AND len(tok) <= 64)"
-
-const docsDDL = `
-CREATE TABLE docs AS
-SELECT event_uid, cast(n AS UINTEGER) AS doc_len
-FROM (SELECT event_uid, len(` + tokenList + `) AS n FROM events)
-WHERE n > 0`
-
-// postingsDDL clamps tf to 65535 rather than letting the USMALLINT cast fail:
-// a term can occur more than 65535 times in one event's 200k-char
-// text_content, and upstream's toUInt16(count()) only wrapped silently.
-const postingsDDL = `
-CREATE TABLE postings AS
-SELECT term, event_uid, cast(least(count(*), 65535) AS USMALLINT) AS tf
-FROM (SELECT event_uid, unnest(` + tokenList + `) AS term FROM events)
-GROUP BY term, event_uid
-ORDER BY term`
-
-const termStatsDDL = `
-CREATE TABLE term_stats AS
-SELECT term, cast(count(*) AS UBIGINT) AS df
-FROM postings
-GROUP BY term`
-
-const corpusDDL = `
-CREATE TABLE corpus AS
-SELECT cast(count(*) AS UBIGINT) AS docs,
-       cast(coalesce(avg(doc_len), 0) AS DOUBLE) AS avg_doc_len
-FROM docs`
-
 // sourcesDDL is the sources table from schema.sql.
 const sourcesDDL = `CREATE TABLE sources (
     author VARCHAR NOT NULL,
@@ -373,22 +589,28 @@ const sourcesDDL = `CREATE TABLE sources (
     events UBIGINT NOT NULL
 )`
 
-// lakeFileRe parses a lake parquet path: the hive prefix and src_id. src_id
-// alone is not unique — two authors or machines can hold the same client
-// path — so row counts key on the full source identity.
+// lakeFileRe parses a live lake parquet path: the hive prefix and src_id.
+// src_id alone is not unique — two authors or machines can hold the same
+// client path — so row counts key on the full source identity.
 var lakeFileRe = regexp.MustCompile(`author=([^/]*)/machine=([^/]*)/harness=([^/]*)/([0-9a-f]+)\.parquet$`)
 
 type sourceKey struct {
 	author, machine, harness, srcID string
 }
 
-// insertSources loads the manifest files and counts each source's parquet
-// rows; a manifest without a parquet (no parser for that harness) has 0.
-func insertSources(db *sql.DB, dataDir string) error {
+// insertSources loads the manifest files and counts each live source's
+// parquet rows from the parquet footers; a manifest without a parquet (no
+// parser for that harness) has 0. Archive rows have no manifests. A manifest
+// the store deletes between the glob and the read is skipped.
+func insertSources(ctx context.Context, c *sql.Conn, dataDir string, live []lakeFile) error {
 	counts := map[sourceKey]int64{}
-	if paths, _ := filepath.Glob(filepath.Join(dataDir, layout.EventsGlob)); len(paths) > 0 {
-		rows, err := db.Query("SELECT filename, count(*) FROM read_parquet(" +
-			sqlStr(filepath.Join(dataDir, layout.EventsGlob)) + ", filename=true, hive_partitioning=false) GROUP BY 1")
+	if len(live) > 0 {
+		paths := make([]string, len(live))
+		for i, f := range live {
+			paths[i] = sqlStr(f.path)
+		}
+		rows, err := c.QueryContext(ctx, "SELECT file_name, num_rows FROM parquet_file_metadata(["+
+			strings.Join(paths, ", ")+"])")
 		if err != nil {
 			return err
 		}
@@ -417,7 +639,7 @@ func insertSources(db *sql.DB, dataDir string) error {
 	if err != nil {
 		return err
 	}
-	stmt, err := db.Prepare("INSERT INTO sources VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+	stmt, err := c.PrepareContext(ctx, "INSERT INTO sources VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 	if err != nil {
 		return err
 	}
@@ -425,6 +647,9 @@ func insertSources(db *sql.DB, dataDir string) error {
 	for _, m := range matches {
 		var src manifest
 		b, err := os.ReadFile(m)
+		if os.IsNotExist(err) {
+			continue
+		}
 		if err != nil {
 			return err
 		}
@@ -440,7 +665,7 @@ func insertSources(db *sql.DB, dataDir string) error {
 		machine, _ := strings.CutPrefix(parts[2], "machine=")
 		harness, _ := strings.CutPrefix(parts[3], "harness=")
 		k := sourceKey{author, machine, harness, src.SrcID}
-		if _, err := stmt.Exec(author, machine, harness, src.SourceName, src.Path,
+		if _, err := stmt.ExecContext(ctx, author, machine, harness, src.SourceName, src.Path,
 			src.SrcID, src.Size, src.HeadHash, src.UpdatedMs, counts[k]); err != nil {
 			return err
 		}
@@ -448,7 +673,8 @@ func insertSources(db *sql.DB, dataDir string) error {
 	return stmt.Close()
 }
 
-// OpenNewest opens the newest complete cache read-only.
+// OpenNewest opens the newest complete cache read-only with its archive
+// index attached as arch, which its views read.
 func OpenNewest(dataDir string) (*sql.DB, string, error) {
 	caches, err := cacheFiles(dataDir)
 	if err != nil {
@@ -462,7 +688,12 @@ func OpenNewest(dataDir string) (*sql.DB, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	if err := db.Ping(); err != nil {
+	var name string
+	if err := db.QueryRow("SELECT name FROM archive_ref").Scan(&name); err != nil {
+		db.Close()
+		return nil, "", err
+	}
+	if _, err := db.Exec("ATTACH " + sqlStr(filepath.Join(layout.CacheDir(dataDir), name)) + " AS arch (READ_ONLY)"); err != nil {
 		db.Close()
 		return nil, "", err
 	}

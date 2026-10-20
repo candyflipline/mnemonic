@@ -1,10 +1,10 @@
 package query
 
-// The search engine: BM25 candidates over postings/term_stats/corpus/events
-// plus hydration through trace, ported from upstream search.rs
+// The search engine: BM25 candidates over all_postings/corpus/events plus
+// hydration through trace, ported from upstream search.rs
 // build_search_mcp_events_sql / build_search_mcp_event_details_sql /
-// map_search_mcp_rows_to_hits / dedupe_mcp_search_rows. The df comes from
-// term_stats (schema.sql's contract) and avgdl from corpus.
+// map_search_mcp_rows_to_hits / dedupe_mcp_search_rows. The df is counted
+// from the query terms' postings and avgdl comes from corpus.
 
 import (
 	"context"
@@ -112,10 +112,8 @@ type mcpRow struct {
 	callID            string
 	itemID            string
 	model             string
-	docLen            int64
 	textPreview       string
 	textContent       string
-	payloadJSON       string
 	eventOrder        int64
 	turnSeq           uint32
 	eventOrdinal      uint32
@@ -128,8 +126,9 @@ type mcpRow struct {
 }
 
 // searchMcpCandidates ports build_search_mcp_events_sql: one ranked pass over
-// postings, scored with term_stats.df and corpus.avg_doc_len, then filtered by
-// the MCP source/event-type clauses on events.
+// the query terms' postings, scored with their df (postings per term across
+// the whole corpus) and corpus.avg_doc_len, then filtered by the MCP
+// source/event-type clauses on events.
 func searchMcpCandidates(ctx context.Context, db *sql.DB, q searchQuery, terms []string, limit int) ([]*mcpRow, error) {
 	termsSQL := "(" + strings.Join(quoteAll(terms), ", ") + ")"
 	var filters []string
@@ -160,24 +159,24 @@ func searchMcpCandidates(ctx context.Context, db *sql.DB, q searchQuery, terms [
 			sqlQuote(q.sessionID)+" AND turn_seq = "+sqlQuoteInt(int(q.turnSeq))+")")
 	}
 
-	sqlStr := `SELECT event_uid, session_id, raw_score, matched_terms, event_unix_ms FROM (
-  SELECT p.event_uid AS event_uid,
+	sqlStr := `WITH p AS (SELECT term, doc, tf, doc_len FROM all_postings WHERE term IN ` + termsSQL + `),
+s AS (SELECT term, count(*) AS df FROM p GROUP BY term)
+SELECT event_uid, session_id, raw_score, matched_terms, event_unix_ms FROM (
+  SELECT e.event_uid AS event_uid,
     max(e.session_id) AS session_id,
     sum(ln(1.0 + ((greatest(cast((SELECT docs FROM corpus) AS DOUBLE), cast(s.df AS DOUBLE))
         - cast(s.df AS DOUBLE) + 0.5) / (cast(s.df AS DOUBLE) + 0.5)))
       * ((cast(p.tf AS DOUBLE) * 1.200000)
         / (cast(p.tf AS DOUBLE) + 1.200000 * (1.0 - 0.750000
-          + 0.750000 * (cast(d.doc_len AS DOUBLE)
+          + 0.750000 * (cast(p.doc_len AS DOUBLE)
             / greatest((SELECT avg_doc_len FROM corpus), 1.0)))))) AS raw_score,
     count(DISTINCT p.term) AS matched_terms,
     coalesce(max(epoch_ms(e.event_ts)), 0) AS event_unix_ms
-  FROM postings p
-  JOIN term_stats s ON s.term = p.term
-  JOIN docs d ON d.event_uid = p.event_uid
-  JOIN events e ON e.event_uid = p.event_uid
-  WHERE p.term IN ` + termsSQL + `
-    AND ` + strings.Join(filters, "\n    AND ") + `
-  GROUP BY p.event_uid
+  FROM p
+  JOIN s ON s.term = p.term
+  JOIN events e ON e.doc = p.doc
+  WHERE ` + strings.Join(filters, "\n    AND ") + `
+  GROUP BY e.event_uid
   HAVING matched_terms >= ` + sqlQuoteInt(minShouldMatch) +
 		` AND raw_score >= 0.000000
   ORDER BY raw_score DESC, event_unix_ms DESC, event_uid ASC
@@ -270,16 +269,14 @@ SELECT
   t.event_uid, t.session_id, t.event_order, o.turn_seq, o.event_ordinal,
   epoch_ms(t.event_time) AS event_unix_ms,
   t.event_class, t.payload_type, t.actor_role, t.name, t.phase, t.call_id, t.item_id,
-  t.source_ref, t.text_content, t.payload_json,
+  t.source_ref, t.text_content,
   e.source_name, e.harness, e.inference_provider, e.endpoint_kind, e.model,
-  d.doc_len,
   tt.turn_event_count, tt.turn_completed, tu.turn_terminal_event_uid,
   ss.session_started_at_unix_ms, ss.session_updated_at_unix_ms, ss.session_completed
 FROM trace t
 JOIN cand ON t.event_uid = cand.event_uid
 JOIN ord o ON o.event_uid = t.event_uid
 JOIN events e ON e.event_uid = t.event_uid
-JOIN docs d ON d.event_uid = t.event_uid
 JOIN turn_totals tt ON tt.session_id = o.session_id AND tt.turn_seq = o.turn_seq
 LEFT JOIN turn_terminal tu ON tu.session_id = o.session_id AND tu.turn_seq = o.turn_seq
 JOIN sess ss ON ss.session_id = o.session_id`
@@ -297,9 +294,8 @@ JOIN sess ss ON ss.session_id = o.session_id`
 		if err := rs.Scan(&r.eventUID, &r.sessionID, &r.eventOrder, &r.turnSeq, &r.eventOrdinal,
 			&r.eventUnixMs,
 			&r.eventClass, &r.payloadType, &r.actorRole, &r.name, &r.phase, &r.callID, &r.itemID,
-			&r.sourceRef, &r.textContent, &r.payloadJSON,
+			&r.sourceRef, &r.textContent,
 			&r.sourceName, &r.harness, &r.inferenceProvider, &r.endpointKind, &r.model,
-			&r.docLen,
 			&r.turnEventCount, &turnCompleted, &turnTerminal,
 			&r.sessionStartedMs, &r.sessionUpdatedMs, &sessionCompleted); err != nil {
 			return err
