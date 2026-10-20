@@ -258,7 +258,8 @@ func putSource(ctx context.Context, cfg config.Client, hc *http.Client, f fileRe
 	defer resp.Body.Close()
 	switch resp.StatusCode {
 	case http.StatusOK:
-		return nil, nil
+		_, err := io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+		return nil, err
 	case http.StatusConflict:
 		var c wire.Conflict
 		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&c); err != nil {
