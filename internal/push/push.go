@@ -42,13 +42,14 @@ const manifestPath = "/v1/manifest"
 // and server clocks need not agree.
 const skewMs = 5 * 60 * 1000
 
-// fileRef is one matched file and the source it belongs to. mtimeMs rides
-// along from the scan's stat so the skip costs no second stat.
+// fileRef is one matched file and the source it belongs to. mtimeMs and size
+// ride along from the scan's stat so the skips cost no second stat.
 type fileRef struct {
 	path       string
 	harness    string
 	sourceName string
 	mtimeMs    int64
+	size       int64
 }
 
 // Run does one pass. Per source: head hash equal and the redacted size grew
@@ -104,14 +105,23 @@ func fetchManifest(ctx context.Context, cfg config.Client, hc *http.Client) (map
 // the server's Size and head hash, and exactly one retry re-decides from it.
 func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client, manifest map[string]*wire.Source, f fileRef, st *Stats) error {
 	srcID := wire.SrcID(f.path)
-	// The server stamps UpdatedMs after it received the bytes, so a file whose
-	// last write is older than that stamp (with a 5-minute margin for
-	// client/server clock skew) has nothing new; skip it unread.
-	if entry := manifest[srcID]; entry != nil && f.mtimeMs < entry.UpdatedMs-skewMs {
+	entry := manifest[srcID]
+	// RawEnd is the raw offset the server's stored bytes cover, so a file whose
+	// size still equals it is, byte for byte, what was sent last time; skip it
+	// unread, before anything else and with no clock in sight.
+	if entry != nil && entry.RawEnd > 0 && f.size == entry.RawEnd {
 		st.Unchanged++
 		return nil
 	}
-	entry := manifest[srcID]
+	// The server stamps UpdatedMs after it received the bytes, so a file whose
+	// last write is older than that stamp (with a 5-minute margin for
+	// client/server clock skew) has nothing new; skip it unread. Entries with
+	// RawEnd 0 — the legacy shape — are saved the read by this skip alone.
+	if entry != nil && f.mtimeMs < entry.UpdatedMs-skewMs {
+		st.Unchanged++
+		return nil
+	}
+	orig := entry // raw_end as the manifest first had it; retries below rewrite entry
 	sent, replaced := false, false
 	if entry != nil && entry.RawEnd > 0 && entry.Size > 0 {
 		done, tailSent, next, err := syncTail(ctx, cfg, red, hc, f, srcID, entry, st)
@@ -144,6 +154,14 @@ func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.C
 	for conflicts := 0; ; {
 		body, offset, noop := decide(entry, head, redacted)
 		if noop {
+			// A legacy entry (RawEnd 0) whose redacted bytes the server already
+			// holds in full would read whole every pass forever: one empty
+			// append at Size records raw_end so the next pass takes the exact
+			// skip. Best effort — an old server answers 400 and a stale one
+			// 409, and either way the file just stays on this full path.
+			if orig != nil && orig.RawEnd == 0 && !sent {
+				_, _ = putSource(ctx, cfg, hc, f, srcID, entry.Size, head, nil, rawEnds[len(rawEnds)-1])
+			}
 			switch {
 			case !sent:
 				st.Unchanged++
@@ -320,7 +338,7 @@ func scan(sources []config.SourceGlob) []fileRef {
 				continue
 			}
 			seen[abs] = true
-			files = append(files, fileRef{path: abs, harness: src.Harness, sourceName: src.SourceName, mtimeMs: info.ModTime().UnixMilli()})
+			files = append(files, fileRef{path: abs, harness: src.Harness, sourceName: src.SourceName, mtimeMs: info.ModTime().UnixMilli(), size: info.Size()})
 		}
 	}
 	return files

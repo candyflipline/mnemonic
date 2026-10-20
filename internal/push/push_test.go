@@ -295,9 +295,10 @@ func TestOldMtimeSkipsRead(t *testing.T) {
 
 	updated := time.Now().UnixMilli()
 	s.updatedMs = updated
-	// Same length, different first line: a read would re-send the whole file,
-	// so Bytes 0 proves the file was never opened.
-	writeFile(t, dir, "a.jsonl", "ALPHA one\nalpha two\n")
+	// Different first line and longer than what was sent, so the exact skip
+	// cannot fire and the skip below is the mtime's doing; a read would re-send
+	// the whole file, so Bytes 0 proves the file was never opened.
+	writeFile(t, dir, "a.jsonl", "ALPHA one\nalpha two\nextra\n")
 	old := time.UnixMilli(updated - time.Hour.Milliseconds())
 	if err := os.Chtimes(p1, old, old); err != nil {
 		t.Fatal(err)
@@ -318,10 +319,10 @@ func TestOldMtimeSkipsRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	st = runPass(t, s, dir)
-	if want := (Stats{Scanned: 2, Replaced: 1, Unchanged: 1, Bytes: 20}); st != want {
+	if want := (Stats{Scanned: 2, Replaced: 1, Unchanged: 1, Bytes: 26}); st != want {
 		t.Fatalf("stats = %+v, want %+v", st, want)
 	}
-	assertRaw(t, s, p1, "ALPHA one\nalpha two\n")
+	assertRaw(t, s, p1, "ALPHA one\nalpha two\nextra\n")
 }
 
 // Growing a file sends exactly the new line, at the server's old size.
@@ -411,6 +412,73 @@ func storedRaw(t *testing.T, dataDir, path string) string {
 	return string(b)
 }
 
+// resetRawEnd rewrites the store's manifest for path with RawEnd 0, the shape
+// an entry uploaded before raw_end existed has.
+func resetRawEnd(t *testing.T, dataDir, path string) {
+	t.Helper()
+	k := layout.Key{Author: "chris", Machine: "testbox", Harness: "claude-code", SrcID: wire.SrcID(path)}
+	b, err := os.ReadFile(k.Manifest(dataDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m struct {
+		wire.Source
+		ZstSize int64 `json:"zst_size"`
+	}
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	m.RawEnd = 0
+	out, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(k.Manifest(dataDir), append(out, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A finished file whose entry predates raw_end reads whole on every pass
+// forever: one pass sees the server already holds every redacted byte and
+// backfills raw_end with an empty append at Size, and the next pass takes the
+// exact skip without opening the file.
+func TestUnchangedFileBackfillsRawEndThenSkips(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFile(t, dir, "a.jsonl", "head line\n"+strings.Repeat("filler line\n", 99)) // 10 + 99*12 = 1198 bytes
+	rs := newRealStore(t)
+	if _, err := Run(context.Background(), testConfig(rs.srv.URL, dir), identityRedactor{}, rs.srv.Client()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	resetRawEnd(t, rs.dataDir, p) // a legacy entry: raw_end unknown
+
+	st, err := Run(context.Background(), testConfig(rs.srv.URL, dir), identityRedactor{}, rs.srv.Client())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if want := (Stats{Scanned: 1, Unchanged: 1}); st != want {
+		t.Fatalf("stats = %+v, want %+v", st, want)
+	}
+	src := realManifestSource(t, rs, p)
+	if src.Size != 1198 || src.RawEnd != 1198 {
+		t.Fatalf("manifest Size = %d RawEnd = %d, want 1198 and 1198", src.Size, src.RawEnd)
+	}
+	if got := storedRaw(t, rs.dataDir, p); got != "head line\n"+strings.Repeat("filler line\n", 99) {
+		t.Fatalf("store holds %q, want the original bytes", got)
+	}
+
+	red := &countingRedactor{}
+	st, err = Run(context.Background(), testConfig(rs.srv.URL, dir), red, rs.srv.Client())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if want := (Stats{Scanned: 1, Unchanged: 1}); st != want {
+		t.Fatalf("stats = %+v, want %+v", st, want)
+	}
+	if red.n != 0 { // the exact skip never opens the file
+		t.Fatalf("Line saw %d bytes on the skip pass, want 0", red.n)
+	}
+}
+
 // Growing a file whose raw offset the server knows redacts only the new tail:
 // against the real store, Line sees the first line (for the head hash) plus
 // the appended lines, the store ends up with the whole redacted file, and its
@@ -476,23 +544,24 @@ func TestPartialTrailingLineWaits(t *testing.T) {
 }
 
 // Rewriting the first line changes the head hash, so the whole file is
-// re-sent at offset 0.
+// re-sent at offset 0. The rewrite grows the file: one of its own length is
+// the exact skip's word now.
 func TestRewrittenFirstLineResendsWhole(t *testing.T) {
 	dir := t.TempDir()
 	p := writeFile(t, dir, "a.jsonl", "one\ntwo\n")
 	s := newTestServer(t)
 	runPass(t, s, dir)
 
-	writeFile(t, dir, "a.jsonl", "ONE\ntwo\n")
+	writeFile(t, dir, "a.jsonl", "ONE\ntwo\nthree\n")
 	st := runPass(t, s, dir)
-	if want := (Stats{Scanned: 1, Replaced: 1, Bytes: 8}); st != want {
+	if want := (Stats{Scanned: 1, Replaced: 1, Bytes: 14}); st != want {
 		t.Fatalf("stats = %+v, want %+v", st, want)
 	}
 	put := s.lastPut()
-	if put.offset != 0 || put.body != "ONE\ntwo\n" {
-		t.Fatalf("PUT offset %d body %q, want offset 0 body %q", put.offset, put.body, "ONE\ntwo\n")
+	if put.offset != 0 || put.body != "ONE\ntwo\nthree\n" {
+		t.Fatalf("PUT offset %d body %q, want offset 0 body %q", put.offset, put.body, "ONE\ntwo\nthree\n")
 	}
-	assertRaw(t, s, p, "ONE\ntwo\n")
+	assertRaw(t, s, p, "ONE\ntwo\nthree\n")
 }
 
 // A stale manifest size draws one 409; when the extra server bytes are this

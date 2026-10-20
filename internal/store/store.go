@@ -141,7 +141,14 @@ func (s *Store) servePut(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "read body", http.StatusBadRequest)
 		return
 	}
-	if len(body) == 0 || body[len(body)-1] != '\n' {
+	// An empty body is a raw_end backfill: allowed only at offset > 0, where
+	// the client has proved it holds nothing new. A non-empty body must still
+	// be whole lines.
+	if len(body) == 0 && offset == 0 {
+		http.Error(w, "body must be non-empty whole lines", http.StatusBadRequest)
+		return
+	}
+	if len(body) > 0 && body[len(body)-1] != '\n' {
 		http.Error(w, "body must be non-empty whole lines", http.StatusBadRequest)
 		return
 	}
@@ -210,6 +217,20 @@ func (s *Store) append(w http.ResponseWriter, k layout.Key, offset int64, headHa
 	}
 	if offset != m.Size || headHash != m.HeadHash {
 		writeJSON(w, http.StatusConflict, wire.Conflict{Size: m.Size, HeadHash: m.HeadHash, RawEnd: m.RawEnd})
+		return
+	}
+	if len(body) == 0 {
+		// A raw_end backfill: offset and head hash just proved the client holds
+		// nothing new, so record where the stored bytes end in the raw file and
+		// touch nothing else — lake and the cache must see no change.
+		if rawEnd > 0 {
+			m.RawEnd = rawEnd
+			if err := writeManifest(k.Manifest(s.DataDir), *m); err != nil {
+				http.Error(w, "write manifest", http.StatusInternalServerError)
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, m.Source)
 		return
 	}
 	zst, err := appendZst(k.Raw(s.DataDir), m.ZstSize, body)

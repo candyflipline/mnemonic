@@ -50,11 +50,12 @@ type Manifest struct {
 }
 
 // PUT /v1/raw/{machine}/{harness}/{src_id}?offset=N&head_hash=H&source_name=S&path=P&raw_end=R
-// Body: whole redacted lines, each ending in '\n'. offset=0 replaces the raw
-// file; offset>0 appends and must equal the server's Size, else 409 with a
-// Conflict body. raw_end=R is the offset in the client's raw file the sent
-// body ends at; R=0 (or absent) means unknown. Success is 200 with the
-// updated Source.
+// Body: whole redacted lines, each ending in '\n'. An empty body only records
+// raw_end: the server accepts it at offset == Size and nowhere else. offset=0
+// replaces the raw file; offset>0 appends and must equal the server's Size,
+// else 409 with a Conflict body. raw_end=R is the offset in the client's raw
+// file the sent body ends at; R=0 (or absent) means unknown. Success is 200
+// with the updated Source.
 const RawPathPrefix = "/v1/raw/"
 
 // Conflict is the 409 body: the client re-reads Size and retries from there.
