@@ -139,7 +139,18 @@ func buildFile(path, dataDir string, lakeFiles int) (Stats, error) {
 		return Stats{}, err
 	}
 	defer db.Close()
+	// The events dedupe windows over every payload column; at ten million
+	// archive rows that outgrows memory, so it must spill. The service sandbox
+	// lets DuckDB write only under the data dir.
+	spill := filepath.Join(layout.CacheDir(dataDir), "spill")
+	if err := os.MkdirAll(spill, 0o755); err != nil {
+		return Stats{}, err
+	}
+	defer os.RemoveAll(spill)
 	for _, stmt := range []string{
+		"SET temp_directory = '" + spill + "'",
+		"SET preserve_insertion_order = false",
+		"SET threads = 2",
 		eventsDDL(),
 		insertEvents(dataDir, lakeFiles),
 		sourcesDDL,
