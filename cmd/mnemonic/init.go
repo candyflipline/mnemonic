@@ -56,7 +56,20 @@ func initCmd(args []string) error {
 	configPath := filepath.Join(dir, "config.toml")
 	tokenPath := filepath.Join(dir, "token")
 
-	// A guarded exit happens before anything is created or touched.
+	// Guarded exits happen before anything is created or touched.
+	if *machine == "" {
+		host, err := os.Hostname()
+		if err != nil {
+			return fmt.Errorf("init: machine: %w", err)
+		}
+		if i := strings.IndexByte(host, '.'); i >= 0 {
+			host = host[:i]
+		}
+		*machine = strings.ToLower(host)
+	}
+	if !machineRe.MatchString(*machine) {
+		return fmt.Errorf("machine %q must match [a-z0-9._-]+", *machine)
+	}
 	if _, err := os.Stat(configPath); err == nil && !*force {
 		return fmt.Errorf("%s already exists; pass --force to overwrite it", configPath)
 	}
@@ -88,20 +101,6 @@ func initCmd(args []string) error {
 		fmt.Println("wrote " + tokenPath)
 	} else {
 		fmt.Println("kept  " + tokenPath)
-	}
-
-	if *machine == "" {
-		host, err := os.Hostname()
-		if err != nil {
-			return fmt.Errorf("init: machine: %w", err)
-		}
-		if i := strings.IndexByte(host, '.'); i >= 0 {
-			host = host[:i]
-		}
-		*machine = strings.ToLower(host)
-	}
-	if !machineRe.MatchString(*machine) {
-		return fmt.Errorf("machine %q must match [a-z0-9._-]+", *machine)
 	}
 
 	// Sources are written out, not left to the LoadClient default, so a
