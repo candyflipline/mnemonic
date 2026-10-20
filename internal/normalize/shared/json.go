@@ -196,15 +196,23 @@ func Get(v JSON, key string) JSON {
 	return nil
 }
 
-// Pointer walks a slash-separated path like serde_json's Value::pointer.
+// Pointer walks a slash-separated path like serde_json's Value::pointer,
+// including the ~1 and ~0 escapes.
 func Pointer(v JSON, path string) JSON {
-	if path == "" {
-		return v
+	for path != "" {
+		if path[0] != '/' {
+			return nil
+		}
+		path = path[1:]
+		seg := path
+		if i := strings.IndexByte(path, '/'); i >= 0 {
+			seg, path = path[:i], path[i:]
+		} else {
+			path = ""
+		}
+		v = Get(v, strings.ReplaceAll(strings.ReplaceAll(seg, "~1", "/"), "~0", "~"))
 	}
-	if path[0] != '/' {
-		return nil
-	}
-	return Pointer(Get(v, path[1:]), path[1:])
+	return v
 }
 
 // AsArray returns the underlying slice when v is an array.
