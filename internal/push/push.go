@@ -51,11 +51,25 @@ func Run(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client) 
 	var st Stats
 	for _, f := range scan(cfg.Sources) {
 		st.Scanned++
-		if err := syncSource(ctx, cfg, red, hc, manifest, f, &st); err != nil {
+		entry := manifest[wire.SrcID(f.path)]
+		// The server stamps UpdatedMs after it received the bytes, so a file whose
+		// last write is older than that stamp (with a 5-minute margin for
+		// client/server clock skew) has nothing new; skip it unread. Entries with
+		// RawEnd 0 — the legacy shape — are saved the read by this skip alone.
+		if entry != nil && f.mtimeMs < entry.UpdatedMs-skewMs {
+			st.Unchanged++
+			continue
+		}
+		if _, _, err := syncSource(ctx, cfg, red, hc, entry, f, &st); err != nil {
 			st.Failed++
 		}
 	}
 	return st, nil
+}
+
+func (s Stats) String() string {
+	return fmt.Sprintf("scanned %d, appended %d, replaced %d, unchanged %d, failed %d, sent %d bytes",
+		s.Scanned, s.Appended, s.Replaced, s.Unchanged, s.Failed, s.Bytes)
 }
 
 func fetchManifest(ctx context.Context, cfg config.Client, hc *http.Client) (map[string]*wire.Source, error) {
@@ -84,27 +98,21 @@ func fetchManifest(ctx context.Context, cfg config.Client, hc *http.Client) (map
 	return byID, nil
 }
 
-func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client, manifest map[string]*wire.Source, f fileRef, st *Stats) error {
+// syncSource returns the server's state for the source as its last answer
+// reported it (nil when it sent nothing) and whether any answer was a 409.
+func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client, entry *wire.Source, f fileRef, st *Stats) (held *wire.Source, conflicted bool, err error) {
 	srcID := wire.SrcID(f.path)
-	entry := manifest[srcID]
 	if entry != nil && entry.RawEnd > 0 && f.size == entry.RawEnd {
 		st.Unchanged++
-		return nil
-	}
-	// The server stamps UpdatedMs after it received the bytes, so a file whose
-	// last write is older than that stamp (with a 5-minute margin for
-	// client/server clock skew) has nothing new; skip it unread. Entries with
-	// RawEnd 0 — the legacy shape — are saved the read by this skip alone.
-	if entry != nil && f.mtimeMs < entry.UpdatedMs-skewMs {
-		st.Unchanged++
-		return nil
+		return nil, false, nil
 	}
 	legacy := entry != nil && entry.RawEnd == 0
 	sent, replaced := false, false
 	if entry != nil && entry.RawEnd > 0 && entry.Size > 0 {
 		tail, err := syncTail(ctx, cfg, red, hc, f, srcID, entry, st)
+		held, conflicted = tail.held, tail.conflicted
 		if err != nil {
-			return err
+			return held, conflicted, err
 		}
 		if tail.fallback == nil {
 			if tail.sent {
@@ -112,19 +120,19 @@ func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.C
 			} else {
 				st.Unchanged++
 			}
-			return nil
+			return held, conflicted, nil
 		}
 		entry, sent = tail.fallback, tail.sent
 	}
 	file, err := redactComplete(f.path, red)
 	if err != nil {
-		return err
+		return held, conflicted, err
 	}
 	if file == nil {
 		if !sent {
 			st.Unchanged++
 		}
-		return nil
+		return held, conflicted, nil
 	}
 	for conflicts := 0; ; {
 		body, offset, noop := decide(entry, file.head, file.body)
@@ -135,7 +143,9 @@ func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.C
 			// skip. Best effort — an old server answers 400 and a stale one
 			// 409, and either way the file just stays on this full path.
 			if legacy && !sent {
-				_, _ = putSource(ctx, cfg, hc, f, srcID, entry.Size, file.head, nil, file.rawEnds[len(file.rawEnds)-1])
+				if now, c, err := putSource(ctx, cfg, hc, f, srcID, entry.Size, file.head, nil, file.rawEnds[len(file.rawEnds)-1]); err == nil {
+					held, conflicted = now, conflicted || c
+				}
 			}
 			switch {
 			case !sent:
@@ -145,18 +155,20 @@ func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.C
 			default:
 				st.Appended++
 			}
-			return nil
+			return held, conflicted, nil
 		}
 		body = firstChunk(body, maxChunk)
-		conflict, err := putSource(ctx, cfg, hc, f, srcID, offset, file.head, body, rawEndOf(file.rawEnds, file.body, offset, body))
+		now, c, err := putSource(ctx, cfg, hc, f, srcID, offset, file.head, body, rawEndOf(file.rawEnds, file.body, offset, body))
 		if err != nil {
-			return err
+			return held, conflicted, err
 		}
-		if conflict != nil {
+		held = now
+		if c {
+			conflicted = true
 			if conflicts++; conflicts > 1 {
-				return fmt.Errorf("put %s: conflict again at size %d", f.path, conflict.Size)
+				return held, conflicted, fmt.Errorf("put %s: conflict again at size %d", f.path, now.Size)
 			}
-			entry = &wire.Source{SrcID: srcID, Size: conflict.Size, HeadHash: conflict.HeadHash}
+			entry = &wire.Source{SrcID: srcID, Size: now.Size, HeadHash: now.HeadHash}
 			continue
 		}
 		st.Bytes += int64(len(body))
@@ -166,8 +178,9 @@ func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.C
 }
 
 type tailResult struct {
-	sent     bool
-	fallback *wire.Source
+	sent, conflicted bool
+	fallback         *wire.Source
+	held             *wire.Source
 }
 
 func syncTail(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client, f fileRef, srcID string, entry *wire.Source, st *Stats) (tailResult, error) {
@@ -184,12 +197,13 @@ func syncTail(ctx context.Context, cfg config.Client, red Redactor, hc *http.Cli
 		chunk := firstChunk(body, maxChunk)
 		lines := bytes.Count(chunk, []byte{'\n'})
 		rawEnd := rawEnds[lines-1]
-		conflict, err := putSource(ctx, cfg, hc, f, srcID, entry.Size, tail.head, chunk, rawEnd)
+		now, conflicted, err := putSource(ctx, cfg, hc, f, srcID, entry.Size, tail.head, chunk, rawEnd)
 		if err != nil {
 			return res, err
 		}
-		if conflict != nil {
-			res.fallback = &wire.Source{SrcID: srcID, Size: conflict.Size, HeadHash: conflict.HeadHash, RawEnd: conflict.RawEnd}
+		res.held = now
+		if conflicted {
+			res.fallback, res.conflicted = now, true
 			return res, nil
 		}
 		st.Bytes += int64(len(chunk))
@@ -235,7 +249,9 @@ func rawEndOf(rawEnds []int64, redacted []byte, start int64, body []byte) int64 
 	return rawEnds[lines-1]
 }
 
-func putSource(ctx context.Context, cfg config.Client, hc *http.Client, f fileRef, srcID string, offset int64, head string, body []byte, rawEnd int64) (*wire.Conflict, error) {
+// putSource returns the server's state for the source: the 200 body, or on a
+// 409 the Conflict's Size, HeadHash and RawEnd with conflicted set.
+func putSource(ctx context.Context, cfg config.Client, hc *http.Client, f fileRef, srcID string, offset int64, head string, body []byte, rawEnd int64) (now *wire.Source, conflicted bool, err error) {
 	q := url.Values{
 		"offset":      {strconv.FormatInt(offset, 10)},
 		"head_hash":   {head},
@@ -247,27 +263,31 @@ func putSource(ctx context.Context, cfg config.Client, hc *http.Client, f fileRe
 		url.PathEscape(cfg.Machine) + "/" + url.PathEscape(f.harness) + "/" + srcID + "?" + q.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.Token)
 	req.Header.Set("Content-Type", "application/octet-stream")
 	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer resp.Body.Close()
 	switch resp.StatusCode {
 	case http.StatusOK:
+		var s wire.Source
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&s); err != nil {
+			return nil, false, fmt.Errorf("put %s: 200 body: %w", srcID, err)
+		}
 		_, err := io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
-		return nil, err
+		return &s, false, err
 	case http.StatusConflict:
 		var c wire.Conflict
 		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&c); err != nil {
-			return nil, fmt.Errorf("put %s: 409 body: %w", srcID, err)
+			return nil, false, fmt.Errorf("put %s: 409 body: %w", srcID, err)
 		}
-		return &c, nil
+		return &wire.Source{SrcID: srcID, Size: c.Size, HeadHash: c.HeadHash, RawEnd: c.RawEnd}, true, nil
 	default:
-		return nil, fmt.Errorf("put %s: %s: %s", srcID, resp.Status, readErrBody(resp.Body))
+		return nil, false, fmt.Errorf("put %s: %s: %s", srcID, resp.Status, readErrBody(resp.Body))
 	}
 }
 

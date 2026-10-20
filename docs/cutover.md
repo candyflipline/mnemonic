@@ -66,7 +66,7 @@ CGO_ENABLED=0 go install github.com/candyflipline/mnemonic/cmd/mnemonic@latest
 `mnemonic init` writes `~/.mnemonic/config.toml` and `~/.mnemonic/token`
 (0600) and, on macOS, `~/Library/LaunchAgents/com.mnemonic.push.plist`,
 then prints the one `launchctl bootstrap gui/$UID ...` command to run (on
-Linux it prints a systemd --user unit):
+Linux it prints a systemd --user service):
 
 ```
 mnemonic init --server https://loyal-agent-memory.5-78-147-233.sslip.io \
@@ -121,8 +121,9 @@ rather not use the default path.
 
 ## Push on every Mac
 
-`mnemonic push` runs from launchd every 60 s. `mnemonic init` installs the
-plist; to bootstrap it by hand:
+`mnemonic push --watch` stays resident under launchd and polls every 60 s;
+launchd restarts it if it exits. `mnemonic init` installs the plist; to
+bootstrap it by hand:
 
 ```
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mnemonic.push.plist

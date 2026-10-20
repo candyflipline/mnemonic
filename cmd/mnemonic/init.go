@@ -146,23 +146,18 @@ func printSystemd(exe string) {
 Description=mnemonic push (upload agent traces)
 
 [Service]
-Type=oneshot
-ExecStart=%s push
-
-# save as ~/.config/systemd/user/mnemonic-push.timer
-[Unit]
-Description=run mnemonic push every 60 s
-
-[Timer]
-OnBootSec=60
-OnUnitActiveSec=60
+Type=simple
+ExecStart=%s push --watch
+Restart=always
+RestartSec=60
+Nice=10
 
 [Install]
-WantedBy=timers.target
+WantedBy=default.target
 
 then run:
 systemctl --user daemon-reload
-systemctl --user enable --now mnemonic-push.timer
+systemctl --user enable --now mnemonic-push.service
 `, exe)
 }
 

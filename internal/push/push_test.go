@@ -524,6 +524,69 @@ func TestConflictWithForeignBytesResendsWhole(t *testing.T) {
 	assertRaw(t, s, p, "one\ntwo\nthree\n")
 }
 
+type countingTransport struct {
+	base http.RoundTripper
+	reqs []string
+}
+
+func (c *countingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	c.reqs = append(c.reqs, r.Method)
+	return c.base.RoundTrip(r)
+}
+
+func TestWatchTicksSendOnlyWhatChanged(t *testing.T) {
+	dir := t.TempDir()
+	body := "head line\n" + strings.Repeat("filler line\n", 99)
+	p := writeFile(t, dir, "a.jsonl", body)
+	rs := newRealStore(t)
+	tr := &countingTransport{base: rs.srv.Client().Transport}
+	red := &countingRedactor{}
+	w := newWatcher(testConfig(rs.srv.URL, dir), red, &http.Client{Transport: tr})
+	tick := func() Stats {
+		t.Helper()
+		tr.reqs, red.n = nil, 0
+		st, err := w.tick(context.Background())
+		if err != nil {
+			t.Fatalf("tick: %v", err)
+		}
+		return st
+	}
+
+	if st := tick(); st != (Stats{Scanned: 1, Replaced: 1, Bytes: 1198}) {
+		t.Fatalf("tick 1 stats = %+v", st)
+	}
+	if got := strings.Join(tr.reqs, " "); got != "GET PUT" {
+		t.Fatalf("tick 1 requests = %q, want %q", got, "GET PUT")
+	}
+
+	if st := tick(); st != (Stats{}) || len(tr.reqs) != 0 || red.n != 0 {
+		t.Fatalf("idle tick: stats %+v, requests %q, redacted %d bytes; want zero, none, 0", st, tr.reqs, red.n)
+	}
+
+	body += "new one\nnew two\n"
+	writeFile(t, dir, "a.jsonl", body)
+	if st := tick(); st != (Stats{Scanned: 1, Appended: 1, Bytes: 16}) {
+		t.Fatalf("tick 3 stats = %+v", st)
+	}
+	if got := strings.Join(tr.reqs, " "); got != "PUT" {
+		t.Fatalf("tick 3 requests = %q, want %q", got, "PUT")
+	}
+	if got := storedRaw(t, rs.dataDir, p); got != body {
+		t.Fatalf("store holds %q, want %q", got, body)
+	}
+	if h := w.held[wire.SrcID(p)]; h.Size != 1214 || h.RawEnd != 1214 {
+		t.Fatalf("held Size = %d RawEnd = %d, want 1214 and 1214", h.Size, h.RawEnd)
+	}
+
+	q := writeFile(t, dir, filepath.Join("sub", "b.jsonl"), "beta\n")
+	if st := tick(); st != (Stats{Scanned: 1, Replaced: 1, Bytes: 5}) {
+		t.Fatalf("tick 4 stats = %+v", st)
+	}
+	if got := storedRaw(t, rs.dataDir, q); got != "beta\n" {
+		t.Fatalf("store holds %q for the new file, want %q", got, "beta\n")
+	}
+}
+
 func TestLaunchdPlistLints(t *testing.T) {
 	plutil, err := exec.LookPath("plutil")
 	if err != nil {

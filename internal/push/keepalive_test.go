@@ -25,7 +25,7 @@ func TestPutReusesConnection(t *testing.T) {
 	cfg := testConfig(srv.URL, t.TempDir())
 	f := fileRef{harness: "claude-code", sourceName: "claude", path: "/x"}
 	for i := 0; i < 20; i++ {
-		if _, err := putSource(context.Background(), cfg, srv.Client(), f, "abcdefabcdefabcd", 0, "h", []byte("a\n"), 2); err != nil {
+		if _, _, err := putSource(context.Background(), cfg, srv.Client(), f, "abcdefabcdefabcd", 0, "h", []byte("a\n"), 2); err != nil {
 			t.Fatal(err)
 		}
 	}

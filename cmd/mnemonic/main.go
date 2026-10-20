@@ -1,6 +1,6 @@
 // mnemonic collects agent session traces and serves them over MCP.
 //
-//	mnemonic push [--config ~/.mnemonic/config.toml]   one pass, client
+//	mnemonic push [--watch] [--config ~/.mnemonic/config.toml]   one pass, or resident and polling every 60 s
 //	mnemonic serve --config server.toml                HTTP /v1 + /mcp, normalize and cache loops
 //	mnemonic import-ch --config server.toml --author A <export_dir>
 //
@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/candyflipline/mnemonic/internal/config"
@@ -41,6 +43,7 @@ func main() {
 func push(args []string) error {
 	fs := flag.NewFlagSet("push", flag.ContinueOnError)
 	configPath := fs.String("config", "~/.mnemonic/config.toml", "path to the client config TOML")
+	watch := fs.Bool("watch", false, "stay resident and push every 60 s")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -52,11 +55,16 @@ func push(args []string) error {
 	if err != nil {
 		return err
 	}
-	stats, err := pushrun.Run(context.Background(), cfg, red, &http.Client{Timeout: 60 * time.Second})
+	hc := &http.Client{Timeout: 60 * time.Second}
+	if *watch {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return pushrun.Watch(ctx, cfg, red, hc, os.Stdout)
+	}
+	stats, err := pushrun.Run(context.Background(), cfg, red, hc)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("scanned %d, appended %d, replaced %d, unchanged %d, failed %d, sent %d bytes\n",
-		stats.Scanned, stats.Appended, stats.Replaced, stats.Unchanged, stats.Failed, stats.Bytes)
+	fmt.Println(stats)
 	return nil
 }
