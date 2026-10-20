@@ -15,7 +15,7 @@ not json
 
 	events, err := claudecode.Parser{}.Parse(strings.NewReader(input), normalize.SourceMeta{
 		SourceName: "golden-claude-code", Harness: "claude-code",
-		SourceFile: "/fixtures/claude-code/session.jsonl", Generation: 1, Inode: 1,
+		SourceFile: "/fixtures/claude-code/session.jsonl",
 	})
 	if err != nil {
 		t.Fatal(err)

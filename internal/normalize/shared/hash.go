@@ -14,9 +14,9 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-func EventUID(sourceFile string, sourceGeneration uint32, sourceLineNo, sourceOffset uint64, recordFingerprint, suffix string) string {
+func EventUID(sourceFile string, sourceLineNo, sourceOffset uint64, recordFingerprint, suffix string) string {
 	material := fmt.Sprintf("%s|%d|%d|%d|%s|%s",
-		sourceFile, sourceGeneration, sourceLineNo, sourceOffset, recordFingerprint, suffix)
+		sourceFile, wholeFile, sourceLineNo, sourceOffset, recordFingerprint, suffix)
 	sum := sha256.Sum256([]byte(material))
 	return hex.EncodeToString(sum[:])
 }

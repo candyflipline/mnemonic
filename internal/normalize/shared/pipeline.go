@@ -35,16 +35,14 @@ type SourceRecordContext struct {
 }
 
 type RecordParams struct {
-	SourceName       string
-	SourceFile       string
-	SourceInode      uint64
-	SourceGeneration uint32
-	SourceLineNo     uint64
-	SourceOffset     uint64
-	SessionHint      string
-	ModelHint        string
-	CwdHint          string
-	RecordTSHint     string
+	SourceName   string
+	SourceFile   string
+	SourceLineNo uint64
+	SourceOffset uint64
+	SessionHint  string
+	ModelHint    string
+	CwdHint      string
+	RecordTSHint string
 }
 
 type NormalizedRecord struct {
@@ -63,12 +61,11 @@ func NormalizeRecord(rec JSON, src Source, p RecordParams) NormalizedRecord {
 	harness := src.Harness()
 	meta := src.SourceMetadata(rec)
 	recordTS := ResolveRecordTS(harness, p.SourceFile, src.RecordTS(rec), p.RecordTSHint)
-	eventTS, tsFailed := ParseEventTS(recordTS)
-	_ = tsFailed // error rows are not kept in this port
+	eventTS := ParseEventTS(recordTS)
 	topType := src.TopType(rec)
 	sessionDate := InferSessionDateFromFile(p.SourceFile, recordTS)
 	rawJSON := Compact(rec)
-	baseUID := EventUID(p.SourceFile, p.SourceGeneration, p.SourceLineNo, p.SourceOffset, rawJSON, "raw")
+	baseUID := EventUID(p.SourceFile, p.SourceLineNo, p.SourceOffset, rawJSON, "raw")
 	sessionID := src.SessionID(rec, SourceRecordContext{
 		SourceName:  p.SourceName,
 		SourceFile:  p.SourceFile,
@@ -86,8 +83,6 @@ func NormalizeRecord(rec JSON, src Source, p RecordParams) NormalizedRecord {
 		SessionDate:       sessionDate,
 		Cwd:               cwd,
 		SourceFile:        p.SourceFile,
-		SourceInode:       p.SourceInode,
-		SourceGeneration:  p.SourceGeneration,
 		SourceLineNo:      p.SourceLineNo,
 		SourceOffset:      p.SourceOffset,
 		RecordTS:          recordTS,

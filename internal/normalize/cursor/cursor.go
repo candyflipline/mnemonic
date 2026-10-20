@@ -177,9 +177,9 @@ func normalizeCursorToolFormer(identity string, toolData shared.JSON, stamp func
 	}
 
 	input := shared.JSON(nil)
-	if v, ok := firstPresent(toolData, "params"); ok && !shared.IsNull(v) {
+	if v, ok := shared.FirstPresent(toolData, "params"); ok && !shared.IsNull(v) {
 		input = v
-	} else if v, ok := firstPresent(toolData, "rawArgs"); ok && !shared.IsNull(v) {
+	} else if v, ok := shared.FirstPresent(toolData, "rawArgs"); ok && !shared.IsNull(v) {
 		input = v
 	}
 	inputJSON := shared.Compact(input)
@@ -207,11 +207,11 @@ func normalizeCursorToolFormer(identity string, toolData shared.JSON, stamp func
 	}
 
 	output := shared.JSON(nil)
-	if v, ok := firstPresent(toolData, "result"); ok && !shared.IsNull(v) {
+	if v, ok := shared.FirstPresent(toolData, "result"); ok && !shared.IsNull(v) {
 		output = v
-	} else if v, ok := firstPresent(toolData, "error"); ok && !shared.IsNull(v) {
+	} else if v, ok := shared.FirstPresent(toolData, "error"); ok && !shared.IsNull(v) {
 		output = v
-	} else if v, ok := firstPresent(toolData, "additionalData"); ok && !shared.IsNull(v) {
+	} else if v, ok := shared.FirstPresent(toolData, "additionalData"); ok && !shared.IsNull(v) {
 		output = v
 	}
 	outputJSON := shared.Compact(output)
@@ -286,7 +286,7 @@ type cursorRecord struct {
 
 func newCursorRecord(rec shared.JSON, topType, baseUID, modelHint string) cursorRecord {
 	message := rec
-	if v, ok := firstPresent(rec, "message"); ok {
+	if v, ok := shared.FirstPresent(rec, "message"); ok {
 		message = v
 	}
 	model := cursorModelHint(rec)
@@ -309,16 +309,16 @@ func newCursorRecord(rec shared.JSON, topType, baseUID, modelHint string) cursor
 }
 
 func (r *cursorRecord) content() shared.JSON {
-	if v, ok := firstPresent(r.message, "content"); ok {
+	if v, ok := shared.FirstPresent(r.message, "content"); ok {
 		return v
 	}
-	if v, ok := firstPresent(r.rec, "content"); ok {
+	if v, ok := shared.FirstPresent(r.rec, "content"); ok {
 		return v
 	}
-	if v, ok := firstPresent(r.message, "text"); ok {
+	if v, ok := shared.FirstPresent(r.message, "text"); ok {
 		return v
 	}
-	if v, ok := firstPresent(r.rec, "text"); ok {
+	if v, ok := shared.FirstPresent(r.rec, "text"); ok {
 		return v
 	}
 	return nil
@@ -434,7 +434,7 @@ func emitCursorToolResult(r *cursorRecord, idx int, block shared.JSON, em *share
 	toolCallID, _ := cursorToolCallID(block)
 	toolName := cursorToolName(block)
 	output := block
-	if v, ok := firstPresent(block, "content", "output", "result"); ok {
+	if v, ok := shared.FirstPresent(block, "content", "output", "result"); ok {
 		output = v
 	}
 	outputJSON := shared.Compact(output)
@@ -483,10 +483,10 @@ func cursorToolCallID(block shared.JSON) (string, bool) {
 }
 
 func cursorToolInput(block shared.JSON) shared.JSON {
-	if v, ok := firstPresent(block, "input", "arguments"); ok {
+	if v, ok := shared.FirstPresent(block, "input", "arguments"); ok {
 		return v
 	}
-	if v, ok := firstPresent(shared.Get(block, "function"), "arguments"); ok {
+	if v, ok := shared.FirstPresent(shared.Get(block, "function"), "arguments"); ok {
 		return v
 	}
 	return nil
@@ -532,21 +532,6 @@ func cursorRole(rec shared.JSON) string {
 		role = s
 	}
 	return strings.ToLower(strings.TrimSpace(role))
-}
-
-// firstPresent mirrors Option-or_else chains over Value::get: the first key
-// actually present wins, explicit null included.
-func firstPresent(v shared.JSON, keys ...string) (shared.JSON, bool) {
-	m, ok := shared.AsObject(v)
-	if !ok {
-		return nil, false
-	}
-	for _, key := range keys {
-		if val, present := m[key]; present {
-			return val, true
-		}
-	}
-	return nil, false
 }
 
 func firstStringOf(v, fallback shared.JSON, keys []string) (string, bool) {

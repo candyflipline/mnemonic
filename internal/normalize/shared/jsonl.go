@@ -41,15 +41,13 @@ func ParseJSONL(r io.Reader, src normalize.SourceMeta, s Source) ([]schema.Event
 			continue
 		}
 		out := NormalizeRecord(rec, s, RecordParams{
-			SourceName:       src.SourceName,
-			SourceFile:       src.SourceFile,
-			SourceInode:      src.Inode,
-			SourceGeneration: src.Generation,
-			SourceLineNo:     lineNo,
-			SourceOffset:     startOffset,
-			SessionHint:      sessionHint,
-			ModelHint:        modelHint,
-			CwdHint:          cwdHint,
+			SourceName:   src.SourceName,
+			SourceFile:   src.SourceFile,
+			SourceLineNo: lineNo,
+			SourceOffset: startOffset,
+			SessionHint:  sessionHint,
+			ModelHint:    modelHint,
+			CwdHint:      cwdHint,
 		})
 		sessionHint, modelHint, cwdHint = out.SessionHint, out.ModelHint, out.CwdHint
 		for _, row := range out.Events {

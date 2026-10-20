@@ -77,11 +77,11 @@ func FormatEventTS(dt time.Time) string {
 	return dt.UTC().Format("2006-01-02 15:04:05.000")
 }
 
-func ParseEventTS(recordTS string) (string, bool) {
+func ParseEventTS(recordTS string) string {
 	if dt, ok := ParseRecordTS(recordTS); ok {
-		return FormatEventTS(dt), false
+		return FormatEventTS(dt)
 	}
-	return UnparseableEventTS, true
+	return UnparseableEventTS
 }
 
 func FormatRecordTSMillis(dt time.Time) string {

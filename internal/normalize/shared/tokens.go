@@ -128,16 +128,21 @@ func (t TokenAccounting) WithRawUsage(usage JSON) TokenAccounting {
 // FirstOf returns the first member of v present under any of keys, explicit
 // null included.
 func FirstOf(v JSON, keys ...string) JSON {
+	val, _ := FirstPresent(v, keys...)
+	return val
+}
+
+func FirstPresent(v JSON, keys ...string) (JSON, bool) {
 	m, ok := AsObject(v)
 	if !ok {
-		return nil
+		return nil, false
 	}
 	for _, key := range keys {
 		if val, present := m[key]; present {
-			return val
+			return val, true
 		}
 	}
-	return nil
+	return nil, false
 }
 
 func (t TokenAccounting) Buckets() map[string]uint64 { return copyBuckets(t.buckets) }

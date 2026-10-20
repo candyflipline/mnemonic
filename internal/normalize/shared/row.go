@@ -8,6 +8,8 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
+const wholeFile = 1
+
 type Ctx struct {
 	SourceName        string
 	Harness           string
@@ -17,8 +19,6 @@ type Ctx struct {
 	SessionDate       string
 	Cwd               string
 	SourceFile        string
-	SourceInode       uint64
-	SourceGeneration  uint32
 	SourceLineNo      uint64
 	SourceOffset      uint64
 	RecordTS          string
@@ -70,7 +70,7 @@ type Emitter struct {
 func NewEmitter(ctx *Ctx) *Emitter { return &Emitter{Ctx: ctx} }
 
 func (c *Ctx) UID(fingerprint, suffix string) string {
-	return EventUID(c.SourceFile, c.SourceGeneration, c.SourceLineNo, c.SourceOffset, fingerprint, suffix)
+	return EventUID(c.SourceFile, c.SourceLineNo, c.SourceOffset, fingerprint, suffix)
 }
 
 func (c *Ctx) UIDForJSON(v JSON, suffix string) string {
@@ -78,7 +78,7 @@ func (c *Ctx) UIDForJSON(v JSON, suffix string) string {
 }
 
 func (c *Ctx) SourceRef() string {
-	return fmt.Sprintf("%s:%d:%d", c.SourceFile, c.SourceGeneration, c.SourceLineNo)
+	return fmt.Sprintf("%s:%d:%d", c.SourceFile, wholeFile, c.SourceLineNo)
 }
 
 func canonicalEventKind(value string) string {
@@ -128,8 +128,8 @@ func (e *Emitter) Event(eventUID, eventKind, payloadType, actorKind, textContent
 		Harness:               ctx.Harness,
 		InferenceProvider:     ctx.InferenceProvider,
 		SourceFile:            ctx.SourceFile,
-		SourceInode:           ctx.SourceInode,
-		SourceGeneration:      ctx.SourceGeneration,
+		SourceInode:           wholeFile,
+		SourceGeneration:      wholeFile,
 		SourceLineNo:          ctx.SourceLineNo,
 		SourceOffset:          ctx.SourceOffset,
 		SourceRef:             ctx.SourceRef(),

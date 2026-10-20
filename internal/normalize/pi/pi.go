@@ -55,5 +55,9 @@ func (piSource) SessionID(rec shared.JSON, sctx shared.SourceRecordContext) stri
 }
 
 func (piSource) Normalize(rec shared.JSON, ctx *shared.Ctx, topType, baseUID, modelHint string) *shared.Partials {
-	return pifamily.NormalizeRecord(rec, ctx, topType, baseUID, modelHint, pifamily.PI)
+	policy := pifamily.PI
+	if ctx.SourceName == "omp" {
+		policy = pifamily.OMP
+	}
+	return pifamily.NormalizeRecord(rec, ctx, topType, baseUID, modelHint, policy)
 }

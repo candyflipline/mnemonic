@@ -43,7 +43,7 @@ func TestGoldens(t *testing.T) {
 			}
 			defer f.Close()
 			events, err := p.Parse(f, normalize.SourceMeta{
-				SourceName: c.sourceName, Harness: c.harness, SourceFile: c.sourceFile, Generation: 1, Inode: 1,
+				SourceName: c.sourceName, Harness: c.harness, SourceFile: c.sourceFile,
 			})
 			if err != nil {
 				t.Fatal(err)

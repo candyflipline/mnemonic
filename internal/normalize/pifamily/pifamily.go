@@ -11,9 +11,12 @@ import (
 type Policy struct {
 	Harness         string
 	RawOnlyFallback bool
+	OMPTitles       bool
 }
 
 var PI = Policy{Harness: "pi-coding-agent"}
+
+var OMP = Policy{Harness: "pi-coding-agent", OMPTitles: true}
 
 var PRIME = Policy{Harness: "prime-agent", RawOnlyFallback: true}
 
@@ -61,9 +64,7 @@ func NormalizeRecord(rec shared.JSON, ctx *shared.Ctx, topType, baseUID, modelHi
 	case "session_info":
 		handleSessionInfo(rec, baseUID, em)
 	case "title", "title_change":
-		// The omp title shapes only exist for the omp source name; anything
-		// else follows the harness's own fallback.
-		if ctx.SourceName == "omp" {
+		if policy.OMPTitles {
 			handleOMPTitle(rec, topType, baseUID, em)
 		} else if !policy.RawOnlyFallback {
 			handleUnknown(rec, topType, baseUID, em)

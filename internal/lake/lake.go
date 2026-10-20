@@ -188,8 +188,6 @@ func parseAndWrite(db *sql.DB, dataDir string, key layout.Key, src manifest, par
 		SourceName: src.SourceName,
 		Harness:    src.Harness,
 		SourceFile: src.Path,
-		Generation: 1,
-		Inode:      1,
 	})
 	if err != nil {
 		return 0, err

@@ -6,14 +6,10 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-// SourceMeta is what a parser knows about the file besides its bytes. The
-// server always parses whole files, so Generation and Inode are 1.
 type SourceMeta struct {
 	SourceName string
 	Harness    string
 	SourceFile string
-	Generation uint32
-	Inode      uint64
 }
 
 type Parser interface {
