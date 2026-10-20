@@ -9,6 +9,7 @@ package query
 import (
 	"context"
 	"database/sql"
+	"sort"
 	"strings"
 )
 
@@ -25,31 +26,31 @@ type searchQuery struct {
 }
 
 type searchHit struct {
-	rank                    int
-	eventUID                string
-	sessionID               string
-	eventType               string
-	eventUnixMs             int64
-	turnSeq                 uint32
-	turnOrdinal             uint32
-	eventOrder              int64
-	eventOrdinal            uint32
-	turnEventCount          int64
-	turnCompleted           bool
-	turnTerminalEventUID    string
-	sessionStartedAtUnixMs  int64
-	sessionUpdatedAtUnixMs  int64
-	sessionTitle            string
-	sessionSummary          string
-	sessionSlug             string
-	sessionCompleted        bool
-	sourceName              string
-	harness                 string
-	inferenceProvider       string
-	snippet                 string
-	snippetTruncated        bool
-	score                   float64
-	rawScore                float64
+	rank                   int
+	eventUID               string
+	sessionID              string
+	eventType              string
+	eventUnixMs            int64
+	turnSeq                uint32
+	turnOrdinal            uint32
+	eventOrder             int64
+	eventOrdinal           uint32
+	turnEventCount         int64
+	turnCompleted          bool
+	turnTerminalEventUID   string
+	sessionStartedAtUnixMs int64
+	sessionUpdatedAtUnixMs int64
+	sessionTitle           string
+	sessionSummary         string
+	sessionSlug            string
+	sessionCompleted       bool
+	sourceName             string
+	harness                string
+	inferenceProvider      string
+	snippet                string
+	snippetTruncated       bool
+	score                  float64
+	rawScore               float64
 }
 
 type searchResult struct {
@@ -134,9 +135,15 @@ func searchMcpCandidates(ctx context.Context, db *sql.DB, q searchQuery, terms [
 	var filters []string
 	filters = append(filters,
 		"e.source_name != 'codex-mcp'",
-		"NOT "+mcpToolNamesPredicate("e.name"),
-		mcpEventTypeFilterClause("e.event_class", "e.payload_type", "e.actor_role", q.eventTypes),
+		"NOT "+mcpToolNamesPredicate("e.tool_name"),
 	)
+	// events carries the raw lake column names; the trace renames
+	// (event_kind->event_class, actor_kind->actor_role, tool_name->name)
+	// exist only in the view, so the filter clauses bind the raw names.
+	if len(q.eventTypes) > 0 {
+		filters = append(filters,
+			mcpEventTypeFilterClause("e.event_kind", "e.payload_type", "e.actor_kind", q.eventTypes))
+	}
 	if q.sessionOK {
 		filters = append(filters, "e.session_id = "+sqlQuote(q.sessionID))
 	}
@@ -155,7 +162,7 @@ func searchMcpCandidates(ctx context.Context, db *sql.DB, q searchQuery, terms [
 
 	sqlStr := `SELECT event_uid, session_id, raw_score, matched_terms, event_unix_ms FROM (
   SELECT p.event_uid AS event_uid,
-    any(e.session_id) AS session_id,
+    max(e.session_id) AS session_id,
     sum(ln(1.0 + ((greatest(cast((SELECT docs FROM corpus) AS DOUBLE), cast(s.df AS DOUBLE))
         - cast(s.df AS DOUBLE) + 0.5) / (cast(s.df AS DOUBLE) + 0.5)))
       * ((cast(p.tf AS DOUBLE) * 1.200000)
@@ -163,7 +170,7 @@ func searchMcpCandidates(ctx context.Context, db *sql.DB, q searchQuery, terms [
           + 0.750000 * (cast(d.doc_len AS DOUBLE)
             / greatest((SELECT avg_doc_len FROM corpus), 1.0)))))) AS raw_score,
     count(DISTINCT p.term) AS matched_terms,
-    max(epoch_ms(e.event_time)) AS event_unix_ms
+    coalesce(max(epoch_ms(e.event_ts)), 0) AS event_unix_ms
   FROM postings p
   JOIN term_stats s ON s.term = p.term
   JOIN docs d ON d.event_uid = p.event_uid
@@ -221,7 +228,8 @@ func hydrateMcpCandidates(ctx context.Context, db *sql.DB, rows []*mcpRow) error
 		uids[i] = r.eventUID
 		byUID[r.eventUID] = r
 	}
-	uidsSQL := "(" + strings.Join(quoteAll(uids), ", ") + ")"
+	// DuckDB list literal: unnest(['uid', ...]) yields the uid column.
+	uidsSQL := "[" + strings.Join(quoteAll(uids), ", ") + "]"
 
 	const detailSQL = `WITH cand AS (SELECT unnest(%UIDS%) AS event_uid),
 scope AS (
@@ -254,7 +262,7 @@ sess AS (
   GROUP BY session_id
 ),
 ord AS (
-  SELECT event_uid, event_order, turn_seq,
+  SELECT session_id, event_uid, event_order, turn_seq,
          row_number() OVER (PARTITION BY session_id, turn_seq ORDER BY event_order) AS event_ordinal
   FROM turn_rows
 )
@@ -296,14 +304,17 @@ JOIN sess ss ON ss.session_id = o.session_id`
 			&r.sessionStartedMs, &r.sessionUpdatedMs, &sessionCompleted); err != nil {
 			return err
 		}
-		_ = turnTerminal
 		r.turnCompleted = turnCompleted != 0
 		r.sessionCompleted = sessionCompleted != 0
 		r.turnTerminalUID = jsonAsString(turnTerminal)
 		// Upstream hydrates text_preview as leftUTF8(text_content, preview).
 		r.textPreview = truncateRunes(r.textContent, previewChars)
 		if existing, ok := byUID[r.eventUID]; ok {
+			// The candidate pass supplied the ranking inputs; the hydration
+			// pass must not wipe them.
+			rawScore, matched := existing.rawScore, existing.matchedTerm
 			*existing = r
+			existing.rawScore, existing.matchedTerm = rawScore, matched
 		}
 	}
 	return rs.Err()
@@ -319,7 +330,8 @@ func truncateRunes(s string, n int) string {
 
 // sortMcpRows ports sort_search_mcp_event_rows.
 func sortMcpRows(rows []*mcpRow) {
-	sortSliceStable(rows, func(a, b *mcpRow) bool {
+	sort.SliceStable(rows, func(i, j int) bool {
+		a, b := rows[i], rows[j]
 		if a.rawScore != b.rawScore {
 			return a.rawScore > b.rawScore
 		}
@@ -389,11 +401,15 @@ func codexFinalAnswerMirrors(a, b *mcpRow) bool {
 	if orderDelta < 0 {
 		orderDelta = -orderDelta
 	}
+	lineDelta := aRef.line - bRef.line
+	if aRef.line < bRef.line {
+		lineDelta = bRef.line - aRef.line
+	}
 	return a.harness == "codex" && b.harness == "codex" &&
 		a.sourceName != "" && a.sourceName == b.sourceName &&
 		pair(a, b) && isFinalAnswer(a) && isFinalAnswer(b) &&
 		aRef.file == bRef.file && aRef.generation == bRef.generation &&
-		abs64(aRef.line-bRef.line) == 1 && orderDelta == 1 && delta <= codexMirrorMaxDeltaMs
+		lineDelta == 1 && orderDelta == 1 && delta <= codexMirrorMaxDeltaMs
 }
 
 type sourceRefParts struct {
@@ -405,8 +421,6 @@ type sourceRefParts struct {
 // parseMcpSourceRef splits "file:generation:line".
 func parseMcpSourceRef(s string) (sourceRefParts, bool) {
 	fileAndGen, line, ok1 := strings.Cut(s, ":")
-	rev := func(x, y string) (string, string) { return x, y }
-	_, _ = rev
 	var parts sourceRefParts
 	file, gen, ok2 := func() (string, string, bool) {
 		i := strings.LastIndex(fileAndGen, ":")
@@ -440,13 +454,6 @@ func parseUint(s string) uint64 {
 	var n uint64
 	for _, c := range s {
 		n = n*10 + uint64(c-'0')
-	}
-	return n
-}
-
-func abs64(n int64) int64 {
-	if n < 0 {
-		return -n
 	}
 	return n
 }

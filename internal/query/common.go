@@ -293,6 +293,10 @@ var allEventTypes = []string{
 // search filter is emitted in.
 var searchableEventTypes = allEventTypes[:8]
 
+// searchDefaults is McpEventType::search_defaults(): the effective filter when
+// the caller omits event_types.
+var searchDefaults = []string{"user_input", "assistant_response"}
+
 func isSearchableEventType(name string) bool {
 	for _, t := range searchableEventTypes {
 		if t == name {

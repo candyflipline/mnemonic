@@ -33,12 +33,12 @@ type canonicalSearchSessionsArgs struct {
 // the upstream contract text.
 func parseSearchSessionsArgs(raw json.RawMessage) (canonicalSearchSessionsArgs, error) {
 	var args struct {
-		Query      *string           `json:"query"`
-		WithinID   *string           `json:"within_id"`
-		EventTypes []string          `json:"event_types"`
-		Harness    *string           `json:"harness"`
-		Source     *string           `json:"source"`
-		NHits      *int              `json:"n_hits"`
+		Query      *string   `json:"query"`
+		WithinID   *string   `json:"within_id"`
+		EventTypes *[]string `json:"event_types"`
+		Harness    *string   `json:"harness"`
+		Source     *string   `json:"source"`
+		NHits      *int      `json:"n_hits"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return canonicalSearchSessionsArgs{}, argErrorf(
@@ -70,9 +70,16 @@ func parseSearchSessionsArgs(raw json.RawMessage) (canonicalSearchSessionsArgs, 
 		a.withinID = &id
 	}
 
+	// Absent event_types falls back to search_defaults(); only a
+	// present-but-empty array is an error (contract.rs
+	// SearchSessionsArgs::validate).
 	var err error
-	if a.eventTypes, err = canonicalizeSearchEventTypeNames(args.EventTypes); err != nil {
-		return canonicalSearchSessionsArgs{}, err
+	if args.EventTypes != nil {
+		if a.eventTypes, err = canonicalizeSearchEventTypeNames(*args.EventTypes); err != nil {
+			return canonicalSearchSessionsArgs{}, err
+		}
+	} else {
+		a.eventTypes = append([]string(nil), searchDefaults...)
 	}
 	if a.harness, err = normalizeOptionalFilter("harness", args.Harness); err != nil {
 		return canonicalSearchSessionsArgs{}, err
@@ -134,15 +141,20 @@ func (searchSessionsTool) Call(ctx context.Context, db *sql.DB, raw json.RawMess
 	}
 	request := args.requestShape()
 
-	result, err := searchMcpEvents(ctx, db, searchQuery{
+	q := searchQuery{
 		query:      args.query,
 		nHits:      args.nHits,
-		sessionID:  scopeSessionID(args.withinID),
-		turnSeq:    scopeTurnSeq(args.withinID),
 		eventTypes: args.eventTypes,
 		harness:    args.harness,
 		sourceName: args.source,
-	})
+	}
+	if args.withinID != nil {
+		q.sessionID, q.sessionOK = args.withinID.session, true
+		if args.withinID.kind == kindTurn {
+			q.turnSeq, q.turnOK = args.withinID.turnSeq, true
+		}
+	}
+	result, err := searchMcpEvents(ctx, db, q)
 	if err != nil {
 		return nil, "", err
 	}
@@ -172,20 +184,6 @@ func (searchSessionsTool) Call(ctx context.Context, db *sql.DB, raw json.RawMess
 	}
 	text := formatSearchSessionsText(request, data)
 	return data, text, nil
-}
-
-func scopeSessionID(id *mcpID) (string, bool) {
-	if id == nil {
-		return "", false
-	}
-	return id.session, true
-}
-
-func scopeTurnSeq(id *mcpID) (uint32, bool) {
-	if id == nil || id.kind != kindTurn {
-		return 0, false
-	}
-	return id.turnSeq, true
 }
 
 // searchHitJSON ports search_sessions_v1.rs search_hit_json.
