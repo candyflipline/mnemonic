@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -136,6 +137,11 @@ func buildFile(path, dataDir string, lakeFiles int) (Stats, error) {
 		return Stats{}, err
 	}
 	defer db.Close()
+	// Views compute event_time at query time, so the querying session's zone
+	// must match the build's; UTC is pinned on both sides (see OpenNewest).
+	if _, err := db.Exec(`SET TimeZone='UTC'`); err != nil {
+		return Stats{}, err
+	}
 	for _, stmt := range []string{
 		eventsDDL(),
 		insertEvents(dataDir, lakeFiles),
@@ -227,17 +233,20 @@ const emissionExpr = "coalesce(try_cast(json_extract_string(payload_json, '$.mor
 // traceDDL ports docs/clickhouse/v_conversation_trace.sql; the v_all_events
 // renames (origin_event_id->compacted_parent_uid, actor_kind->actor_role,
 // event_kind->event_class, tool_call_id->call_id, tool_name->name,
-// turn_index->turn_id, phase=tool_phase or op_status) are inlined. DuckDB
-// TRY_CAST covers what ClickHouse's parseDateTime64BestEffortOrNull and
-// toUInt32OrZero accept, and json_extract_string+TRY_CAST replaces
-// JSONExtractUInt (NULL or non-numeric -> 0).
+// turn_index->turn_id, phase=tool_phase or op_status) are inlined. event_time
+// mirrors parseDateTime64BestEffortOrNull: TIMESTAMPTZ parsing honors a
+// trailing Z or numeric offset, and the connection runs with TimeZone='UTC'
+// so zoneless record_ts reads as UTC. json_extract_string+TRY_CAST replaces
+// JSONExtractUInt (NULL or non-numeric -> 0), try_cast(x AS UINTEGER)
+// replaces toUInt32OrZero.
 var traceDDL = fmt.Sprintf(`
 CREATE VIEW trace AS
 WITH base AS (
     SELECT session_id, session_date, event_uid,
            origin_event_id AS compacted_parent_uid,
            source_file, source_generation, source_line_no, source_offset, source_ref,
-           coalesce(try_cast(record_ts AS TIMESTAMP), ingested_at) AS event_time,
+           coalesce(try_cast(record_ts AS TIMESTAMPTZ), ingested_at AT TIME ZONE 'UTC')
+               AT TIME ZONE 'UTC' AS event_time,
            cast(turn_index AS VARCHAR) AS turn_id,
            actor_kind AS actor_role,
            event_kind AS event_class,
@@ -284,27 +293,30 @@ SELECT session_id,
 FROM trace
 GROUP BY session_id`
 
-// The BM25 inputs follow docs/clickhouse/mv_search_postings.sql: doc_len
-// counts every token, postings keep only 2..64 char terms, and docs are the
-// events with at least one token.
+// The BM25 inputs follow docs/clickhouse/mv_search_postings.sql with
+// schema.sql's term definition: a term is a 2..64 char token of
+// lower(text_content), doc_len counts only terms, and docs are the events
+// with at least one term. docs, postings and the query-side scorer must use
+// the same definition.
+
+const tokenList = "list_filter(regexp_extract_all(lower(text_content), '[a-z0-9_]+'), tok -> len(tok) >= 2 AND len(tok) <= 64)"
 
 const docsDDL = `
 CREATE TABLE docs AS
 SELECT event_uid, cast(n AS UINTEGER) AS doc_len
-FROM (SELECT event_uid, len(regexp_extract_all(lower(text_content), '[a-z0-9_]+')) AS n FROM events)
+FROM (SELECT event_uid, len(` + tokenList + `) AS n FROM events)
 WHERE n > 0`
 
 const postingsDDL = `
 CREATE TABLE postings AS
 SELECT term, event_uid, cast(count(*) AS USMALLINT) AS tf
-FROM (SELECT event_uid, unnest(regexp_extract_all(lower(text_content), '[a-z0-9_]+')) AS term FROM events)
-WHERE length(term) >= 2 AND length(term) <= 64
+FROM (SELECT event_uid, unnest(` + tokenList + `) AS term FROM events)
 GROUP BY term, event_uid
 ORDER BY term`
 
 const termStatsDDL = `
 CREATE TABLE term_stats AS
-SELECT term, cast(count(*) AS UBIGINT) AS docs
+SELECT term, cast(count(*) AS UBIGINT) AS df
 FROM postings
 GROUP BY term`
 
@@ -328,12 +340,21 @@ const sourcesDDL = `CREATE TABLE sources (
     events UBIGINT NOT NULL
 )`
 
+// lakeFileRe parses a lake parquet path: the hive prefix and src_id. src_id
+// alone is not unique — two authors or machines can hold the same client
+// path — so row counts key on the full source identity.
+var lakeFileRe = regexp.MustCompile(`author=([^/]*)/machine=([^/]*)/harness=([^/]*)/([0-9a-f]+)\.parquet$`)
+
+type sourceKey struct {
+	author, machine, harness, srcID string
+}
+
 // insertSources loads the manifest files and counts each source's parquet
 // rows; a manifest without a parquet (no parser for that harness) has 0.
 func insertSources(db *sql.DB, dataDir string) error {
-	counts := map[string]int64{}
+	counts := map[sourceKey]int64{}
 	if paths, _ := filepath.Glob(filepath.Join(dataDir, layout.EventsGlob)); len(paths) > 0 {
-		rows, err := db.Query("SELECT parse_filename(filename), count(*) FROM read_parquet(" +
+		rows, err := db.Query("SELECT filename, count(*) FROM read_parquet(" +
 			sqlStr(filepath.Join(dataDir, layout.EventsGlob)) + ", filename=true, hive_partitioning=false) GROUP BY 1")
 		if err != nil {
 			return err
@@ -345,7 +366,12 @@ func insertSources(db *sql.DB, dataDir string) error {
 				rows.Close()
 				return err
 			}
-			counts[strings.TrimSuffix(name, ".parquet")] = n
+			m := lakeFileRe.FindStringSubmatch(filepath.ToSlash(name))
+			if m == nil {
+				rows.Close()
+				return fmt.Errorf("lake parquet outside the source layout: %s", name)
+			}
+			counts[sourceKey{m[1], m[2], m[3], m[4]}] = n
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -380,8 +406,9 @@ func insertSources(db *sql.DB, dataDir string) error {
 		author, _ := strings.CutPrefix(parts[1], "author=")
 		machine, _ := strings.CutPrefix(parts[2], "machine=")
 		harness, _ := strings.CutPrefix(parts[3], "harness=")
+		k := sourceKey{author, machine, harness, src.SrcID}
 		if _, err := stmt.Exec(author, machine, harness, src.SourceName, src.Path,
-			src.SrcID, src.Size, src.HeadHash, src.UpdatedMs, counts[src.SrcID]); err != nil {
+			src.SrcID, src.Size, src.HeadHash, src.UpdatedMs, counts[k]); err != nil {
 			return err
 		}
 	}
@@ -400,6 +427,10 @@ func OpenNewest(dataDir string) (*sql.DB, string, error) {
 	path := caches[len(caches)-1].path
 	db, err := sql.Open("duckdb", path+"?access_mode=READ_ONLY")
 	if err != nil {
+		return nil, "", err
+	}
+	if _, err := db.Exec(`SET TimeZone='UTC'`); err != nil {
+		db.Close()
 		return nil, "", err
 	}
 	if err := db.Ping(); err != nil {

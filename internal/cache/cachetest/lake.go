@@ -56,15 +56,32 @@ func Lake(dataDir string, goldens ...string) error {
 	defer os.RemoveAll(tmp)
 
 	for _, name := range goldens {
-		if err := writeSource(db, tmp, dir, dataDir, name); err != nil {
+		raw, err := os.ReadFile(filepath.Join(dir, name+".json"))
+		if err != nil {
+			return err
+		}
+		var g golden
+		if err := json.Unmarshal(raw, &g); err != nil {
+			return err
+		}
+		k := layout.Key{Author: Author, Machine: Machine, Harness: g.Harness}
+		k.SrcID = wire.SrcID(g.SourceFile)
+		if err := writeSource(db, tmp, dataDir, k, g, name); err != nil {
 			return err
 		}
 	}
 	return db.Close()
 }
 
-func writeSource(db *sql.DB, tmp, goldensDir, dataDir, name string) error {
-	raw, err := os.ReadFile(filepath.Join(goldensDir, name+".json"))
+// Source writes one golden at an explicit layout key, so tests can place the
+// same source under several authors or machines. An empty k.SrcID is derived
+// from the golden's source_file.
+func Source(dataDir string, k layout.Key, goldenName string) error {
+	dir, err := goldensDir()
+	if err != nil {
+		return err
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, goldenName+".json"))
 	if err != nil {
 		return err
 	}
@@ -72,8 +89,33 @@ func writeSource(db *sql.DB, tmp, goldensDir, dataDir, name string) error {
 	if err := json.Unmarshal(raw, &g); err != nil {
 		return err
 	}
-	srcID := wire.SrcID(g.SourceFile)
-	key := layout.Key{Author: Author, Machine: Machine, Harness: g.Harness, SrcID: srcID}
+	if k.Author == "" {
+		k.Author = Author
+	}
+	if k.Machine == "" {
+		k.Machine = Machine
+	}
+	if k.Harness == "" {
+		k.Harness = g.Harness
+	}
+	if k.SrcID == "" {
+		k.SrcID = wire.SrcID(g.SourceFile)
+	}
+	db, err := sql.Open("duckdb", ":memory:")
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	tmp, err := os.MkdirTemp("", "cachetest")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	return writeSource(db, tmp, dataDir, k, g, goldenName)
+}
+
+func writeSource(db *sql.DB, tmp, dataDir string, k layout.Key, g golden, name string) error {
+	srcID := k.SrcID
 
 	var rows []map[string]json.RawMessage
 	sourceName := name
@@ -86,8 +128,8 @@ func writeSource(db *sql.DB, tmp, goldensDir, dataDir, name string) error {
 			if json.Unmarshal(row["source_name"], &src) == nil && src != "" {
 				sourceName = src
 			}
-			row["author"] = json.RawMessage(`"test"`)
-			row["machine_id"] = json.RawMessage(`"m1"`)
+			row["author"] = json.RawMessage(sqlJSONString(k.Author))
+			row["machine_id"] = json.RawMessage(sqlJSONString(k.Machine))
 			row["ingested_at"] = json.RawMessage(`"` + IngestedAt + `"`)
 			rows = append(rows, row)
 		}
@@ -107,19 +149,19 @@ func writeSource(db *sql.DB, tmp, goldensDir, dataDir, name string) error {
 		return err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(key.Events(dataDir)), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(k.Events(dataDir)), 0o755); err != nil {
 		return err
 	}
 	if _, err := db.Exec("COPY (SELECT " + strings.Join(readCols(), ", ") + " FROM read_json(" +
 		sqlStr(nd) + ", format='newline_delimited', columns=" + jsonColumns() + ")) TO " +
-		sqlStr(key.Events(dataDir)) + " (FORMAT parquet, COMPRESSION zstd)"); err != nil {
+		sqlStr(k.Events(dataDir)) + " (FORMAT parquet, COMPRESSION zstd)"); err != nil {
 		return fmt.Errorf("%s: %w", name, err)
 	}
-	if err := os.MkdirAll(filepath.Dir(key.Manifest(dataDir)), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(k.Manifest(dataDir)), 0o755); err != nil {
 		return err
 	}
 	src := wire.Source{
-		SrcID: srcID, Harness: g.Harness, SourceName: sourceName, Path: g.SourceFile,
+		SrcID: srcID, Harness: k.Harness, SourceName: sourceName, Path: g.SourceFile,
 		Size: int64(lines.Len()), HeadHash: strings.Repeat("0", 64), UpdatedMs: 1767225600000,
 	}
 	b, err := json.Marshal(struct {
@@ -129,7 +171,12 @@ func writeSource(db *sql.DB, tmp, goldensDir, dataDir, name string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(key.Manifest(dataDir), b, 0o644)
+	return os.WriteFile(k.Manifest(dataDir), b, 0o644)
+}
+
+func sqlJSONString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }
 
 // readCols casts every JSON field to its lake type; column order is the lake
