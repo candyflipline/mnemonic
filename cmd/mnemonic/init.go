@@ -16,8 +16,6 @@ import (
 
 const launchdLabel = "com.mnemonic.push"
 
-// machineRe mirrors the check config.LoadClient applies, so a bad --machine
-// fails here at setup instead of on the teammate's first push.
 func initCmd(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	server := fs.String("server", "", "base URL of the mnemonic server (required)")
