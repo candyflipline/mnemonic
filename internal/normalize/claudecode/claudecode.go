@@ -4,7 +4,6 @@
 package claudecode
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -20,51 +19,9 @@ type Parser struct{}
 
 func (Parser) Harness() string { return "claude-code" }
 
-// Parse walks the file line by line, threading session, model and cwd hints
-// from each normalized record into the next. Lines that are blank or not
-// valid JSON are skipped; only a reader failure fails the file.
+// Parse walks the file line by line through the shared JSONL loop.
 func (Parser) Parse(r io.Reader, src normalize.SourceMeta) ([]schema.Event, error) {
-	body, err := io.ReadAll(r)
-	if err != nil {
-		return nil, err
-	}
-	var events []schema.Event
-	var sessionHint, modelHint, cwdHint string
-	rest, offset, lineNo := body, uint64(0), uint64(0)
-	for len(rest) > 0 {
-		var raw []byte
-		if i := bytes.IndexByte(rest, '\n'); i >= 0 {
-			raw, rest = rest[:i+1], rest[i+1:]
-		} else {
-			raw, rest = rest, nil
-		}
-		lineNo++
-		trimmed := bytes.TrimSpace(raw)
-		if len(trimmed) == 0 {
-			continue
-		}
-		rec, err := shared.DecodeJSON(trimmed)
-		if err != nil {
-			continue
-		}
-		out := shared.NormalizeRecord(rec, claudeSource{}, shared.RecordParams{
-			SourceName:       src.SourceName,
-			SourceFile:       src.SourceFile,
-			SourceInode:      src.Inode,
-			SourceGeneration: src.Generation,
-			SourceLineNo:     lineNo,
-			SourceOffset:     offset,
-			SessionHint:      sessionHint,
-			ModelHint:        modelHint,
-			CwdHint:          cwdHint,
-		})
-		sessionHint, modelHint, cwdHint = out.SessionHint, out.ModelHint, out.CwdHint
-		for _, row := range out.Events {
-			events = append(events, row.Event)
-		}
-		offset += uint64(len(raw))
-	}
-	return events, nil
+	return shared.ParseJSONL(r, src, claudeSource{})
 }
 
 func init() { normalize.Register(Parser{}) }
