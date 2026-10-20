@@ -74,14 +74,6 @@ func (primeSource) Normalize(rec shared.JSON, ctx *shared.Ctx, topType, baseUID,
 		return &shared.Partials{}
 	}
 
-	// pifamily at this lane's base (4054826) predates the session_info case
-	// (upstream pi_family.rs:68, fixed on origin/lane/pi in fd59c51). Emit
-	// the same row here; once the branches reconcile this special case goes
-	// away and session_info delegates like every other record.
-	if topType == "session_info" {
-		return sessionInfo(rec, baseUID, ctx)
-	}
-
 	partials := pifamily.NormalizeRecord(rec, ctx, topType, baseUID, modelHint, pifamily.PRIME)
 
 	if ctx.SourceName != subagentSourceName {
@@ -93,18 +85,6 @@ func (primeSource) Normalize(rec shared.JSON, ctx *shared.Ctx, topType, baseUID,
 	// The subagent_parent link row (session records with rlmDepth > 0) is
 	// not kept in this port.
 	return partials
-}
-
-// sessionInfo mirrors upstream handle_pi_session_info verbatim; see the
-// comment in Normalize for why it lives here for now.
-func sessionInfo(rec shared.JSON, baseUID string, ctx *shared.Ctx) *shared.Partials {
-	em := shared.NewEmitter(ctx)
-	row := em.EventForJSON(baseUID, "session_meta", "session_meta", "system",
-		shared.ToStr(shared.Get(rec, "name")), rec)
-	row.Event.ItemID = shared.ToStr(shared.Get(rec, "id"))
-	row.Event.OpKind = "session_info"
-	em.PushEvent(row)
-	return &em.Partials
 }
 
 // primeRecordCanDelegate mirrors upstream prime_record_can_delegate: prime
