@@ -223,3 +223,26 @@ func touch(t *testing.T, dataDir string) {
 		}
 	}
 }
+
+func TestBuildRemovesKilledBuildLeftovers(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := cachetest.Lake(dataDir, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	dir := layout.CacheDir(dataDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"cache-1.duckdb.tmp", "cache-1.duckdb.tmp.wal", "archive-x.duckdb.tmp"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("partial"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := Build(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	left, _ := filepath.Glob(filepath.Join(dir, "*.tmp*"))
+	if len(left) != 0 {
+		t.Fatalf("leftovers after build: %v", left)
+	}
+}

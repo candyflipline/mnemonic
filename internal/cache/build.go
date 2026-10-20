@@ -48,7 +48,21 @@ func Build(dataDir string) (Stats, error) {
 	if err := os.MkdirAll(layout.CacheDir(dataDir), 0o755); err != nil {
 		return Stats{}, err
 	}
+	// Build has one caller, the serve loop, so any partial file here belongs
+	// to a build a restart killed.
+	leftovers, err := filepath.Glob(filepath.Join(layout.CacheDir(dataDir), "*.tmp*"))
+	if err != nil {
+		return Stats{}, err
+	}
+	for _, l := range leftovers {
+		if err := os.Remove(l); err != nil {
+			return Stats{}, err
+		}
+	}
 	spill := filepath.Join(layout.CacheDir(dataDir), "spill")
+	if err := os.RemoveAll(spill); err != nil {
+		return Stats{}, err
+	}
 	if err := os.MkdirAll(spill, 0o755); err != nil {
 		return Stats{}, err
 	}
