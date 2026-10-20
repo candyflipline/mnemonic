@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -257,28 +258,16 @@ func hasEncryptedContentField(text string) bool {
 	}
 }
 
-// mcpEventType names, in upstream McpEventType declaration order.
-var allEventTypes = []string{
-	"user_input", "assistant_response", "reasoning", "tool_call", "tool_response",
-	"compaction", "system", "runtime", "unknown",
-}
-
 // searchableEventTypes is the canonical order the search filter is emitted in.
-var searchableEventTypes = allEventTypes[:8]
+var searchableEventTypes = []string{
+	"user_input", "assistant_response", "reasoning", "tool_call", "tool_response",
+	"compaction", "system", "runtime",
+}
 
 var searchDefaults = []string{"user_input", "assistant_response"}
 
 func isSearchableEventType(name string) bool {
 	for _, t := range searchableEventTypes {
-		if t == name {
-			return true
-		}
-	}
-	return false
-}
-
-func isValidEventType(name string) bool {
-	for _, t := range allEventTypes {
 		if t == name {
 			return true
 		}
@@ -292,7 +281,7 @@ func canonicalizeSearchEventTypeNames(names []string) ([]string, error) {
 	}
 	selected := map[string]bool{}
 	for _, raw := range names {
-		if !isValidEventType(raw) || !isSearchableEventType(raw) {
+		if !isSearchableEventType(raw) {
 			return nil, argErrorf("unsupported event type: %s", raw)
 		}
 		selected[raw] = true
@@ -478,15 +467,34 @@ func mcpEventTypeFilterClause(class, payload, actor string, eventTypes []string)
 	return "(" + strings.Join(clauses, " OR ") + ")"
 }
 
-// mcpToolNamesPredicate ports the upstream clickhouse/src/mcp_tool_names.rs
-// sql_predicate: the internal tool names, bare or mcp__<server>__-qualified
-// (transcripts say either server name).
-func mcpToolNamesPredicate(column string) string {
-	const names = "'search', 'search_sessions', 'open', 'list_sessions', 'file_attention'"
+var mcpInternalToolNames = []string{"search", "search_sessions", "open", "list_sessions", "file_attention"}
+
+const (
+	mcpServerName       = "mnemonic"
+	legacyMcpServerName = "moraine"
+)
+
+func isMcpInternalToolName(name string) bool {
+	n := strings.ToLower(strings.TrimSpace(name))
+	if slices.Contains(mcpInternalToolNames, n) {
+		return true
+	}
+	parts := strings.Split(n, "__")
+	return len(parts) == 3 && parts[0] == "mcp" &&
+		(parts[1] == legacyMcpServerName || parts[1] == mcpServerName) &&
+		slices.Contains(mcpInternalToolNames, parts[2])
+}
+
+func mcpInternalToolPredicate(column string) string {
+	quoted := make([]string, len(mcpInternalToolNames))
+	for i, n := range mcpInternalToolNames {
+		quoted[i] = sqlQuote(n)
+	}
+	names := strings.Join(quoted, ", ")
 	norm := "lower(trim(" + column + "))"
 	parts := "str_split(" + norm + ", '__')"
 	return "(" + norm + " IN (" + names + ") OR (len(" + parts + ") = 3 AND " +
-		"list_extract(" + parts + ", 1) = 'mcp' AND list_extract(" + parts + ", 2) IN ('moraine', 'mnemonic') AND " +
+		"list_extract(" + parts + ", 1) = 'mcp' AND list_extract(" + parts + ", 2) IN (" + sqlQuote(legacyMcpServerName) + ", " + sqlQuote(mcpServerName) + ") AND " +
 		"list_extract(" + parts + ", 3) IN (" + names + ")))"
 }
 

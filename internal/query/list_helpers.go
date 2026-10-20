@@ -152,24 +152,6 @@ func qTurnID(sessionID string, turnSeq uint32) string {
 	return "turn:" + qB64URL([]byte(sessionID)) + ":" + fmt.Sprint(turnSeq)
 }
 
-// qInternalToolNames ports the upstream clickhouse mcp_tool_names::INTERNAL_TOOL_NAMES.
-var qInternalToolNames = []string{"search", "search_sessions", "open", "list_sessions", "file_attention"}
-
-// qInternalToolPredicate ports mcp_tool_names::sql_predicate for a trusted
-// column expression: bare internal names and mcp__<server>__<leaf> aliases
-// (transcripts say either server name).
-func qInternalToolPredicate(column string) string {
-	norm := fmt.Sprintf("lower(trim(%s))", column)
-	parts := fmt.Sprintf("string_split(%s, '__')", norm)
-	names := make([]string, 0, len(qInternalToolNames))
-	for _, n := range qInternalToolNames {
-		names = append(names, qQuote(n))
-	}
-	leafIn := strings.Join(names, ", ")
-	return fmt.Sprintf("(%s IN (%s) OR (len(%s) = 3 AND %s[1] = 'mcp' AND %s[2] IN ('moraine', 'mnemonic') AND %s[3] IN (%s)))",
-		norm, leafIn, parts, parts, parts, parts, leafIn)
-}
-
 func qProjectIDForRoot(root string) string {
 	if common, ok := qGitCommonDir(root); ok {
 		return qProjectIDForPath("moraine-git-common-dir\x00", "git", common)

@@ -17,7 +17,7 @@ func lsModeAggregate() string {
 		"  WHEN count(*) FILTER (WHERE payload_type = 'web_search_call'\n" +
 		"    OR payload_type = 'search_results_received'\n" +
 		"    OR (payload_type = 'tool_use' AND tool_name IN ('WebSearch', 'WebFetch'))) > 0 THEN 'web_search'\n" +
-		"  WHEN count(*) FILTER (WHERE source_name = 'codex-mcp' OR " + qInternalToolPredicate("tool_name") + ") > 0 THEN 'mcp_internal'\n" +
+		"  WHEN count(*) FILTER (WHERE source_name = 'codex-mcp' OR " + mcpInternalToolPredicate("tool_name") + ") > 0 THEN 'mcp_internal'\n" +
 		"  WHEN count(*) FILTER (WHERE event_kind IN ('tool_call', 'tool_result') OR payload_type = 'tool_use') > 0 THEN 'tool_calling'\n" +
 		"  ELSE 'chat' END"
 }

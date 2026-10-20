@@ -126,7 +126,7 @@ func searchMcpCandidates(ctx context.Context, db *sql.DB, q searchQuery, terms [
 	var filters []string
 	filters = append(filters,
 		"e.source_name != 'codex-mcp'",
-		"NOT "+mcpToolNamesPredicate("e.tool_name"),
+		"NOT "+mcpInternalToolPredicate("e.tool_name"),
 	)
 	// events carries the raw lake column names; the trace renames
 	// (event_kind->event_class, actor_kind->actor_role, tool_name->name)

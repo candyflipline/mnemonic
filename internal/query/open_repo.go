@@ -625,21 +625,3 @@ func modeFromRank(rank uint8) string {
 		return "chat"
 	}
 }
-
-// isMcpInternalToolName ports the upstream clickhouse/src/mcp_tool_names.rs
-// is_mcp_internal_tool_name (the Go twin of the SQL predicate in common.go).
-func isMcpInternalToolName(name string) bool {
-	n := strings.ToLower(strings.TrimSpace(name))
-	if n == "" {
-		return false
-	}
-	const names = "search\x00search_sessions\x00open\x00list_sessions\x00file_attention"
-	if strings.Contains("\x00"+names+"\x00", "\x00"+n+"\x00") {
-		return true
-	}
-	parts := strings.Split(n, "__")
-	if len(parts) != 3 || parts[0] != "mcp" || (parts[1] != "moraine" && parts[1] != "mnemonic") {
-		return false
-	}
-	return strings.Contains("\x00"+names+"\x00", "\x00"+parts[2]+"\x00")
-}
