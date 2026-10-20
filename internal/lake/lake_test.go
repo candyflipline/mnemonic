@@ -174,7 +174,7 @@ func TestRun(t *testing.T) {
 	}
 
 	var uid, author, machine string
-	if err := db.QueryRow("SELECT event_uid, author, machine_id FROM read_parquet(" + sqlQuote(p1) + ") WHERE source_line_no = 1").
+	if err := db.QueryRow("SELECT event_uid, author, machine_id FROM read_parquet("+sqlQuote(p1)+") WHERE source_line_no = 1").
 		Scan(&uid, &author, &machine); err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +306,7 @@ func TestImportClickHouse(t *testing.T) {
 	}
 	var sourceFile, machineID, auth string
 	var ingested time.Time
-	if err := db.QueryRow("SELECT source_file, machine_id, author, ingested_at FROM read_parquet(" + sqlQuote(out) + ")").
+	if err := db.QueryRow("SELECT source_file, machine_id, author, ingested_at FROM read_parquet("+sqlQuote(out)+")").
 		Scan(&sourceFile, &machineID, &auth, &ingested); err != nil {
 		t.Fatal(err)
 	}
