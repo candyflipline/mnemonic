@@ -55,9 +55,10 @@ func (listSessions) Call(ctx context.Context, db *sql.DB, args json.RawMessage) 
 // lsParseArgs ports parse_list_sessions_args + ListSessionsArgs::validate.
 // Every serde-level failure carries the same upstream message.
 func lsParseArgs(raw json.RawMessage) (*lsArgs, error) {
-	fields, err := lsObjectFields(raw)
+	fields, err := lsObjectFields(raw,
+		"start_datetime", "end_datetime", "limit", "cursor", "mode", "harness", "source", "sort")
 	if err != nil {
-		return nil, err
+		return nil, lsSerdeError()
 	}
 	var in struct {
 		start, end   *string
@@ -181,10 +182,22 @@ func derefStr(s *string) string {
 
 // lsObjectFields decodes a JSON object's top-level fields, rejecting
 // non-objects and unknown fields the way serde's deny_unknown_fields does.
-func lsObjectFields(raw json.RawMessage) (map[string]json.RawMessage, error) {
+func lsObjectFields(raw json.RawMessage, allowed ...string) (map[string]json.RawMessage, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
 		return nil, err
+	}
+	for key := range fields {
+		ok := false
+		for _, a := range allowed {
+			if key == a {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return nil, qErr("unknown field %q", key)
+		}
 	}
 	return fields, nil
 }
@@ -340,18 +353,18 @@ func lsDataJSON(a *lsArgs, page *lsPage) map[string]any {
 			"id":   id,
 			"session": map[string]any{
 				"id":              id,
-				"title":           item.Title,
+				"title":           nilPtr(item.Title),
 				"display_label":   item.DisplayLabel,
-				"harness":         item.Harness,
-				"source":          item.Source,
+				"harness":         nilPtr(item.Harness),
+				"source":          nilPtr(item.Source),
 				"started_at":      qFormatMillis(item.FirstEventUnixMs),
 				"updated_at":      qFormatMillis(item.LastEventUnixMs),
 				"completed":       item.Completed,
 				"turn_count":      item.TotalTurns,
 				"event_count":     item.TotalEvents,
 				"mode":            item.Mode,
-				"session_slug":    item.SessionSlug,
-				"session_summary": item.SessionSummary,
+				"session_slug":    nilPtr(item.SessionSlug),
+				"session_summary": nilPtr(item.SessionSummary),
 			},
 			"open": map[string]any{"session_id": id},
 		})
@@ -361,8 +374,17 @@ func lsDataJSON(a *lsArgs, page *lsPage) map[string]any {
 		"limit":        a.Limit,
 		"truncated":    page.NextCursor != nil,
 		"sessions":     sessions,
-		"next_cursor":  page.NextCursor,
+		"next_cursor":  nilPtr(page.NextCursor),
 	}
+}
+
+// nilPtr erases a typed nil pointer to untyped nil, matching how the
+// upstream Option serializes; it also lets text checks type-assert strings.
+func nilPtr[T any](p *T) any {
+	if p == nil {
+		return nil
+	}
+	return *p
 }
 
 // lsText ports format_list_sessions_text.
@@ -401,22 +423,32 @@ func stringAt(m map[string]any, key string) string {
 }
 
 func intAt(m map[string]any, key string) int {
-	if m == nil {
-		return 0
-	}
-	n, _ := m[key].(int)
+	n, _ := intAtOK(m, key)
 	return n
+}
+
+func intAtOK(m map[string]any, key string) (int, bool) {
+	if m == nil {
+		return 0, false
+	}
+	n, ok := m[key].(int)
+	return n, ok
 }
 
 func sprintf(format string, args ...any) string { return fmt.Sprintf(format, args...) }
 
-// stringOr reads m[outer][inner] with a fallback.
+// stringOr reads m[outer][inner] with a fallback. Presence, not emptiness,
+// decides: an empty string is still a value (Rust's unwrap_or fires on None).
 func stringOr(m map[string]any, outer, inner, fallback string) string {
 	if m == nil {
 		return fallback
 	}
 	innerMap, _ := m[outer].(map[string]any)
-	if s := stringAt(innerMap, inner); s != "" {
+	if innerMap == nil {
+		return fallback
+	}
+	if v, ok := innerMap[inner]; ok {
+		s, _ := v.(string)
 		return s
 	}
 	return fallback

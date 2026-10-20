@@ -12,8 +12,9 @@ import (
 // list_mcp_sessions_impl. The events table is deduped at build time, so the
 // upstream FINAL reads and ANY joins collapse to plain reads.
 
-// lsEventTime is v_conversation_trace.event_time.
-const lsEventTime = "coalesce(try_cast(record_ts AS TIMESTAMP), ingested_at)"
+// lsEventTime is v_conversation_trace.event_time: TIMESTAMPTZ parsing honors
+// record_ts's trailing Z, and the session runs in UTC.
+const lsEventTime = "coalesce(try_cast(record_ts AS TIMESTAMPTZ), ingested_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'"
 
 // lsModeAggregate ports helpers.rs mode_aggregate_sql.
 func lsModeAggregate() string {
@@ -29,12 +30,15 @@ func lsModeAggregate() string {
 // lsArgMax orders a trusted arg expression by (event_ts, event_uid), skipping
 // NULL args the way ClickHouse argMax does.
 func lsArgMax(arg string) string {
-	return "arg_max(" + arg + ", struct_pack(a := event_ts, b := event_uid)) " +
+	return "arg_max(" + arg + ", " + lsArgMaxOrder + ") " +
 		"FILTER (WHERE " + arg + " IS NOT NULL)"
 }
 
+const lsArgMaxOrder = "struct_pack(a := event_ts, b := event_uid)"
+
 func lsArgMaxIf(arg, pred string) string {
-	return lsArgMax(arg) + " FILTER (WHERE " + pred + " AND " + arg + " IS NOT NULL)"
+	// One FILTER clause: DuckDB rejects two on the same aggregate.
+	return "arg_max(" + arg + ", " + lsArgMaxOrder + ") FILTER (WHERE " + pred + " AND " + arg + " IS NOT NULL)"
 }
 
 // lsArgMinIf orders a trusted arg expression by
@@ -257,12 +261,13 @@ func lsMetadataRollups(idsSQL string) string {
 		"    coalesce(arg_min(nullif(trim(regexp_replace(string_split(replace(source_file, '\\', '/'), '/')[-1], '[.]jsonl$', '')), ''),\n" +
 		"      struct_pack(a := event_ts, b := source_name, c := source_file, d := source_generation,\n" +
 		"                  e := source_offset, f := source_line_no, g := event_uid))\n" +
-		"      FILTER (WHERE source_name = 'omp' AND session_id <> '' AND endsWith(source_file, '.jsonl')\n" +
-		"        AND NOT endsWith(source_file, session_id || '.jsonl')\n" +
+		"      FILTER (WHERE source_name = 'omp' AND session_id <> '' AND ends_with(source_file, '.jsonl')\n" +
+		"        AND NOT ends_with(source_file, session_id || '.jsonl')\n" +
 		"        AND nullif(trim(regexp_replace(string_split(replace(source_file, '\\', '/'), '/')[-1], '[.]jsonl$', '')), '') IS NOT NULL), '') AS omp_dispatch_title,\n" +
 		"    " + firstNonEmpty("session_slug", meta, slug) + "\n" +
 		"  FROM (\n" +
-		"    SELECT session_id, event_ts, event_uid, event_kind, source_name, source_file, payload_json\n" +
+		"    SELECT session_id, event_ts, event_uid, event_kind, source_name, source_file,\n" +
+		"      source_generation, source_offset, source_line_no, payload_json\n" +
 		"    FROM events WHERE session_id IN (" + idsSQL + ")\n" +
 		"      AND (event_kind = 'session_meta' OR source_name = 'omp')\n" +
 		"  ) AS e\n" +

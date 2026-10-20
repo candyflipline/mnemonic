@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -19,6 +20,13 @@ import (
 // qErr builds an *ArgError with upstream's message text.
 func qErr(format string, args ...any) *ArgError {
 	return &ArgError{Msg: fmt.Sprintf(format, args...)}
+}
+
+// sortSliceStable is sort.SliceStable over any element type. search_repo.go
+// (lane cache) calls it but no shared home exists yet; if common.go grows its
+// own, delete this one.
+func sortSliceStable[T any](xs []T, less func(a, b T) bool) {
+	sort.SliceStable(xs, func(i, j int) bool { return less(xs[i], xs[j]) })
 }
 
 // qQuote renders a Go string as a single-quoted SQL literal. Filter values
@@ -118,7 +126,7 @@ func qHasExplicitTimezone(input string) bool {
 		return false
 	}
 	o := input[len(input)-6:]
-	return (o[0] == '+' || o[0] == '-') && isDigits(o[1:3]) && o[2] == ':' && isDigits(o[3:5])
+	return (o[0] == '+' || o[0] == '-') && isDigits(o[1:3]) && o[3] == ':' && isDigits(o[4:6])
 }
 
 func isDigits(s string) bool {

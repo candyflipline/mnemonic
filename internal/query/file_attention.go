@@ -39,12 +39,12 @@ func (fileAttention) Call(ctx context.Context, db *sql.DB, args json.RawMessage)
 	if tail.Normalized {
 		warnings = append(warnings, sprintf("normalized %q to %q before matching.", a.Path, tail.Rel))
 	}
-	if tail.TailIsAbsolute {
+	if tail.Abs {
 		warnings = append(warnings, sprintf(
 			"could not reduce %q to a project-relative tail (no Git boundary or launch-directory containment could be proven); matching the absolute path literally, so other roots of the same file will not be unified. Pass a project-relative path for cross-root coverage.",
 			a.Path))
 	}
-	if !tail.DeriveWorktreeRoots {
+	if !tail.DeriveRoots {
 		warnings = append(warnings,
 			"could not prove the path is a project-relative file in this launch scope; roots are derived only from exact relative captures with cwd, otherwise reported as unknown to avoid mislabeling arbitrary suffix matches.")
 	}
@@ -53,35 +53,30 @@ func (fileAttention) Call(ctx context.Context, db *sql.DB, args json.RawMessage)
 			"%q is a generic tail (depth %d); results may include unrelated files. Pass a longer project-relative path, and check the surfaced roots.",
 			tail.Rel, depth))
 	}
-	if a.Scope == "project" && tail.ProjectID == "" {
+	if a.Scope == "project" && tail.ProjID == "" {
 		warnings = append(warnings,
 			"scope=\"project\" could not establish the launch project's normalized identity; the project query remains closed rather than widening across projects.")
 	}
-	if a.Scope == "project" && strings.HasPrefix(tail.ProjectID, "git:") {
+	if a.Scope == "project" && strings.HasPrefix(tail.ProjID, "git:") {
 		warnings = append(warnings,
 			"pre-digest worktree roots pruned before durable project mapping was installed cannot be attributed safely and remain excluded; currently registered roots are migrated and future normalized roots remain durable.")
 	}
-	// This server has no launch-directory scope, so a project-scoped query
-	// never widens.
-	if a.Scope == "all" {
-		// Upstream warns when scope=all meets a project-scoped server; our
-		// server is unscoped, so all is the ordinary widening path.
-		_ = a
-	}
+	// Upstream also warns when scope=all meets a project-scoped server; this
+	// server has no launch scope, so all is the ordinary widening path.
 
 	q := faQuery{
-		Rel:                  tail.Rel,
-		NormalizedProjectID:  tail.ProjectID,
-		NormalizedProjectRoots: faRootsFor(tail.Root),
-		DeriveLegacyRoots:    tail.DeriveWorktreeRoots,
-		ApplyProjectScope:    a.Scope == "project",
-		StartUnixMs:          a.StartUnixMs,
-		EndUnixMs:            a.EndUnixMs,
-		Tool:                 a.Tool,
-		Harness:              a.Harness,
-		SourceName:           a.Source,
-		MutationsOnly:        a.MutationsOnly,
-		MaxRows:              faScanCap,
+		Rel:             tail.Rel,
+		NormalizedPID:   tail.ProjID,
+		NormalizedRoots: faRootsFor(tail.Root),
+		DeriveLegacy:    tail.DeriveRoots,
+		ProjectScope:    a.Scope == "project",
+		StartUnixMs:     a.StartUnixMs,
+		EndUnixMs:       a.EndUnixMs,
+		Tool:            a.Tool,
+		Harness:         a.Harness,
+		SourceName:      a.Source,
+		MutationsOnly:   a.MutationsOnly,
+		MaxRows:         faScanCap,
 	}
 	touches, err := faTouches(ctx, db, q)
 	if err != nil {
@@ -105,23 +100,26 @@ func faRootsFor(root string) []string {
 }
 
 type faArgs struct {
-	Path           string
-	Scope          string // "project" | "all"
-	Granularity    string // "sessions" | "events"
-	StartDatetime  *string
-	EndDatetime    *string
-	StartUnixMs    *int64
-	EndUnixMs      *int64
-	Tool           string
-	Harness        string
-	Source         string
-	MutationsOnly  bool
-	Limit          int
+	Path          string
+	Scope         string // "project" | "all"
+	Granularity   string // "sessions" | "events"
+	StartDatetime *string
+	EndDatetime   *string
+	StartUnixMs   *int64
+	EndUnixMs     *int64
+	Tool          string
+	Harness       string
+	Source        string
+	MutationsOnly bool
+	Limit         int
+	limitSet      bool
 }
 
 // faParseArgs ports parse_file_attention_args + FileAttentionArgs::validate.
 func faParseArgs(raw json.RawMessage) (*faArgs, error) {
-	fields, err := lsObjectFields(raw)
+	fields, err := lsObjectFields(raw,
+		"path", "scope", "granularity", "start_datetime", "end_datetime",
+		"mutations_only", "limit", "tool", "harness", "source")
 	if err != nil {
 		return nil, qErr("file_attention expects a JSON object with valid fields")
 	}
@@ -142,20 +140,20 @@ func faParseArgs(raw json.RawMessage) (*faArgs, error) {
 		return nil, qErr("file_attention expects a JSON object with valid fields")
 	}
 	if !present || pathPtr == nil {
-		return nil, qErrField("path", "path is required")
+		return nil, qErr("path is required")
 	}
 	path := *pathPtr
 	if path != strings.TrimSpace(path) {
-		return nil, qErrField("path", "path must not have leading or trailing whitespace")
+		return nil, qErr("path must not have leading or trailing whitespace")
 	}
 	if strings.HasPrefix(path, "file://") {
-		return nil, qErrField("path", "file:// URIs are not supported; pass a filesystem path")
+		return nil, qErr("file:// URIs are not supported; pass a filesystem path")
 	}
 	if strings.HasSuffix(path, "/") {
-		return nil, qErrField("path", "path must name a file, not a directory-style path ending in '/'")
+		return nil, qErr("path must name a file, not a directory-style path ending in '/'")
 	}
 	if path == "" {
-		return nil, qErrField("path", "path must be a non-empty string")
+		return nil, qErr("path must be a non-empty string")
 	}
 	a.Path = path
 
@@ -170,15 +168,16 @@ func faParseArgs(raw json.RawMessage) (*faArgs, error) {
 			return nil, qErr("file_attention expects a JSON object with valid fields")
 		}
 		a.Limit = int(lim)
+		a.limitSet = true
 	}
-	if a.Limit == 0 {
+	if !a.limitSet {
 		a.Limit = faDefaultLimit
 		if a.Limit > maxLimit {
 			a.Limit = maxLimit
 		}
 	}
 	if a.Limit < faMinLimit || a.Limit > maxLimit {
-		return nil, qErrField("limit", sprintf("limit must be between 1 and %d", maxLimit))
+		return nil, qErr("limit must be between 1 and %d", maxLimit)
 	}
 
 	if v, ok := fields["start_datetime"]; ok && string(v) != "null" {
@@ -208,28 +207,32 @@ func faParseArgs(raw json.RawMessage) (*faArgs, error) {
 		}
 	}
 	if a.StartUnixMs != nil && a.EndUnixMs != nil && *a.EndUnixMs <= *a.StartUnixMs {
-		return nil, qErrField("end_datetime", "end_datetime must be later than start_datetime")
+		return nil, qErr("end_datetime must be later than start_datetime")
 	}
 
-	enum := func(key string, allowed map[string]bool) (string, error) {
+	enum := func(key string, allowed map[string]bool) *string {
 		v, ok := fields[key]
 		if !ok || string(v) == "null" {
-			return "", nil
+			return nil
 		}
 		var s string
-		if err := json.Unmarshal(v, &s); err != nil {
-			return "", err
+		if err := json.Unmarshal(v, &s); err != nil || !allowed[s] {
+			return nil
 		}
-		if !allowed[s] {
-			return "", &json.UnsupportedValueError{}
-		}
-		return s, nil
+		return &s
 	}
-	var err2 error
-	if a.Scope, err2 = enum("scope", map[string]bool{"project": true, "all": true}); err2 != nil {
-		return nil, qErr("file_attention expects a JSON object with valid fields")
+	badEnum := false
+	if s := enum("scope", map[string]bool{"project": true, "all": true}); s != nil {
+		a.Scope = *s
+	} else if v, ok := fields["scope"]; ok && string(v) != "null" {
+		badEnum = true
 	}
-	if a.Granularity, err2 = enum("granularity", map[string]bool{"sessions": true, "events": true}); err2 != nil {
+	if s := enum("granularity", map[string]bool{"sessions": true, "events": true}); s != nil {
+		a.Granularity = *s
+	} else if v, ok := fields["granularity"]; ok && string(v) != "null" {
+		badEnum = true
+	}
+	if badEnum {
 		return nil, qErr("file_attention expects a JSON object with valid fields")
 	}
 	if v, ok := fields["mutations_only"]; ok && string(v) != "null" {
@@ -251,7 +254,8 @@ func faParseArgs(raw json.RawMessage) (*faArgs, error) {
 	return a, nil
 }
 
-func faMaxResults() int { return 25 }
+// faMaxResults is the MCP layer's max_results pin for this tool (tools.json).
+const faMaxResults = 25
 
 // faFilterField ports normalize_optional_filter for an object field.
 func faFilterField(fields map[string]json.RawMessage, field string) (string, error) {
@@ -265,29 +269,25 @@ func faFilterField(fields map[string]json.RawMessage, field string) (string, err
 	}
 	trimmed := strings.TrimSpace(s)
 	if trimmed == "" {
-		return "", qErrField(field, field+" must be a non-empty string when provided")
+		return "", qErr("%s must be a non-empty string when provided", field)
 	}
 	return trimmed, nil
 }
 
-// qErrField builds an ArgError the way invalid_request_with_field names the
-// field: the field leads the message so the caller can route on it.
-func qErrField(field, msg string) *ArgError {
-	return qErr("%s: %s", field, msg)
-}
-
+// Validation errors carry the bare message; the offending field travels in
+// the envelope's details, which the mcp layer owns.
 func faCanonicalRequest(a *faArgs) map[string]any {
 	req := map[string]any{
-		"path":         a.Path,
-		"scope":        a.Scope,
-		"granularity":  a.Granularity,
-		"tool":         strOrNil(a.Tool),
-		"harness":      strOrNil(a.Harness),
-		"source":       strOrNil(a.Source),
+		"path":           a.Path,
+		"scope":          a.Scope,
+		"granularity":    a.Granularity,
+		"tool":           strOrNil(a.Tool),
+		"harness":        strOrNil(a.Harness),
+		"source":         strOrNil(a.Source),
 		"mutations_only": a.MutationsOnly,
-		"limit":        a.Limit,
+		"limit":          a.Limit,
 		"start_datetime": nil,
-		"end_datetime": nil,
+		"end_datetime":   nil,
 	}
 	if a.StartDatetime != nil {
 		req["start_datetime"] = *a.StartDatetime

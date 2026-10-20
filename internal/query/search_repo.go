@@ -25,31 +25,31 @@ type searchQuery struct {
 }
 
 type searchHit struct {
-	rank                    int
-	eventUID                string
-	sessionID               string
-	eventType               string
-	eventUnixMs             int64
-	turnSeq                 uint32
-	turnOrdinal             uint32
-	eventOrder              int64
-	eventOrdinal            uint32
-	turnEventCount          int64
-	turnCompleted           bool
-	turnTerminalEventUID    string
-	sessionStartedAtUnixMs  int64
-	sessionUpdatedAtUnixMs  int64
-	sessionTitle            string
-	sessionSummary          string
-	sessionSlug             string
-	sessionCompleted        bool
-	sourceName              string
-	harness                 string
-	inferenceProvider       string
-	snippet                 string
-	snippetTruncated        bool
-	score                   float64
-	rawScore                float64
+	rank                   int
+	eventUID               string
+	sessionID              string
+	eventType              string
+	eventUnixMs            int64
+	turnSeq                uint32
+	turnOrdinal            uint32
+	eventOrder             int64
+	eventOrdinal           uint32
+	turnEventCount         int64
+	turnCompleted          bool
+	turnTerminalEventUID   string
+	sessionStartedAtUnixMs int64
+	sessionUpdatedAtUnixMs int64
+	sessionTitle           string
+	sessionSummary         string
+	sessionSlug            string
+	sessionCompleted       bool
+	sourceName             string
+	harness                string
+	inferenceProvider      string
+	snippet                string
+	snippetTruncated       bool
+	score                  float64
+	rawScore               float64
 }
 
 type searchResult struct {
@@ -393,7 +393,7 @@ func codexFinalAnswerMirrors(a, b *mcpRow) bool {
 		a.sourceName != "" && a.sourceName == b.sourceName &&
 		pair(a, b) && isFinalAnswer(a) && isFinalAnswer(b) &&
 		aRef.file == bRef.file && aRef.generation == bRef.generation &&
-		abs64(aRef.line-bRef.line) == 1 && orderDelta == 1 && delta <= codexMirrorMaxDeltaMs
+		abs64(int64(aRef.line)-int64(bRef.line)) == 1 && orderDelta == 1 && delta <= codexMirrorMaxDeltaMs
 }
 
 type sourceRefParts struct {
@@ -405,8 +405,6 @@ type sourceRefParts struct {
 // parseMcpSourceRef splits "file:generation:line".
 func parseMcpSourceRef(s string) (sourceRefParts, bool) {
 	fileAndGen, line, ok1 := strings.Cut(s, ":")
-	rev := func(x, y string) (string, string) { return x, y }
-	_, _ = rev
 	var parts sourceRefParts
 	file, gen, ok2 := func() (string, string, bool) {
 		i := strings.LastIndex(fileAndGen, ":")

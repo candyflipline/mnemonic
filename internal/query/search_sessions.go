@@ -33,12 +33,12 @@ type canonicalSearchSessionsArgs struct {
 // the upstream contract text.
 func parseSearchSessionsArgs(raw json.RawMessage) (canonicalSearchSessionsArgs, error) {
 	var args struct {
-		Query      *string           `json:"query"`
-		WithinID   *string           `json:"within_id"`
-		EventTypes []string          `json:"event_types"`
-		Harness    *string           `json:"harness"`
-		Source     *string           `json:"source"`
-		NHits      *int              `json:"n_hits"`
+		Query      *string  `json:"query"`
+		WithinID   *string  `json:"within_id"`
+		EventTypes []string `json:"event_types"`
+		Harness    *string  `json:"harness"`
+		Source     *string  `json:"source"`
+		NHits      *int     `json:"n_hits"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return canonicalSearchSessionsArgs{}, argErrorf(
@@ -134,11 +134,13 @@ func (searchSessionsTool) Call(ctx context.Context, db *sql.DB, raw json.RawMess
 	}
 	request := args.requestShape()
 
+	sessionID, _ := scopeSessionID(args.withinID)
+	turnSeq, _ := scopeTurnSeq(args.withinID)
 	result, err := searchMcpEvents(ctx, db, searchQuery{
 		query:      args.query,
 		nHits:      args.nHits,
-		sessionID:  scopeSessionID(args.withinID),
-		turnSeq:    scopeTurnSeq(args.withinID),
+		sessionID:  sessionID,
+		turnSeq:    turnSeq,
 		eventTypes: args.eventTypes,
 		harness:    args.harness,
 		sourceName: args.source,
