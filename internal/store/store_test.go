@@ -198,6 +198,47 @@ func TestStoreProtocol(t *testing.T) {
 	}
 }
 
+// TestReplaceCrashBeforeManifest drives a replace that died between the raw
+// rename and the manifest write: the new raw sits next to the old manifest.
+// An append the old manifest would accept must be refused, and a re-send from
+// offset 0 must converge on the new raw plus appended lines.
+func TestReplaceCrashBeforeManifest(t *testing.T) {
+	srv, dir := newServer(t)
+	k := testKey()
+	body1, body2, line3 := "a\nb\n", "x\ny\n", "c\n"
+	head1, head2 := wire.HeadHash([]byte("a\n")), wire.HeadHash([]byte("x\n"))
+
+	res := put(t, srv, rawTarget(testMachine, testHarness, testSrcID, "0", head1), body1)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("put body1: status %d, want 200", res.StatusCode)
+	}
+
+	// The crash: the replacement raw is on disk, the manifest never written.
+	if _, err := (&Store{DataDir: dir}).replaceRaw(k, []byte(body2)); err != nil {
+		t.Fatal(err)
+	}
+
+	res = put(t, srv, rawTarget(testMachine, testHarness, testSrcID, "4", head1), line3)
+	if res.StatusCode != http.StatusConflict {
+		t.Fatalf("append after crash: status %d, want 409", res.StatusCode)
+	}
+	if c := decode[wire.Conflict](t, res); c.Size != 0 || c.HeadHash != "" {
+		t.Fatalf("append after crash: conflict = {%d %q}, want {0 \"\"}", c.Size, c.HeadHash)
+	}
+
+	res = put(t, srv, rawTarget(testMachine, testHarness, testSrcID, "0", head2), body2)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("re-replace: status %d, want 200", res.StatusCode)
+	}
+	res = put(t, srv, rawTarget(testMachine, testHarness, testSrcID, "4", head2), line3)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("append after recovery: status %d, want 200", res.StatusCode)
+	}
+	if got := rawOf(t, dir, k); got != body2+line3 {
+		t.Fatalf("raw after recovery = %q, want %q", got, body2+line3)
+	}
+}
+
 func TestStoreRejects(t *testing.T) {
 	srv, _ := newServer(t)
 	head := wire.HeadHash([]byte("a\n"))
