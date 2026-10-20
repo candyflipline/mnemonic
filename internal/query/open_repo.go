@@ -492,8 +492,8 @@ func adjacentTurnRef(sc *sessionScan, turnSeq uint32, next bool) *turnRef {
 
 type turnCompact struct {
 	metadata             *turnSummary
-	userInputSummary     any
-	finalResponseSummary any
+	userInputSummary     string
+	finalResponseSummary string
 	userInputEvent       *eventRef
 	finalResponseEvent   *eventRef
 	toolsCalled          []string
@@ -525,9 +525,11 @@ func compactTurn(turn *turnAccum, previewChars int) *turnCompact {
 	return c
 }
 
-// sessionLabels ports session_labels; returns (title, slug, summary), each
-// nil when empty.
-func sessionLabels(sc *sessionScan) (any, any, any) {
+type sessionLabel struct {
+	title, slug, summary string
+}
+
+func sessionLabels(sc *sessionScan) sessionLabel {
 	ordered := append([]*navRow(nil), sc.metadataRows...)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		a, b := ordered[i], ordered[j]
@@ -561,23 +563,20 @@ func sessionLabels(sc *sessionScan) (any, any, any) {
 		resolvedTitle = firstNonEmpty(title, name)
 		resolvedSummary = firstNonEmpty(summary, resolvedTitle, name)
 	}
-	return nonEmpty(resolvedTitle), nonEmpty(slug), nonEmpty(resolvedSummary)
+	return sessionLabel{title: resolvedTitle, slug: slug, summary: resolvedSummary}
 }
 
-func previewFromWide(row *navRow, previewChars int) any {
+func previewFromWide(row *navRow, previewChars int) string {
 	source, isPayload := row.textContent, false
 	if strings.TrimSpace(row.textContent) == "" {
 		source, isPayload = row.payloadJSON, true
 	}
-	if s, ok := compactSource(source, isPayload, previewChars); ok {
-		return s
-	}
-	return nil
+	return compactSource(source, isPayload, previewChars)
 }
 
-func compactSource(source string, isPayload bool, previewChars int) (string, bool) {
+func compactSource(source string, isPayload bool, previewChars int) string {
 	if strings.TrimSpace(source) == "" {
-		return "", false
+		return ""
 	}
 	outputLimit := previewChars
 	if outputLimit < 1 {
@@ -594,11 +593,7 @@ func compactSource(source string, isPayload bool, previewChars int) (string, boo
 	if len([]rune(source)) > sourceLimit {
 		truncated = string([]rune(source)[:sourceLimit-3]) + "..."
 	}
-	compact := compactTextLine(truncated, outputLimit)
-	if compact == "" {
-		return "", false
-	}
-	return compact, true
+	return compactTextLine(truncated, outputLimit)
 }
 
 func eventModeRank(r *navRow) uint8 {

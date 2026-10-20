@@ -59,7 +59,7 @@ func TestOpenArgValidation(t *testing.T) {
 
 func TestCompactTextKeepsKnownEventHandle(t *testing.T) {
 	eventID := formatEventID("event-empty")
-	compact := compactTextContent(eventID, nil)
+	compact := compactTextContent(eventID, "")
 	if compact == nil {
 		t.Fatal("compact is nil")
 	}
@@ -70,7 +70,7 @@ func TestCompactTextKeepsKnownEventHandle(t *testing.T) {
 	if m["text"] != nil || m["truncated"] != false {
 		t.Fatalf("compact: %v", m)
 	}
-	if compactTextContent(nil, nil) != nil {
+	if compactTextContent(nil, "") != nil {
 		t.Fatal("unknown handle must collapse to null")
 	}
 }

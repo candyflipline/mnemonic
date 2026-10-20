@@ -307,20 +307,10 @@ func optionalTurnRefID(ref *turnRef) any {
 	return formatTurnID(ref.sessionID, ref.turnSeq)
 }
 
-// compactOptionalValue adapts an optional string (nil = absent) to
-// compact_optional_line.
-func compactOptionalValue(v any, maxChars int) any {
-	s, ok := v.(string)
-	if !ok {
-		return nil
-	}
-	return compactOptionalLine(s, maxChars)
-}
-
 func openSessionData(scan *sessionScan, pageTurns []any, nextCursor any) map[string]any {
 	m := scan.metadata
 	seqs := scan.turnSeqs()
-	title, slug, summary := sessionLabels(scan)
+	label := sessionLabels(scan)
 	if pageTurns == nil {
 		pageTurns = []any{}
 	}
@@ -328,8 +318,8 @@ func openSessionData(scan *sessionScan, pageTurns []any, nextCursor any) map[str
 		"kind": "session",
 		"session": map[string]any{
 			"id":                 formatSessionID(m.sessionID),
-			"title":              compactOptionalValue(title, summaryPreviewChars),
-			"source":             compactOptionalValue(nonEmpty(scan.source), summaryToolNameChars),
+			"title":              compactOptionalLine(label.title, summaryPreviewChars),
+			"source":             compactOptionalLine(scan.source, summaryToolNameChars),
 			"started_at":         formatRFC3339UTCMillis(m.firstEventUnixMs),
 			"updated_at":         formatRFC3339UTCMillis(m.lastEventUnixMs),
 			"completed":          scan.completed,
@@ -337,10 +327,10 @@ func openSessionData(scan *sessionScan, pageTurns []any, nextCursor any) map[str
 			"turn_count":         m.totalTurns,
 			"event_count":        m.totalEvents,
 			"mode":               m.mode,
-			"harness":            compactOptionalValue(nonEmpty(scan.harness), summaryToolNameChars),
-			"inference_provider": compactOptionalValue(nonEmpty(scan.inferenceProvider), summaryToolNameChars),
-			"session_slug":       compactOptionalValue(slug, summaryPreviewChars),
-			"session_summary":    compactOptionalValue(summary, summaryPreviewChars),
+			"harness":            compactOptionalLine(scan.harness, summaryToolNameChars),
+			"inference_provider": compactOptionalLine(scan.inferenceProvider, summaryToolNameChars),
+			"session_slug":       compactOptionalLine(label.slug, summaryPreviewChars),
+			"session_summary":    compactOptionalLine(label.summary, summaryPreviewChars),
 		},
 		"turns":       pageTurns,
 		"next_cursor": nextCursor,
@@ -379,15 +369,14 @@ func openSessionTurnSummary(c *turnCompact) map[string]any {
 	}
 }
 
-func compactTextContent(eventID any, text any) any {
-	s, ok := text.(string)
-	if !ok || strings.TrimSpace(s) == "" {
+func compactTextContent(eventID any, text string) any {
+	if strings.TrimSpace(text) == "" {
 		if eventID != nil {
 			return map[string]any{"event_id": eventID, "text": nil, "truncated": false}
 		}
 		return nil
 	}
-	compact := compactTextLine(s, summaryPreviewChars)
+	compact := compactTextLine(text, summaryPreviewChars)
 	return map[string]any{
 		"event_id":  eventID,
 		"text":      compact,
@@ -459,9 +448,9 @@ func openTurnData(scan *sessionScan, turn *turnAccum, c *turnCompact, events []a
 }
 
 func openTurnEventSummary(r *navRow, ordinal int, terminalEventUID string) map[string]any {
-	toolName := toolNameFor(r.eventType(), r.name, r.callID)
-	if toolName != nil {
-		toolName = compactTextLine(toolName.(string), summaryToolNameChars)
+	var toolName any
+	if name := toolNameFor(r.eventType(), r.name, r.callID); name != "" {
+		toolName = compactTextLine(name, summaryToolNameChars)
 	}
 	summary, truncated := compactEventSummary(r)
 	return map[string]any{
@@ -478,8 +467,8 @@ func openTurnEventSummary(r *navRow, ordinal int, terminalEventUID string) map[s
 }
 
 func compactEventSummary(r *navRow) (string, bool) {
-	text, ok := previewFromWide(r, summaryPreviewChars).(string)
-	if !ok {
+	text := previewFromWide(r, summaryPreviewChars)
+	if text == "" {
 		return "", false
 	}
 	if r.eventType() == "reasoning" && hasEncryptedContentField(text) {
@@ -511,9 +500,9 @@ func openEventData(scan *sessionScan, r *navRow, parentTurn *turnAccum) map[stri
 			"type":              r.eventType(),
 			"timestamp":         formatRFC3339UTCMillis(r.eventUnixMs),
 			"terminal":          terminal,
-			"model":             extractStringField(payload, "model", "model_name"),
-			"originating_model": extractStringField(payload, "originating_model", "model", "model_name"),
-			"tool_name":         toolName,
+			"model":             nonEmpty(extractStringField(payload, "model", "model_name")),
+			"originating_model": nonEmpty(extractStringField(payload, "originating_model", "model", "model_name")),
+			"tool_name":         nonEmpty(toolName),
 		},
 		"content": fullEventContent(r, r.eventType(), toolName, payload),
 		"session": map[string]any{
@@ -542,7 +531,7 @@ func openEventData(scan *sessionScan, r *navRow, parentTurn *turnAccum) map[stri
 	}
 }
 
-func fullEventContent(r *navRow, eventType string, toolName any, payload any) map[string]any {
+func fullEventContent(r *navRow, eventType string, toolName string, payload any) map[string]any {
 	text := fullEventText(r, payload)
 	format := "text"
 	switch eventType {
@@ -554,7 +543,7 @@ func fullEventContent(r *navRow, eventType string, toolName any, payload any) ma
 		"text":      text,
 		"truncated": false,
 	}
-	if toolName != nil {
+	if toolName != "" {
 		content["tool_name"] = toolName
 	}
 	if format == "tool_call" {
@@ -647,27 +636,24 @@ func extractExitCode(payload any) (int64, bool) {
 	return 0, false
 }
 
-func extractStringField(payload any, names ...string) any {
+func extractStringField(payload any, names ...string) string {
 	object, ok := payload.(map[string]any)
 	if !ok {
-		return nil
+		return ""
 	}
 	for _, name := range names {
 		if value, ok := object[name].(string); ok && strings.TrimSpace(value) != "" {
 			return strings.TrimSpace(value)
 		}
 	}
-	return nil
+	return ""
 }
 
-func toolNameFor(eventType, name, callID string) any {
+func toolNameFor(eventType, name, callID string) string {
 	if eventType != "tool_call" && eventType != "tool_response" {
-		return nil
+		return ""
 	}
-	if v := nonEmpty(name); v != nil {
-		return v
-	}
-	return nonEmpty(callID)
+	return firstNonEmpty(name, callID)
 }
 
 func pathStr(value any, path ...string) (string, bool) {
