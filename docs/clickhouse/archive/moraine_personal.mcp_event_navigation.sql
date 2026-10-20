@@ -1,0 +1,33 @@
+CREATE TABLE moraine_personal.mcp_event_navigation
+(
+    `session_id` String,
+    `sort_time` DateTime64(3),
+    `source_file` String,
+    `source_generation` UInt32,
+    `source_offset` UInt64,
+    `source_line_no` UInt64,
+    `emission_index` UInt32,
+    `event_uid` String,
+    `event_version` UInt64,
+    `source_name` LowCardinality(String),
+    `event_ts` DateTime64(3),
+    `display_time` DateTime64(3),
+    `event_kind` LowCardinality(String),
+    `actor_kind` LowCardinality(String),
+    `payload_type` LowCardinality(String),
+    `turn_index` UInt32,
+    `tool_call_id` String,
+    `tool_name` LowCardinality(String),
+    `tool_phase` LowCardinality(String),
+    `op_status` LowCardinality(String),
+    `item_id` String,
+    `harness` LowCardinality(String),
+    `inference_provider` LowCardinality(String),
+    `cwd` LowCardinality(String),
+    `is_user_message` UInt8,
+    `is_metadata_bearing` UInt8
+)
+ENGINE = ReplacingMergeTree(event_version)
+PARTITION BY cityHash64(session_id) % 64
+ORDER BY (session_id, event_uid)
+SETTINGS index_granularity = 8192

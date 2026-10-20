@@ -51,6 +51,50 @@ the server. Append the printed `[[tokens]]` block to
 sudo systemctl restart mnemonic
 ```
 
+## Teammate onboarding
+
+Get your token file from the owner. The server keeps one per teammate at
+`/root/mnemonic-tokens/<author>.token`. Never paste it in chat or commit it.
+
+Install the client (or grab a release binary):
+
+```
+CGO_ENABLED=0 go install github.com/candyflipline/mnemonic/cmd/mnemonic@latest
+```
+
+`mnemonic init` writes `~/.mnemonic/config.toml` and `~/.mnemonic/token`
+(0600) and, on macOS, `~/Library/LaunchAgents/com.mnemonic.push.plist`,
+then prints the one `launchctl bootstrap gui/$UID ...` command to run (on
+Linux it prints a systemd --user unit):
+
+```
+mnemonic init --server https://loyal-agent-memory.5-78-147-233.sslip.io \
+  --token-file ./<author>.token
+```
+
+`--machine NAME` overrides the machine name (it defaults to the short
+hostname); `--force` overwrites an existing config.
+
+Point Claude Code at the server:
+
+```
+claude mcp add --transport http moraine \
+  https://loyal-agent-memory.5-78-147-233.sslip.io/mcp \
+  --header "Authorization: Bearer $(cat ~/.mnemonic/token)"
+```
+
+Point Codex at it, in `~/.codex/config.toml`:
+
+```
+[mcp_servers.moraine]
+url = "https://loyal-agent-memory.5-78-147-233.sslip.io/mcp"
+http_headers = { Authorization = "Bearer <token>" }
+```
+
+`bearer_token_env_var = "MNEMONIC_TOKEN"` instead keeps the token out of
+the file, if you export `MNEMONIC_TOKEN`. The MCP server name stays
+`moraine`, so existing agent prompts keep working.
+
 ## Client config
 
 `~/.mnemonic/config.toml`:

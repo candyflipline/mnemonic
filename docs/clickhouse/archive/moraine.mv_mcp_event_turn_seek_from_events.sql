@@ -1,0 +1,46 @@
+CREATE MATERIALIZED VIEW moraine.mv_mcp_event_turn_seek_from_events TO moraine.mcp_event_turn_seek
+(
+    `session_id` String,
+    `turn_index` UInt32,
+    `sort_time` DateTime64(3),
+    `source_file` String,
+    `source_generation` UInt32,
+    `source_offset` UInt64,
+    `source_line_no` UInt64,
+    `emission_index` UInt32,
+    `event_uid` String,
+    `event_version` UInt64,
+    `event_ts` DateTime64(3),
+    `is_user_message` UInt8,
+    `display_time` DateTime64(3),
+    `event_kind` LowCardinality(String),
+    `actor_kind` LowCardinality(String),
+    `payload_type` LowCardinality(String),
+    `tool_call_id` String,
+    `tool_name` LowCardinality(String),
+    `tool_phase` LowCardinality(String),
+    `op_status` LowCardinality(String)
+)
+AS SELECT
+    session_id,
+    turn_index,
+    ifNull(parseDateTime64BestEffortOrNull(record_ts), toDateTime64('1970-01-01 00:00:00', 3)) AS sort_time,
+    source_file,
+    source_generation,
+    source_offset,
+    source_line_no,
+    toUInt32(JSONExtractUInt(payload_json, 'moraine_emission_index')) AS emission_index,
+    event_uid,
+    event_version,
+    event_ts,
+    toUInt8((actor_kind = 'user') AND (event_kind = 'message')) AS is_user_message,
+    ifNull(parseDateTime64BestEffortOrNull(record_ts), ingested_at) AS display_time,
+    event_kind,
+    actor_kind,
+    payload_type,
+    tool_call_id,
+    tool_name,
+    tool_phase,
+    op_status
+FROM moraine.events
+WHERE notEmpty(session_id) AND (turn_index > 0)
