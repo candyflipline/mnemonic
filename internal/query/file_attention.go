@@ -7,11 +7,6 @@ import (
 	"strings"
 )
 
-// file_attention ports upstream mcp-core/src/file_attention_v1.rs over
-// the DuckDB cache, with the touch SQL from clickhouse_repo/file_attention.rs.
-// The mcp_event_locator/navigation tables have no cache counterpart, so the
-// exact pass reads the canonical events columns directly and the suffix pass
-// always scans payload tool IO (upstream's non-indexed legacy path).
 type fileAttention struct{}
 
 func (fileAttention) Name() string { return "file_attention" }
@@ -22,9 +17,7 @@ const (
 	faMinLimit        = 1
 	faDefaultLimit    = 50
 	faMinTailSegments = 2
-	// faScanCap bounds the matched rows pulled from the cache; the summary and
-	// roots are computed over this set and hitting it flags truncation.
-	faScanCap = 2000
+	faScanCap         = 2000
 )
 
 func (fileAttention) Call(ctx context.Context, db *sql.DB, args json.RawMessage) (any, string, error) {
@@ -61,8 +54,6 @@ func (fileAttention) Call(ctx context.Context, db *sql.DB, args json.RawMessage)
 		warnings = append(warnings,
 			"pre-digest worktree roots pruned before durable project mapping was installed cannot be attributed safely and remain excluded; currently registered roots are migrated and future normalized roots remain durable.")
 	}
-	// Upstream also warns when scope=all meets a project-scoped server; this
-	// server has no launch scope, so all is the ordinary widening path.
 
 	q := faQuery{
 		Rel:             tail.Rel,
@@ -91,7 +82,6 @@ func (fileAttention) Call(ctx context.Context, db *sql.DB, args json.RawMessage)
 	return data, faText(payload), nil
 }
 
-// faRootsFor ports worktree_roots_for_repo_root for the resolved root.
 func faRootsFor(root string) []string {
 	if root == "" {
 		return nil
@@ -115,7 +105,6 @@ type faArgs struct {
 	limitSet      bool
 }
 
-// faParseArgs ports parse_file_attention_args + FileAttentionArgs::validate.
 func faParseArgs(raw json.RawMessage) (*faArgs, error) {
 	fields, err := lsObjectFields(raw,
 		"path", "scope", "granularity", "start_datetime", "end_datetime",
@@ -257,7 +246,6 @@ func faParseArgs(raw json.RawMessage) (*faArgs, error) {
 // faMaxResults is the MCP layer's max_results pin for this tool (tools.json).
 const faMaxResults = 25
 
-// faFilterField ports normalize_optional_filter for an object field.
 func faFilterField(fields map[string]json.RawMessage, field string) (string, error) {
 	v, ok := fields[field]
 	if !ok || string(v) == "null" {

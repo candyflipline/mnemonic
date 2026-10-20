@@ -7,11 +7,6 @@ import (
 	"strings"
 )
 
-// The path-side half of file_attention: reduce a query path to the
-// project-relative tail used for suffix matching, and enumerate a repo root's
-// worktrees. Ports file_attention_v1.rs's resolve_tail_from and the upstream
-// config worktree_roots_for_repo_root.
-
 type faTail struct {
 	Rel    string
 	Root   string
@@ -86,8 +81,6 @@ func faLaunchProject(launchDir string) (string, string) {
 	return root, qProjectIDForRoot(root)
 }
 
-// faIsSinglePathCandidate rejects compound shell text, never interpreted as a
-// path or repository root.
 func faIsSinglePathCandidate(path string) bool {
 	if path == "" {
 		return false
@@ -95,8 +88,6 @@ func faIsSinglePathCandidate(path string) bool {
 	return !strings.ContainsAny(path, "\x00\n\r;|&`")
 }
 
-// faNormalizePathText resolves "." and ".." segments lexically and drops
-// repeated slashes, preserving absolute/relative shape.
 func faNormalizePathText(path string) string {
 	absolute := strings.HasPrefix(path, "/")
 	parts := make([]string, 0, len(path)/2+1)
@@ -123,7 +114,6 @@ func faNormalizePathText(path string) string {
 	return body
 }
 
-// faStripRoot removes root (with one joining slash) from the front of path.
 func faStripRoot(path, root string) (string, bool) {
 	root = strings.TrimRight(root, "/")
 	if root == "" {
@@ -133,8 +123,6 @@ func faStripRoot(path, root string) (string, bool) {
 	return rest, ok
 }
 
-// faTailSegments counts non-empty slash-separated segments: mod.rs is depth 1,
-// src/lib.rs is depth 2.
 func faTailSegments(rel string) int {
 	n := 0
 	for _, seg := range strings.Split(rel, "/") {
@@ -145,10 +133,6 @@ func faTailSegments(rel string) int {
 	return n
 }
 
-// qWorktreeRootsForRepoRoot ports the upstream config
-// worktree_roots_for_repo_root (without a pwd): the root itself, the common
-// dir's parent for linked worktrees, and every registered worktree that still
-// resolves to the same common dir — canonicalized, sorted, deduped.
 func qWorktreeRootsForRepoRoot(root string) []string {
 	if root == "" {
 		return nil

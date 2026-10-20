@@ -5,12 +5,9 @@ import (
 	"strings"
 )
 
-// The response-side half of file_attention: summary, root breakdown, session
-// rollups or an event timeline, and the prose. Ports file_attention_v1.rs.
-
 const faUnknownRoot = "(unknown)"
 
-// faBuildData ports build_data. Warnings are appended in the upstream order.
+// faBuildData: warnings are appended in the upstream order.
 func faBuildData(a *faArgs, tail *faTail, touches []faTouch, warnings *[]string) map[string]any {
 	scanTruncated := len(touches) > faScanCap
 	if scanTruncated {
@@ -165,7 +162,6 @@ func faFormatMillisPtr(ms *int64) any {
 	return qFormatMillis(*ms)
 }
 
-// faSortedSet renders a unique, sorted string list (Rust BTreeSet output).
 func faSortedSet(values map[string]bool) []string {
 	out := make([]string, 0, len(values))
 	for v := range values {
@@ -187,7 +183,6 @@ type faSessionAgg struct {
 	latestTurnSeq   *uint32
 }
 
-// faSessionRollups folds the newest-first stream into per-session rollups.
 func faSessionRollups(touches []faTouch, limit int) ([]any, int, int) {
 	order := []string{}
 	aggs := map[string]*faSessionAgg{}
@@ -280,7 +275,6 @@ func faSessionRollups(touches []faTouch, limit int) ([]any, int, int) {
 	return sessions, encodable, skipped
 }
 
-// faEventTimeline is the flat, newest-first touch-by-touch timeline.
 func faEventTimeline(touches []faTouch, limit int) ([]any, int, int) {
 	events := []any{}
 	encodable, skipped := 0, 0
@@ -359,7 +353,6 @@ func faActionPreview(touch *faTouch) any {
 	return collapsed
 }
 
-// faText ports format_text.
 func faText(payload map[string]any) string {
 	data, _ := payload["data"].(map[string]any)
 	tail := stringAt(data, "tail")
@@ -440,7 +433,6 @@ func faText(payload map[string]any) string {
 	return strings.Join(lines, "\n")
 }
 
-// faFormatErrorText ports format_error_text for the envelope's error block.
 func faFormatErrorText(code, message string) string {
 	if code == "" {
 		code = "internal_error"

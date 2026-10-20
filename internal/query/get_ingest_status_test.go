@@ -8,14 +8,8 @@ import (
 	"testing"
 )
 
-// Ports of the tests in upstream mcp-core/src/
-// get_ingest_status_v1.rs: the projection must never leak raw-heartbeat
-// fields, and unknown arguments are rejected with the upstream message.
-
 const stMarker = "SECRET_MARKER_7f3a"
 
-// stRawHeartbeat ports the test's raw_heartbeat builder: every field that the
-// projection must drop carries the marker.
 func stRawHeartbeat(tsUnixMs int64) stHeartbeat {
 	backend := "secret-backend-" + stMarker
 	watcherErrors := uint64(4)

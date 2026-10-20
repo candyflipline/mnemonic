@@ -61,7 +61,6 @@ type stHeartbeat struct {
 	Progress               *stProgress
 }
 
-// stProgress ports IngestProgressSnapshot.
 type stProgress struct {
 	SchemaVersion             uint16
 	InstanceID                string
@@ -81,7 +80,6 @@ type stProgress struct {
 	Sources                   []stSourceProgress
 }
 
-// stSourceProgress ports IngestSourceProgress.
 type stSourceProgress struct {
 	SourceName       string
 	Format           string
@@ -93,7 +91,6 @@ type stSourceProgress struct {
 	CoverageDegraded bool
 }
 
-// stStatusRead ports IngestStatusRead.
 type stStatusRead struct {
 	TablePresent bool
 	Latest       *stHeartbeat
@@ -123,8 +120,6 @@ type stEta struct {
 	HighSeconds uint64
 }
 
-// stHistoryPoint ports IngestHistoryPoint: the narrowed, serializable
-// projection of one heartbeat.
 type stHistoryPoint struct {
 	TsUnixMs          int64
 	QueueDepth        uint64
@@ -158,7 +153,6 @@ func stHistoryPointFrom(h *stHeartbeat) stHistoryPoint {
 	return p
 }
 
-// stStatus ports IngestStatus (the derived, safe state).
 type stStatus struct {
 	ObservedAt int64
 	Current    *stHeartbeat
@@ -173,7 +167,6 @@ func stCondition2(t stConditionType, s stConditionState, reason string, now int6
 	return stCondition{Type: t, State: s, Reason: reason, ObservedAt: now}
 }
 
-// stDerive ports IngestStatusRead::derive.
 func stDerive(read stStatusRead, now int64) stStatus {
 	latest := read.Latest
 	health := stHealthCondition(latest, now)

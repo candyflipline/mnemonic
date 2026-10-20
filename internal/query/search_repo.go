@@ -1,11 +1,5 @@
 package query
 
-// The search engine: BM25 candidates over all_postings/corpus/events plus
-// hydration through trace, ported from upstream search.rs
-// build_search_mcp_events_sql / build_search_mcp_event_details_sql /
-// map_search_mcp_rows_to_hits / dedupe_mcp_search_rows. The df is counted
-// from the query terms' postings and avgdl comes from corpus.
-
 import (
 	"context"
 	"database/sql"
@@ -127,10 +121,6 @@ type mcpRow struct {
 	sessionCompleted  bool
 }
 
-// searchMcpCandidates ports build_search_mcp_events_sql: one ranked pass over
-// the query terms' postings, scored with their df (postings per term across
-// the whole corpus) and corpus.avg_doc_len, then filtered by the MCP
-// source/event-type clauses on events.
 func searchMcpCandidates(ctx context.Context, db *sql.DB, q searchQuery, terms []string, limit int) ([]*mcpRow, error) {
 	termsSQL := "(" + strings.Join(quoteAll(terms), ", ") + ")"
 	var filters []string
@@ -155,8 +145,6 @@ func searchMcpCandidates(ctx context.Context, db *sql.DB, q searchQuery, terms [
 		filters = append(filters, "e.source_name = "+sqlQuote(*q.sourceName))
 	}
 	if q.turnOK {
-		// Upstream derives the turn's events from the navigation window; the
-		// trace view carries the same turn_seq already.
 		filters = append(filters, "e.event_uid IN (SELECT event_uid FROM trace WHERE session_id = "+
 			sqlQuote(q.sessionID)+" AND turn_seq = "+sqlQuoteInt(int(q.turnSeq))+")")
 	}
@@ -203,8 +191,6 @@ SELECT event_uid, session_id, doc, raw_score, matched_terms, event_unix_ms FROM 
 	return out, rows.Err()
 }
 
-// scopeExistsFor ports the upstream scope_exists expression: only session and
-// turn scopes can be missing; an unscoped search always has scope.
 func scopeExistsFor(ctx context.Context, db *sql.DB, q searchQuery) (bool, error) {
 	if !q.sessionOK {
 		return true, nil
@@ -220,9 +206,8 @@ func scopeExistsFor(ctx context.Context, db *sql.DB, q searchQuery) (bool, error
 	return n > 0, nil
 }
 
-// hydrateMcpCandidates ports build_search_mcp_event_details_sql: navigation
-// ordinals and turn/session totals for the candidates' turns, hydration from
-// events. Session title/slug/summary stay empty, matching upstream.
+// hydrateMcpCandidates: session title/slug/summary stay empty, matching
+// upstream.
 func hydrateMcpCandidates(ctx context.Context, db *sql.DB, rows []*mcpRow) error {
 	byUID := make(map[string]*mcpRow, len(rows))
 	seen := map[string]bool{}
@@ -310,7 +295,6 @@ JOIN sess ss ON ss.session_id = o.session_id`
 		r.turnCompleted = turnCompleted != 0
 		r.sessionCompleted = sessionCompleted != 0
 		r.turnTerminalUID = jsonAsString(turnTerminal)
-		// Upstream hydrates text_preview as leftUTF8(text_content, preview).
 		r.textPreview = truncateRunes(r.textContent, previewChars)
 		if existing, ok := byUID[r.eventUID]; ok {
 			// The candidate pass supplied the ranking inputs; the hydration
@@ -331,7 +315,6 @@ func truncateRunes(s string, n int) string {
 	return string(r[:n])
 }
 
-// sortMcpRows ports sort_search_mcp_event_rows.
 func sortMcpRows(rows []*mcpRow) {
 	sort.SliceStable(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]
@@ -345,7 +328,6 @@ func sortMcpRows(rows []*mcpRow) {
 	})
 }
 
-// dedupeMcpRows ports dedupe_mcp_search_rows with mcp_search_rows_are_equivalent.
 func dedupeMcpRows(rows []*mcpRow, limit int) []*mcpRow {
 	var out []*mcpRow
 	for _, row := range rows {
@@ -421,7 +403,6 @@ type sourceRefParts struct {
 	line       uint64
 }
 
-// parseMcpSourceRef splits "file:generation:line".
 func parseMcpSourceRef(s string) (sourceRefParts, bool) {
 	fileAndGen, line, ok1 := strings.Cut(s, ":")
 	var parts sourceRefParts
@@ -461,8 +442,6 @@ func parseUint(s string) uint64 {
 	return n
 }
 
-// mapMcpRowsToHits ports map_search_mcp_rows_to_hits: score is the row's share
-// of the best raw score.
 func mapMcpRowsToHits(rows []*mcpRow) []searchHit {
 	maxRaw := 0.0
 	for _, r := range rows {

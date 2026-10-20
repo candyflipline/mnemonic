@@ -8,16 +8,12 @@ import (
 	"strings"
 )
 
-// list_sessions ports upstream mcp-core/src/list_sessions_v1.rs
-// over the DuckDB cache, with the page SQL from
-// upstream conversations/src/clickhouse_repo/{list,session_page}.rs.
 type listSessions struct{}
 
 func (listSessions) Name() string { return "list_sessions" }
 
 func init() { register(listSessions{}) }
 
-// Limits from contract.rs; max_results is the server cap the MCP layer pins.
 const (
 	lsDefaultLimit = 20
 	lsMinLimit     = 1
@@ -52,8 +48,7 @@ func (listSessions) Call(ctx context.Context, db *sql.DB, args json.RawMessage) 
 	return payload["data"], lsText(payload), nil
 }
 
-// lsParseArgs ports parse_list_sessions_args + ListSessionsArgs::validate.
-// Every serde-level failure carries the same upstream message.
+// lsParseArgs: every serde-level failure carries the same upstream message.
 func lsParseArgs(raw json.RawMessage) (*lsArgs, error) {
 	fields, err := lsObjectFields(raw,
 		"start_datetime", "end_datetime", "limit", "cursor", "mode", "harness", "source", "sort")
@@ -229,7 +224,6 @@ func lsCanonicalRequest(a *lsArgs) map[string]any {
 	return req
 }
 
-// lsItem is one mapped McpSessionListItem.
 type lsItem struct {
 	SessionID                         string
 	FirstEventTime, LastEventTime     string
@@ -244,14 +238,11 @@ type lsItem struct {
 	DisplayLabel                      string
 }
 
-// lsPage is the repo-layer result: items plus the opaque next cursor.
 type lsPage struct {
 	Items      []lsItem
 	NextCursor *string
 }
 
-// lsFilterSig ports mcp_session_list_filter_sig: the cursor carries a
-// signature of every filter it only resumes under.
 func lsFilterSig(a *lsArgs) string {
 	b, err := json.Marshal([]any{a.StartUnixMs, a.EndUnixMs, optStr(a.Mode), a.Harness, a.Source, a.Sort, nil})
 	if err != nil {
@@ -295,8 +286,6 @@ func lsDecodeCursor(token string) (*lsCursor, error) {
 	return &c, nil
 }
 
-// lsQueryPage ports list_mcp_sessions_impl: phase 1 picks the page of ids
-// from narrow columns, phase 2 summarizes only those sessions.
 func lsQueryPage(ctx context.Context, db *sql.DB, a *lsArgs) (*lsPage, error) {
 	var cursor *lsCursor
 	if a.Cursor != "" {
@@ -340,7 +329,6 @@ func lsQueryPage(ctx context.Context, db *sql.DB, a *lsArgs) (*lsPage, error) {
 	return &lsPage{Items: items, NextCursor: next}, nil
 }
 
-// lsDataJSON ports list_sessions_data_json.
 func lsDataJSON(a *lsArgs, page *lsPage) map[string]any {
 	sessions := make([]any, 0, len(page.Items))
 	for _, item := range page.Items {
@@ -387,7 +375,6 @@ func nilPtr[T any](p *T) any {
 	return *p
 }
 
-// lsText ports format_list_sessions_text.
 func lsText(payload map[string]any) string {
 	req, _ := payload["request"].(map[string]any)
 	start := stringAt(req, "start_datetime")

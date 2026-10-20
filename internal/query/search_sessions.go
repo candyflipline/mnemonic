@@ -1,10 +1,5 @@
 package query
 
-// search_sessions: BM25 keyword search over the cache, ported from upstream
-// upstream conversations/src/clickhouse_repo/search.rs (the MCP event
-// search path) and upstream mcp-core/src/search_sessions_v1.rs (args,
-// data shape, prose). Owned by lane cache.
-
 import (
 	"context"
 	"database/sql"
@@ -19,7 +14,6 @@ func (searchSessionsTool) Name() string { return "search_sessions" }
 
 func init() { register(searchSessionsTool{}) }
 
-// canonicalSearchSessionsArgs is contract.rs CanonicalSearchSessionsArgs.
 type canonicalSearchSessionsArgs struct {
 	query      string
 	withinID   *mcpID
@@ -29,8 +23,7 @@ type canonicalSearchSessionsArgs struct {
 	nHits      int
 }
 
-// parseSearchSessionsArgs ports SearchSessionsArgs::validate; every message is
-// the upstream contract text.
+// parseSearchSessionsArgs: every message is the upstream contract text.
 func parseSearchSessionsArgs(raw json.RawMessage) (canonicalSearchSessionsArgs, error) {
 	var args struct {
 		Query      *string   `json:"query"`
@@ -70,9 +63,6 @@ func parseSearchSessionsArgs(raw json.RawMessage) (canonicalSearchSessionsArgs, 
 		a.withinID = &id
 	}
 
-	// Absent event_types falls back to search_defaults(); only a
-	// present-but-empty array is an error (contract.rs
-	// SearchSessionsArgs::validate).
 	var err error
 	if args.EventTypes != nil {
 		if a.eventTypes, err = canonicalizeSearchEventTypeNames(*args.EventTypes); err != nil {
@@ -98,7 +88,6 @@ func parseSearchSessionsArgs(raw json.RawMessage) (canonicalSearchSessionsArgs, 
 	return a, nil
 }
 
-// normalizeOptionalFilter ports contract.rs normalize_optional_filter.
 func normalizeOptionalFilter(field string, value *string) (*string, error) {
 	if value == nil {
 		return nil, nil
@@ -159,8 +148,6 @@ func (searchSessionsTool) Call(ctx context.Context, db *sql.DB, raw json.RawMess
 		return nil, "", err
 	}
 
-	// Upstream search_sessions_v1: a missing scope is a not-found error, not
-	// an empty result.
 	if !result.scopeExists {
 		switch {
 		case args.withinID == nil:
@@ -186,7 +173,6 @@ func (searchSessionsTool) Call(ctx context.Context, db *sql.DB, raw json.RawMess
 	return data, text, nil
 }
 
-// searchHitJSON ports search_sessions_v1.rs search_hit_json.
 func searchHitJSON(hit searchHit) map[string]any {
 	eventID := formatEventID(hit.eventUID)
 	turnID := formatTurnID(hit.sessionID, hit.turnSeq)
@@ -239,7 +225,6 @@ func searchHitJSON(hit searchHit) map[string]any {
 	}
 }
 
-// compactSnippet ports search_sessions_v1.rs compact_snippet.
 func compactSnippet(snippet string, alreadyTruncated bool) (string, bool) {
 	trimmed := strings.TrimSpace(snippet)
 	if len([]rune(trimmed)) <= maxSnippetChars {
@@ -249,7 +234,6 @@ func compactSnippet(snippet string, alreadyTruncated bool) (string, bool) {
 	return compact, true
 }
 
-// scoreUnit ports search_sessions_v1.rs score_unit.
 func scoreUnit(score float64) float64 {
 	if score != score || score > 1.7976931348623157e308 || score < -1.7976931348623157e308 {
 		return 0
@@ -263,8 +247,6 @@ func scoreUnit(score float64) float64 {
 	return score
 }
 
-// formatSearchSessionsText ports format_search_sessions_text: it reads the
-// request and data halves of the envelope, so it takes them separately.
 func formatSearchSessionsText(request, data map[string]any) string {
 	query, _ := request["query"].(string)
 	resultCount := 0

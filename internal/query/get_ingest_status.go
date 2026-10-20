@@ -35,8 +35,6 @@ func (getIngestStatus) Call(ctx context.Context, db *sql.DB, args json.RawMessag
 	return data, stStatusText(status), nil
 }
 
-// stEmptyArgs ports GetIngestStatusArgs (an empty struct with
-// deny_unknown_fields): only the literal empty object parses.
 func stEmptyArgs(args json.RawMessage) bool {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(args, &fields); err != nil || fields == nil {
@@ -57,8 +55,6 @@ type stGroupRow struct {
 	parsedBytes int64
 }
 
-// stReadSources maps the sources table onto IngestStatusRead: one synthetic
-// heartbeat per (author, machine_id) group, the newest group as latest.
 func stReadSources(ctx context.Context, db *sql.DB) (stStatusRead, error) {
 	rows, err := db.QueryContext(ctx,
 		"SELECT author, machine_id, max(updated_ms), count(*), coalesce(sum(size), 0),"+
@@ -86,7 +82,6 @@ func stReadSources(ctx context.Context, db *sql.DB) (stStatusRead, error) {
 	for _, g := range groups {
 		heartbeats = append(heartbeats, stGroupHeartbeat(g))
 	}
-	// Latest = newest group; ties break on host descending for determinism.
 	latestIdx := 0
 	for i := range heartbeats {
 		a, b := heartbeats[i], heartbeats[latestIdx]
@@ -248,7 +243,6 @@ func stStatusJSON(status stStatus) *stStatusJSONShape {
 	return out
 }
 
-// stConditionStateText ports condition_state.
 func stConditionStateText(status stStatus, kind stConditionType) (string, string) {
 	for _, c := range status.Conditions {
 		if c.Type != kind {
@@ -266,7 +260,6 @@ func stConditionStateText(status stStatus, kind stConditionType) (string, string
 	return "unknown", "condition_missing"
 }
 
-// stStatusText ports format_status_text.
 func stStatusText(status stStatus) string {
 	health, healthReason := stConditionStateText(status, stCondHealth)
 	coverage, coverageReason := stConditionStateText(status, stCondCoverage)

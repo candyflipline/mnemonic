@@ -1,13 +1,5 @@
 package query
 
-// The open engine: one ordered pass over a session's trace, ported from
-// upstream conversations/src/clickhouse_repo/canonical_open.rs
-// (scan_canonical_session, update_turn, session_labels, preview_from_wide,
-// event_mode_rank, adjacent_turn_ref). The cache is one immutable snapshot per
-// file, so the upstream version paging, FINAL/reconcile and
-// snapshot-generation machinery is a no-op here; trace carries the wide
-// columns inline, so hydration is folded into the scan.
-
 import (
 	"context"
 	"database/sql"
@@ -17,7 +9,6 @@ import (
 	"strings"
 )
 
-// navRow is upstream NavRow + DerivedPosition + HydratedRow folded together.
 type navRow struct {
 	sessionID         string
 	eventUID          string
@@ -61,8 +52,6 @@ func (r *navRow) isTerminal() bool {
 	return r.payloadType == "task_complete" || r.payloadType == "turn_aborted"
 }
 
-// isMetadataBearing ports sql/033_replay_stable_events.sql: session_meta rows,
-// plus omp title payloads.
 func (r *navRow) isMetadataBearing() bool {
 	if r.eventClass == "session_meta" {
 		return true
@@ -74,7 +63,6 @@ func (r *navRow) isMetadataBearing() bool {
 	return t == "title" || t == "title_change"
 }
 
-// payloadString reads payload_json as an object and returns one string field.
 func payloadString(payloadJSON, field string) string {
 	if strings.TrimSpace(payloadJSON) == "" {
 		return ""
@@ -87,7 +75,6 @@ func payloadString(payloadJSON, field string) string {
 	return s
 }
 
-// eventRef is upstream McpEventRef.
 type eventRef struct {
 	sessionID  string
 	eventUID   string
@@ -108,8 +95,6 @@ func navEventRef(r *navRow) *eventRef {
 	}
 }
 
-// refBefore ports the (event_time, event_order, event_uid) tuple comparison
-// scan_canonical_session uses for first/last.
 func refBefore(a, b *eventRef) bool {
 	if a.eventTime != b.eventTime {
 		return a.eventTime < b.eventTime
@@ -120,7 +105,6 @@ func refBefore(a, b *eventRef) bool {
 	return a.eventUID < b.eventUID
 }
 
-// turnRef is upstream McpTurnRef.
 type turnRef struct {
 	sessionID string
 	turnSeq   uint32
@@ -139,7 +123,6 @@ func turnRefOf(m *turnSummary) *turnRef {
 	}
 }
 
-// sessionMetadata is upstream SessionMetadata.
 type sessionMetadata struct {
 	sessionID         string
 	firstEventTime    string
@@ -158,7 +141,6 @@ type sessionMetadata struct {
 	lastActorRole     string
 }
 
-// turnSummary is upstream TurnSummary, the per-turn metadata accumulator.
 type turnSummary struct {
 	sessionID         string
 	turnSeq           uint32
@@ -175,7 +157,6 @@ type turnSummary struct {
 	reasoningItems    uint64
 }
 
-// turnAccum is upstream TurnAccum (minus cursor-carry plumbing).
 type turnAccum struct {
 	metadata             *turnSummary
 	firstEvent           *eventRef
@@ -191,7 +172,6 @@ type turnAccum struct {
 	selected             []*navRow
 }
 
-// sessionScan is upstream SessionScan.
 type sessionScan struct {
 	metadata          sessionMetadata
 	source            string
@@ -410,7 +390,6 @@ func decodeFloatMap(s string) map[string]float64 {
 	return m
 }
 
-// updateTurn ports update_turn.
 func updateTurn(turn *turnAccum, r *navRow, ref *eventRef, selected bool) {
 	if turn.metadata == nil {
 		turn.metadata = &turnSummary{
@@ -482,7 +461,6 @@ func updateTurn(turn *turnAccum, r *navRow, ref *eventRef, selected bool) {
 	}
 }
 
-// adjacentTurnRef ports adjacent_turn_ref over the ordered turn keys.
 func adjacentTurnRef(sc *sessionScan, turnSeq uint32, next bool) *turnRef {
 	var seq uint32
 	found := false
@@ -510,7 +488,6 @@ func adjacentTurnRef(sc *sessionScan, turnSeq uint32, next bool) *turnRef {
 	return turnRefOf(turn.metadata)
 }
 
-// turnCompact is upstream McpTurnCompact.
 type turnCompact struct {
 	metadata             *turnSummary
 	userInputSummary     any
@@ -525,7 +502,6 @@ type turnCompact struct {
 	lastEvent            *eventRef
 }
 
-// compactTurn ports compact_turn.
 func compactTurn(turn *turnAccum, previewChars int) *turnCompact {
 	c := &turnCompact{
 		metadata:             turn.metadata,
@@ -586,7 +562,6 @@ func sessionLabels(sc *sessionScan) (any, any, any) {
 	return nonEmpty(resolvedTitle), nonEmpty(slug), nonEmpty(resolvedSummary)
 }
 
-// previewFromWide ports preview_from_wide.
 func previewFromWide(row *navRow, previewChars int) any {
 	source, isPayload := row.textContent, false
 	if strings.TrimSpace(row.textContent) == "" {
@@ -598,7 +573,6 @@ func previewFromWide(row *navRow, previewChars int) any {
 	return nil
 }
 
-// compactSource ports compact_source: returns ("", false) for None.
 func compactSource(source string, isPayload bool, previewChars int) (string, bool) {
 	if strings.TrimSpace(source) == "" {
 		return "", false
@@ -625,7 +599,6 @@ func compactSource(source string, isPayload bool, previewChars int) (string, boo
 	return compact, true
 }
 
-// eventModeRank ports event_mode_rank.
 func eventModeRank(r *navRow) uint8 {
 	if r.payloadType == "web_search_call" || r.payloadType == "search_results_received" ||
 		(r.payloadType == "tool_use" && (r.name == "WebSearch" || r.name == "WebFetch")) {
@@ -640,7 +613,6 @@ func eventModeRank(r *navRow) uint8 {
 	return 0
 }
 
-// modeFromRank ports mode_from_rank -> ConversationMode::as_str.
 func modeFromRank(rank uint8) string {
 	switch rank {
 	case 3:

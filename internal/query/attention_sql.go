@@ -9,18 +9,9 @@ import (
 	"strings"
 )
 
-// DuckDB ports of clickhouse_repo/file_attention.rs. The mcp_event_locator
-// and mcp_event_navigation tables have no cache counterpart: the exact pass
-// reads the canonical events columns directly, and both passes join the trace
-// view for (event_time, event_order, turn_seq). The durable
-// file_attention_project_roots mapping is likewise absent, so project scope
-// runs on registered roots alone.
-
 type faQuery struct {
-	Rel string
-	// NormalizedPID is the resolved project's identity (git:/dir: digest).
-	NormalizedPID string
-	// NormalizedRoots are the registered worktree roots for the resolved root.
+	Rel             string
+	NormalizedPID   string
 	NormalizedRoots []string
 	DeriveLegacy    bool
 	ProjectScope    bool
@@ -33,7 +24,6 @@ type faQuery struct {
 	MaxRows         int
 }
 
-// faTouch ports FileAttentionTouch (rows.rs).
 type faTouch struct {
 	SessionID     string
 	EventUID      string
@@ -60,8 +50,6 @@ var faPathKeys = []string{
 	"relative_workspace_path", "filepath", "file", "filename",
 }
 
-// faTouches ports file_attention_impl: the exact normalized-path pass, then
-// the suffix pass, merged newest-first and capped at MaxRows+1.
 func faTouches(ctx context.Context, db *sql.DB, q faQuery) ([]faTouch, error) {
 	if q.Rel == "" {
 		return nil, qErr("file_attention requires a non-empty path tail")
@@ -81,8 +69,6 @@ func faTouches(ctx context.Context, db *sql.DB, q faQuery) ([]faTouch, error) {
 	return faMergeTouches(append(touches, suffix...), limitPlus), nil
 }
 
-// faSinglePath ports single_path_sql: a value fit to attribute a worktree
-// root from (no separators or shell metacharacters).
 func faSinglePath(expr string) string {
 	var b strings.Builder
 	b.WriteString("(")
@@ -99,8 +85,6 @@ func faSinglePath(expr string) string {
 	return b.String()
 }
 
-// faNav ports file_attention_navigation_source over the trace view, scoped to
-// the already-matched events.
 func faNav(scope string) string {
 	return "nav AS (\n" +
 		"  SELECT session_id, event_uid, event_time,\n" +
@@ -111,8 +95,6 @@ func faNav(scope string) string {
 		")"
 }
 
-// faFilters renders the shared request-side clauses over a scope prefix
-// ("e." for events, "" for the matched subquery).
 func faFilters(prefix string, q faQuery) []string {
 	toolName := prefix + "tool_name"
 	clauses := []string{
@@ -131,8 +113,6 @@ func faFilters(prefix string, q faQuery) []string {
 	return clauses
 }
 
-// faTimeClauses renders the outer start/end/source clauses over the joined
-// trace row.
 func faTimeClauses(q faQuery) []string {
 	var outer []string
 	if q.StartUnixMs != nil {
@@ -154,7 +134,6 @@ func faOuterWhere(q faQuery) string {
 	return "1"
 }
 
-// faExact ports file_attention_exact_impl.
 func faExact(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTouch, error) {
 	pred := "e.project_id != ''"
 	if q.ProjectScope {
@@ -197,9 +176,6 @@ func faJStr(input, key string) string {
 	return "CASE WHEN json_valid(" + input + ") THEN coalesce(json_extract_string(" + input + ", '$." + key + "'), '') ELSE '' END"
 }
 
-// faSuffix ports file_attention_suffix_impl on its non-indexed path: the
-// payload moraine_tool_io block is matched by path key, nested JSON value, or
-// shell command text.
 func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTouch, error) {
 	rel := q.Rel
 	relQ := qQuote(rel)
@@ -247,8 +223,6 @@ func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTo
 
 	scalarPaths := make([]string, 0, len(faPathKeys))
 	for _, key := range faPathKeys {
-		// json_valid-gated: rows with non-JSON input_json (free-text tool
-		// input) match nothing but still flow through the CTE ladder.
 		scalarPaths = append(scalarPaths, faJStr("ti.input_json", key))
 	}
 	legacyList := "[" + strings.Join(scalarPaths, ", ") + "]"
@@ -391,8 +365,6 @@ func faScanTouches(ctx context.Context, db *sql.DB, qry string) ([]faTouch, erro
 	return out, nil
 }
 
-// faMergeTouches ports merge_file_attention_touches: dedupe on
-// (session, call, uid), newest first, null timestamps last.
 func faMergeTouches(touches []faTouch, limit int) []faTouch {
 	seen := make(map[string]bool, len(touches))
 	merged := make([]faTouch, 0, len(touches))

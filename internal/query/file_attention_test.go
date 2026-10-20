@@ -9,9 +9,6 @@ import (
 	"unicode/utf8"
 )
 
-// Ports of the resolve_tail, build_data and format_text tests in upstream
-// upstream mcp-core/src/file_attention_v1.rs.
-
 func TestFaRejectsNegativeLimit(t *testing.T) {
 	raw := json.RawMessage(`{"path": "crates/foo/tee.rs", "limit": -1}`)
 	if _, err := faParseArgs(raw); err == nil || err.Error() != "limit must be between 1 and 25" {
@@ -79,7 +76,6 @@ func TestFaTailSegmentsCountsNonEmptyComponents(t *testing.T) {
 	}
 }
 
-// faGitDir makes an empty Git repository root (a .git directory, no objects).
 func faGitDir(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -217,9 +213,6 @@ func TestFaResolveTailFallsBackToAbsoluteWhenNoMarker(t *testing.T) {
 	}
 }
 
-// --- build_data ---
-
-// faTouchFixture builds one newest-first touch like upstream's touch() helper.
 func faTouchFixture(session, event, tool, matchKind, root string, ts int64) faTouch {
 	var ms *int64
 	var turn *uint32
@@ -445,8 +438,6 @@ func TestFaActionPreviewCollapsesWhitespaceAndTruncatesByChars(t *testing.T) {
 		t.Fatalf("collapsed = %q", got)
 	}
 }
-
-// --- format_text ---
 
 func TestFaFormatTextDescribesUnknownOnlyRootsAsIncompleteAttribution(t *testing.T) {
 	data := map[string]any{

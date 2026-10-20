@@ -1,9 +1,5 @@
 package query
 
-// open: MCP open tool, ported from upstream
-// upstream mcp-core/src/open_v1.rs (args, data shapes, prose) over the
-// scan engine in open_repo.go. Owned by lane cache.
-
 import (
 	"context"
 	"database/sql"
@@ -19,7 +15,6 @@ func (openTool) Name() string { return "open" }
 
 func init() { register(openTool{}) }
 
-// canonicalOpenArgs is contract.rs CanonicalOpenV1Args.
 type canonicalOpenArgs struct {
 	target        mcpID
 	limit         int
@@ -42,15 +37,13 @@ type openCursor struct {
 	After    openCursorAfter `json:"after"`
 }
 
-// openCursorAfter is where reading stopped: a session page continues after a
-// turn_seq, a turn page after an event_ordinal.
 type openCursorAfter struct {
 	Kind         string `json:"kind"`
 	TurnSeq      uint32 `json:"turn_seq,omitempty"`
 	EventOrdinal uint32 `json:"event_ordinal,omitempty"`
 }
 
-// parseOpenArgs ports OpenV1Args::validate; every message is upstream text.
+// parseOpenArgs: every message is upstream text.
 func parseOpenArgs(raw json.RawMessage) (canonicalOpenArgs, error) {
 	var args struct {
 		ID     *string `json:"id"`
@@ -144,8 +137,6 @@ func encodeOpenCursor(cursor openCursor) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(bytes), nil
 }
 
-// requestShape is the canonical request the envelope echoes (resolve_open):
-// the re-encoded ID, limit only when provided, or the cursor verbatim.
 func (a canonicalOpenArgs) requestShape() map[string]any {
 	if a.hasCursor {
 		return map[string]any{"cursor": a.cursor}
@@ -342,7 +333,6 @@ func compactOptionalValue(v any, maxChars int) any {
 	return compactOptionalLine(s, maxChars)
 }
 
-// openSessionData ports open_v1.rs open_session_data.
 func openSessionData(scan *sessionScan, pageTurns []any, nextCursor any) map[string]any {
 	m := scan.metadata
 	title, slug, summary := sessionLabels(scan)
@@ -378,7 +368,6 @@ func openSessionData(scan *sessionScan, pageTurns []any, nextCursor any) map[str
 	}
 }
 
-// openSessionTurnSummary ports open_v1.rs open_session_turn_summary.
 func openSessionTurnSummary(c *turnCompact) map[string]any {
 	turnID := formatTurnID(c.metadata.sessionID, c.metadata.turnSeq)
 	terminalEventID := optionalEventID(c.terminalEventUID)
@@ -405,7 +394,6 @@ func openSessionTurnSummary(c *turnCompact) map[string]any {
 	}
 }
 
-// compactTextContent ports open_v1.rs compact_text_content.
 func compactTextContent(eventID any, text any) any {
 	s, ok := text.(string)
 	if !ok || strings.TrimSpace(s) == "" {
@@ -422,7 +410,6 @@ func compactTextContent(eventID any, text any) any {
 	}
 }
 
-// compactTools ports open_v1.rs compact_tools.
 func compactTools(tools []string) ([]any, bool) {
 	out := make([]any, 0, len(tools))
 	for i, tool := range tools {
@@ -442,8 +429,6 @@ func stringSliceAny(values []string) []any {
 	return out
 }
 
-// openTurnData ports open_v1.rs open_turn_data_with_offset (offset rides in
-// the page ordinals).
 func openTurnData(scan *sessionScan, turn *turnAccum, c *turnCompact, events []any, nextCursor any) map[string]any {
 	m := c.metadata
 	turnID := formatTurnID(m.sessionID, m.turnSeq)
@@ -488,7 +473,6 @@ func openTurnData(scan *sessionScan, turn *turnAccum, c *turnCompact, events []a
 	}
 }
 
-// openTurnEventSummary ports open_v1.rs open_turn_event_summary.
 func openTurnEventSummary(r *navRow, ordinal int, terminalEventUID string) map[string]any {
 	toolName := toolNameFor(r.eventType(), r.name, r.callID)
 	if toolName != nil {
@@ -508,7 +492,6 @@ func openTurnEventSummary(r *navRow, ordinal int, terminalEventUID string) map[s
 	}
 }
 
-// compactEventSummary ports open_v1.rs compact_event_summary.
 func compactEventSummary(r *navRow) (string, bool) {
 	text, ok := previewFromWide(r, summaryPreviewChars).(string)
 	if !ok {
@@ -520,7 +503,6 @@ func compactEventSummary(r *navRow) (string, bool) {
 	return compactTextLine(text, summaryPreviewChars), looksTruncated(text)
 }
 
-// openEventData ports open_v1.rs open_event_data.
 func openEventData(scan *sessionScan, r *navRow, parentTurn *turnAccum) map[string]any {
 	m := scan.metadata
 	eventID := formatEventID(r.eventUID)
@@ -575,7 +557,6 @@ func openEventData(scan *sessionScan, r *navRow, parentTurn *turnAccum) map[stri
 	}
 }
 
-// fullEventContent ports open_v1.rs full_event_content.
 func fullEventContent(r *navRow, eventType string, toolName any, payload any) map[string]any {
 	text := fullEventText(r, payload)
 	format := "text"
@@ -622,7 +603,6 @@ func fullEventContent(r *navRow, eventType string, toolName any, payload any) ma
 	return content
 }
 
-// fullEventText ports open_v1.rs full_event_text.
 func fullEventText(r *navRow, payload any) string {
 	if strings.TrimSpace(r.textContent) != "" {
 		return r.textContent
@@ -637,9 +617,9 @@ func fullEventText(r *navRow, payload any) string {
 	return r.payloadJSON
 }
 
-// parsePayloadJSON ports open_v1.rs parse_payload_json. UseNumber keeps
-// integer literals exact, matching serde_json's u64/i64 Value numbers when
-// the payload is re-encoded into the content object.
+// parsePayloadJSON: UseNumber keeps integer literals exact, matching
+// serde_json's u64/i64 Value numbers when the payload is re-encoded into the
+// content object.
 func parsePayloadJSON(payloadJSON string) any {
 	if strings.TrimSpace(payloadJSON) == "" {
 		return nil
@@ -653,7 +633,6 @@ func parsePayloadJSON(payloadJSON string) any {
 	return payload
 }
 
-// extractToolArguments ports open_v1.rs extract_tool_arguments.
 func extractToolArguments(payload any) any {
 	object, ok := payload.(map[string]any)
 	if !ok {
@@ -667,7 +646,6 @@ func extractToolArguments(payload any) any {
 	return nil
 }
 
-// extractExitCode ports open_v1.rs extract_exit_code.
 func extractExitCode(payload any) (int64, bool) {
 	object, ok := payload.(map[string]any)
 	if !ok {
@@ -684,7 +662,6 @@ func extractExitCode(payload any) (int64, bool) {
 	return 0, false
 }
 
-// extractStringField ports open_v1.rs extract_string_field (trimmed values).
 func extractStringField(payload any, names ...string) any {
 	object, ok := payload.(map[string]any)
 	if !ok {
@@ -698,7 +675,6 @@ func extractStringField(payload any, names ...string) any {
 	return nil
 }
 
-// toolNameFor ports open_v1.rs tool_name_for.
 func toolNameFor(eventType, name, callID string) any {
 	if eventType != "tool_call" && eventType != "tool_response" {
 		return nil
@@ -709,8 +685,6 @@ func toolNameFor(eventType, name, callID string) any {
 	return nonEmpty(callID)
 }
 
-// pathStr reads a /-separated path through the data map, filtering empty
-// strings (open_v1.rs str_at).
 func pathStr(value any, path ...string) (string, bool) {
 	for _, key := range path {
 		m, ok := value.(map[string]any)
@@ -726,8 +700,6 @@ func pathStr(value any, path ...string) (string, bool) {
 	return s, true
 }
 
-// openResultText ports open_v1.rs open_result_text: header plus a plain-text
-// rendering of the opened object.
 func openResultText(request, data map[string]any) string {
 	header := openResultHeader(request, data)
 	var body []string
@@ -745,8 +717,6 @@ func openResultText(request, data map[string]any) string {
 	return header + "\n\n" + strings.Join(body, "\n")
 }
 
-// OpenErrorText ports the error branch of open_result_header for the mcp
-// envelope layer.
 func OpenErrorText(code, message string) string {
 	if code == "" {
 		code = "error"
@@ -853,7 +823,6 @@ func openSessionText(data map[string]any) []string {
 	return lines
 }
 
-// openResultHeader ports open_v1.rs open_result_header.
 func openResultHeader(request, data map[string]any) string {
 	kind := "object"
 	if s, ok := pathStr(data, "kind"); ok {
@@ -897,8 +866,6 @@ func openResultHeader(request, data map[string]any) string {
 		return fmt.Sprintf("Opened %s %s summary only. %d %s available; call open with id and limit to expand.",
 			kind, id, total, unit)
 	}
-	// Upstream looks for a string cursor (as_str); a JSON null means the
-	// final page.
 	if s, ok := data["next_cursor"].(string); ok && s != "" {
 		return fmt.Sprintf("Opened %s %s with %d %s. More are available with next_cursor.",
 			kind, id, children, unit)
