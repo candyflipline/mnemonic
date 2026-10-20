@@ -147,6 +147,13 @@ func New(extraPatterns []string) (*Redactor, error) {
 			priority: len(builtinRules) + i,
 		})
 	}
+	byPriority := make(map[int]string, len(r.rules))
+	for _, ru := range r.rules {
+		if other, dup := byPriority[ru.priority]; dup {
+			panic(fmt.Sprintf("redact: rules %s and %s share priority %d", other, ru.id, ru.priority))
+		}
+		byPriority[ru.priority] = ru.id
+	}
 	r.buildPrefilter()
 	return r, nil
 }
