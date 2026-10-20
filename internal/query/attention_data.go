@@ -131,7 +131,7 @@ func faBuildData(a *faArgs, tail *faTail, touches []faTouch, warnings *[]string)
 	data := map[string]any{
 		"path":             a.Path,
 		"tail":             tail.Rel,
-		"tail_is_absolute": tail.Abs,
+		"tail_is_absolute": strings.HasPrefix(tail.Rel, "/"),
 		"stripped_root":    nil,
 		"scope":            a.Scope,
 		"granularity":      a.Granularity,

@@ -8,77 +8,30 @@ import (
 )
 
 type faTail struct {
-	Rel    string
-	Root   string
-	ProjID string
-	// Abs records that the path was absolute and could not be reduced to a
-	// project-relative tail, so Rel is matched literally.
-	Abs        bool
+	Rel        string
+	Root       string
+	ProjID     string
 	Normalized bool
-	// DeriveRoots: stripping the tail from historical matched paths is safe
-	// enough to report a worktree root.
-	DeriveRoots bool
 }
 
-// faResolveTail ports resolve_tail_from; launchDir is empty on this server
-// (no launch scope), but the parameter stays for the ported tests.
-func faResolveTail(path, launchDir string) faTail {
+func faResolveTail(path string) faTail {
 	cleaned := strings.TrimPrefix(path, "./")
-	rawSingle := faIsSinglePathCandidate(cleaned)
 	normalized := faNormalizePathText(cleaned)
 	normalizedChanged := normalized != path
-	normalizedSingle := faIsSinglePathCandidate(normalized)
-	root, projID := faLaunchProject(launchDir)
 
 	if !strings.HasPrefix(normalized, "/") {
-		if rawSingle && normalizedSingle && launchDir != "" && root != "" {
-			absolute := faNormalizePathText(strings.TrimRight(launchDir, "/") + "/" + normalized)
-			if rel, ok := faStripRoot(absolute, root); ok && rel != "" {
-				return faTail{Rel: rel, Root: root, ProjID: projID, DeriveRoots: true, Normalized: normalizedChanged}
-			}
-		}
-		return faTail{Rel: strings.TrimLeft(normalized, "/"), Normalized: normalizedChanged}
+		return faTail{Rel: normalized, Normalized: normalizedChanged}
 	}
 
-	if rawSingle && normalizedSingle {
-		targetRoot := qFindProjectRoot(normalized)
-		if targetRoot == "" && root != "" {
-			if _, ok := faStripRoot(normalized, root); ok {
-				targetRoot = root
-			}
-		}
-		if targetRoot != "" {
-			if rel, ok := faStripRoot(normalized, targetRoot); ok && rel != "" {
-				var projectID string
-				switch {
-				case launchDir == "":
-					projectID = qProjectIDForRoot(targetRoot)
-				case projID != "" && projID == qProjectIDForRoot(targetRoot):
-					projectID = projID
-				}
-				return faTail{Rel: rel, Root: targetRoot, ProjID: projectID, DeriveRoots: true, Normalized: normalizedChanged}
+	if faIsSinglePathCandidate(cleaned) && faIsSinglePathCandidate(normalized) {
+		if root := qFindProjectRoot(normalized); root != "" {
+			if rel, ok := faStripRoot(normalized, root); ok && rel != "" {
+				return faTail{Rel: rel, Root: root, ProjID: qProjectIDForRoot(root), Normalized: normalizedChanged}
 			}
 		}
 	}
 
-	return faTail{Rel: normalized, Abs: true, Normalized: normalizedChanged}
-}
-
-// faLaunchProject ports the launch_project binding: the Git boundary above the
-// launch directory (probed through a routing marker so the launch dir itself
-// counts), else the launch directory as a plain directory root.
-func faLaunchProject(launchDir string) (string, string) {
-	if launchDir == "" {
-		return "", ""
-	}
-	root := qFindProjectRoot(filepath.Join(launchDir, ".mnemonic-project-scope"))
-	if root == "" {
-		if !qIsDir(launchDir) {
-			return "", ""
-		}
-		root = launchDir
-	}
-	return root, qProjectIDForRoot(root)
+	return faTail{Rel: normalized, Normalized: normalizedChanged}
 }
 
 func faIsSinglePathCandidate(path string) bool {

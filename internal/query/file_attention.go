@@ -28,16 +28,16 @@ func (fileAttention) Call(ctx context.Context, db *sql.DB, args json.RawMessage)
 	request := faCanonicalRequest(a)
 
 	warnings := []string{}
-	tail := faResolveTail(a.Path, "")
+	tail := faResolveTail(a.Path)
 	if tail.Normalized {
 		warnings = append(warnings, sprintf("normalized %q to %q before matching.", a.Path, tail.Rel))
 	}
-	if tail.Abs {
+	if strings.HasPrefix(tail.Rel, "/") {
 		warnings = append(warnings, sprintf(
 			"could not reduce %q to a project-relative tail (no Git boundary or launch-directory containment could be proven); matching the absolute path literally, so other roots of the same file will not be unified. Pass a project-relative path for cross-root coverage.",
 			a.Path))
 	}
-	if !tail.DeriveRoots {
+	if tail.Root == "" {
 		warnings = append(warnings,
 			"could not prove the path is a project-relative file in this launch scope; roots are derived only from exact relative captures with cwd, otherwise reported as unknown to avoid mislabeling arbitrary suffix matches.")
 	}
@@ -59,7 +59,7 @@ func (fileAttention) Call(ctx context.Context, db *sql.DB, args json.RawMessage)
 		Rel:             tail.Rel,
 		NormalizedPID:   tail.ProjID,
 		NormalizedRoots: faRootsFor(tail.Root),
-		DeriveLegacy:    tail.DeriveRoots,
+		DeriveLegacy:    tail.Root != "",
 		ProjectScope:    a.Scope == "project",
 		StartUnixMs:     a.StartUnixMs,
 		EndUnixMs:       a.EndUnixMs,
