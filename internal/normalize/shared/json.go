@@ -15,8 +15,7 @@ import (
 // byte-for-byte the way serde_json's u64/i64/f64 do.
 type JSON = any
 
-// DecodeJSON parses one JSON document. Trailing non-space bytes are an error,
-// mirroring serde_json::from_str.
+// DecodeJSON parses one JSON document. Trailing non-space bytes are an error.
 func DecodeJSON(data []byte) (JSON, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
@@ -188,7 +187,6 @@ func RustFloatDisplay(f float64) string {
 	return strconv.FormatFloat(f, 'f', -1, 64)
 }
 
-// Get returns v[key], or nil when v is not an object or lacks the key.
 func Get(v JSON, key string) JSON {
 	if m, ok := v.(map[string]any); ok {
 		return m[key]
@@ -196,8 +194,6 @@ func Get(v JSON, key string) JSON {
 	return nil
 }
 
-// Pointer walks a slash-separated path like serde_json's Value::pointer,
-// including the ~1 and ~0 escapes.
 func Pointer(v JSON, path string) JSON {
 	for path != "" {
 		if path[0] != '/' {
@@ -215,31 +211,26 @@ func Pointer(v JSON, path string) JSON {
 	return v
 }
 
-// AsArray returns the underlying slice when v is an array.
 func AsArray(v JSON) ([]any, bool) {
 	a, ok := v.([]any)
 	return a, ok
 }
 
-// AsObject returns the underlying map when v is an object.
 func AsObject(v JSON) (map[string]any, bool) {
 	m, ok := v.(map[string]any)
 	return m, ok
 }
 
-// AsString returns the underlying string when v is a JSON string.
 func AsString(v JSON) (string, bool) {
 	s, ok := v.(string)
 	return s, ok
 }
 
-// AsBool returns the underlying bool when v is a JSON bool.
 func AsBool(v JSON) (bool, bool) {
 	b, ok := v.(bool)
 	return b, ok
 }
 
-// IsNull reports whether v is absent or JSON null.
 func IsNull(v JSON) bool {
 	return v == nil
 }

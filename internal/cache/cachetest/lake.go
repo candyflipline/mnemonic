@@ -1,6 +1,3 @@
-// Package cachetest builds a small lake from testdata/goldens so cache and
-// query tests run against real parquet. It is a normal package (no _test)
-// so other packages' tests can import it.
 package cachetest
 
 import (
@@ -19,8 +16,6 @@ import (
 	_ "github.com/duckdb/duckdb-go/v2"
 )
 
-// Lake fixture constants: every golden lands under one author and machine
-// with the same ingest time.
 const (
 	Author     = "test"
 	Machine    = "m1"
@@ -179,8 +174,6 @@ func sqlJSONString(s string) string {
 	return string(b)
 }
 
-// readCols casts every JSON field to its lake type; column order is the lake
-// contract order.
 func readCols() []string {
 	cols := make([]string, 0, len(schema.EventColumns)+3)
 	for _, c := range schema.EventColumns {
@@ -189,7 +182,6 @@ func readCols() []string {
 	return append(cols, "author", "machine_id", "cast(ingested_at AS TIMESTAMP) AS ingested_at")
 }
 
-// jsonColumns is read_json's columns={...} spec, one entry per lake column.
 func jsonColumns() string {
 	specs := make([]string, 0, len(schema.EventColumns)+3)
 	for _, c := range schema.EventColumns {

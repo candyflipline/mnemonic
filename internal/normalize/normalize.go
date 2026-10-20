@@ -1,7 +1,3 @@
-// Package normalize turns one whole raw source file into event rows. Parsers
-// are ports of the upstream ingest-core/src/sources/*
-// (read them with `git show upstream/main:<path>`); testdata/goldens pins
-// their output.
 package normalize
 
 import (
@@ -15,13 +11,11 @@ import (
 type SourceMeta struct {
 	SourceName string
 	Harness    string
-	SourceFile string // absolute path on the client
+	SourceFile string
 	Generation uint32
 	Inode      uint64
 }
 
-// Parser reads a whole source and returns its events in file order. Per-line
-// state (session, model and cwd hints) lives inside one Parse call.
 type Parser interface {
 	Harness() string
 	Parse(r io.Reader, src SourceMeta) ([]schema.Event, error)
@@ -29,7 +23,6 @@ type Parser interface {
 
 var parsers = map[string]Parser{}
 
-// Register adds a parser; each parser package calls it from init.
 func Register(p Parser) {
 	if _, dup := parsers[p.Harness()]; dup {
 		panic("normalize: duplicate parser for harness " + p.Harness())
@@ -37,8 +30,6 @@ func Register(p Parser) {
 	parsers[p.Harness()] = p
 }
 
-// For returns the parser for harness, or false when the harness is kept raw
-// only until someone ports its parser.
 func For(harness string) (Parser, bool) {
 	p, ok := parsers[harness]
 	return p, ok

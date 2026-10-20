@@ -5,13 +5,9 @@ import (
 	"time"
 )
 
-// Source is one harness's parsing behavior, ported from upstream
-// IngestSource (upstream ingest-core/src/sources/mod.rs). NormalizeRecord
-// runs the shared pipeline around it; parser packages implement the hooks.
 type Source interface {
 	Harness() string
 	DefaultInferenceProvider() string
-	// Preflight returns the record to parse and false when it is skipped.
 	Preflight(rec JSON) (JSON, bool)
 	SourceMetadata(rec JSON) SourceMetadata
 	RecordTS(rec JSON) string
@@ -21,19 +17,15 @@ type Source interface {
 	Normalize(rec JSON, ctx *Ctx, topType, baseUID, modelHint string) *Partials
 }
 
-// SourceMetadata is source_metadata: the record's inference provider plus an
-// optional fallback for the session model hint.
 type SourceMetadata struct {
 	InferenceProvider string
 	ModelHintFallback string
 }
 
-// DefaultSourceMetadata is the metadata most sources return.
 func DefaultSourceMetadata(provider string) SourceMetadata {
 	return SourceMetadata{InferenceProvider: provider}
 }
 
-// SourceRecordContext is what SessionID resolution sees.
 type SourceRecordContext struct {
 	SourceName  string
 	SourceFile  string
@@ -42,8 +34,6 @@ type SourceRecordContext struct {
 	BaseUID     string
 }
 
-// RecordParams is one JSONL line's coordinates plus the hints threaded from
-// the previous line. Hints never leak past the file being parsed.
 type RecordParams struct {
 	SourceName       string
 	SourceFile       string
@@ -57,8 +47,6 @@ type RecordParams struct {
 	RecordTSHint     string
 }
 
-// NormalizedRecord is one line's outcome: its finalized event rows and the
-// hints the next line inherits.
 type NormalizedRecord struct {
 	Events      []*EventRow
 	SessionHint string
@@ -66,9 +54,6 @@ type NormalizedRecord struct {
 	CwdHint     string
 }
 
-// NormalizeRecord ports normalize_record_with_ts_hint: resolve the record's
-// coordinates and identity, run the source adapter, then fold tool payloads
-// into their events and re-key events to their canonical semantic uid.
 func NormalizeRecord(rec JSON, src Source, p RecordParams) NormalizedRecord {
 	kept, keep := src.Preflight(rec)
 	if !keep {
@@ -127,8 +112,6 @@ func NormalizeRecord(rec JSON, src Source, p RecordParams) NormalizedRecord {
 	}
 }
 
-// ResolveRecordTS mirrors resolve_record_ts: the record's own timestamp, else
-// the caller's hint, else (codex only) the rollout file-name timestamp.
 func ResolveRecordTS(harness, sourceFile, sourceRecordTS, recordTSHint string) string {
 	if trimmed := strings.TrimSpace(sourceRecordTS); trimmed != "" {
 		return trimmed
@@ -144,8 +127,6 @@ func ResolveRecordTS(harness, sourceFile, sourceRecordTS, recordTSHint string) s
 	return ""
 }
 
-// ResolveCwd mirrors resolve_cwd: the record's cwd wins over the session
-// hint; whitespace-only values count as absent.
 func ResolveCwd(recordCwd, cwdHint string) string {
 	if trimmed := strings.TrimSpace(recordCwd); trimmed != "" {
 		return trimmed
@@ -218,8 +199,6 @@ func FoldToolPayloads(p *Partials) map[string]*FoldedIdentity {
 	return identities
 }
 
-// toolPayloadObject renders the tool row as the moraine_tool_io member: the
-// tool row minus the event/session transport columns.
 func toolPayloadObject(t *ToolRow) map[string]any {
 	full := t.MapOf()
 	payload := make(map[string]any, len(full))
@@ -233,8 +212,6 @@ func toolPayloadObject(t *ToolRow) map[string]any {
 	return payload
 }
 
-// occurrenceGroup is the dedupe key for identical semantic events from one
-// line (SemanticOccurrenceGroup upstream).
 type occurrenceGroup struct {
 	sourceName   string
 	sourceFile   string
@@ -291,9 +268,6 @@ func stampSemanticOccurrence(ev *EventRow, occurrence uint32) {
 	ev.Event.PayloadJSON = Compact(obj)
 }
 
-// FinalizeIdentities ports finalize_event_identities: once every canonical
-// field and folded tool payload is present, replace the provisional uids with
-// the semantic ones and rewrite same-record references.
 func FinalizeIdentities(events []*EventRow, folded map[string]*FoldedIdentity) {
 	uidMap := make(map[string]string, len(events))
 	for _, ev := range events {
@@ -311,7 +285,6 @@ func FinalizeIdentities(events []*EventRow, folded map[string]*FoldedIdentity) {
 	}
 }
 
-// rewritePayloadUID ports rewrite_payload_uid_field for request_event_uid.
 func rewritePayloadUID(ev *EventRow, uidMap map[string]string) {
 	parsed, err := DecodeJSON([]byte(ev.Event.PayloadJSON))
 	if err != nil {
@@ -333,8 +306,6 @@ func rewritePayloadUID(ev *EventRow, uidMap map[string]string) {
 	ev.Event.PayloadJSON = Compact(obj)
 }
 
-// EventVersion is the dedupe stamp upstream writes per row (higher wins). It
-// is wall-clock based, so the golden masks it.
 func EventVersion() uint64 {
 	return uint64(time.Now().UnixMilli())
 }

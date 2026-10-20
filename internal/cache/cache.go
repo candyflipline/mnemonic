@@ -1,5 +1,3 @@
-// Package cache builds the derived DuckDB file every query reads. Owned by
-// lane cache.
 package cache
 
 import (

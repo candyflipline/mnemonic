@@ -8,23 +8,18 @@ import (
 	"strings"
 )
 
-// fileAttentionPathKeys are the input members a tool request may name a path
-// under.
 var fileAttentionPathKeys = map[string]bool{
 	"file_path": true, "notebook_path": true, "path": true, "target_file": true,
 	"relativeWorkspacePath": true, "relative_workspace_path": true, "filepath": true,
 	"file": true, "filename": true,
 }
 
-// FileAttentionFields is the project identity a cwd or tool path resolves to.
 type FileAttentionFields struct {
 	ProjectID    string
 	RepoRelPath  string
 	WorktreeRoot string
 }
 
-// EventFileAttentionFields resolves the project identity of a record's cwd,
-// mirroring event_file_attention_fields.
 func EventFileAttentionFields(cwd string) FileAttentionFields {
 	cwd = NormalizePathText(strings.TrimSpace(cwd))
 	if cwd == "" || !strings.HasPrefix(cwd, "/") {
@@ -46,8 +41,6 @@ func EventFileAttentionFields(cwd string) FileAttentionFields {
 	return FileAttentionFields{ProjectID: projectID, WorktreeRoot: root}
 }
 
-// ToolFileAttentionFields resolves a tool request's structured path against
-// the session cwd, mirroring tool_file_attention_fields.
 func ToolFileAttentionFields(cwd, toolPhase, inputJSON string) FileAttentionFields {
 	if toolPhase != "request" {
 		return FileAttentionFields{}
@@ -141,8 +134,6 @@ func isSinglePathCandidate(path string) bool {
 	return !strings.ContainsAny(path, "\n\r;|&`")
 }
 
-// NormalizePathText collapses duplicate slashes and dot segments the way
-// normalize_path_text does.
 func NormalizePathText(path string) string {
 	absolute := strings.HasPrefix(path, "/")
 	var parts []string
@@ -171,8 +162,6 @@ func NormalizePathText(path string) string {
 	return body
 }
 
-// findFileAttentionRoot walks up from path (or its parent) looking for a
-// .git entry, stopping at $HOME.
 func findFileAttentionRoot(path string) (string, bool) {
 	home := os.Getenv("HOME")
 	dir := path
@@ -213,8 +202,7 @@ func stripRoot(path, root string) string {
 	return strings.TrimPrefix(path, root+"/")
 }
 
-// ProjectIDForRoot mirrors upstream config::project_id_for_repo_root: git
-// repositories key on their common dir, non-git directories on their
+// Git repositories key on their common dir, non-git directories on their
 // canonical path.
 func ProjectIDForRoot(root string) (string, bool) {
 	if commonDir, ok := gitCommonDir(root); ok {
@@ -237,8 +225,6 @@ func hashPathDomain(domain, path string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// gitCommonDir resolves a worktree-aware git common directory, mirroring
-// upstream config::git_common_dir.
 func gitCommonDir(root string) (string, bool) {
 	marker := filepath.Join(root, ".git")
 	var gitDir string

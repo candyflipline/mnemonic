@@ -8,9 +8,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/normalize/claudecode"
 )
 
-// The middle line is not valid JSON; it must still advance the byte offset,
-// so line 3 lands at 74+9=83 and keeps line_no 3. Regression guard for the
-// offset-after-skip bug in the pre-ParseJSONL claude-code loop.
 func TestParseJSONLSkippedLineKeepsOffsets(t *testing.T) {
 	input := `{"timestamp":"2026-01-01T00:00:00.000Z","type":"system","subtype":"init"}
 not json

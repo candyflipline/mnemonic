@@ -1,5 +1,3 @@
-// Package all registers every ported parser. Importers that parse (the
-// server, the golden test) import it for its side effects.
 package all
 
 import (

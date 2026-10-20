@@ -23,7 +23,6 @@ import (
 	"github.com/duckdb/duckdb-go/v2"
 )
 
-// manifest is one raw/<...>.json file: wire.Source plus the ignored zst_size.
 type manifest struct {
 	wire.Source
 	ZSTSize int64 `json:"zst_size"`
@@ -78,9 +77,6 @@ func Build(dataDir string) (Stats, error) {
 	return st, nil
 }
 
-// lakeChanged reports whether any lake parquet or manifest is newer than the
-// newest complete cache file. A manifest the store deletes between the glob
-// and the stat is skipped, as lake.Run does.
 func lakeChanged(dataDir string) (bool, error) {
 	var newest int64
 	for _, pat := range []string{
@@ -112,14 +108,12 @@ func lakeChanged(dataDir string) (bool, error) {
 	return newest > caches[len(caches)-1].ms, nil
 }
 
-// lakeFile is one events parquet with the identity the archive key hashes.
 type lakeFile struct {
 	path  string
 	size  int64
 	mtime int64
 }
 
-// lakeFiles splits the lake into archive and live parquet, each sorted by path.
 func lakeFiles(dataDir string) (archive, live []lakeFile, err error) {
 	matches, err := filepath.Glob(filepath.Join(dataDir, layout.EventsGlob))
 	if err != nil {
@@ -146,7 +140,6 @@ type cacheFile struct {
 	path string
 }
 
-// cacheFiles lists complete cache files oldest first.
 func cacheFiles(dataDir string) ([]cacheFile, error) {
 	matches, err := filepath.Glob(filepath.Join(layout.CacheDir(dataDir), "cache-*.duckdb"))
 	if err != nil {
@@ -154,7 +147,7 @@ func cacheFiles(dataDir string) ([]cacheFile, error) {
 	}
 	out := make([]cacheFile, 0, len(matches))
 	for _, m := range matches {
-		base := filepath.Base(m) // cache-<ms>.duckdb
+		base := filepath.Base(m)
 		ms, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(base, "cache-"), ".duckdb"), 10, 64)
 		if err != nil {
 			continue
@@ -165,9 +158,6 @@ func cacheFiles(dataDir string) ([]cacheFile, error) {
 	return out, nil
 }
 
-// prune deletes all but the newest two complete cache files and every archive
-// index but the current one. An open handle on a deleted file stays valid
-// until the server swaps to the newest cache.
 func prune(dataDir, archPath string) error {
 	caches, err := cacheFiles(dataDir)
 	if err != nil {
@@ -192,7 +182,6 @@ func prune(dataDir, archPath string) error {
 	return nil
 }
 
-// archiveKey names the archive index after the archive files' identity.
 func archiveKey(dataDir string, files []lakeFile) string {
 	h := sha256.New()
 	h.Write([]byte(strings.Join(archiveStmts("src"), "\n") + "\n"))
@@ -203,7 +192,6 @@ func archiveKey(dataDir string, files []lakeFile) string {
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
-// ensureArchive returns the archive index for files, building it when absent.
 func ensureArchive(dataDir, spill string, files []lakeFile) (string, error) {
 	path := filepath.Join(layout.CacheDir(dataDir), "archive-"+archiveKey(dataDir, files)+".duckdb")
 	if _, err := os.Stat(path); err == nil {
@@ -225,8 +213,6 @@ func ensureArchive(dataDir, spill string, files []lakeFile) (string, error) {
 	return path, os.Rename(tmp, path)
 }
 
-// archiveStmts is the SQL that builds an archive index over src, or the empty
-// tables when src is "". archiveKey hashes it, so changing it rebuilds the index.
 func archiveStmts(src string) []string {
 	stmts := []string{eventsDDL("events"), docsDDL("docs"), postingsDDL("postings")}
 	if src == "" {
@@ -240,9 +226,6 @@ func archiveStmts(src string) []string {
 	return append(stmts, insertPostingsSQL("events", "docs", "postings")...)
 }
 
-// buildCache writes the per-cycle cache: the live rows' events, docs and
-// postings, the archive docs that live rows supersede, the corpus totals,
-// sources, and the contract views over archive and live together.
 func buildCache(path, spill, archPath, dataDir string, live []lakeFile) (Stats, error) {
 	var st Stats
 	err := withBuildConn(path, spill, archPath, func(ctx context.Context, c *sql.Conn) error {
@@ -370,7 +353,6 @@ func newDB(dsn string) (*sql.DB, error) {
 	return sql.OpenDB(c), nil
 }
 
-// sqlStr quotes a literal for DuckDB SQL.
 func sqlStr(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
@@ -384,20 +366,13 @@ func parquetSource(files []lakeFile) string {
 		"], hive_partitioning=false, filename=true, file_row_number=true)"
 }
 
-// winnersSQL picks one row per event_uid over key columns only: the highest
-// event_version, ties broken by the newest ingested_at.
 func winnersSQL(src string) string {
 	return "SELECT filename, file_row_number, event_uid, event_version, ingested_at FROM " + src +
 		" QUALIFY row_number() OVER (PARTITION BY event_uid ORDER BY event_version DESC, ingested_at DESC) = 1"
 }
 
-// heavyColumns stay in the lake; the open tool reads them by locator
-// (lake_file, lake_row) for the rows it renders.
 var heavyColumns = map[string]bool{"payload_json": true, "token_usage_json": true}
 
-// eventsDDL declares an events table: the lake columns minus heavyColumns,
-// a doc id shared by docs and postings, the lake locator, and the fields the
-// tools derive from payload_json. Long strings are zstd-compressed.
 func eventsDDL(table string) string {
 	var b strings.Builder
 	b.WriteString("CREATE TABLE " + table + " (doc UINTEGER NOT NULL")
@@ -458,18 +433,15 @@ FROM (SELECT *, CASE WHEN tool_phase = 'request' AND contains(payload_json, 'mor
 JOIN w ON w.filename = r.filename AND w.file_row_number = r.file_row_number`
 }
 
-// The BM25 inputs follow docs/clickhouse/mv_search_postings.sql with
-// schema.sql's term definition: a term is a 2..64 char token of
-// lower(text_content), doc_len counts only terms, and docs are the events
-// with at least one term. docs, postings and the query-side scorer must use
-// the same definition.
+// A term is a 2..64 char token of lower(text_content), doc_len counts only
+// terms, and docs are the events with at least one term. docs, postings and
+// the query-side scorer must use the same definition.
 const tokenList = "list_filter(regexp_extract_all(lower(text_content), '[a-z0-9_]+'), lambda tok: len(tok) >= 2 AND len(tok) <= 64)"
 
 func docsDDL(table string) string {
 	return "CREATE TABLE " + table + " (doc UINTEGER NOT NULL, doc_len UINTEGER NOT NULL)"
 }
 
-// postingsDDL: doc_len rides on every posting so scoring needs no docs join.
 func postingsDDL(table string) string {
 	return "CREATE TABLE " + table +
 		" (term VARCHAR NOT NULL, doc UINTEGER NOT NULL, tf USMALLINT NOT NULL, doc_len UINTEGER NOT NULL)"
@@ -492,8 +464,6 @@ func insertPostingsSQL(events, docs, postings string) []string {
 	}
 }
 
-// viewsSQL unions archive and live: an archive doc a live row supersedes is
-// in dropped and hidden everywhere.
 var viewsSQL = []string{
 	`CREATE VIEW events AS
 SELECT * FROM arch.events WHERE doc NOT IN (SELECT doc FROM dropped)
@@ -519,11 +489,9 @@ FROM (SELECT count(*) AS n, sum(doc_len) AS len FROM arch.docs WHERE doc NOT IN 
 
 // traceOrderDDL computes each event's place in its session once per build,
 // so trace reads need no window over whole sessions (one session holds 1.5M
-// events). It ports docs/clickhouse/v_conversation_trace.sql: event_time
-// mirrors parseDateTime64BestEffortOrNull (TIMESTAMPTZ parsing honors a
-// trailing Z or numeric offset, and the build runs with TimeZone='UTC' so
-// zoneless record_ts reads as UTC); emission_index replaces
-// JSONExtractUInt(payload_json, 'moraine_emission_index').
+// events). event_time mirrors parseDateTime64BestEffortOrNull (TIMESTAMPTZ
+// parsing honors a trailing Z or numeric offset, and the build runs with
+// TimeZone='UTC' so zoneless record_ts reads as UTC).
 const traceOrderDDL = `
 CREATE TABLE trace_order AS
 WITH base AS (
@@ -545,11 +513,6 @@ FROM base
 WINDOW w AS (PARTITION BY session_id ORDER BY event_time, source_file,
     source_generation, source_offset, source_line_no, emission_index, event_uid)`
 
-// traceDDL is the trace view: events with their trace_order and the
-// v_all_events renames (origin_event_id->compacted_parent_uid,
-// actor_kind->actor_role, event_kind->event_class, tool_call_id->call_id,
-// tool_name->name, turn_index->turn_id, phase=tool_phase or op_status).
-// payload_json and token_usage_json stay in the lake.
 const traceDDL = `
 CREATE VIEW trace AS
 SELECT e.session_id, e.session_date, e.event_uid,
@@ -567,7 +530,6 @@ SELECT e.session_id, e.session_date, e.event_uid,
        e.token_usage_buckets, e.token_usage_native_units
 FROM events e JOIN trace_order o ON o.doc = e.doc`
 
-// sessionsDDL ports docs/clickhouse/v_session_summary.sql.
 const sessionsDDL = `
 CREATE VIEW sessions AS
 SELECT session_id,
@@ -596,19 +558,12 @@ const sourcesDDL = `CREATE TABLE sources (
     events UBIGINT NOT NULL
 )`
 
-// lakeFileRe parses a live lake parquet path: the hive prefix and src_id.
-// src_id alone is not unique — two authors or machines can hold the same
-// client path — so row counts key on the full source identity.
 var lakeFileRe = regexp.MustCompile(`author=([^/]*)/machine=([^/]*)/harness=([^/]*)/([0-9a-f]+)\.parquet$`)
 
 type sourceKey struct {
 	author, machine, harness, srcID string
 }
 
-// insertSources loads the manifest files and counts each live source's
-// parquet rows from the parquet footers; a manifest without a parquet (no
-// parser for that harness) has 0. Archive rows have no manifests. A manifest
-// the store deletes between the glob and the read is skipped.
 func insertSources(ctx context.Context, c *sql.Conn, dataDir string, live []lakeFile) error {
 	counts := map[sourceKey]int64{}
 	if len(live) > 0 {

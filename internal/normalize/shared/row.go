@@ -8,8 +8,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-// Ctx is the record-scoped context every row of one JSONL line shares
-// (RecordContext upstream).
 type Ctx struct {
 	SourceName        string
 	Harness           string
@@ -34,15 +32,11 @@ type EventRow struct {
 	Folded *FoldedIdentity
 }
 
-// Partials collects the rows one record normalizes into. Link rows are not
-// kept by this port; only events and the tool rows folded into them matter.
 type Partials struct {
 	Events []*EventRow
 	Tools  []*ToolRow
 }
 
-// ToolRow is the tool request/response detail later folded into its owning
-// event's payload.
 type ToolRow struct {
 	EventUID          string
 	SessionID         string
@@ -68,26 +62,21 @@ type ToolRow struct {
 	SourceRef         string
 }
 
-// Emitter builds rows for one record (SourceEmitter upstream).
 type Emitter struct {
 	Ctx      *Ctx
 	Partials Partials
 }
 
-// NewEmitter starts an emitter for a record context.
 func NewEmitter(ctx *Ctx) *Emitter { return &Emitter{Ctx: ctx} }
 
-// UID derives a provisional event uid from a record fingerprint.
 func (c *Ctx) UID(fingerprint, suffix string) string {
 	return EventUID(c.SourceFile, c.SourceGeneration, c.SourceLineNo, c.SourceOffset, fingerprint, suffix)
 }
 
-// UIDForJSON derives a provisional event uid from a JSON fingerprint.
 func (c *Ctx) UIDForJSON(v JSON, suffix string) string {
 	return c.UID(Compact(v), suffix)
 }
 
-// SourceRef renders file:generation:line.
 func (c *Ctx) SourceRef() string {
 	return fmt.Sprintf("%s:%d:%d", c.SourceFile, c.SourceGeneration, c.SourceLineNo)
 }
@@ -127,7 +116,6 @@ var payloadTypeDomain = map[string]bool{
 func eventKindInDomain(value string) bool   { return eventKindDomain[value] }
 func payloadTypeInDomain(value string) bool { return payloadTypeDomain[value] }
 
-// Event opens a new event row with the base column defaults filled in.
 func (e *Emitter) Event(eventUID, eventKind, payloadType, actorKind, textContent, payloadJSON string) *EventRow {
 	ctx := e.Ctx
 	text := TruncateChars(textContent, textLimit)
@@ -166,21 +154,17 @@ func (e *Emitter) Event(eventUID, eventKind, payloadType, actorKind, textContent
 	return row
 }
 
-// EventForJSON opens an event whose payload is a JSON value.
 func (e *Emitter) EventForJSON(eventUID, eventKind, payloadType, actorKind, textContent string, payload JSON) *EventRow {
 	return e.Event(eventUID, eventKind, payloadType, actorKind, textContent, Compact(payload))
 }
 
-// PushEvent appends an event row.
 func (e *Emitter) PushEvent(row *EventRow) { e.Partials.Events = append(e.Partials.Events, row) }
 
-// PushToolRequest appends a tool request row bound to an event uid.
 func (e *Emitter) PushToolRequest(eventUID, toolCallID, parentToolCallID, toolName, inputJSON string) {
 	e.Partials.Tools = append(e.Partials.Tools,
 		e.toolRow(eventUID, toolCallID, parentToolCallID, toolName, "request", 0, inputJSON, "", ""))
 }
 
-// PushToolResponse appends a tool response row bound to an event uid.
 func (e *Emitter) PushToolResponse(eventUID, toolCallID, parentToolCallID, toolName string, toolError uint8, inputJSON, outputJSON, outputText string) {
 	e.Partials.Tools = append(e.Partials.Tools,
 		e.toolRow(eventUID, toolCallID, parentToolCallID, toolName, "response", toolError, inputJSON, outputJSON, outputText))
@@ -217,7 +201,6 @@ func (e *Emitter) toolRow(eventUID, toolCallID, parentToolCallID, toolName, tool
 	}
 }
 
-// SetText sets text_content and derives text_preview.
 func (r *EventRow) SetText(text string) *EventRow {
 	text = TruncateChars(text, textLimit)
 	r.Event.TextContent = text
@@ -225,7 +208,6 @@ func (r *EventRow) SetText(text string) *EventRow {
 	return r
 }
 
-// SetContentTypes overrides the content_types array, normalizing nil to empty.
 func (r *EventRow) SetContentTypes(values []string) *EventRow {
 	if values == nil {
 		values = []string{}
@@ -234,7 +216,6 @@ func (r *EventRow) SetContentTypes(values []string) *EventRow {
 	return r
 }
 
-// SetTokenAccounting stamps the accounting onto the row.
 func (r *EventRow) SetTokenAccounting(t TokenAccounting) *EventRow {
 	r.Event.EndpointKind = t.EndpointKind
 	r.Event.InputTokens = t.InputTokens
@@ -247,7 +228,6 @@ func (r *EventRow) SetTokenAccounting(t TokenAccounting) *EventRow {
 	return r
 }
 
-// MarkReasoning flags a reasoning event.
 func (r *EventRow) MarkReasoning() *EventRow {
 	r.Event.HasReasoning = 1
 	return r.SetContentTypes([]string{"reasoning"})
@@ -282,8 +262,6 @@ func (t *ToolRow) MapOf() map[string]any {
 	}
 }
 
-// ResolveModelHint mirrors resolve_model_hint: the last canonically
-// non-empty model among the record's events, else the fallback.
 func ResolveModelHint(events []*EventRow, harness, fallback string) string {
 	for i := len(events) - 1; i >= 0; i-- {
 		if normalized := CanonicalizeModel(harness, events[i].Event.Model); normalized != "" {

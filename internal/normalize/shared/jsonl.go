@@ -8,9 +8,8 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-// ParseJSONL walks one whole JSONL source the way upstream normalize_jsonl
-// does (tests/golden_fixtures.rs): line_no is the 1-based line index and
-// source_offset the byte offset of the line start, both counted over every
+// ParseJSONL walks one whole JSONL source: line_no is the 1-based line index
+// and source_offset the byte offset of the line start, both counted over every
 // line including the blank and invalid-JSON ones that get skipped — the offset
 // advances before any skip so later lines keep their true positions. Session,
 // model and cwd hints thread from one line's outcome into the next and die

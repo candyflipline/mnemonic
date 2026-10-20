@@ -22,14 +22,10 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// fakeParser stands in for a ported parser: one event per line
-// "uid|version|ts", registered as harness "test-fake".
 type fakeParser struct{}
 
 func (fakeParser) Harness() string { return "test-fake" }
 
-// raceOnParse, when non-nil, fires once at the start of the next Parse: a
-// test's way to land a push while Run is mid-source.
 var raceOnParse func()
 
 func (fakeParser) Parse(r io.Reader, src normalize.SourceMeta) ([]schema.Event, error) {
@@ -71,8 +67,6 @@ func (fakeParser) Parse(r io.Reader, src normalize.SourceMeta) ([]schema.Event, 
 
 func init() { normalize.Register(fakeParser{}) }
 
-// writeSource hand-writes one raw file (two zstd frames, as an appended
-// source looks) plus its manifest with zst_size.
 func writeSource(t *testing.T, dataDir, author, machine, harness, srcID string, lines []string) {
 	t.Helper()
 	key := layout.Key{Author: author, Machine: machine, Harness: harness, SrcID: srcID}
@@ -198,7 +192,6 @@ func TestRun(t *testing.T) {
 		t.Fatalf("token_usage_buckets['input'] = %d, want 3", bucket)
 	}
 
-	// Parquet column order and types: schema.EventColumns, then the stamps.
 	rows, err := db.Query("DESCRIBE SELECT * FROM read_parquet(" + sqlQuote(p1) + ", hive_partitioning=false)")
 	if err != nil {
 		t.Fatal(err)
@@ -235,9 +228,6 @@ func TestRun(t *testing.T) {
 	}
 }
 
-// appendFrame lands a push the way store does: one more zstd frame of lines
-// at the end of the raw file, then the manifest rewritten with the new size
-// and a strictly later UpdatedMs.
 func appendFrame(t *testing.T, dataDir string, key layout.Key, lines []string) {
 	t.Helper()
 	raw, err := os.OpenFile(key.Raw(dataDir), os.O_WRONLY|os.O_APPEND, 0o644)
@@ -288,9 +278,6 @@ func appendFrame(t *testing.T, dataDir string, key layout.Key, lines []string) {
 	}
 }
 
-// A push that lands while a source is parsing must not be lost to the mtime
-// comparison: the parquet written after it is restamped to the parsed
-// manifest's UpdatedMs, so the next Run rewrites it with the appended line.
 func TestRunRestampsParquetWhenPushLandsMidParse(t *testing.T) {
 	dataDir := t.TempDir()
 	key := layout.Key{Author: "alice", Machine: "chris-mbp", Harness: "test-fake", SrcID: "ffffffffffffffff"}
@@ -367,8 +354,6 @@ func TestImportClickHouse(t *testing.T) {
 		t.Fatalf("live run: %+v, %v", st, err)
 	}
 
-	// A small per-month export: one row already live in the lake, one archive
-	// row whose source file no longer exists.
 	db := openDB(t)
 	exportDir := t.TempDir()
 	exportEvents := []schema.Event{

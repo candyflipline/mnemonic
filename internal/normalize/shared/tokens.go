@@ -1,7 +1,5 @@
 package shared
 
-// Token bucket and native-unit key sets, in the order the golden maps carry
-// them (alphabetical, since the maps serialize sorted).
 var tokenBucketKeys = []string{
 	"embedding_input_image",
 	"embedding_input_text",
@@ -59,20 +57,16 @@ func copyNativeUnits(m map[string]float64) map[string]float64 {
 	return out
 }
 
-// BucketValue is one named bucket entry.
 type BucketValue struct {
 	Key   string
 	Value uint64
 }
 
-// NativeUnitValue is one named native-unit entry.
 type NativeUnitValue struct {
 	Key   string
 	Value float64
 }
 
-// TokenAccounting mirrors TokenAccounting: per-event token totals plus the
-// harmonized bucket and native-unit maps.
 type TokenAccounting struct {
 	EndpointKind     string
 	InputTokens      uint32
@@ -84,7 +78,6 @@ type TokenAccounting struct {
 	nativeUnits      map[string]float64
 }
 
-// NewTokenAccounting starts a zero-valued accounting for an endpoint kind.
 func NewTokenAccounting(endpointKind string) TokenAccounting {
 	return TokenAccounting{
 		EndpointKind: endpointKind,
@@ -93,7 +86,6 @@ func NewTokenAccounting(endpointKind string) TokenAccounting {
 	}
 }
 
-// WithBuckets sets named buckets, ignoring names outside the key set.
 func (t TokenAccounting) WithBuckets(values ...BucketValue) TokenAccounting {
 	for _, v := range values {
 		if _, ok := t.buckets[v.Key]; ok {
@@ -103,7 +95,6 @@ func (t TokenAccounting) WithBuckets(values ...BucketValue) TokenAccounting {
 	return t
 }
 
-// WithNativeUnits sets named native units, ignoring names outside the key set.
 func (t TokenAccounting) WithNativeUnits(values ...NativeUnitValue) TokenAccounting {
 	for _, v := range values {
 		if _, ok := t.nativeUnits[v.Key]; ok {
@@ -113,7 +104,6 @@ func (t TokenAccounting) WithNativeUnits(values ...NativeUnitValue) TokenAccount
 	return t
 }
 
-// WithLegacyScalars sets the flat token counters.
 func (t TokenAccounting) WithLegacyScalars(input, output, cacheRead, cacheWrite uint64) TokenAccounting {
 	t.InputTokens = capU32(input)
 	t.OutputTokens = capU32(output)
@@ -122,14 +112,11 @@ func (t TokenAccounting) WithLegacyScalars(input, output, cacheRead, cacheWrite 
 	return t
 }
 
-// WithRawUsageJSON records usage JSON verbatim on the row.
 func (t TokenAccounting) WithRawUsageJSON(s string) TokenAccounting {
 	t.TokenUsageJSON = s
 	return t
 }
 
-// WithRawUsage records the compact JSON of a usage object on the row, like
-// with_raw_usage.
 func (t TokenAccounting) WithRawUsage(usage JSON) TokenAccounting {
 	if IsNull(usage) {
 		return t
@@ -139,7 +126,7 @@ func (t TokenAccounting) WithRawUsage(usage JSON) TokenAccounting {
 }
 
 // FirstOf returns the first member of v present under any of keys, explicit
-// null included, mirroring Rust's Option::or_else chains over Value::get.
+// null included.
 func FirstOf(v JSON, keys ...string) JSON {
 	m, ok := AsObject(v)
 	if !ok {
@@ -153,17 +140,14 @@ func FirstOf(v JSON, keys ...string) JSON {
 	return nil
 }
 
-// Buckets returns a private copy of the bucket map.
 func (t TokenAccounting) Buckets() map[string]uint64 { return copyBuckets(t.buckets) }
 
-// NativeUnits returns a private copy of the native-unit map.
 func (t TokenAccounting) NativeUnits() map[string]float64 { return copyNativeUnits(t.nativeUnits) }
 
 func capU32(v uint64) uint32 {
 	return uint32(min(v, uint64(^uint32(0))))
 }
 
-// SatSub is u64 saturating_sub, which the upstream token arithmetic leans on.
 func SatSub(a, b uint64) uint64 {
 	if b > a {
 		return 0
@@ -171,8 +155,6 @@ func SatSub(a, b uint64) uint64 {
 	return a - b
 }
 
-// usageFallback resolves the first present usage member, explicit null
-// included, and otherwise falls back to an input-details subkey.
 func usageFallback(usage JSON, keys []string, details JSON, detailKey string) uint64 {
 	if v := FirstOf(usage, keys...); v != nil {
 		return ToU64(v)
@@ -180,8 +162,6 @@ func usageFallback(usage JSON, keys []string, details JSON, detailKey string) ui
 	return ToU64(Get(details, detailKey))
 }
 
-// OpenAIGeneration mirrors TokenAccounting::openai_generation for OpenAI-style
-// usage objects.
 func OpenAIGeneration(usage JSON) TokenAccounting {
 	t := NewTokenAccounting("generation")
 	if IsNull(usage) {
@@ -227,7 +207,6 @@ func OpenAIGeneration(usage JSON) TokenAccounting {
 		WithRawUsage(usage)
 }
 
-// AsObjectOrEmpty returns the object form of v, or an empty map.
 func AsObjectOrEmpty(v JSON) map[string]any {
 	m, _ := AsObject(v)
 	return m

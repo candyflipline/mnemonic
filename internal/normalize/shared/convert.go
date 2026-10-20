@@ -8,8 +8,6 @@ import (
 	"unicode/utf8"
 )
 
-// ToStr mirrors shared::to_str: absent/null is "", strings pass through, any
-// other value is its compact JSON.
 func ToStr(v JSON) string {
 	switch t := v.(type) {
 	case nil:
@@ -21,8 +19,6 @@ func ToStr(v JSON) string {
 	}
 }
 
-// ToU64 mirrors shared::to_u64: numbers truncate through u64, numeric strings
-// parse, anything else is 0.
 func ToU64(v JSON) uint64 {
 	switch t := v.(type) {
 	case json.Number:
@@ -40,18 +36,14 @@ func ToU64(v JSON) uint64 {
 	}
 }
 
-// ToU32 mirrors shared::to_u32, clamping to the u32 range.
 func ToU32(v JSON) uint32 {
 	return uint32(min(ToU64(v), uint64(^uint32(0))))
 }
 
-// ToU16 mirrors shared::to_u16, clamping to the u16 range.
 func ToU16(v JSON) uint16 {
 	return uint16(min(uint64(ToU32(v)), uint64(^uint16(0))))
 }
 
-// ToU8Bool mirrors shared::to_u8_bool: bools directly, numbers by non-zero,
-// strings "true"/"1" case-insensitively.
 func ToU8Bool(v JSON) uint8 {
 	switch t := v.(type) {
 	case bool:
@@ -77,7 +69,6 @@ func ToU8Bool(v JSON) uint8 {
 	}
 }
 
-// SumNumericObject sums the numeric members of a JSON object.
 func SumNumericObject(v JSON) uint64 {
 	m, ok := AsObject(v)
 	if !ok {
@@ -90,8 +81,6 @@ func SumNumericObject(v JSON) uint64 {
 	return sum
 }
 
-// FirstString returns the first present, non-blank string member among keys,
-// trimmed.
 func FirstString(v JSON, keys ...string) (string, bool) {
 	for _, key := range keys {
 		if s, ok := AsString(Get(v, key)); ok {
@@ -103,7 +92,6 @@ func FirstString(v JSON, keys ...string) (string, bool) {
 	return "", false
 }
 
-// CanonicalizeModel mirrors shared::canonicalize_model.
 func CanonicalizeModel(harness, rawModel string) string {
 	model := strings.ToLower(strings.TrimSpace(rawModel))
 	if model == "" {
@@ -121,7 +109,6 @@ const (
 	previewLimit = 320
 )
 
-// TruncateChars keeps at most max runes of s.
 func TruncateChars(s string, max int) string {
 	if utf8.RuneCountInString(s) <= max {
 		return s
@@ -130,8 +117,6 @@ func TruncateChars(s string, max int) string {
 	return string(runes[:max])
 }
 
-// ExtractMessageText walks a JSON value collecting human text the way
-// shared::extract_message_text does, joining chunks with newlines.
 func ExtractMessageText(content JSON) string {
 	var chunks []string
 	walkMessageText(content, &chunks)
@@ -162,8 +147,6 @@ func walkMessageText(node JSON, out *[]string) {
 	}
 }
 
-// ExtractContentTypes mirrors shared::extract_content_types: the "type" of
-// each array member, sorted and deduplicated; empty for non-arrays.
 func ExtractContentTypes(content JSON) []string {
 	items, ok := AsArray(content)
 	if !ok {

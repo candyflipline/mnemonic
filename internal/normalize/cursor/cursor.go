@@ -1,6 +1,3 @@
-// Package cursor parses cursor sources. Port of upstream
-// upstream ingest-core/src/sources/cursor.rs plus the shared helpers it
-// calls; testdata/goldens pins the output.
 package cursor
 
 import (
@@ -13,20 +10,16 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-// Parser parses cursor JSONL agent transcripts (and the cursor_sqlite
-// poller's synthesized records).
 type Parser struct{}
 
 func (Parser) Harness() string { return "cursor" }
 
-// Parse walks the file line by line through the shared JSONL loop.
 func (Parser) Parse(r io.Reader, src normalize.SourceMeta) ([]schema.Event, error) {
 	return shared.ParseJSONL(r, src, cursorSource{})
 }
 
 func init() { normalize.Register(Parser{}) }
 
-// cursorSource is the cursor adapter (IngestSource for Cursor).
 type cursorSource struct{}
 
 func (cursorSource) Harness() string                  { return "cursor" }
@@ -85,9 +78,6 @@ func (cursorSource) SessionID(rec shared.JSON, sctx shared.SourceRecordContext) 
 }
 
 func (cursorSource) Normalize(rec shared.JSON, ctx *shared.Ctx, topType, baseUID, modelHint string) *shared.Partials {
-	// Synthetic records produced by the cursor_sqlite poller route by
-	// top-level type (the Hermes precedent); JSONL agent transcripts fall
-	// through to the shape-based normalizer below.
 	switch topType {
 	case "cursor_composer":
 		return normalizeCursorComposer(rec, ctx)
@@ -97,10 +87,6 @@ func (cursorSource) Normalize(rec shared.JSON, ctx *shared.Ctx, topType, baseUID
 	return normalizeCursorRecord(rec, ctx, topType, baseUID, modelHint)
 }
 
-// normalizeCursorComposer normalizes a `cursor_composer` synthetic record
-// (one per `composerData:` row) into a session_meta event. The payload keeps
-// title/name so the MCP session-info extraction surfaces Cursor's own
-// session name.
 func normalizeCursorComposer(rec shared.JSON, ctx *shared.Ctx) *shared.Partials {
 	em := shared.NewEmitter(ctx)
 	sessionID, _ := shared.FirstString(rec, "sessionId")
@@ -171,9 +157,6 @@ func normalizeCursorSqliteBubble(rec shared.JSON, ctx *shared.Ctx) *shared.Parti
 	return &em.Partials
 }
 
-// normalizeCursorToolFormer emits the tool-call (and, once the call reached a
-// terminal status, the tool-result) events plus tool metadata later folded
-// into those events.
 func normalizeCursorToolFormer(identity string, toolData shared.JSON, stamp func(*shared.EventRow) *shared.EventRow, em *shared.Emitter) {
 	toolName := cursorFormerToolName(toolData)
 	status := ""
@@ -290,8 +273,6 @@ func normalizeCursorRecord(rec shared.JSON, ctx *shared.Ctx, topType, baseUID, m
 	return &em.Partials
 }
 
-// cursorRecord is CursorRecord: the record-level fields every emitted event
-// of one line shares.
 type cursorRecord struct {
 	rec       shared.JSON
 	message   shared.JSON
@@ -417,7 +398,6 @@ func emitCursorTextBlock(r *cursorRecord, idx int, block shared.JSON, blockType 
 		r.actor(), text, block))
 	row.SetContentTypes([]string{contentType})
 	em.PushEvent(row)
-	// emit_cursor_reference_links: link rows are not kept in this port.
 }
 
 func emitCursorReasoning(r *cursorRecord, idx int, block shared.JSON, em *shared.Emitter) {
@@ -447,7 +427,6 @@ func emitCursorToolUse(r *cursorRecord, idx int, block shared.JSON, em *shared.E
 	row.Event.ItemID, _ = shared.FirstString(block, "id")
 	em.PushEvent(row)
 	em.PushToolRequest(uid, toolCallID, "", toolName, inputJSON)
-	// emit_cursor_reference_links: link rows are not kept in this port.
 }
 
 func emitCursorToolResult(r *cursorRecord, idx int, block shared.JSON, em *shared.Emitter) {
@@ -469,7 +448,6 @@ func emitCursorToolResult(r *cursorRecord, idx int, block shared.JSON, em *share
 	row.Event.ToolError = toolError
 	em.PushEvent(row)
 	em.PushToolResponse(uid, toolCallID, "", toolName, toolError, "", outputJSON, outputText)
-	// emit_cursor_reference_links: link rows are not kept in this port.
 }
 
 func emitCursorUnknown(r *cursorRecord, em *shared.Emitter) {
@@ -514,8 +492,6 @@ func cursorToolInput(block shared.JSON) shared.JSON {
 	return nil
 }
 
-// cursorTextOrJSON is the text extraction every cursor payload falls back on:
-// the collected human text, or the compact JSON when there is none.
 func cursorTextOrJSON(v shared.JSON) string {
 	text := shared.ExtractMessageText(v)
 	if text == "" && !shared.IsNull(v) {
@@ -573,8 +549,6 @@ func firstPresent(v shared.JSON, keys ...string) (shared.JSON, bool) {
 	return nil, false
 }
 
-// firstStringOf runs FirstString over v then fallback, for the record-then-
-// message lookups.
 func firstStringOf(v, fallback shared.JSON, keys []string) (string, bool) {
 	if s, ok := shared.FirstString(v, keys...); ok {
 		return s, true

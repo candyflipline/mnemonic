@@ -7,8 +7,6 @@ import (
 	"time"
 )
 
-// UnparseableEventTS is the UTC fallback event_ts when a record carries no
-// parseable timestamp.
 const UnparseableEventTS = "1970-01-01 00:00:00.000"
 
 var (
@@ -18,7 +16,6 @@ var (
 	naiveRecordTSRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$`)
 )
 
-// InferSessionIDFromFile pulls the trailing UUID from a source file's stem.
 func InferSessionIDFromFile(sourceFile string) string {
 	stem := fileStem(sourceFile)
 	if m := sessionIDRe.FindStringSubmatch(stem); m != nil {
@@ -38,8 +35,6 @@ func fileStem(sourceFile string) string {
 	return name
 }
 
-// InferSessionDateFromFile prefers a /sessions|projects/YYYY/MM/DD/ path
-// segment and otherwise falls back to the record timestamp's UTC date.
 func InferSessionDateFromFile(sourceFile, recordTS string) string {
 	if m := sessionDateRe.FindStringSubmatch(sourceFile); m != nil {
 		return m[1] + "-" + m[2] + "-" + m[3]
@@ -61,7 +56,7 @@ func InferRolloutRecordTSFromFile(sourceFile string) string {
 }
 
 // ParseRecordTS accepts RFC 3339 timestamps and naive
-// YYYY-MM-DDTHH:MM:SS[.frac] forms (assumed UTC), like parse_record_ts.
+// YYYY-MM-DDTHH:MM:SS[.frac] forms (assumed UTC).
 func ParseRecordTS(recordTS string) (time.Time, bool) {
 	trimmed := strings.TrimSpace(recordTS)
 	if trimmed == "" {
@@ -78,13 +73,10 @@ func ParseRecordTS(recordTS string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// FormatEventTS renders the DateTime64(3) spelling of a timestamp.
 func FormatEventTS(dt time.Time) string {
 	return dt.UTC().Format("2006-01-02 15:04:05.000")
 }
 
-// ParseEventTS mirrors parse_event_ts: the formatted timestamp plus whether
-// the fallback had to be used.
 func ParseEventTS(recordTS string) (string, bool) {
 	if dt, ok := ParseRecordTS(recordTS); ok {
 		return FormatEventTS(dt), false
@@ -92,8 +84,6 @@ func ParseEventTS(recordTS string) (string, bool) {
 	return UnparseableEventTS, true
 }
 
-// FormatRecordTSMillis renders a timestamp as RFC 3339 with milliseconds and
-// Z, the spelling claude-style sources carry in their records.
 func FormatRecordTSMillis(dt time.Time) string {
 	return dt.UTC().Format("2006-01-02T15:04:05.000Z")
 }

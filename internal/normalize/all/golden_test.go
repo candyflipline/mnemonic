@@ -11,7 +11,6 @@ import (
 	_ "github.com/candyflipline/mnemonic/internal/normalize/all"
 )
 
-// Cases mirror upstream tests/golden_fixtures.rs golden_cases(), jsonl only.
 var cases = []struct {
 	name, harness, sourceName, fixture, sourceFile string
 }{

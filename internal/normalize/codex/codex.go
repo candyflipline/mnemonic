@@ -1,6 +1,3 @@
-// Package codex parses codex sources. Port of upstream
-// upstream ingest-core/src/sources/codex.rs plus the shared helpers it
-// calls; testdata/goldens pins the output.
 package codex
 
 import (
@@ -12,19 +9,16 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-// Parser parses codex rollout JSONL transcripts.
 type Parser struct{}
 
 func (Parser) Harness() string { return "codex" }
 
-// Parse walks the file line by line through the shared JSONL loop.
 func (Parser) Parse(r io.Reader, src normalize.SourceMeta) ([]schema.Event, error) {
 	return shared.ParseJSONL(r, src, codexSource{})
 }
 
 func init() { normalize.Register(Parser{}) }
 
-// codexSource is the codex adapter (IngestSource for Codex).
 type codexSource struct{}
 
 func (codexSource) Harness() string                  { return "codex" }
@@ -66,12 +60,9 @@ func (codexSource) Normalize(rec shared.JSON, ctx *shared.Ctx, topType, baseUID,
 	em := shared.NewEmitter(ctx)
 	routeCodexRecord(&r, em)
 	stampCodexModelFallbacks(&r, em.Partials.Events)
-	// append_codex_parent_link: link rows are not kept in this port.
 	return &em.Partials
 }
 
-// codexRecord is CodexRecord: the payload-focused view one line normalizes
-// through.
 type codexRecord struct {
 	rec         shared.JSON
 	topType     string
@@ -291,9 +282,6 @@ func normalizeCodexEventMsg(r *codexRecord, em *shared.Emitter) {
 	em.PushEvent(row)
 }
 
-// stampCodexTokenCount ports stamp_codex_token_count: usage accounting from
-// info.last_token_usage, service tier from the rate limits, and the model
-// from the rate-limit name chain.
 func stampCodexTokenCount(r *codexRecord, row *shared.EventRow) {
 	usage := shared.Get(r.payloadField("info"), "last_token_usage")
 	inputTokens := shared.ToU32(shared.Get(usage, "input_tokens"))
@@ -301,9 +289,6 @@ func stampCodexTokenCount(r *codexRecord, row *shared.EventRow) {
 	cacheReadTokens := shared.ToU32(shared.FirstOf(usage, "cached_input_tokens", "cache_read_input_tokens"))
 	cacheWriteTokens := shared.ToU32(shared.FirstOf(usage, "cache_creation_input_tokens", "cache_write_input_tokens"))
 
-	// from_parts("generation", openai_generation_token_buckets(usage),
-	// token_native_units(&[])): the OpenAI arithmetic fills the buckets, the
-	// codex keys fill the scalars, and the whole payload is the raw usage.
 	accounting := shared.OpenAIGeneration(usage).
 		WithLegacyScalars(uint64(inputTokens), uint64(outputTokens), uint64(cacheReadTokens), uint64(cacheWriteTokens)).
 		WithRawUsageJSON(r.payloadJSON)
@@ -381,7 +366,6 @@ func normalizeCodexCompactedItem(r *codexRecord, item shared.JSON, idx int, em *
 		row.MarkReasoning()
 	}
 	em.PushEvent(row)
-	// push_event_link("compacted_parent"): link rows are not kept in this port.
 }
 
 func normalizeCodexLegacyTopLevel(r *codexRecord, em *shared.Emitter) {
@@ -408,9 +392,6 @@ func normalizeCodexUnknownTopLevel(r *codexRecord, em *shared.Emitter) {
 	em.PushEvent(row)
 }
 
-// stampCodexModelFallbacks ports stamp_codex_model_fallbacks: every event of
-// the record ends up with the row's own model, else the payload's, else the
-// inherited hint.
 func stampCodexModelFallbacks(r *codexRecord, events []*shared.EventRow) {
 	payloadModel := shared.CanonicalizeModel("codex", shared.ToStr(r.payloadField("model")))
 	inheritedModel := shared.CanonicalizeModel("codex", r.modelHint)

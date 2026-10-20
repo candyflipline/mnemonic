@@ -1,6 +1,3 @@
-// Package pi parses pi-coding-agent sources. Port of upstream
-// upstream ingest-core/src/sources/pi.rs onto the shared pi_family
-// normalizer; testdata/goldens pins the output.
 package pi
 
 import (
@@ -12,19 +9,16 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-// Parser parses pi-coding-agent JSONL transcripts.
 type Parser struct{}
 
 func (Parser) Harness() string { return "pi-coding-agent" }
 
-// Parse walks the file line by line through the shared JSONL loop.
 func (Parser) Parse(r io.Reader, src normalize.SourceMeta) ([]schema.Event, error) {
 	return shared.ParseJSONL(r, src, piSource{})
 }
 
 func init() { normalize.Register(Parser{}) }
 
-// piSource is the pi-coding-agent adapter (IngestSource for PiCodingAgent).
 type piSource struct{}
 
 func (piSource) Harness() string                  { return "pi-coding-agent" }

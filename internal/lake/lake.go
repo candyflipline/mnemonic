@@ -1,5 +1,3 @@
-// Package lake turns raw sources into events parquet and imports the
-// ClickHouse archive. Owned by lane lake.
 package lake
 
 import (
@@ -34,9 +32,6 @@ type Stats struct {
 	Events                                       int64
 }
 
-// manifest is the server's per-source manifest file: wire.Source plus
-// zst_size, the number of compressed bytes that Size covers (an append may
-// still be in flight when Run reads).
 type manifest struct {
 	wire.Source
 	ZstSize int64 `json:"zst_size"`
@@ -149,9 +144,6 @@ func ImportClickHouse(dataDir, exportDir, author string) (Stats, error) {
 	return st, nil
 }
 
-// readManifest parses a manifest path raw/author=A/machine=M/harness=H/<id>.json
-// and its wire.Source (+zst_size). The path names the key; the file names the
-// source.
 func readManifest(rawDir, mpath string) (manifest, layout.Key, error) {
 	var src manifest
 	b, err := os.ReadFile(mpath)
@@ -181,9 +173,6 @@ func readManifest(rawDir, mpath string) (manifest, layout.Key, error) {
 	return src, key, nil
 }
 
-// writeSource parses one whole raw file and writes its events parquet,
-// returning the row count. An empty source still writes a parquet with the
-// full schema, so every raw file of a ported harness has exactly one.
 func parseAndWrite(db *sql.DB, dataDir string, key layout.Key, src manifest, parser normalize.Parser, ingestedAt string) (int64, error) {
 	raw, err := os.Open(key.Raw(dataDir))
 	if err != nil {
@@ -276,9 +265,6 @@ func dedupe(events []schema.Event) []schema.Event {
 	return out
 }
 
-// liveSourceFiles collects the source_files present in the author's
-// non-archive parquet. Archive parquet does not count: it is the output of
-// this same import, so rerunning must not compare against it.
 func liveSourceFiles(db *sql.DB, dataDir, author string) (map[string]bool, error) {
 	glob := filepath.Join(dataDir, "events", "author="+author, "machine=*", "harness=*", "*.parquet")
 	files, err := filepath.Glob(glob)
@@ -307,7 +293,6 @@ func liveSourceFiles(db *sql.DB, dataDir, author string) (map[string]bool, error
 	return live, rows.Err()
 }
 
-// harnessesIn lists the distinct harness values of one export parquet.
 func harnessesIn(db *sql.DB, export string) ([]string, error) {
 	rows, err := db.Query(fmt.Sprintf("SELECT DISTINCT harness FROM read_parquet(%s)", sqlQuote(export)))
 	if err != nil {
@@ -326,8 +311,6 @@ func harnessesIn(db *sql.DB, export string) ([]string, error) {
 	return out, rows.Err()
 }
 
-// importHarness copies one harness's not-already-live export rows to out and
-// returns the row count. Output names repeat on rerun: same rows, same file.
 func importHarness(db *sql.DB, export, harness, out, author string, live map[string]bool) (int64, error) {
 	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
 		return 0, err
@@ -349,8 +332,6 @@ func importHarness(db *sql.DB, export, harness, out, author string, live map[str
 
 func open() (*sql.DB, error) { return sql.Open("duckdb", "") }
 
-// copyParquet writes query's rows to outPath: COPY to a .tmp sibling, then
-// rename, so readers only ever see complete files.
 func copyParquet(db *sql.DB, query, outPath string) error {
 	tmp := outPath + ".tmp"
 	if _, err := db.Exec(fmt.Sprintf("COPY (%s) TO %s (FORMAT parquet, COMPRESSION zstd)", query, sqlQuote(tmp))); err != nil {

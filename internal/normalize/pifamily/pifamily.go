@@ -1,6 +1,3 @@
-// Package pifamily ports upstream ingest-core/src/sources/pi_family.rs,
-// the record normalizer shared by the pi-coding-agent and prime-agent
-// harnesses.
 package pifamily
 
 import (
@@ -11,21 +8,15 @@ import (
 	"github.com/candyflipline/mnemonic/internal/normalize/shared"
 )
 
-// Policy mirrors upstream PiFamilyPolicy: the harness spelling of the
-// pi-family source and whether unknown record types stay raw only.
 type Policy struct {
 	Harness         string
 	RawOnlyFallback bool
 }
 
-// PI mirrors upstream PiFamilyPolicy::PI.
 var PI = Policy{Harness: "pi-coding-agent"}
 
-// PRIME mirrors upstream PiFamilyPolicy::PRIME.
 var PRIME = Policy{Harness: "prime-agent", RawOnlyFallback: true}
 
-// SourceMetadata mirrors upstream pi_family_source_metadata: provider and
-// model hints carried by model_change and message records.
 func SourceMetadata(rec shared.JSON) shared.SourceMetadata {
 	switch shared.ToStr(shared.Get(rec, "type")) {
 	case "model_change":
@@ -44,9 +35,6 @@ func SourceMetadata(rec shared.JSON) shared.SourceMetadata {
 	}
 }
 
-// NormalizeRecord mirrors upstream normalize_pi_family_record: one record
-// into event rows under the given policy. Link rows are not kept in this
-// port.
 func NormalizeRecord(rec shared.JSON, ctx *shared.Ctx, topType, baseUID, modelHint string, policy Policy) *shared.Partials {
 	em := shared.NewEmitter(ctx)
 	switch topType {
@@ -379,9 +367,6 @@ func handleUnknown(rec shared.JSON, topType, baseUID string, em *shared.Emitter)
 	em.PushEvent(row)
 }
 
-// stampMessageCommon mirrors upstream pi_stamp_message_common: the message's
-// model, falling back to the session model hint, and its stop reason as
-// op_status.
 func stampMessageCommon(row *shared.EventRow, message shared.JSON, modelHint, modelHarness string) *shared.EventRow {
 	model := shared.CanonicalizeModel(modelHarness, shared.ToStr(shared.Get(message, "model")))
 	if model == "" {
@@ -403,8 +388,6 @@ func stampTokenAccounting(row *shared.EventRow, accounting *shared.TokenAccounti
 	return row
 }
 
-// tokenAccounting mirrors upstream pi_token_accounting: a generation
-// accounting from the message's usage object, nil when it is absent or null.
 func tokenAccounting(message shared.JSON) *shared.TokenAccounting {
 	usage := shared.Get(message, "usage")
 	if shared.IsNull(usage) {
@@ -434,8 +417,6 @@ func satAdd(a, b uint64) uint64 {
 	return sum
 }
 
-// contentTypes mirrors upstream pi_content_types: the block types of a
-// message content, with toolCall/thinking renamed, sorted and deduplicated.
 func contentTypes(content shared.JSON) []string {
 	switch t := content.(type) {
 	case string:

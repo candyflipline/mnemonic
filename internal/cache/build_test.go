@@ -15,7 +15,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/wire"
 )
 
-// TestBuild covers the whole cache lifecycle over a real two-source lake.
 func TestBuild(t *testing.T) {
 	dataDir := t.TempDir()
 	if err := cachetest.Lake(dataDir, "codex", "claude_code"); err != nil {
@@ -26,7 +25,6 @@ func TestBuild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Literals over testdata/goldens codex (15 events) + claude_code (6).
 	if st.LakeFiles != 2 || st.Events != 21 || st.Docs != 14 || st.Postings != 48 {
 		t.Fatalf("build 1 stats: %+v", st)
 	}
@@ -40,8 +38,6 @@ func TestBuild(t *testing.T) {
 	}
 
 	var got string
-	// The codex session_meta row carries record_ts 2026-02-15T03:50:40.000Z:
-	// the trace must parse it as UTC, not fall back to ingested_at.
 	if err := db.QueryRow(`SELECT CAST(event_time AS VARCHAR) FROM trace
 		WHERE event_uid = '48c9b0b29f26283de60b80544f64752fdb806352658b0798beb29617b8b170b4'`).
 		Scan(&got); err != nil {
@@ -94,10 +90,6 @@ func TestBuild(t *testing.T) {
 	}
 }
 
-// TestSourcesSameSrcIDTwoMachines: src_id is only the hash of the client
-// path, so two machines can hold the same one. Two different goldens share a
-// forced src_id here, so src_id-keyed counting would report the same (wrong)
-// count for both; each sources row must count its own parquet.
 func TestSourcesSameSrcIDTwoMachines(t *testing.T) {
 	dataDir := t.TempDir()
 	srcID := wire.SrcID("/fixtures/codex/session.jsonl")
@@ -140,10 +132,6 @@ func TestSourcesSameSrcIDTwoMachines(t *testing.T) {
 	}
 }
 
-// TestPostingsTFClamp: one event's text_content (capped at 200k chars) can
-// hold a term more than 65535 times; tf must clamp to 65535 like upstream's
-// silent toUInt16 wrap, not fail the whole rebuild with an out-of-range
-// UINT16 conversion.
 func TestPostingsTFClamp(t *testing.T) {
 	dataDir := t.TempDir()
 	if err := cachetest.Lake(dataDir, "codex"); err != nil {
@@ -185,10 +173,6 @@ func TestPostingsTFClamp(t *testing.T) {
 	}
 }
 
-// TestOpenNewestTimeZonePinnedOnEveryConnection: SET TimeZone is
-// session-scoped in DuckDB, so OpenNewest must pin it per connection rather
-// than on whichever pooled connection happens to run one Exec. Holding three
-// connections forces three sessions.
 func TestOpenNewestTimeZonePinnedOnEveryConnection(t *testing.T) {
 	dataDir := t.TempDir()
 	if err := cachetest.Lake(dataDir, "codex"); err != nil {

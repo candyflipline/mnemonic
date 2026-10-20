@@ -14,8 +14,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-// EventUID hashes the transport coordinates of one record plus a fingerprint
-// into a provisional event id.
 func EventUID(sourceFile string, sourceGeneration uint32, sourceLineNo, sourceOffset uint64, recordFingerprint, suffix string) string {
 	material := fmt.Sprintf("%s|%d|%d|%d|%s|%s",
 		sourceFile, sourceGeneration, sourceLineNo, sourceOffset, recordFingerprint, suffix)
@@ -37,7 +35,6 @@ func mustU64(hexPrefix string) uint64 {
 	return v
 }
 
-// IOHash pins one tool call's input and output payload.
 func IOHash(inputJSON, outputJSON string) uint64 {
 	return RawHash(inputJSON + "\n" + outputJSON)
 }
@@ -129,9 +126,6 @@ type FoldedIdentity struct {
 	Occurrence      uint32
 }
 
-// SemanticEventUID is the replay-stable canonical event id: a hash over the
-// identity fields, the token maps and the sanitized semantic payload, with
-// the folded tool identity when the event carries one.
 func SemanticEventUID(event *schema.Event, folded *FoldedIdentity) string {
 	var h hash.Hash = sha256.New()
 	hashIdentityField(h, []byte(eventIdentityDomain))
@@ -260,8 +254,6 @@ func compactStrings(values []string) []byte {
 	return []byte(b.String())
 }
 
-// hashNumericMapIdentity hashes a sorted key/value component string built
-// from pre-encoded map entries.
 func hashNumericMapIdentity(h hash.Hash, encoded [][2]string) {
 	var comp []byte
 	for _, kv := range encoded {
@@ -358,7 +350,6 @@ func SanitizeSemanticPayload(obj map[string]any) {
 	}
 }
 
-// AsNumber reads a JSON number as uint64.
 func AsNumber(v JSON) (uint64, bool) {
 	n, ok := v.(json.Number)
 	if !ok {
@@ -371,8 +362,7 @@ func AsNumber(v JSON) (uint64, bool) {
 	return u, true
 }
 
-// encodeIdentityValue mirrors encode_identity_value: strings raw, everything
-// else compact JSON, absent empty.
+// Strings raw, everything else compact JSON, absent empty.
 func encodeIdentityValue(v JSON) string {
 	switch t := v.(type) {
 	case nil:

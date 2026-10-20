@@ -1,6 +1,3 @@
-// Package claudecode parses claude-code sources. Port of upstream
-// upstream ingest-core/src/sources/claude_code.rs plus the shared helpers
-// it calls; testdata/goldens pins the output.
 package claudecode
 
 import (
@@ -14,19 +11,16 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-// Parser parses claude-code JSONL transcripts.
 type Parser struct{}
 
 func (Parser) Harness() string { return "claude-code" }
 
-// Parse walks the file line by line through the shared JSONL loop.
 func (Parser) Parse(r io.Reader, src normalize.SourceMeta) ([]schema.Event, error) {
 	return shared.ParseJSONL(r, src, claudeSource{})
 }
 
 func init() { normalize.Register(Parser{}) }
 
-// claudeSource is the claude-code adapter (IngestSource for ClaudeCode).
 type claudeSource struct{}
 
 func (claudeSource) Harness() string                  { return "claude-code" }
@@ -82,13 +76,9 @@ func (claudeSource) Normalize(rec shared.JSON, ctx *shared.Ctx, topType, baseUID
 	} else {
 		normalizeClaudeOperationalRecord(&r, em)
 	}
-	// append_claude_record_links: link rows are not kept in this port.
 	return &em.Partials
 }
 
-// coworkSessionPath classifies Cowork transcripts under a
-// local-agent-mode-sessions/local_<uuid> session directory (ported from
-// claude_code.rs cowork_session_path).
 func coworkSessionPath(sourceFile string) (string, bool) {
 	if filepath.Ext(sourceFile) != ".jsonl" || filepath.Base(sourceFile) == "audit.jsonl" {
 		return "", false
@@ -132,8 +122,6 @@ func allNormalComponents(parts []string) bool {
 	return true
 }
 
-// claudeRecord is ClaudeRecord: the record-level fields every emitted event
-// of one line shares.
 type claudeRecord struct {
 	rec              shared.JSON
 	message          shared.JSON
@@ -201,8 +189,6 @@ func newClaudeRecord(rec shared.JSON, topType, baseUID string) claudeRecord {
 	}
 }
 
-// usageReasoningTokens ports the reasoning_tokens or_else chain: direct
-// members first, then output_tokens_details.reasoning_tokens.
 func usageReasoningTokens(usage shared.JSON) shared.JSON {
 	if v := shared.FirstOf(usage, "reasoning_tokens", "thinking_tokens"); v != nil {
 		return v
