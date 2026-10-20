@@ -9,8 +9,16 @@
 package main
 
 import (
+	"context"
+	"flag"
 	"fmt"
+	"net/http"
 	"os"
+	"time"
+
+	"github.com/candyflipline/mnemonic/internal/config"
+	pushrun "github.com/candyflipline/mnemonic/internal/push"
+	"github.com/candyflipline/mnemonic/internal/redact"
 )
 
 // commands holds every subcommand this build has; server.go adds the rest.
@@ -29,5 +37,29 @@ func main() {
 	}
 }
 
-// push: owned by lane push.
-func push(args []string) error { panic("lane push") }
+// push: one client pass — load the config, scan, diff against the server's
+// manifest, send redacted whole lines.
+func push(args []string) error {
+	fs := flag.NewFlagSet("push", flag.ContinueOnError)
+	configPath := fs.String("config", "~/.mnemonic/config.toml", "path to the client config TOML")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.LoadClient(*configPath)
+	if err != nil {
+		return err
+	}
+	red, err := redact.New(cfg.Redaction.ExtraPatterns)
+	if err != nil {
+		return err
+	}
+	// The pass is one manifest GET plus at most a couple of PUTs per source;
+	// 60 s covers a slow link without pinning a wedged connection.
+	stats, err := pushrun.Run(context.Background(), cfg, red, &http.Client{Timeout: 60 * time.Second})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("scanned %d, appended %d, replaced %d, unchanged %d, failed %d, sent %d bytes\n",
+		stats.Scanned, stats.Appended, stats.Replaced, stats.Unchanged, stats.Failed, stats.Bytes)
+	return nil
+}
