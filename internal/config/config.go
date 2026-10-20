@@ -43,7 +43,8 @@ var DefaultSources = []SourceGlob{
 	{"qwen-code", "qwen", "~/.qwen/projects/*/chats/*.jsonl"},
 	{"pi-coding-agent", "pi", "~/.pi/agent/sessions/**/*.jsonl"},
 	{"pi-coding-agent", "omp", "~/.omp/agent/sessions/**/*.jsonl"},
-	{"prime-agent", "prime", "~/.prime/agent/sessions/*.jsonl"},
+	{"prime-agent", "prime-agent", "~/.prime/agent/sessions/*.jsonl"},
+	{"prime-agent", "prime-agent-subagents", "~/.prime/agent/session-artifacts/**/sub-*/*.jsonl"},
 }
 
 // Server is the server's config file.
