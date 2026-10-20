@@ -649,6 +649,7 @@ func TestOpenFixture(t *testing.T) {
 	for _, tc := range []struct{ raw, want string }{
 		{`{"id":"session:bm9wZQ"}`, "session not found"},
 		{`{"id":"` + formatTurnID(fixtureCodexSession, 99) + `"}`, "turn not found"},
+		{`{"id":"` + formatTurnID("nope", 1) + `"}`, "turn not found"},
 		{`{"id":"` + formatEventID("nope") + `"}`, "event not found"},
 	} {
 		_, _, err := tool.Call(ctx, db, []byte(tc.raw))

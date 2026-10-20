@@ -213,8 +213,11 @@ func openTurnFlow(ctx context.Context, db *sql.DB, request map[string]any, args 
 	if err != nil {
 		return nil, "", err
 	}
+	if scan == nil {
+		return nil, "", argErrorf("turn not found")
+	}
 	turn := scan.turns[args.target.turnSeq]
-	if scan == nil || turn == nil {
+	if turn == nil {
 		return nil, "", argErrorf("turn not found")
 	}
 	compact := compactTurn(turn, summaryPreviewChars)
