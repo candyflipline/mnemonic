@@ -3,7 +3,7 @@
 # import-ch`: one <out_dir>/events-<YYYYMM>.parquet per month, all 59
 # events.tsv columns in order.
 #
-#	CH_URL=https://host:8443 CH_USER=... CH_PASSWORD=... scripts/export_ch.sh out
+#	CH_URL=https://host:8443 CH_USER=... CH_PASSWORD=... CH_DB=... scripts/export_ch.sh out
 #
 # CH_USER and CH_PASSWORD reach curl through a 0600 temp config and are never
 # on argv or stdout. Query text goes in the POST body.
