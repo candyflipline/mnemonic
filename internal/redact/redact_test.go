@@ -36,11 +36,6 @@ func TestBuiltinRuleIDs(t *testing.T) {
 	}
 }
 
-// TestLineTable runs every upstream scrubbing test input through Line on a
-// JSON line. Each case is also checked to stay valid JSON (secrets sit
-// inside escaped literals in cases entropy_gate, pem_and_jwt and
-// batch_input_json) and to be a fixpoint, which is upstream's idempotency
-// property.
 func TestLineTable(t *testing.T) {
 	r, err := New(nil)
 	if err != nil {
@@ -122,10 +117,6 @@ func TestLineTable(t *testing.T) {
 	}
 }
 
-// TestExtraPattern covers upstream extra_pattern_redacts_and_stays_idempotent:
-// the pattern carries no keyword, so it must be scanned even though no
-// builtin keyword occurs beyond the generic gate, which rejects the candidate
-// by entropy.
 func TestExtraPattern(t *testing.T) {
 	r, err := New([]string{`acme_internal_[0-9A-Za-z]{32}`})
 	if err != nil {
@@ -152,8 +143,6 @@ func TestNewInvalidPattern(t *testing.T) {
 	}
 }
 
-// TestLargeSecretFreeText covers upstream large_secret_free_text: the
-// prefilter must reject 2 MiB of z's without running any regex.
 func TestLargeSecretFreeText(t *testing.T) {
 	r, err := New(nil)
 	if err != nil {

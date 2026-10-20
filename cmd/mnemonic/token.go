@@ -8,10 +8,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/auth"
 )
 
-// token mints one teammate credential. It has no build tag so anyone can run
-// it from the client binary; the server only ever sees the sha256 line.
-//
-//	mnemonic token new --author chris
 func token(args []string) error {
 	if len(args) < 1 || args[0] != "new" {
 		return fmt.Errorf("usage: mnemonic token new --author <name>")

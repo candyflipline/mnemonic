@@ -1,6 +1,5 @@
 // Package push is the client side of the wire protocol: scan the configured
 // globs, diff against the server's manifest, send only whole redacted lines.
-// Owned by lane push.
 package push
 
 import (
@@ -23,9 +22,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/wire"
 )
 
-// Redactor is the part of *redact.Redactor a pass needs. It is an interface
-// rather than the concrete type so the pass — and its tests — do not depend on
-// internal/redact's rules landing first.
 type Redactor interface {
 	Line(line []byte) []byte
 }
@@ -35,15 +31,10 @@ type Stats struct {
 	Bytes                                          int64
 }
 
-// manifestPath is the only wire path without a constant in internal/wire.
-const manifestPath = "/v1/manifest"
-
 // skewMs is the mtime-vs-UpdatedMs margin the skip needs, because the client
 // and server clocks need not agree.
 const skewMs = 5 * 60 * 1000
 
-// fileRef is one matched file and the source it belongs to. mtimeMs and size
-// ride along from the scan's stat so the skips cost no second stat.
 type fileRef struct {
 	path       string
 	harness    string
@@ -52,11 +43,6 @@ type fileRef struct {
 	size       int64
 }
 
-// Run does one pass. Per source: head hash equal and the redacted size grew
-// means append from the server's Size; otherwise send the whole file with
-// offset 0. A trailing line without '\n' waits for the next pass. A 409
-// re-reads the manifest once for that source. Rerunning with no new bytes
-// sends nothing.
 func Run(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client) (Stats, error) {
 	manifest, err := fetchManifest(ctx, cfg, hc)
 	if err != nil {
@@ -72,10 +58,8 @@ func Run(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client) 
 	return st, nil
 }
 
-// fetchManifest maps the server's manifest by SrcID. The author comes from the
-// token, not from us.
 func fetchManifest(ctx context.Context, cfg config.Client, hc *http.Client) (map[string]*wire.Source, error) {
-	u := strings.TrimSuffix(cfg.Server, "/") + manifestPath + "?" + url.Values{"machine": {cfg.Machine}}.Encode()
+	u := strings.TrimSuffix(cfg.Server, "/") + wire.ManifestPath + "?" + url.Values{"machine": {cfg.Machine}}.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
@@ -100,15 +84,9 @@ func fetchManifest(ctx context.Context, cfg config.Client, hc *http.Client) (map
 	return byID, nil
 }
 
-// syncSource diffs one file against its manifest entry and sends what is
-// missing. A 409 means our manifest view was stale; the Conflict body carries
-// the server's Size and head hash, and exactly one retry re-decides from it.
 func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client, manifest map[string]*wire.Source, f fileRef, st *Stats) error {
 	srcID := wire.SrcID(f.path)
 	entry := manifest[srcID]
-	// RawEnd is the raw offset the server's stored bytes cover, so a file whose
-	// size still equals it is, byte for byte, what was sent last time; skip it
-	// unread, before anything else and with no clock in sight.
 	if entry != nil && entry.RawEnd > 0 && f.size == entry.RawEnd {
 		st.Unchanged++
 		return nil
@@ -121,46 +99,43 @@ func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.C
 		st.Unchanged++
 		return nil
 	}
-	orig := entry // raw_end as the manifest first had it; retries below rewrite entry
+	legacy := entry != nil && entry.RawEnd == 0
 	sent, replaced := false, false
 	if entry != nil && entry.RawEnd > 0 && entry.Size > 0 {
-		done, tailSent, next, err := syncTail(ctx, cfg, red, hc, f, srcID, entry, st)
+		tail, err := syncTail(ctx, cfg, red, hc, f, srcID, entry, st)
 		if err != nil {
 			return err
 		}
-		if done {
-			if tailSent {
+		if tail.fallback == nil {
+			if tail.sent {
 				st.Appended++
 			} else {
 				st.Unchanged++
 			}
 			return nil
 		}
-		// The fast path's premise failed; the full path re-decides from the
-		// freshest entry we have.
-		entry, sent = next, tailSent
+		entry, sent = tail.fallback, tail.sent
 	}
-	redacted, head, rawEnds, ok, err := redactComplete(f.path, red)
+	file, err := redactComplete(f.path, red)
 	if err != nil {
 		return err
 	}
-	if !ok {
-		// No whole line yet: nothing to send and nothing to compare.
+	if file == nil {
 		if !sent {
 			st.Unchanged++
 		}
 		return nil
 	}
 	for conflicts := 0; ; {
-		body, offset, noop := decide(entry, head, redacted)
+		body, offset, noop := decide(entry, file.head, file.body)
 		if noop {
 			// A legacy entry (RawEnd 0) whose redacted bytes the server already
 			// holds in full would read whole every pass forever: one empty
 			// append at Size records raw_end so the next pass takes the exact
 			// skip. Best effort — an old server answers 400 and a stale one
 			// 409, and either way the file just stays on this full path.
-			if orig != nil && orig.RawEnd == 0 && !sent {
-				_, _ = putSource(ctx, cfg, hc, f, srcID, entry.Size, head, nil, rawEnds[len(rawEnds)-1])
+			if legacy && !sent {
+				_, _ = putSource(ctx, cfg, hc, f, srcID, entry.Size, file.head, nil, file.rawEnds[len(file.rawEnds)-1])
 			}
 			switch {
 			case !sent:
@@ -173,7 +148,7 @@ func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.C
 			return nil
 		}
 		body = firstChunk(body, maxChunk)
-		conflict, err := putSource(ctx, cfg, hc, f, srcID, offset, head, body, rawEndOf(rawEnds, redacted, offset, body))
+		conflict, err := putSource(ctx, cfg, hc, f, srcID, offset, file.head, body, rawEndOf(file.rawEnds, file.body, offset, body))
 		if err != nil {
 			return err
 		}
@@ -186,47 +161,49 @@ func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.C
 		}
 		st.Bytes += int64(len(body))
 		sent, replaced = true, replaced || offset == 0
-		entry = &wire.Source{SrcID: srcID, Size: offset + int64(len(body)), HeadHash: head}
+		entry = &wire.Source{SrcID: srcID, Size: offset + int64(len(body)), HeadHash: file.head}
 	}
 }
 
-// syncTail is the fast path: with the server vouching that its stored bytes
-// end at raw offset entry.RawEnd of this file, only the bytes past it are
-// read and redacted. It appends the new whole lines in chunks, each PUT
-// carrying the raw_end its own body ends at, and reports done once the tail
-// is sent or turns out empty. A 409 means our entry was stale, and the
-// redacted-length coincidence the full path checks is the only proof left, so
-// it hands the source back with the Conflict entry for the full path.
-func syncTail(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client, f fileRef, srcID string, entry *wire.Source, st *Stats) (done, sent bool, next *wire.Source, err error) {
-	tail, head, rawEnds, ok, err := redactTail(f.path, red, entry)
-	if err != nil || !ok {
-		return false, false, entry, err
+type tailResult struct {
+	sent     bool
+	fallback *wire.Source
+}
+
+func syncTail(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client, f fileRef, srcID string, entry *wire.Source, st *Stats) (tailResult, error) {
+	tail, err := redactTail(f.path, red, entry)
+	if err != nil {
+		return tailResult{}, err
 	}
-	for len(tail) > 0 {
-		chunk := firstChunk(tail, maxChunk)
+	if tail == nil {
+		return tailResult{fallback: entry}, nil
+	}
+	var res tailResult
+	body, rawEnds := tail.body, tail.rawEnds
+	for len(body) > 0 {
+		chunk := firstChunk(body, maxChunk)
 		lines := bytes.Count(chunk, []byte{'\n'})
 		rawEnd := rawEnds[lines-1]
-		conflict, err := putSource(ctx, cfg, hc, f, srcID, entry.Size, head, chunk, rawEnd)
+		conflict, err := putSource(ctx, cfg, hc, f, srcID, entry.Size, tail.head, chunk, rawEnd)
 		if err != nil {
-			return true, sent, nil, err
+			return res, err
 		}
 		if conflict != nil {
-			return false, sent, &wire.Source{SrcID: srcID, Size: conflict.Size, HeadHash: conflict.HeadHash, RawEnd: conflict.RawEnd}, nil
+			res.fallback = &wire.Source{SrcID: srcID, Size: conflict.Size, HeadHash: conflict.HeadHash, RawEnd: conflict.RawEnd}
+			return res, nil
 		}
 		st.Bytes += int64(len(chunk))
-		sent = true
-		tail, rawEnds = tail[len(chunk):], rawEnds[lines:]
-		entry = &wire.Source{SrcID: srcID, Size: entry.Size + int64(len(chunk)), HeadHash: head, RawEnd: rawEnd}
+		res.sent = true
+		body, rawEnds = body[len(chunk):], rawEnds[lines:]
+		entry = &wire.Source{SrcID: srcID, Size: entry.Size + int64(len(chunk)), HeadHash: tail.head, RawEnd: rawEnd}
 	}
-	return true, sent, nil, nil
+	return res, nil
 }
 
 // maxChunk bounds one PUT body, so a first push of a huge transcript lands in
 // pieces that each fit the HTTP timeout and the proxy's body limit.
 var maxChunk = 32 << 20
 
-// firstChunk is the longest prefix of whole lines within max bytes, or the
-// first line alone when that line is longer than max.
 func firstChunk(body []byte, max int) []byte {
 	if len(body) <= max {
 		return body
@@ -237,9 +214,6 @@ func firstChunk(body []byte, max int) []byte {
 	return body[:bytes.IndexByte(body, '\n')+1]
 }
 
-// decide picks the PUT for one attempt: whole at offset 0 whenever we cannot
-// prove the server holds our exact redacted prefix, append from Size when it
-// does and the file grew, nothing when it holds all of it.
 func decide(entry *wire.Source, head string, redacted []byte) (body []byte, offset int64, noop bool) {
 	if entry == nil || entry.HeadHash != head || int64(len(redacted)) < entry.Size {
 		return redacted, 0, false
@@ -256,19 +230,11 @@ func decide(entry *wire.Source, head string, redacted []byte) (body []byte, offs
 	return redacted[cut:], entry.Size, false
 }
 
-// rawEndOf maps a body of whole redacted lines starting at redacted offset
-// start back to the raw offset its last line ends at, using the per-line raw
-// ends redactComplete collected. The body is whole lines of redacted, so the
-// lines before it plus the lines in it index the right one.
 func rawEndOf(rawEnds []int64, redacted []byte, start int64, body []byte) int64 {
 	lines := bytes.Count(redacted[:start], []byte{'\n'}) + bytes.Count(body, []byte{'\n'})
 	return rawEnds[lines-1]
 }
 
-// putSource sends one PUT and decodes the updated Source just to validate the
-// 200 body. rawEnd is the offset in the client's raw file the body ends at;
-// a server that predates raw_end ignores it. A 409 is not an error: the
-// Conflict body comes back so the caller can re-decide.
 func putSource(ctx context.Context, cfg config.Client, hc *http.Client, f fileRef, srcID string, offset int64, head string, body []byte, rawEnd int64) (*wire.Conflict, error) {
 	q := url.Values{
 		"offset":      {strconv.FormatInt(offset, 10)},
@@ -290,24 +256,20 @@ func putSource(ctx context.Context, cfg config.Client, hc *http.Client, f fileRe
 		return nil, err
 	}
 	defer resp.Body.Close()
-	switch {
-	case resp.StatusCode == http.StatusConflict:
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return nil, nil
+	case http.StatusConflict:
 		var c wire.Conflict
 		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&c); err != nil {
 			return nil, fmt.Errorf("put %s: 409 body: %w", srcID, err)
 		}
 		return &c, nil
-	case resp.StatusCode != http.StatusOK:
+	default:
 		return nil, fmt.Errorf("put %s: %s: %s", srcID, resp.Status, readErrBody(resp.Body))
 	}
-	var src wire.Source
-	if err := json.NewDecoder(resp.Body).Decode(&src); err != nil {
-		return nil, fmt.Errorf("put %s: response: %w", srcID, err)
-	}
-	return nil, nil
 }
 
-// readErrBody caps an error body so a chatty server cannot blow up a log line.
 func readErrBody(r io.Reader) string {
 	b, err := io.ReadAll(io.LimitReader(r, 512))
 	if err != nil {
@@ -316,9 +278,6 @@ func readErrBody(r io.Reader) string {
 	return strings.TrimSpace(string(b))
 }
 
-// scan lists every file the globs match — absolute, regular, deduped — with
-// the first source that matches a path owning it. A source whose glob cannot
-// be evaluated matches nothing this pass.
 func scan(sources []config.SourceGlob) []fileRef {
 	seen := make(map[string]bool)
 	var files []fileRef

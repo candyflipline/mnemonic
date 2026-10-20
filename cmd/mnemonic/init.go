@@ -5,30 +5,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
-	"strings"
 
 	"github.com/BurntSushi/toml"
 
 	"github.com/candyflipline/mnemonic/internal/config"
+	"github.com/candyflipline/mnemonic/internal/wire"
 	"github.com/candyflipline/mnemonic/ops"
 )
 
-// launchdLabel is the plist Label and the service name in the bootout line.
 const launchdLabel = "com.mnemonic.push"
 
 // machineRe mirrors the check config.LoadClient applies, so a bad --machine
 // fails here at setup instead of on the teammate's first push.
-var machineRe = regexp.MustCompile(`^[a-z0-9._-]+$`)
-
-// initCmd sets a teammate's machine up for `mnemonic push`: config and token
-// under ~/.mnemonic, then the launchd plist (darwin) or printed systemd --user
-// units (linux). It never execs launchctl or systemctl; the scheduler command
-// is printed for the user to run, because a bootstrap belongs to their shell
-// and session.
-//
-//	mnemonic init --server URL --token-file PATH [--machine NAME] [--force]
 func initCmd(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	server := fs.String("server", "", "base URL of the mnemonic server (required)")
@@ -56,18 +45,14 @@ func initCmd(args []string) error {
 	configPath := filepath.Join(dir, "config.toml")
 	tokenPath := filepath.Join(dir, "token")
 
-	// Guarded exits happen before anything is created or touched.
 	if *machine == "" {
 		host, err := os.Hostname()
 		if err != nil {
 			return fmt.Errorf("init: machine: %w", err)
 		}
-		if i := strings.IndexByte(host, '.'); i >= 0 {
-			host = host[:i]
-		}
-		*machine = strings.ToLower(host)
+		*machine = config.ShortHost(host)
 	}
-	if !machineRe.MatchString(*machine) {
+	if !wire.ValidSegment(*machine) {
 		return fmt.Errorf("machine %q must match [a-z0-9._-]+", *machine)
 	}
 	if _, err := os.Stat(configPath); err == nil && !*force {
@@ -76,14 +61,11 @@ func initCmd(args []string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("init: %s: %w", dir, err)
 	}
-	// 0700 again in case the directory predates init with looser modes.
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return fmt.Errorf("init: %s: %w", dir, err)
 	}
 
-	// The token goes in ~/.mnemonic/token so config.toml can point at one
-	// stable path even when the minted file lives somewhere temporary.
-	src, err := expandHome(*tokenFile)
+	src, err := config.ExpandHome(*tokenFile)
 	if err != nil {
 		return err
 	}
@@ -103,8 +85,6 @@ func initCmd(args []string) error {
 		fmt.Println("kept  " + tokenPath)
 	}
 
-	// Sources are written out, not left to the LoadClient default, so a
-	// teammate can see and trim the globs that will leave their machine.
 	cfg := config.Client{
 		Server:    *server,
 		TokenFile: tokenPath,
@@ -140,15 +120,13 @@ func initCmd(args []string) error {
 	}
 }
 
-// initLaunchd writes ~/Library/LaunchAgents/<label>.plist with the real binary
-// and home paths substituted and prints the one launchctl line to run. With
-// --force the bootout comes first on the same line, so a re-init replaces a
-// loaded job in one paste.
 func initLaunchd(home, exe string, force bool) error {
 	agents := filepath.Join(home, "Library", "LaunchAgents")
 	plistPath := filepath.Join(agents, launchdLabel+".plist")
-	plist := strings.ReplaceAll(ops.LaunchdPlist, "/usr/local/bin/mnemonic", exe)
-	plist = strings.ReplaceAll(plist, "/Users/USERNAME", home)
+	plist, err := ops.RenderLaunchd(exe, home)
+	if err != nil {
+		return fmt.Errorf("init: plist: %w", err)
+	}
 	if err := os.MkdirAll(agents, 0o755); err != nil {
 		return fmt.Errorf("init: %s: %w", agents, err)
 	}
@@ -164,8 +142,6 @@ func initLaunchd(home, exe string, force bool) error {
 	return nil
 }
 
-// printSystemd prints the units instead of writing them: the timer is the
-// teammate's scheduling decision, and enable needs their shell anyway.
 func printSystemd(exe string) {
 	fmt.Printf(`# save as ~/.config/systemd/user/mnemonic-push.service
 [Unit]
@@ -192,8 +168,6 @@ systemctl --user enable --now mnemonic-push.timer
 `, exe)
 }
 
-// runningBinary resolves the running mnemonic past symlinks (a brew link or a
-// ~/bin alias), so the scheduler survives both.
 func runningBinary() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -204,22 +178,6 @@ func runningBinary() (string, error) {
 		return "", fmt.Errorf("init: %s: %w", exe, err)
 	}
 	return real, nil
-}
-
-// expandHome rewrites a leading ~ with the home directory, matching how
-// config.LoadClient re-reads token_file.
-func expandHome(p string) (string, error) {
-	if p != "~" && !strings.HasPrefix(p, "~"+string(os.PathSeparator)) {
-		return p, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("init: ~: %w", err)
-	}
-	if p == "~" {
-		return home, nil
-	}
-	return home + p[1:], nil
 }
 
 // writeToken creates at 0600 and then chmods: the create mode passes through

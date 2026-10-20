@@ -1,17 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
-<!--
-	Install as ~/Library/LaunchAgents/com.mnemonic.push.plist. An installer
-	must rewrite /Users/USERNAME below with the real home directory: launchd
-	does not expand ~ in StandardOutPath/StandardErrorPath.
--->
 <dict>
 	<key>Label</key>
 	<string>com.mnemonic.push</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/usr/local/bin/mnemonic</string>
+		<string>{{.Exe}}</string>
 		<string>push</string>
 	</array>
 	<key>StartInterval</key>
@@ -19,9 +14,9 @@
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StandardOutPath</key>
-	<string>/Users/USERNAME/.mnemonic/push.log</string>
+	<string>{{.Home}}/.mnemonic/push.log</string>
 	<key>StandardErrorPath</key>
-	<string>/Users/USERNAME/.mnemonic/push.log</string>
+	<string>{{.Home}}/.mnemonic/push.log</string>
 	<key>LowPriorityIO</key>
 	<true/>
 	<key>Nice</key>

@@ -23,13 +23,10 @@ import (
 	"github.com/candyflipline/mnemonic/internal/wire"
 )
 
-// identityRedactor stands in for *redact.Redactor, whose rules live in
-// another lane; these tests only need Line to keep bytes where they are.
 type identityRedactor struct{}
 
 func (identityRedactor) Line(line []byte) []byte { return line }
 
-// countingRedactor is identityRedactor with a byte counter on Line.
 type countingRedactor struct{ n int64 }
 
 func (c *countingRedactor) Line(line []byte) []byte {
@@ -37,10 +34,6 @@ func (c *countingRedactor) Line(line []byte) []byte {
 	return line
 }
 
-// fakeStore is the server side of the wire protocol, in memory: offset 0
-// replaces, offset == size appends, anything else is a 409. The stale map lets
-// a test serve a manifest whose sizes lag the store, as they do when another
-// writer lands between our manifest snapshot and our PUT.
 type fakeStore struct {
 	srv       *httptest.Server
 	mu        sync.Mutex
@@ -157,8 +150,6 @@ func (s *fakeStore) servePut(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// appendDirect lands bytes on the server outside any Run, the way a second
-// writer would.
 func (s *fakeStore) appendDirect(t *testing.T, path, chunk string) {
 	t.Helper()
 	s.mu.Lock()
@@ -223,11 +214,10 @@ func assertRaw(t *testing.T, s *fakeStore, path, want string) {
 	}
 }
 
-// Two files of whole lines upload exactly their bytes on the first pass.
 func TestFirstPassUploadsWholeFiles(t *testing.T) {
 	dir := t.TempDir()
-	p1 := writeFile(t, dir, "a.jsonl", "alpha one\nalpha two\n") // 20 bytes
-	p2 := writeFile(t, dir, "b.jsonl", "beta\n")                 // 5 bytes
+	p1 := writeFile(t, dir, "a.jsonl", "alpha one\nalpha two\n")
+	p2 := writeFile(t, dir, "b.jsonl", "beta\n")
 	s := newTestServer(t)
 
 	st := runPass(t, s, dir)
@@ -244,12 +234,11 @@ func TestFirstPassUploadsWholeFiles(t *testing.T) {
 	assertRaw(t, s, p2, "beta\n")
 }
 
-// A file bigger than one chunk lands as a replace then appends of whole lines.
 func TestBigFileUploadsInChunks(t *testing.T) {
 	defer func(old int) { maxChunk = old }(maxChunk)
 	maxChunk = 12
 	dir := t.TempDir()
-	p := writeFile(t, dir, "a.jsonl", "alpha one\nalpha two\nbeta\n") // 10 + 10 + 5 bytes
+	p := writeFile(t, dir, "a.jsonl", "alpha one\nalpha two\nbeta\n")
 	s := newTestServer(t)
 
 	st := runPass(t, s, dir)
@@ -265,7 +254,6 @@ func TestBigFileUploadsInChunks(t *testing.T) {
 	assertRaw(t, s, p, "alpha one\nalpha two\nbeta\n")
 }
 
-// A second pass with nothing new sends nothing.
 func TestSecondPassSendsNothing(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "a.jsonl", "alpha one\nalpha two\n")
@@ -283,9 +271,6 @@ func TestSecondPassSendsNothing(t *testing.T) {
 	}
 }
 
-// A file whose mtime is older than the manifest's UpdatedMs (minus skew) is
-// skipped unread; touching it puts it back in play.
-// Growing a file sends exactly the new line, at the server's old size.
 func TestAppendSendsOnlyNewLine(t *testing.T) {
 	dir := t.TempDir()
 	p := writeFile(t, dir, "a.jsonl", "alpha one\n")
@@ -304,9 +289,6 @@ func TestAppendSendsOnlyNewLine(t *testing.T) {
 	assertRaw(t, s, p, "alpha one\ngamma three\n")
 }
 
-// realStore is the real internal/store server on a temp data dir: the handler
-// mnemonic serve runs, behind auth, so a test can exercise the store's own
-// manifest and raw_end handling rather than a re-implementation.
 type realStore struct {
 	srv     *httptest.Server
 	dataDir string
@@ -321,10 +303,9 @@ func newRealStore(t *testing.T) *realStore {
 	return &realStore{srv: srv, dataDir: data}
 }
 
-// realManifestSource is the Source the real store's manifest serves for path.
 func realManifestSource(t *testing.T, rs *realStore, path string) wire.Source {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, rs.srv.URL+manifestPath+"?machine=testbox", nil)
+	req, err := http.NewRequest(http.MethodGet, rs.srv.URL+wire.ManifestPath+"?machine=testbox", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,8 +331,6 @@ func realManifestSource(t *testing.T, rs *realStore, path string) wire.Source {
 	return wire.Source{}
 }
 
-// storedRaw decodes the raw file the real store keeps for path, the way
-// internal/store's own tests read it: layout key, then the zstd frames.
 func storedRaw(t *testing.T, dataDir, path string) string {
 	t.Helper()
 	k := layout.Key{Author: "chris", Machine: "testbox", Harness: "claude-code", SrcID: wire.SrcID(path)}
@@ -372,8 +351,6 @@ func storedRaw(t *testing.T, dataDir, path string) string {
 	return string(b)
 }
 
-// resetRawEnd rewrites the store's manifest for path with RawEnd 0, the shape
-// an entry uploaded before raw_end existed has.
 func resetRawEnd(t *testing.T, dataDir, path string) {
 	t.Helper()
 	k := layout.Key{Author: "chris", Machine: "testbox", Harness: "claude-code", SrcID: wire.SrcID(path)}
@@ -398,18 +375,14 @@ func resetRawEnd(t *testing.T, dataDir, path string) {
 	}
 }
 
-// A finished file whose entry predates raw_end reads whole on every pass
-// forever: one pass sees the server already holds every redacted byte and
-// backfills raw_end with an empty append at Size, and the next pass takes the
-// exact skip without opening the file.
 func TestUnchangedFileBackfillsRawEndThenSkips(t *testing.T) {
 	dir := t.TempDir()
-	p := writeFile(t, dir, "a.jsonl", "head line\n"+strings.Repeat("filler line\n", 99)) // 10 + 99*12 = 1198 bytes
+	p := writeFile(t, dir, "a.jsonl", "head line\n"+strings.Repeat("filler line\n", 99))
 	rs := newRealStore(t)
 	if _, err := Run(context.Background(), testConfig(rs.srv.URL, dir), identityRedactor{}, rs.srv.Client()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	resetRawEnd(t, rs.dataDir, p) // a legacy entry: raw_end unknown
+	resetRawEnd(t, rs.dataDir, p)
 
 	st, err := Run(context.Background(), testConfig(rs.srv.URL, dir), identityRedactor{}, rs.srv.Client())
 	if err != nil {
@@ -434,24 +407,20 @@ func TestUnchangedFileBackfillsRawEndThenSkips(t *testing.T) {
 	if want := (Stats{Scanned: 1, Unchanged: 1}); st != want {
 		t.Fatalf("stats = %+v, want %+v", st, want)
 	}
-	if red.n != 0 { // the exact skip never opens the file
+	if red.n != 0 {
 		t.Fatalf("Line saw %d bytes on the skip pass, want 0", red.n)
 	}
 }
 
-// Growing a file whose raw offset the server knows redacts only the new tail:
-// against the real store, Line sees the first line (for the head hash) plus
-// the appended lines, the store ends up with the whole redacted file, and its
-// manifest records the redacted size and the raw offset it came from.
 func TestAppendTailRedactsOnlyNewBytes(t *testing.T) {
 	dir := t.TempDir()
-	p := writeFile(t, dir, "a.jsonl", "head line\n"+strings.Repeat("filler line\n", 999)) // 10 + 999*12 = 11998 bytes
+	p := writeFile(t, dir, "a.jsonl", "head line\n"+strings.Repeat("filler line\n", 999))
 	rs := newRealStore(t)
 	if _, err := Run(context.Background(), testConfig(rs.srv.URL, dir), identityRedactor{}, rs.srv.Client()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
-	body := "head line\n" + strings.Repeat("filler line\n", 999) + "new one\nnew two\n" // 12014 bytes
+	body := "head line\n" + strings.Repeat("filler line\n", 999) + "new one\nnew two\n"
 	writeFile(t, dir, "a.jsonl", body)
 	red := &countingRedactor{}
 	st, err := Run(context.Background(), testConfig(rs.srv.URL, dir), red, rs.srv.Client())
@@ -461,7 +430,6 @@ func TestAppendTailRedactsOnlyNewBytes(t *testing.T) {
 	if want := (Stats{Scanned: 1, Appended: 1, Bytes: 16}); st != want {
 		t.Fatalf("stats = %+v, want %+v", st, want)
 	}
-	// Line never sees the terminators: "head line" + "new one" + "new two".
 	if red.n != 9+7+7 {
 		t.Fatalf("Line saw %d bytes, want %d", red.n, 9+7+7)
 	}
@@ -474,7 +442,6 @@ func TestAppendTailRedactsOnlyNewBytes(t *testing.T) {
 	}
 }
 
-// A trailing partial line waits; completing it sends the whole line.
 func TestPartialTrailingLineWaits(t *testing.T) {
 	dir := t.TempDir()
 	p := writeFile(t, dir, "a.jsonl", "one\ntw")
@@ -503,12 +470,6 @@ func TestPartialTrailingLineWaits(t *testing.T) {
 	assertRaw(t, s, p, "one\ntwo\n")
 }
 
-// Rewriting the first line changes the head hash, so the whole file is
-// re-sent at offset 0. The rewrite grows the file: one of its own length is
-// the exact skip's word now.
-// A stale manifest size draws one 409; when the extra server bytes are this
-// client's own earlier append whose response was lost, the retry re-decides
-// and appends from the server's real size.
 func TestConflictRecoversInSamePass(t *testing.T) {
 	dir := t.TempDir()
 	p := writeFile(t, dir, "a.jsonl", "one\ntwo\n")
@@ -516,9 +477,7 @@ func TestConflictRecoversInSamePass(t *testing.T) {
 	runPass(t, s, dir)
 	base := s.putCount()
 
-	// The last pass's append ("zz\n") committed on the server but the response
-	// was lost, and the client kept writing. Manifest still says 8.
-	s.appendDirect(t, p, "zz\n") // server now holds 11 bytes
+	s.appendDirect(t, p, "zz\n")
 	s.stale[wire.SrcID(p)] = 8
 	writeFile(t, dir, "a.jsonl", "one\ntwo\nzz\nthree\n")
 
@@ -541,8 +500,6 @@ func TestConflictRecoversInSamePass(t *testing.T) {
 	assertRaw(t, s, p, "one\ntwo\nzz\nthree\n")
 }
 
-// A stale manifest size plus foreign server bytes leaves no safe seam to
-// append at: the retry falls back to replacing the whole file.
 func TestConflictWithForeignBytesResendsWhole(t *testing.T) {
 	dir := t.TempDir()
 	p := writeFile(t, dir, "a.jsonl", "one\ntwo\n")
@@ -550,7 +507,7 @@ func TestConflictWithForeignBytesResendsWhole(t *testing.T) {
 	runPass(t, s, dir)
 	base := s.putCount()
 
-	s.appendDirect(t, p, "zz\n") // another writer's bytes
+	s.appendDirect(t, p, "zz\n")
 	s.stale[wire.SrcID(p)] = 8
 	writeFile(t, dir, "a.jsonl", "one\ntwo\nthree\n")
 
@@ -567,7 +524,6 @@ func TestConflictWithForeignBytesResendsWhole(t *testing.T) {
 	assertRaw(t, s, p, "one\ntwo\nthree\n")
 }
 
-// The launchd plist must be a valid plist on the machine that runs launchd.
 func TestLaunchdPlistLints(t *testing.T) {
 	plutil, err := exec.LookPath("plutil")
 	if err != nil {

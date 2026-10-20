@@ -1,7 +1,3 @@
-// genschema writes internal/schema/events.go from docs/clickhouse/events.tsv,
-// the column list of the retired ClickHouse events table (name<TAB>type).
-//
-//	go run ./scripts/genschema
 package main
 
 import (
@@ -14,9 +10,7 @@ import (
 	"strings"
 )
 
-// Lake-only columns the normalizer never emits: the lake writer stamps
-// ingested_at, and author belongs to the shared ClickHouse only.
-var skip = map[string]bool{"ingested_at": true, "author": true}
+var lakeStampedColumns = map[string]bool{"ingested_at": true, "author": true}
 
 type mapping struct{ goType, duckType string }
 
@@ -45,7 +39,7 @@ func main() {
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		name, chType, ok := strings.Cut(sc.Text(), "\t")
-		if !ok || skip[name] {
+		if !ok || lakeStampedColumns[name] {
 			continue
 		}
 		m, ok := types[chType]
@@ -63,8 +57,6 @@ func main() {
 
 package schema
 
-// Column is one events column: its ClickHouse type and the DuckDB type the
-// lake and cache use for it.
 type Column struct {
 	Name, ClickHouse, DuckDB string
 }
@@ -75,7 +67,6 @@ type Column struct {
 var EventColumns = []Column{
 %s}
 
-// Event is one normalized event row.
 type Event struct {
 %s}
 `, cols.String(), fields.String())

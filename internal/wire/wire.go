@@ -7,10 +7,16 @@ package wire
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"regexp"
 )
 
-// HeadCap bounds the bytes HeadHash reads, so a huge first line costs little.
 const HeadCap = 64 << 10
+
+var segmentRe = regexp.MustCompile(`^[a-z0-9._-]+$`)
+
+func ValidSegment(s string) bool {
+	return s != "." && s != ".." && segmentRe.MatchString(s)
+}
 
 // SrcID names a source file on the server: the first 16 hex chars of
 // sha256(absolute path on the client).
@@ -35,12 +41,14 @@ type Source struct {
 	SrcID      string `json:"src_id"`
 	Harness    string `json:"harness"`
 	SourceName string `json:"source_name"`
-	Path       string `json:"path"` // absolute path on the client
+	Path       string `json:"path"`
 	Size       int64  `json:"size"`
 	RawEnd     int64  `json:"raw_end"` // raw bytes of the client's file consumed into Size; 0 = unknown
 	HeadHash   string `json:"head_hash"`
 	UpdatedMs  int64  `json:"updated_ms"`
 }
+
+const ManifestPath = "/v1/manifest"
 
 // Manifest answers GET /v1/manifest?machine=M for the caller's author.
 type Manifest struct {

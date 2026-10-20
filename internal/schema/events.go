@@ -2,8 +2,6 @@
 
 package schema
 
-// Column is one events column: its ClickHouse type and the DuckDB type the
-// lake and cache use for it.
 type Column struct {
 	Name, ClickHouse, DuckDB string
 }
@@ -71,7 +69,6 @@ var EventColumns = []Column{
 	{"cwd", "String", "VARCHAR"},
 }
 
-// Event is one normalized event row.
 type Event struct {
 	EventUID              string             `json:"event_uid"`
 	SessionID             string             `json:"session_id"`

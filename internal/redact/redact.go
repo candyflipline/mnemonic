@@ -1,7 +1,5 @@
 // Package redact removes secrets from raw lines on the client, before they
-// leave the machine. Port of upstream ingest-core/src/redaction.rs:
-// the 26 built-in rules, the keyword prefilter and the non-overlapping span
-// selection, with the same [REDACTED:<rule_id>] replacement text.
+// leave the machine.
 //
 // Upstream scrubs parsed string fields on the server; here the client scrubs
 // the whole jsonl line before upload, and the server re-parses it. Line
@@ -29,15 +27,13 @@ type entropyGate uint8
 
 const (
 	gateNone entropyGate = iota
-	// gateGenericCredential holds a match until the candidate passes the
-	// shannon-entropy / false-positive check.
 	gateGenericCredential
 )
 
 type rule struct {
 	id          string
 	re          *regexp.Regexp
-	keywords    [][]byte // ascii-lowercased; a rule with none is always scanned
+	keywords    [][]byte
 	secretGroup int
 	gate        entropyGate
 	minLen      int
@@ -53,9 +49,13 @@ type redactionSpan struct {
 // Redactor is safe for concurrent use.
 type Redactor struct {
 	rules      []rule
-	kwIndex    [][]byte // distinct keywords, ascii-lowercased
-	kwRules    [][]int  // rule indices selected by kwIndex[j]
-	alwaysScan []int    // rules the prefilter cannot skip
+	keywords   []keyword
+	alwaysScan []int
+}
+
+type keyword struct {
+	text  []byte
+	rules []int
 }
 
 const redactedMarker = "[REDACTED:"
@@ -68,6 +68,7 @@ const genericPattern = `(?i)\b(?:api[_-]?key|access[_-]?token|auth(?:orization)?
 	rustSpace + `*[:=]` + rustSpace + `*["']?([0-9A-Za-z_./+=-]{20,})["']?`
 
 type ruleSpec struct {
+	priority    int
 	id          string
 	pattern     string
 	keywords    []string
@@ -76,43 +77,41 @@ type ruleSpec struct {
 	minLen      int
 }
 
-func literal(id, pattern string, keywords ...string) ruleSpec {
-	return ruleSpec{id: id, pattern: pattern, keywords: keywords, minLen: 1}
+func literal(priority int, id, pattern string, keywords ...string) ruleSpec {
+	return ruleSpec{priority: priority, id: id, pattern: pattern, keywords: keywords, minLen: 1}
 }
 
-func generic(id, pattern string, keywords ...string) ruleSpec {
-	return ruleSpec{id: id, pattern: pattern, keywords: keywords, secretGroup: 1, gate: gateGenericCredential, minLen: 20}
+func generic(priority int, id, pattern string, keywords ...string) ruleSpec {
+	return ruleSpec{priority: priority, id: id, pattern: pattern, keywords: keywords, secretGroup: 1, gate: gateGenericCredential, minLen: 20}
 }
 
-// builtinRules mirrors upstream builtin_rules(), order is the tie-break
-// priority for overlapping spans, so it must not be reordered.
 var builtinRules = []ruleSpec{
-	literal("aws-access-token", `\b((?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16})\b`, "a3t", "akia", "asia", "abia", "acca"),
-	literal("github-token", `\bgh[pousr]_[0-9A-Za-z_]{36,255}\b`, "ghp_", "gho_", "ghu_", "ghs_", "ghr_"),
-	literal("github-fine-grained-token", `\bgithub_pat_[0-9A-Za-z_]{82,255}\b`, "github_pat_"),
-	literal("gitlab-token", `\b(?:glpat|glft|glcbt|glsoat|gldt)-[0-9A-Za-z_-]{20,}\b`, "glpat-", "glft-", "glcbt-", "glsoat-", "gldt-"),
-	literal("slack-token", `\bxox[pbarose]-[0-9A-Za-z-]{10,}\b`, "xoxp-", "xoxb-", "xoxa-", "xoxr-", "xoxo-", "xoxe-", "xoxs-"),
-	literal("slack-webhook", `https://hooks\.slack\.com/services/[0-9A-Za-z/_+-]{20,}`, "hooks.slack.com/services"),
-	literal("google-api-key", `\bAIza[0-9A-Za-z_-]{35}\b`, "aiza"),
-	literal("google-oauth-token", `\bya29\.[0-9A-Za-z_-]{20,}\b`, "ya29."),
-	literal("pem-private-key", `(?s)-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----.*?-----END (?:[A-Z0-9]+ )?PRIVATE KEY-----`, "private key"),
-	literal("openssh-private-key", `(?s)-----BEGIN OPENSSH PRIVATE KEY-----.*?-----END OPENSSH PRIVATE KEY-----`, "openssh private key"),
-	literal("jwt", `\beyJ[0-9A-Za-z_-]{5,}\.eyJ[0-9A-Za-z_-]{5,}\.[0-9A-Za-z_-]*\b`, "eyj"),
-	literal("stripe-token", `\b(?:sk|rk|pk)_(?:test|live)_[0-9A-Za-z]{10,}\b`, "sk_test_", "sk_live_", "rk_test_", "rk_live_", "pk_test_", "pk_live_"),
-	literal("stripe-webhook-secret", `\bwhsec_[0-9A-Za-z]{20,}\b`, "whsec_"),
-	literal("anthropic-api-key", `\bsk-ant-[0-9A-Za-z_-]{20,}\b`, "sk-ant-"),
-	literal("openai-api-key", `\bsk-(?:proj-)?[0-9A-Za-z_-]{20,}\b`, "sk-", "sk-proj-"),
-	literal("huggingface-token", `\bhf_[0-9A-Za-z]{30,}\b`, "hf_"),
-	literal("sendgrid-api-key", `\bSG\.[0-9A-Za-z_-]{20,}\.[0-9A-Za-z_-]{20,}\b`, "sg."),
-	literal("discord-webhook", `https://discord(?:app)?\.com/api/webhooks/[0-9]{6,}/[0-9A-Za-z_-]{20,}`, "discord.com/api/webhooks", "discordapp.com/api/webhooks"),
-	literal("npm-token", `\bnpm_[0-9A-Za-z]{30,}\b`, "npm_"),
-	literal("pypi-token", `\bpypi-[0-9A-Za-z_-]{30,}\b`, "pypi-"),
-	literal("digitalocean-token", `\bdop_v1_[0-9a-f]{64}\b`, "dop_v1_"),
-	literal("databricks-token", `\bdapi[0-9a-f]{32}\b`, "dapi"),
-	literal("dockerhub-token", `\bdckr_pat_[0-9A-Za-z_-]{20,}\b`, "dckr_pat_"),
-	literal("linear-api-key", `\blin_api_[0-9A-Za-z]{30,}\b`, "lin_api_"),
-	literal("notion-token", `\bsecret_[0-9A-Za-z]{30,}\b`, "secret_"),
-	generic("generic-api-key", genericPattern, "api", "access", "auth", "bearer", "client", "credential", "passwd", "password", "private", "secret", "token"),
+	literal(0, "aws-access-token", `\b((?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16})\b`, "a3t", "akia", "asia", "abia", "acca"),
+	literal(1, "github-token", `\bgh[pousr]_[0-9A-Za-z_]{36,255}\b`, "ghp_", "gho_", "ghu_", "ghs_", "ghr_"),
+	literal(2, "github-fine-grained-token", `\bgithub_pat_[0-9A-Za-z_]{82,255}\b`, "github_pat_"),
+	literal(3, "gitlab-token", `\b(?:glpat|glft|glcbt|glsoat|gldt)-[0-9A-Za-z_-]{20,}\b`, "glpat-", "glft-", "glcbt-", "glsoat-", "gldt-"),
+	literal(4, "slack-token", `\bxox[pbarose]-[0-9A-Za-z-]{10,}\b`, "xoxp-", "xoxb-", "xoxa-", "xoxr-", "xoxo-", "xoxe-", "xoxs-"),
+	literal(5, "slack-webhook", `https://hooks\.slack\.com/services/[0-9A-Za-z/_+-]{20,}`, "hooks.slack.com/services"),
+	literal(6, "google-api-key", `\bAIza[0-9A-Za-z_-]{35}\b`, "aiza"),
+	literal(7, "google-oauth-token", `\bya29\.[0-9A-Za-z_-]{20,}\b`, "ya29."),
+	literal(8, "pem-private-key", `(?s)-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----.*?-----END (?:[A-Z0-9]+ )?PRIVATE KEY-----`, "private key"),
+	literal(9, "openssh-private-key", `(?s)-----BEGIN OPENSSH PRIVATE KEY-----.*?-----END OPENSSH PRIVATE KEY-----`, "openssh private key"),
+	literal(10, "jwt", `\beyJ[0-9A-Za-z_-]{5,}\.eyJ[0-9A-Za-z_-]{5,}\.[0-9A-Za-z_-]*\b`, "eyj"),
+	literal(11, "stripe-token", `\b(?:sk|rk|pk)_(?:test|live)_[0-9A-Za-z]{10,}\b`, "sk_test_", "sk_live_", "rk_test_", "rk_live_", "pk_test_", "pk_live_"),
+	literal(12, "stripe-webhook-secret", `\bwhsec_[0-9A-Za-z]{20,}\b`, "whsec_"),
+	literal(13, "anthropic-api-key", `\bsk-ant-[0-9A-Za-z_-]{20,}\b`, "sk-ant-"),
+	literal(14, "openai-api-key", `\bsk-(?:proj-)?[0-9A-Za-z_-]{20,}\b`, "sk-", "sk-proj-"),
+	literal(15, "huggingface-token", `\bhf_[0-9A-Za-z]{30,}\b`, "hf_"),
+	literal(16, "sendgrid-api-key", `\bSG\.[0-9A-Za-z_-]{20,}\.[0-9A-Za-z_-]{20,}\b`, "sg."),
+	literal(17, "discord-webhook", `https://discord(?:app)?\.com/api/webhooks/[0-9]{6,}/[0-9A-Za-z_-]{20,}`, "discord.com/api/webhooks", "discordapp.com/api/webhooks"),
+	literal(18, "npm-token", `\bnpm_[0-9A-Za-z]{30,}\b`, "npm_"),
+	literal(19, "pypi-token", `\bpypi-[0-9A-Za-z_-]{30,}\b`, "pypi-"),
+	literal(20, "digitalocean-token", `\bdop_v1_[0-9a-f]{64}\b`, "dop_v1_"),
+	literal(21, "databricks-token", `\bdapi[0-9a-f]{32}\b`, "dapi"),
+	literal(22, "dockerhub-token", `\bdckr_pat_[0-9A-Za-z_-]{20,}\b`, "dckr_pat_"),
+	literal(23, "linear-api-key", `\blin_api_[0-9A-Za-z]{30,}\b`, "lin_api_"),
+	literal(24, "notion-token", `\bsecret_[0-9A-Za-z]{30,}\b`, "secret_"),
+	generic(25, "generic-api-key", genericPattern, "api", "access", "auth", "bearer", "client", "credential", "passwd", "password", "private", "secret", "token"),
 }
 
 // New compiles the built-in rules plus extra regex patterns from config.
@@ -133,7 +132,7 @@ func New(extraPatterns []string) (*Redactor, error) {
 			secretGroup: spec.secretGroup,
 			gate:        spec.gate,
 			minLen:      spec.minLen,
-			priority:    i,
+			priority:    spec.priority,
 		})
 	}
 	for i, p := range extraPatterns {
@@ -145,7 +144,7 @@ func New(extraPatterns []string) (*Redactor, error) {
 			id:       fmt.Sprintf("extra-pattern-%d", i+1),
 			re:       re,
 			minLen:   1,
-			priority: len(r.rules),
+			priority: len(builtinRules) + i,
 		})
 	}
 	r.buildPrefilter()
@@ -163,12 +162,11 @@ func (r *Redactor) buildPrefilter() {
 		for _, kw := range kws {
 			j, ok := seen[string(kw)]
 			if !ok {
-				j = len(r.kwIndex)
+				j = len(r.keywords)
 				seen[string(kw)] = j
-				r.kwIndex = append(r.kwIndex, kw)
-				r.kwRules = append(r.kwRules, nil)
+				r.keywords = append(r.keywords, keyword{text: kw})
 			}
-			r.kwRules[j] = append(r.kwRules[j], i)
+			r.keywords[j].rules = append(r.keywords[j].rules, i)
 		}
 	}
 }
@@ -184,10 +182,6 @@ func (r *Redactor) Line(line []byte) []byte {
 	return r.redactJSON(line)
 }
 
-// redactJSON scrubs each string literal's decoded content. Unchanged
-// literals keep their original bytes, so escapes the server would decode
-// differently (e.g. A) survive untouched unless the literal was
-// redacted anyway.
 func (r *Redactor) redactJSON(line []byte) []byte {
 	type literal struct{ q0, q1 int }
 	var lits []literal
@@ -201,7 +195,7 @@ func (r *Redactor) redactJSON(line []byte) []byte {
 			i++
 			continue
 		}
-		if c == '\\' { // inside a valid literal every escape is well-formed
+		if c == '\\' {
 			i += 2
 			continue
 		}
@@ -368,8 +362,6 @@ func appendJSONString(dst []byte, s []byte) []byte {
 	return append(dst, '"')
 }
 
-// scrub redacts secret spans in text, upstream scrub_text. Returns text
-// itself when nothing matched, so callers can keep the original bytes.
 func (r *Redactor) scrub(text []byte) ([]byte, map[string]uint64) {
 	spans := r.nonOverlappingSpans(text)
 	if len(spans) == 0 {
@@ -419,7 +411,6 @@ func (r *Redactor) nonOverlappingSpans(text []byte) []redactionSpan {
 			spans = append(spans, redactionSpan{start: g0, end: g1, ruleID: ru.id, priority: ru.priority})
 		}
 	}
-	// Leftmost first, then longest, then earliest rule: upstream's sort key.
 	slices.SortFunc(spans, func(a, b redactionSpan) int {
 		if c := cmp.Compare(a.start, b.start); c != 0 {
 			return c
@@ -451,22 +442,18 @@ func (r *Redactor) shouldRedact(ru *rule, candidate []byte) bool {
 	return true
 }
 
-// candidates selects the rules worth running on text: always-scan rules
-// plus every rule with a keyword occurring in it. A lowercase bytes.Contains
-// over the keyword list picks the same rules as upstream's case-insensitive
-// Aho-Corasick, which only ever answers presence.
 func (r *Redactor) candidates(text []byte) []bool {
 	c := make([]bool, len(r.rules))
 	for _, i := range r.alwaysScan {
 		c[i] = true
 	}
-	if len(r.kwIndex) == 0 {
+	if len(r.keywords) == 0 {
 		return c
 	}
 	lower := asciiLower(text)
-	for j, kw := range r.kwIndex {
-		if bytes.Contains(lower, kw) {
-			for _, i := range r.kwRules[j] {
+	for _, kw := range r.keywords {
+		if bytes.Contains(lower, kw.text) {
+			for _, i := range kw.rules {
 				c[i] = true
 			}
 		}
@@ -506,7 +493,6 @@ func overlapsAny(ranges [][2]int, start, end int) bool {
 	return false
 }
 
-// genericCandidateIsSecret is upstream's entropy gate for generic-api-key.
 func genericCandidateIsSecret(candidate []byte) bool {
 	trimmed := bytes.Trim(candidate, "\"'`,;")
 	if len(trimmed) < 20 || isStructuralFalsePositive(trimmed) {

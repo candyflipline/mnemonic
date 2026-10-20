@@ -23,6 +23,7 @@ import (
 	"github.com/candyflipline/mnemonic/internal/lake"
 	"github.com/candyflipline/mnemonic/internal/mcp"
 	_ "github.com/candyflipline/mnemonic/internal/normalize/all"
+	"github.com/candyflipline/mnemonic/internal/query"
 	"github.com/candyflipline/mnemonic/internal/store"
 )
 
@@ -31,9 +32,6 @@ func init() {
 	commands["import-ch"] = importCH
 }
 
-// serve: owned by lane mcp. Loads config.LoadServer, mounts
-// auth.Middleware around store.Handler on /v1/ and mcp.Handler on /mcp,
-// runs lake.Run then cache.Build every 120 s, and binds Listen.
 func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	home, _ := os.UserHomeDir()
@@ -86,7 +84,7 @@ func serve(args []string) error {
 		dbMu.Lock()
 		defer dbMu.Unlock()
 		if err == nil && newest == dbPath && db != nil {
-			return // nothing changed; keep the open handle
+			return
 		}
 		conn, path, err := cache.OpenNewest(cfg.DataDir)
 		if err != nil {
@@ -119,7 +117,7 @@ func serve(args []string) error {
 	mux := http.NewServeMux()
 	st := store.Store{DataDir: cfg.DataDir}
 	mux.Handle("/v1/", auth.Middleware(authors)(st.Handler()))
-	mux.Handle("/mcp", auth.Middleware(authors)(mcp.Handler(open)))
+	mux.Handle("/mcp", auth.Middleware(authors)(mcp.Handler(open, query.Lookup)))
 	srv := &http.Server{Addr: cfg.Listen, Handler: mux}
 	go func() {
 		<-ctx.Done()
@@ -136,8 +134,6 @@ func serve(args []string) error {
 	return nil
 }
 
-// importCH folds per-month ClickHouse parquet exports into the lake as the
-// author's archive rows.
 func importCH(args []string) error {
 	fs := flag.NewFlagSet("import-ch", flag.ContinueOnError)
 	configPath := fs.String("config", "", "server config toml")
