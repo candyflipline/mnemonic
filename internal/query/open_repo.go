@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"maps"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -179,7 +181,6 @@ type sessionScan struct {
 	inferenceProvider string
 	ompDispatchTitle  string
 	turns             map[uint32]*turnAccum
-	turnSeqs          []uint32 // ascending; mirrors the upstream BTreeMap order
 	metadataRows      []*navRow
 	completed         bool
 	terminalEventUID  string
@@ -188,10 +189,16 @@ type sessionScan struct {
 	nextEvent         *eventRef
 }
 
-// loadSessionScan ports scan_canonical_session: rows in event_order, per-turn
-// accumulators, session signals. selectedTurn (with hasSelectedTurn) marks the
-// turn whose events are kept; targetUID ("" = none) marks the open target.
-func loadSessionScan(ctx context.Context, db *sql.DB, sessionID string, selectedTurn uint32, hasSelectedTurn bool, targetUID string) (*sessionScan, error) {
+func (sc *sessionScan) turnSeqs() []uint32 {
+	return slices.Sorted(maps.Keys(sc.turns))
+}
+
+type scanOpts struct {
+	turn      *uint32
+	targetUID string
+}
+
+func loadSessionScan(ctx context.Context, db *sql.DB, sessionID string, opts scanOpts) (*sessionScan, error) {
 	const scanSQL = `SELECT t.session_id, t.event_uid, epoch_ms(t.event_time),
        t.source_file, t.source_ref, t.event_class, t.actor_role, t.payload_type,
        t.call_id, t.name, t.phase, t.item_id,
@@ -258,7 +265,7 @@ ORDER BY t.event_order`
 			last = ref
 			lastActorRole = r.actorRole
 		}
-		if targetUID != "" && r.eventUID == targetUID {
+		if opts.targetUID != "" && r.eventUID == opts.targetUID {
 			row := r
 			sc.target = &row
 			sc.previousEvent = lastRowRef
@@ -316,9 +323,8 @@ ORDER BY t.event_order`
 		if turn == nil {
 			turn = &turnAccum{toolNames: map[string]bool{}, seenTypes: map[string]bool{}}
 			sc.turns[r.turnSeq] = turn
-			sc.turnSeqs = append(sc.turnSeqs, r.turnSeq)
 		}
-		updateTurn(turn, &r, ref, hasSelectedTurn && r.turnSeq == selectedTurn)
+		updateTurn(turn, &r, ref, opts.turn != nil && r.turnSeq == *opts.turn)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -329,11 +335,11 @@ ORDER BY t.event_order`
 	if err := hydrateKept(ctx, db, sc); err != nil {
 		return nil, err
 	}
-	sort.Slice(sc.turnSeqs, func(i, j int) bool { return sc.turnSeqs[i] < sc.turnSeqs[j] })
+	seqs := sc.turnSeqs()
 
 	// Session time bounds come from the turn accumulators, as upstream.
 	var minStart, maxEnd int64
-	for i, seq := range sc.turnSeqs {
+	for i, seq := range seqs {
 		m := sc.turns[seq].metadata
 		if i == 0 || m.startedAtUnixMs < minStart {
 			minStart = m.startedAtUnixMs
@@ -342,12 +348,7 @@ ORDER BY t.event_order`
 			maxEnd = m.endedAtUnixMs
 		}
 	}
-	var maxTurn uint32
-	for _, seq := range sc.turnSeqs {
-		if seq > maxTurn {
-			maxTurn = seq
-		}
-	}
+	maxTurn := seqs[len(seqs)-1]
 	sc.metadata = sessionMetadata{
 		sessionID:         sessionID,
 		firstEventTime:    first.eventTime,
@@ -464,15 +465,16 @@ func updateTurn(turn *turnAccum, r *navRow, ref *eventRef, selected bool) {
 func adjacentTurnRef(sc *sessionScan, turnSeq uint32, next bool) *turnRef {
 	var seq uint32
 	found := false
+	seqs := sc.turnSeqs()
 	if next {
-		for _, s := range sc.turnSeqs {
+		for _, s := range seqs {
 			if s > turnSeq {
 				seq, found = s, true
 				break
 			}
 		}
 	} else {
-		for _, s := range sc.turnSeqs {
+		for _, s := range seqs {
 			if s < turnSeq {
 				seq, found = s, true
 			}

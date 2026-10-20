@@ -165,7 +165,7 @@ func (openTool) Call(ctx context.Context, db *sql.DB, raw json.RawMessage) (any,
 }
 
 func openSessionFlow(ctx context.Context, db *sql.DB, request map[string]any, args canonicalOpenArgs) (any, string, error) {
-	scan, err := loadSessionScan(ctx, db, args.target.session, 0, false, "")
+	scan, err := loadSessionScan(ctx, db, args.target.session, scanOpts{})
 	if err != nil {
 		return nil, "", err
 	}
@@ -187,7 +187,7 @@ func openSessionFlow(ctx context.Context, db *sql.DB, request map[string]any, ar
 		afterSeq, hasAfter = args.cursorDecoded.After.TurnSeq, true
 	}
 	var seqs []uint32
-	for _, seq := range scan.turnSeqs {
+	for _, seq := range scan.turnSeqs() {
 		if seq > afterSeq {
 			seqs = append(seqs, seq)
 		}
@@ -222,7 +222,7 @@ func openSessionFlow(ctx context.Context, db *sql.DB, request map[string]any, ar
 }
 
 func openTurnFlow(ctx context.Context, db *sql.DB, request map[string]any, args canonicalOpenArgs) (any, string, error) {
-	scan, err := loadSessionScan(ctx, db, args.target.session, args.target.turnSeq, true, "")
+	scan, err := loadSessionScan(ctx, db, args.target.session, scanOpts{turn: &args.target.turnSeq})
 	if err != nil {
 		return nil, "", err
 	}
@@ -287,7 +287,7 @@ func openEventFlow(ctx context.Context, db *sql.DB, request map[string]any, args
 		}
 		return nil, "", err
 	}
-	scan, err := loadSessionScan(ctx, db, sessionID, 0, false, uid)
+	scan, err := loadSessionScan(ctx, db, sessionID, scanOpts{targetUID: uid})
 	if err != nil {
 		return nil, "", err
 	}
@@ -335,6 +335,7 @@ func compactOptionalValue(v any, maxChars int) any {
 
 func openSessionData(scan *sessionScan, pageTurns []any, nextCursor any) map[string]any {
 	m := scan.metadata
+	seqs := scan.turnSeqs()
 	title, slug, summary := sessionLabels(scan)
 	if pageTurns == nil {
 		pageTurns = []any{}
@@ -362,8 +363,8 @@ func openSessionData(scan *sessionScan, pageTurns []any, nextCursor any) map[str
 		"traversal": map[string]any{
 			"previous_session_id": nil,
 			"next_session_id":     nil,
-			"first_turn_id":       formatTurnID(m.sessionID, scan.turnSeqs[0]),
-			"last_turn_id":        formatTurnID(m.sessionID, scan.turnSeqs[len(scan.turnSeqs)-1]),
+			"first_turn_id":       formatTurnID(m.sessionID, seqs[0]),
+			"last_turn_id":        formatTurnID(m.sessionID, seqs[len(seqs)-1]),
 		},
 	}
 }

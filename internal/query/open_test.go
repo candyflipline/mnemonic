@@ -111,8 +111,7 @@ func TestSessionOpenUsesTypedIDsAndCompactTurns(t *testing.T) {
 			mode: "tool_calling", firstEventUID: "event-user", lastEventUID: "event-final",
 		},
 		source: "codex", harness: "cli", inferenceProvider: "openai",
-		turnSeqs: []uint32{1},
-		turns:    map[uint32]*turnAccum{1: turn},
+		turns: map[uint32]*turnAccum{1: turn},
 		metadataRows: []*navRow{{
 			sessionID:   "session-a",
 			eventClass:  "session_meta",
@@ -228,7 +227,6 @@ func TestTurnOpenReturnsCompactEventHandlesWithoutPayloads(t *testing.T) {
 	scan := &sessionScan{
 		metadata: sessionMetadata{sessionID: "session-a", totalTurns: 2, totalEvents: 4, mode: "tool_calling"},
 		source:   "codex",
-		turnSeqs: []uint32{1, 2},
 		turns:    map[uint32]*turnAccum{1: turn, 2: nextTurn},
 	}
 	events := []any{}
@@ -319,7 +317,6 @@ func TestEventOpenIncludesFullToolCallContent(t *testing.T) {
 			mode: "tool_calling",
 		},
 		source:           "claude",
-		turnSeqs:         []uint32{1},
 		turns:            map[uint32]*turnAccum{1: parentTurn},
 		completed:        true,
 		terminalEventUID: "event-final",
