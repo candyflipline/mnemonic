@@ -544,7 +544,6 @@ SELECT session_id,
 FROM trace
 GROUP BY session_id`
 
-// sourcesDDL is the sources table from schema.sql.
 const sourcesDDL = `CREATE TABLE sources (
     author VARCHAR NOT NULL,
     machine_id VARCHAR NOT NULL,
