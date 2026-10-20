@@ -265,7 +265,7 @@ func buildCache(path, spill, archPath, dataDir string, live []lakeFile) (Stats, 
 			stmts = append(stmts, insertPostingsSQL("live_events", "live_docs", "live_postings")...)
 		}
 		stmts = append(stmts, viewsSQL...)
-		stmts = append(stmts, traceDDL, sessionsDDL, corpusDDL, sourcesDDL)
+		stmts = append(stmts, traceOrderDDL, traceDDL, sessionsDDL, corpusDDL, sourcesDDL)
 		if err := execAll(ctx, c, stmts); err != nil {
 			return err
 		}
@@ -512,53 +512,55 @@ SELECT cast(sum(n) AS UBIGINT) AS docs,
 FROM (SELECT count(*) AS n, sum(doc_len) AS len FROM arch.docs WHERE doc NOT IN (SELECT doc FROM dropped)
       UNION ALL SELECT count(*), sum(doc_len) FROM live_docs)`
 
-// traceDDL ports docs/clickhouse/v_conversation_trace.sql; the v_all_events
-// renames (origin_event_id->compacted_parent_uid, actor_kind->actor_role,
-// event_kind->event_class, tool_call_id->call_id, tool_name->name,
-// turn_index->turn_id, phase=tool_phase or op_status) are inlined. event_time
-// mirrors parseDateTime64BestEffortOrNull: TIMESTAMPTZ parsing honors a
-// trailing Z or numeric offset, and the connection runs with TimeZone='UTC'
-// so zoneless record_ts reads as UTC. emission_index replaces
-// JSONExtractUInt(payload_json, 'moraine_emission_index'). payload_json and
-// token_usage_json stay in the lake.
-const traceDDL = `
-CREATE VIEW trace AS
+// traceOrderDDL computes each event's place in its session once per build,
+// so trace reads need no window over whole sessions (one session holds 1.5M
+// events). It ports docs/clickhouse/v_conversation_trace.sql: event_time
+// mirrors parseDateTime64BestEffortOrNull (TIMESTAMPTZ parsing honors a
+// trailing Z or numeric offset, and the build runs with TimeZone='UTC' so
+// zoneless record_ts reads as UTC); emission_index replaces
+// JSONExtractUInt(payload_json, 'moraine_emission_index').
+const traceOrderDDL = `
+CREATE TABLE trace_order AS
 WITH base AS (
-    SELECT session_id, session_date, event_uid,
-           origin_event_id AS compacted_parent_uid,
-           source_file, source_generation, source_line_no, source_offset, source_ref,
+    SELECT doc, session_id, source_file, source_generation, source_offset, source_line_no,
+           emission_index, event_uid, turn_index, actor_kind, event_kind,
            coalesce(try_cast(record_ts AS TIMESTAMPTZ), ingested_at AT TIME ZONE 'UTC')
-               AT TIME ZONE 'UTC' AS event_time,
-           cast(turn_index AS VARCHAR) AS turn_id,
-           actor_kind AS actor_role,
-           event_kind AS event_class,
-           payload_type,
-           tool_call_id AS call_id,
-           tool_name AS name,
-           coalesce(nullif(tool_phase, ''), op_status) AS phase,
-           item_id, text_content, endpoint_kind, emission_index,
-           token_usage_buckets, token_usage_native_units
+               AT TIME ZONE 'UTC' AS event_time
     FROM events
 )
-SELECT session_id, session_date, event_uid, compacted_parent_uid,
-       source_file, source_generation, source_line_no, source_offset, source_ref,
-       event_time,
-       row_number() OVER (PARTITION BY session_id ORDER BY event_time, source_file,
-           source_generation, source_offset, source_line_no, emission_index,
-           event_uid) AS event_order,
-       CASE WHEN coalesce(try_cast(turn_id AS UINTEGER), 0) > 0
-            THEN cast(turn_id AS UINTEGER)
-            ELSE cast(greatest(1, sum(CASE WHEN actor_role = 'user' AND event_class = 'message'
-                                           THEN 1 ELSE 0 END) OVER (
-                    PARTITION BY session_id ORDER BY event_time, source_file,
-                    source_generation, source_offset, source_line_no,
-                    emission_index, event_uid
+SELECT doc, event_time,
+       row_number() OVER w AS event_order,
+       CASE WHEN coalesce(turn_index, 0) > 0
+            THEN turn_index
+            ELSE cast(greatest(1, sum(CASE WHEN actor_kind = 'user' AND event_kind = 'message'
+                                           THEN 1 ELSE 0 END) OVER (w
                     ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)) AS UINTEGER)
-       END AS turn_seq,
-       turn_id, actor_role, event_class, payload_type, call_id, name, phase, item_id,
-       text_content, endpoint_kind,
-       token_usage_buckets, token_usage_native_units
-FROM base`
+       END AS turn_seq
+FROM base
+WINDOW w AS (PARTITION BY session_id ORDER BY event_time, source_file,
+    source_generation, source_offset, source_line_no, emission_index, event_uid)`
+
+// traceDDL is the trace view: events with their trace_order and the
+// v_all_events renames (origin_event_id->compacted_parent_uid,
+// actor_kind->actor_role, event_kind->event_class, tool_call_id->call_id,
+// tool_name->name, turn_index->turn_id, phase=tool_phase or op_status).
+// payload_json and token_usage_json stay in the lake.
+const traceDDL = `
+CREATE VIEW trace AS
+SELECT e.session_id, e.session_date, e.event_uid,
+       e.origin_event_id AS compacted_parent_uid,
+       e.source_file, e.source_generation, e.source_line_no, e.source_offset, e.source_ref,
+       o.event_time, o.event_order, o.turn_seq,
+       cast(e.turn_index AS VARCHAR) AS turn_id,
+       e.actor_kind AS actor_role,
+       e.event_kind AS event_class,
+       e.payload_type,
+       e.tool_call_id AS call_id,
+       e.tool_name AS name,
+       coalesce(nullif(e.tool_phase, ''), e.op_status) AS phase,
+       e.item_id, e.text_content, e.endpoint_kind,
+       e.token_usage_buckets, e.token_usage_native_units
+FROM events e JOIN trace_order o ON o.doc = e.doc`
 
 // sessionsDDL ports docs/clickhouse/v_session_summary.sql.
 const sessionsDDL = `

@@ -10,6 +10,7 @@ import (
 	"context"
 	"database/sql"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -95,6 +96,7 @@ func searchMcpEvents(ctx context.Context, db *sql.DB, q searchQuery) (*searchRes
 type mcpRow struct {
 	eventUID    string
 	sessionID   string
+	doc         int64
 	rawScore    float64
 	matchedTerm int64
 	eventUnixMs int64
@@ -161,9 +163,10 @@ func searchMcpCandidates(ctx context.Context, db *sql.DB, q searchQuery, terms [
 
 	sqlStr := `WITH p AS (SELECT term, doc, tf, doc_len FROM all_postings WHERE term IN ` + termsSQL + `),
 s AS (SELECT term, count(*) AS df FROM p GROUP BY term)
-SELECT event_uid, session_id, raw_score, matched_terms, event_unix_ms FROM (
+SELECT event_uid, session_id, doc, raw_score, matched_terms, event_unix_ms FROM (
   SELECT e.event_uid AS event_uid,
     max(e.session_id) AS session_id,
+    max(e.doc) AS doc,
     sum(ln(1.0 + ((greatest(cast((SELECT docs FROM corpus) AS DOUBLE), cast(s.df AS DOUBLE))
         - cast(s.df AS DOUBLE) + 0.5) / (cast(s.df AS DOUBLE) + 0.5)))
       * ((cast(p.tf AS DOUBLE) * 1.200000)
@@ -191,7 +194,7 @@ SELECT event_uid, session_id, raw_score, matched_terms, event_unix_ms FROM (
 	var out []*mcpRow
 	for rows.Next() {
 		var r mcpRow
-		if err := rows.Scan(&r.eventUID, &r.sessionID, &r.rawScore, &r.matchedTerm,
+		if err := rows.Scan(&r.eventUID, &r.sessionID, &r.doc, &r.rawScore, &r.matchedTerm,
 			&r.eventUnixMs); err != nil {
 			return nil, err
 		}
@@ -221,22 +224,30 @@ func scopeExistsFor(ctx context.Context, db *sql.DB, q searchQuery) (bool, error
 // ordinals and turn/session totals for the candidates' turns, hydration from
 // events. Session title/slug/summary stay empty, matching upstream.
 func hydrateMcpCandidates(ctx context.Context, db *sql.DB, rows []*mcpRow) error {
-	uids := make([]string, len(rows))
 	byUID := make(map[string]*mcpRow, len(rows))
-	for i, r := range rows {
-		uids[i] = r.eventUID
+	seen := map[string]bool{}
+	var cand, tr []string
+	for _, r := range rows {
 		byUID[r.eventUID] = r
+		cand = append(cand, `SELECT event_uid, session_id, source_ref, text_content,
+  source_name, harness, inference_provider, endpoint_kind, model,
+  event_kind AS event_class, payload_type, actor_kind AS actor_role, tool_name AS name,
+  coalesce(nullif(tool_phase, ''), op_status) AS phase, tool_call_id AS call_id, item_id
+FROM events WHERE doc = `+strconv.FormatInt(r.doc, 10))
+		if !seen[r.sessionID] {
+			seen[r.sessionID] = true
+			tr = append(tr, "SELECT session_id, event_uid, turn_seq, event_order, event_time, payload_type FROM trace WHERE session_id = "+sqlQuote(r.sessionID))
+		}
 	}
-	// DuckDB list literal: unnest(['uid', ...]) yields the uid column.
-	uidsSQL := "[" + strings.Join(quoteAll(uids), ", ") + "]"
 
-	const detailSQL = `WITH cand AS (SELECT unnest(%UIDS%) AS event_uid),
+	q2 := `WITH cand AS (` + strings.Join(cand, "\nUNION ALL ") + `),
+tr AS (` + strings.Join(tr, "\nUNION ALL ") + `),
 scope AS (
   SELECT DISTINCT t.session_id, t.turn_seq
-  FROM trace t JOIN cand ON t.event_uid = cand.event_uid
+  FROM tr t JOIN cand c ON t.session_id = c.session_id AND t.event_uid = c.event_uid
 ),
 turn_rows AS (
-  SELECT t.* FROM trace t
+  SELECT t.* FROM tr t
   JOIN scope s ON t.session_id = s.session_id AND t.turn_seq = s.turn_seq
 ),
 turn_totals AS (
@@ -256,32 +267,28 @@ sess AS (
   SELECT session_id, epoch_ms(min(event_time)) AS session_started_at_unix_ms,
          epoch_ms(max(event_time)) AS session_updated_at_unix_ms,
          max(CASE WHEN payload_type = 'task_complete' THEN 1 ELSE 0 END) AS session_completed
-  FROM trace
+  FROM tr
   WHERE session_id IN (SELECT session_id FROM scope)
   GROUP BY session_id
 ),
 ord AS (
-  SELECT session_id, event_uid, event_order, turn_seq,
+  SELECT session_id, event_uid, event_order, event_time, turn_seq,
          row_number() OVER (PARTITION BY session_id, turn_seq ORDER BY event_order) AS event_ordinal
   FROM turn_rows
 )
 SELECT
-  t.event_uid, t.session_id, t.event_order, o.turn_seq, o.event_ordinal,
-  epoch_ms(t.event_time) AS event_unix_ms,
-  t.event_class, t.payload_type, t.actor_role, t.name, t.phase, t.call_id, t.item_id,
-  t.source_ref, t.text_content,
-  e.source_name, e.harness, e.inference_provider, e.endpoint_kind, e.model,
+  c.event_uid, c.session_id, o.event_order, o.turn_seq, o.event_ordinal,
+  epoch_ms(o.event_time) AS event_unix_ms,
+  c.event_class, c.payload_type, c.actor_role, c.name, c.phase, c.call_id, c.item_id,
+  c.source_ref, c.text_content,
+  c.source_name, c.harness, c.inference_provider, c.endpoint_kind, c.model,
   tt.turn_event_count, tt.turn_completed, tu.turn_terminal_event_uid,
   ss.session_started_at_unix_ms, ss.session_updated_at_unix_ms, ss.session_completed
-FROM trace t
-JOIN cand ON t.event_uid = cand.event_uid
-JOIN ord o ON o.event_uid = t.event_uid
-JOIN events e ON e.event_uid = t.event_uid
+FROM cand c
+JOIN ord o ON o.session_id = c.session_id AND o.event_uid = c.event_uid
 JOIN turn_totals tt ON tt.session_id = o.session_id AND tt.turn_seq = o.turn_seq
 LEFT JOIN turn_terminal tu ON tu.session_id = o.session_id AND tu.turn_seq = o.turn_seq
 JOIN sess ss ON ss.session_id = o.session_id`
-
-	q2 := strings.Replace(detailSQL, "%UIDS%", uidsSQL, 1)
 	rs, err := db.QueryContext(ctx, q2)
 	if err != nil {
 		return err

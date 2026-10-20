@@ -41,9 +41,18 @@ CREATE TABLE sources (
     events UBIGINT NOT NULL      -- 0 while the harness has no parser
 );
 
+-- Each event's place in its session, computed once per build.
+CREATE TABLE trace_order (
+    doc UINTEGER NOT NULL,
+    event_time TIMESTAMP,
+    event_order BIGINT NOT NULL,
+    turn_seq UINTEGER NOT NULL
+);
+
 -- DuckDB ports of the ClickHouse views, same column names and types, minus
 -- payload_json and token_usage_json:
---   trace    <- docs/clickhouse/v_conversation_trace.sql
+--   trace    <- docs/clickhouse/v_conversation_trace.sql, events joined to
+--               trace_order on doc
 --   sessions <- docs/clickhouse/v_session_summary.sql
 -- CREATE VIEW trace AS ...;
 -- CREATE VIEW sessions AS ...;
