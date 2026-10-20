@@ -54,8 +54,6 @@ type searchResult struct {
 	scopeExists bool
 }
 
-// searchMcpEvents ports search.rs search_mcp_events_impl minus the result
-// cache (each cache file is one immutable snapshot; serve reopens per query).
 func searchMcpEvents(ctx context.Context, db *sql.DB, q searchQuery) (*searchResult, error) {
 	terms := tokenizeQuery(q.query, bm25MaxQueryTerms)
 	if len(terms) == 0 {
@@ -94,7 +92,10 @@ type mcpRow struct {
 	rawScore    float64
 	matchedTerm int64
 	eventUnixMs int64
+	mcpDetail
+}
 
+type mcpDetail struct {
 	sourceName        string
 	harness           string
 	inferenceProvider string
@@ -128,12 +129,8 @@ func searchMcpCandidates(ctx context.Context, db *sql.DB, q searchQuery, terms [
 		"e.source_name != 'codex-mcp'",
 		"NOT "+mcpInternalToolPredicate("e.tool_name"),
 	)
-	// events carries the raw lake column names; the trace renames
-	// (event_kind->event_class, actor_kind->actor_role, tool_name->name)
-	// exist only in the view, so the filter clauses bind the raw names.
 	if len(q.eventTypes) > 0 {
-		filters = append(filters,
-			mcpEventTypeFilterClause("e.event_kind", "e.payload_type", "e.actor_kind", q.eventTypes))
+		filters = append(filters, mcpEventTypeFilterClause("e", q.eventTypes))
 	}
 	if q.sessionOK {
 		filters = append(filters, "e.session_id = "+sqlQuote(q.sessionID))
@@ -280,11 +277,13 @@ JOIN sess ss ON ss.session_id = o.session_id`
 	}
 	defer rs.Close()
 	for rs.Next() {
-		var r mcpRow
+		var uid, sessionID string
+		var eventUnixMs int64
+		var r mcpDetail
 		var turnCompleted, sessionCompleted int
 		var turnTerminal any
-		if err := rs.Scan(&r.eventUID, &r.sessionID, &r.eventOrder, &r.turnSeq, &r.eventOrdinal,
-			&r.eventUnixMs,
+		if err := rs.Scan(&uid, &sessionID, &r.eventOrder, &r.turnSeq, &r.eventOrdinal,
+			&eventUnixMs,
 			&r.eventClass, &r.payloadType, &r.actorRole, &r.name, &r.phase, &r.callID, &r.itemID,
 			&r.sourceRef, &r.textContent,
 			&r.sourceName, &r.harness, &r.inferenceProvider, &r.endpointKind, &r.model,
@@ -296,12 +295,9 @@ JOIN sess ss ON ss.session_id = o.session_id`
 		r.sessionCompleted = sessionCompleted != 0
 		r.turnTerminalUID = jsonAsString(turnTerminal)
 		r.textPreview = truncateRunes(r.textContent, previewChars)
-		if existing, ok := byUID[r.eventUID]; ok {
-			// The candidate pass supplied the ranking inputs; the hydration
-			// pass must not wipe them.
-			rawScore, matched := existing.rawScore, existing.matchedTerm
-			*existing = r
-			existing.rawScore, existing.matchedTerm = rawScore, matched
+		if existing, ok := byUID[uid]; ok {
+			existing.mcpDetail = r
+			existing.eventUnixMs = eventUnixMs
 		}
 	}
 	return rs.Err()

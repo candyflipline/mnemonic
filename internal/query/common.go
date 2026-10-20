@@ -454,7 +454,8 @@ func singleMcpEventTypeClause(class, payload, actor, eventType string) string {
 	}
 }
 
-func mcpEventTypeFilterClause(class, payload, actor string, eventTypes []string) string {
+func mcpEventTypeFilterClause(eventsAlias string, eventTypes []string) string {
+	class, payload, actor := eventsAlias+".event_kind", eventsAlias+".payload_type", eventsAlias+".actor_kind"
 	clauses := make([]string, 0, len(eventTypes))
 	for _, t := range eventTypes {
 		clauses = append(clauses, singleMcpEventTypeClause(class, payload, actor, t))
