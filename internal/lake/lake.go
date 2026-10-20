@@ -23,8 +23,6 @@ import (
 // as plain strings, and Date values as their first ten characters.
 const tsFormat = "2006-01-02 15:04:05.000"
 
-// epochIngestedAt stamps archive rows so a live row always wins the cache's
-// dedupe tie (newest ingested_at).
 const epochIngestedAt = "1970-01-01 00:00:00.000"
 
 type Stats struct {

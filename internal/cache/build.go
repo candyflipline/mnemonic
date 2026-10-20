@@ -238,13 +238,9 @@ func buildCache(path, spill, archPath, dataDir string, live []lakeFile) (Stats, 
 			src := parquetSource(live)
 			stmts = append(stmts,
 				"CREATE TEMP TABLE lw AS "+winnersSQL(src),
-				// A live row loses to an archive row only with a lower
-				// (event_version, ingested_at); otherwise the archive row
-				// is superseded and its doc dropped.
 				`DELETE FROM lw WHERE event_uid IN (
   SELECT a.event_uid FROM arch.events a JOIN lw ON a.event_uid = lw.event_uid
-  WHERE a.event_version > lw.event_version
-     OR (a.event_version = lw.event_version AND a.ingested_at > lw.ingested_at))`,
+  WHERE a.event_version > lw.event_version)`,
 				"INSERT INTO dropped SELECT a.doc FROM arch.events a JOIN lw ON a.event_uid = lw.event_uid",
 				`CREATE TEMP TABLE w AS SELECT filename, file_row_number,
   cast((SELECT coalesce(max(doc), 0) FROM arch.events) + row_number() OVER () AS UINTEGER) AS doc FROM lw`,
