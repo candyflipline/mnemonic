@@ -15,7 +15,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
+
+	"github.com/candyflipline/mnemonic/internal/auth"
 	"github.com/candyflipline/mnemonic/internal/config"
+	"github.com/candyflipline/mnemonic/internal/layout"
+	"github.com/candyflipline/mnemonic/internal/store"
 	"github.com/candyflipline/mnemonic/internal/wire"
 )
 
@@ -219,20 +224,6 @@ func assertRaw(t *testing.T, s *fakeStore, path, want string) {
 	}
 }
 
-// manifestSource is the Source the manifest serves for path.
-func manifestSource(t *testing.T, s *fakeStore, path string) wire.Source {
-	t.Helper()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	src := s.sources[wire.SrcID(path)]
-	if src == nil {
-		t.Fatalf("server has no entry for %s", path)
-	}
-	return wire.Source{
-		SrcID: wire.SrcID(path), Size: int64(len(src.raw)), RawEnd: src.rawEnd, HeadHash: src.head,
-	}
-}
-
 // Two files of whole lines upload exactly their bytes on the first pass.
 func TestFirstPassUploadsWholeFiles(t *testing.T) {
 	dir := t.TempDir()
@@ -352,20 +343,90 @@ func TestAppendSendsOnlyNewLine(t *testing.T) {
 	assertRaw(t, s, p, "alpha one\ngamma three\n")
 }
 
+// realStore is the real internal/store server on a temp data dir: the handler
+// mnemonic serve runs, behind auth, so a test can exercise the store's own
+// manifest and raw_end handling rather than a re-implementation.
+type realStore struct {
+	srv     *httptest.Server
+	dataDir string
+}
+
+func newRealStore(t *testing.T) *realStore {
+	t.Helper()
+	data := t.TempDir()
+	st := &store.Store{DataDir: data}
+	srv := httptest.NewServer(auth.Middleware(map[string]string{auth.Hash("test-token"): "chris"})(st.Handler()))
+	t.Cleanup(srv.Close)
+	return &realStore{srv: srv, dataDir: data}
+}
+
+// realManifestSource is the Source the real store's manifest serves for path.
+func realManifestSource(t *testing.T, rs *realStore, path string) wire.Source {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, rs.srv.URL+manifestPath+"?machine=testbox", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer test-token")
+	res, err := rs.srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("manifest: status %d, want 200", res.StatusCode)
+	}
+	var man wire.Manifest
+	if err := json.NewDecoder(res.Body).Decode(&man); err != nil {
+		t.Fatal(err)
+	}
+	for _, src := range man.Sources {
+		if src.SrcID == wire.SrcID(path) {
+			return src
+		}
+	}
+	t.Fatalf("manifest has no entry for %s", path)
+	return wire.Source{}
+}
+
+// storedRaw decodes the raw file the real store keeps for path, the way
+// internal/store's own tests read it: layout key, then the zstd frames.
+func storedRaw(t *testing.T, dataDir, path string) string {
+	t.Helper()
+	k := layout.Key{Author: "chris", Machine: "testbox", Harness: "claude-code", SrcID: wire.SrcID(path)}
+	f, err := os.Open(k.Raw(dataDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	zr, err := zstd.NewReader(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zr.Close()
+	b, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
 // Growing a file whose raw offset the server knows redacts only the new tail:
-// Line sees the first line (for the head hash) plus the appended lines, the
-// server ends up with the whole redacted file, and the manifest records the
-// redacted size and the raw offset it came from.
+// against the real store, Line sees the first line (for the head hash) plus
+// the appended lines, the store ends up with the whole redacted file, and its
+// manifest records the redacted size and the raw offset it came from.
 func TestAppendTailRedactsOnlyNewBytes(t *testing.T) {
 	dir := t.TempDir()
 	p := writeFile(t, dir, "a.jsonl", "head line\n"+strings.Repeat("filler line\n", 999)) // 10 + 999*12 = 11998 bytes
-	s := newTestServer(t)
-	runPass(t, s, dir)
+	rs := newRealStore(t)
+	if _, err := Run(context.Background(), testConfig(rs.srv.URL, dir), identityRedactor{}, rs.srv.Client()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
 
 	body := "head line\n" + strings.Repeat("filler line\n", 999) + "new one\nnew two\n" // 12014 bytes
 	writeFile(t, dir, "a.jsonl", body)
 	red := &countingRedactor{}
-	st, err := Run(context.Background(), testConfig(s.srv.URL, dir), red, s.srv.Client())
+	st, err := Run(context.Background(), testConfig(rs.srv.URL, dir), red, rs.srv.Client())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -376,8 +437,10 @@ func TestAppendTailRedactsOnlyNewBytes(t *testing.T) {
 	if red.n != 9+7+7 {
 		t.Fatalf("Line saw %d bytes, want %d", red.n, 9+7+7)
 	}
-	assertRaw(t, s, p, body)
-	src := manifestSource(t, s, p)
+	if got := storedRaw(t, rs.dataDir, p); got != body {
+		t.Fatalf("store holds %q, want %q", got, body)
+	}
+	src := realManifestSource(t, rs, p)
 	if src.Size != 12014 || src.RawEnd != 12014 {
 		t.Fatalf("manifest Size = %d RawEnd = %d, want 12014 and 12014", src.Size, src.RawEnd)
 	}
