@@ -1,0 +1,20 @@
+[package]
+name = "mnemonic"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "mnemonic: moraine-normalized session rows as a per-machine parquet lake"
+
+[dependencies]
+anyhow = "1.0"
+arrow = { version = "58", default-features = false, features = ["json"] }
+parquet = { version = "58", default-features = false, features = ["arrow", "zstd"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "fs"] }
+tracing = "0.1"
+moraine-config = { path = "../moraine-config" }
+moraine-ingest-core = { path = "../moraine-ingest-core" }
+
+[dev-dependencies]
+tempfile = "3"

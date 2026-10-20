@@ -1,0 +1,21 @@
+[package]
+name = "mnemonic-repo"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "mnemonic: moraine's ConversationRepository over a DuckDB cache derived from the parquet lake"
+
+[dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+duckdb = { version = "=1.10506.1", features = ["bundled", "parquet"] }
+serde_json = "1.0"
+tokio = { version = "1.40", features = ["rt", "sync"] }
+tracing = "0.1"
+mnemonic = { path = "../mnemonic" }
+moraine-config = { path = "../moraine-config" }
+moraine-conversations = { path = "../moraine-conversations" }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread"] }

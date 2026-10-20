@@ -273,6 +273,44 @@ pub struct RedactionConfig {
     pub dangerously_skip_secret_redaction_ignored: bool,
 }
 
+/// mnemonic: the parquet lake that replaces ClickHouse for this install.
+/// When present, ingest writes `<lake_dir>/machine=<machine_id>/...` and the
+/// MCP backend serves reads from the cache built at `cache_dir`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MnemonicConfig {
+    /// Root of the parquet lake; every machine's prefix lives under it.
+    #[serde(default = "default_mnemonic_lake_dir")]
+    pub lake_dir: String,
+    /// This machine's prefix. The only prefix this machine ever writes.
+    pub machine_id: String,
+    /// Directory holding the rebuilt `cache-<unix_ms>.duckdb` files.
+    #[serde(default = "default_mnemonic_cache_dir")]
+    pub cache_dir: String,
+    /// A source file is rewritten only after it has been idle this long, or
+    /// after `max_stale_seconds` since its parquet was written.
+    #[serde(default = "default_mnemonic_idle_seconds")]
+    pub idle_seconds: u64,
+    #[serde(default = "default_mnemonic_max_stale_seconds")]
+    pub max_stale_seconds: u64,
+}
+
+fn default_mnemonic_lake_dir() -> String {
+    "~/.mnemonic/lake".to_string()
+}
+
+fn default_mnemonic_cache_dir() -> String {
+    "~/.mnemonic/cache".to_string()
+}
+
+fn default_mnemonic_idle_seconds() -> u64 {
+    120
+}
+
+fn default_mnemonic_max_stale_seconds() -> u64 {
+    900
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdentityConfig {
@@ -472,6 +510,8 @@ pub struct AppConfig {
     pub monitor: MonitorConfig,
     #[serde(default)]
     pub runtime: RuntimeConfig,
+    #[serde(default)]
+    pub mnemonic: Option<MnemonicConfig>,
 }
 
 impl AppConfig {
@@ -593,6 +633,7 @@ impl Default for AppConfig {
             bm25: Bm25Config::default(),
             monitor: MonitorConfig::default(),
             runtime: RuntimeConfig::default(),
+            mnemonic: None,
         }
     }
 }

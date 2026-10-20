@@ -1,5 +1,6 @@
 mod checkpoint;
 mod dispatch;
+pub mod file_rows;
 mod heartbeat;
 pub mod model;
 pub mod normalize;
