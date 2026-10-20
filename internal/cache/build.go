@@ -1,7 +1,9 @@
 package cache
 
 import (
+	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -16,7 +18,7 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 	"github.com/candyflipline/mnemonic/internal/wire"
 
-	_ "github.com/duckdb/duckdb-go/v2"
+	"github.com/duckdb/duckdb-go/v2"
 )
 
 // manifest is one raw/<...>.json file: wire.Source plus the ignored zst_size.
@@ -132,16 +134,11 @@ func prune(dataDir string) error {
 }
 
 func buildFile(path, dataDir string, lakeFiles int) (Stats, error) {
-	db, err := sql.Open("duckdb", path)
+	db, err := newDB(path)
 	if err != nil {
 		return Stats{}, err
 	}
 	defer db.Close()
-	// Views compute event_time at query time, so the querying session's zone
-	// must match the build's; UTC is pinned on both sides (see OpenNewest).
-	if _, err := db.Exec(`SET TimeZone='UTC'`); err != nil {
-		return Stats{}, err
-	}
 	for _, stmt := range []string{
 		eventsDDL(),
 		insertEvents(dataDir, lakeFiles),
@@ -181,6 +178,22 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+// newDB opens a DuckDB database with TimeZone pinned to UTC on every pooled
+// connection: a plain SET is session-scoped, so a database/sql pool would run
+// later connections in the process's local zone and event_time-derived views
+// would drift between queries. Views compute event_time at query time, so the
+// build and every reader must agree on the zone.
+func newDB(dsn string) (*sql.DB, error) {
+	c, err := duckdb.NewConnector(dsn, func(execer driver.ExecerContext) error {
+		_, err := execer.ExecContext(context.Background(), `SET TimeZone='UTC'`, nil)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return sql.OpenDB(c), nil
 }
 
 // eventsDDL declares the events table even when the lake is empty; the column
@@ -299,7 +312,7 @@ GROUP BY session_id`
 // with at least one term. docs, postings and the query-side scorer must use
 // the same definition.
 
-const tokenList = "list_filter(regexp_extract_all(lower(text_content), '[a-z0-9_]+'), tok -> len(tok) >= 2 AND len(tok) <= 64)"
+const tokenList = "list_filter(regexp_extract_all(lower(text_content), '[a-z0-9_]+'), lambda tok: len(tok) >= 2 AND len(tok) <= 64)"
 
 const docsDDL = `
 CREATE TABLE docs AS
@@ -307,9 +320,12 @@ SELECT event_uid, cast(n AS UINTEGER) AS doc_len
 FROM (SELECT event_uid, len(` + tokenList + `) AS n FROM events)
 WHERE n > 0`
 
+// postingsDDL clamps tf to 65535 rather than letting the USMALLINT cast fail:
+// a term can occur more than 65535 times in one event's 200k-char
+// text_content, and upstream's toUInt16(count()) only wrapped silently.
 const postingsDDL = `
 CREATE TABLE postings AS
-SELECT term, event_uid, cast(count(*) AS USMALLINT) AS tf
+SELECT term, event_uid, cast(least(count(*), 65535) AS USMALLINT) AS tf
 FROM (SELECT event_uid, unnest(` + tokenList + `) AS term FROM events)
 GROUP BY term, event_uid
 ORDER BY term`
@@ -425,12 +441,8 @@ func OpenNewest(dataDir string) (*sql.DB, string, error) {
 		return nil, "", fmt.Errorf("no cache in %s: run cache.Build first", layout.CacheDir(dataDir))
 	}
 	path := caches[len(caches)-1].path
-	db, err := sql.Open("duckdb", path+"?access_mode=READ_ONLY")
+	db, err := newDB(path + "?access_mode=READ_ONLY")
 	if err != nil {
-		return nil, "", err
-	}
-	if _, err := db.Exec(`SET TimeZone='UTC'`); err != nil {
-		db.Close()
 		return nil, "", err
 	}
 	if err := db.Ping(); err != nil {

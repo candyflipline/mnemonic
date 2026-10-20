@@ -1,9 +1,12 @@
 package cache
 
 import (
+	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -134,6 +137,92 @@ func TestSourcesSameSrcIDTwoMachines(t *testing.T) {
 	}
 	if len(got) != 2 || got[0] != "m1/codex=15" || got[1] != "m2/claude-code=6" {
 		t.Fatalf("sources rows: %v", got)
+	}
+}
+
+// TestPostingsTFClamp: one event's text_content (capped at 200k chars) can
+// hold a term more than 65535 times; tf must clamp to 65535 like upstream's
+// silent toUInt16 wrap, not fail the whole rebuild with an out-of-range
+// UINT16 conversion.
+func TestPostingsTFClamp(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := cachetest.Lake(dataDir, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	matches, err := filepath.Glob(filepath.Join(dataDir, layout.EventsGlob))
+	if err != nil || len(matches) == 0 {
+		t.Fatalf("no lake parquet: %v %v", matches, err)
+	}
+	uid := strings.Repeat("f", 64)
+	flood := filepath.Join(filepath.Dir(matches[0]), strings.Repeat("e", 64)+".parquet")
+	db, err := sql.Open("duckdb", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec("COPY (SELECT * REPLACE (repeat('ab ', 70000) AS text_content, " +
+		sqlStr(uid) + " AS event_uid) FROM read_parquet(" + sqlStr(matches[0]) +
+		", hive_partitioning=false)) TO " + sqlStr(flood) + " (FORMAT parquet)")
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Build(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	cdb, _, err := OpenNewest(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cdb.Close()
+	var tf int64
+	if err := cdb.QueryRow(`SELECT tf FROM postings WHERE term = 'ab' AND event_uid = ?`,
+		uid).Scan(&tf); err != nil {
+		t.Fatal(err)
+	}
+	if tf != 65535 {
+		t.Fatalf("postings tf for 'ab': %d, want 65535", tf)
+	}
+}
+
+// TestOpenNewestTimeZonePinnedOnEveryConnection: SET TimeZone is
+// session-scoped in DuckDB, so OpenNewest must pin it per connection rather
+// than on whichever pooled connection happens to run one Exec. Holding three
+// connections forces three sessions.
+func TestOpenNewestTimeZonePinnedOnEveryConnection(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := cachetest.Lake(dataDir, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Build(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	db, _, err := OpenNewest(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(4)
+	ctx := context.Background()
+	held := make([]*sql.Conn, 0, 3)
+	defer func() {
+		for _, c := range held {
+			c.Close()
+		}
+	}()
+	for i := 0; i < 3; i++ {
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		held = append(held, conn)
+		var tz string
+		if err := conn.QueryRowContext(ctx, `SELECT current_setting('TimeZone')`).Scan(&tz); err != nil {
+			t.Fatal(err)
+		}
+		if tz != "UTC" {
+			t.Fatalf("held connection %d: TimeZone = %q, want UTC", i+1, tz)
+		}
 	}
 }
 
