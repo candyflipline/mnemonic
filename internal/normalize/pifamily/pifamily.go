@@ -70,6 +70,8 @@ func NormalizeRecord(rec shared.JSON, ctx *shared.Ctx, topType, baseUID, modelHi
 		handleCustomMessage(rec, baseUID, em)
 	case "label":
 		handleLabel(rec, baseUID, em)
+	case "session_info":
+		handleSessionInfo(rec, baseUID, em)
 	case "title", "title_change":
 		// The omp title shapes only exist for the omp source name; anything
 		// else follows the harness's own fallback.
