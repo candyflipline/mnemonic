@@ -146,10 +146,27 @@ func (s *Store) servePut(w http.ResponseWriter, r *http.Request) {
 	s.append(w, key, offset, headHash, body)
 }
 
-// replace stores body as the whole raw file, then the manifest: data first, so
-// a manifest never describes bytes that are not on disk.
+// replaceRaw drops the manifest before it swaps the raw file, then writes body
+// as the whole raw file and returns the compressed length. Removing first is
+// what makes the two-file update crash-safe: a manifest left over from before
+// the raw rename would carry the old Size and ZstSize, and the next append
+// would truncate the new raw to them. Without a manifest an append answers 409
+// at Size 0, the client re-sends from offset 0, and lake skips the source; the
+// replace itself is idempotent, so rerunning converges.
+func (s *Store) replaceRaw(k layout.Key, body []byte) (int64, error) {
+	m := k.Manifest(s.DataDir)
+	if err := os.Remove(m); err != nil && !os.IsNotExist(err) {
+		return 0, err
+	}
+	syncDir(filepath.Dir(m))
+	return writeZst(k.Raw(s.DataDir), body)
+}
+
+// replace stores body as the whole raw file, then the manifest; replaceRaw has
+// already dropped the old manifest, so no manifest ever sits next to raw bytes
+// it does not describe.
 func (s *Store) replace(w http.ResponseWriter, k layout.Key, headHash, sourceName, srcPath string, body []byte) {
-	zst, err := writeZst(k.Raw(s.DataDir), body)
+	zst, err := s.replaceRaw(k, body)
 	if err != nil {
 		http.Error(w, "write raw", http.StatusInternalServerError)
 		return
