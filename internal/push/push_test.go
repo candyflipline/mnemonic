@@ -220,6 +220,27 @@ func TestFirstPassUploadsWholeFiles(t *testing.T) {
 	assertRaw(t, s, p2, "beta\n")
 }
 
+// A file bigger than one chunk lands as a replace then appends of whole lines.
+func TestBigFileUploadsInChunks(t *testing.T) {
+	defer func(old int) { maxChunk = old }(maxChunk)
+	maxChunk = 12
+	dir := t.TempDir()
+	p := writeFile(t, dir, "a.jsonl", "alpha one\nalpha two\nbeta\n") // 10 + 10 + 5 bytes
+	s := newTestServer(t)
+
+	st := runPass(t, s, dir)
+	if want := (Stats{Scanned: 1, Replaced: 1, Bytes: 25}); st != want {
+		t.Fatalf("stats = %+v, want %+v", st, want)
+	}
+	if s.putCount() != 3 {
+		t.Fatalf("PUTs = %d, want 3", s.putCount())
+	}
+	if put := s.lastPut(); put.offset != 20 || put.body != "beta\n" {
+		t.Fatalf("last PUT offset %d body %q, want offset 20 body %q", put.offset, put.body, "beta\n")
+	}
+	assertRaw(t, s, p, "alpha one\nalpha two\nbeta\n")
+}
+
 // A second pass with nothing new sends nothing.
 func TestSecondPassSendsNothing(t *testing.T) {
 	dir := t.TempDir()

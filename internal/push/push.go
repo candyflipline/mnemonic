@@ -121,31 +121,52 @@ func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.C
 		return nil
 	}
 	entry := manifest[srcID]
-	for attempt := 0; ; attempt++ {
+	sent, replaced := false, false
+	for conflicts := 0; ; {
 		body, offset, noop := decide(entry, head, redacted)
 		if noop {
-			st.Unchanged++
+			switch {
+			case !sent:
+				st.Unchanged++
+			case replaced:
+				st.Replaced++
+			default:
+				st.Appended++
+			}
 			return nil
 		}
+		body = firstChunk(body, maxChunk)
 		conflict, err := putSource(ctx, cfg, hc, f, srcID, offset, head, body)
 		if err != nil {
 			return err
 		}
 		if conflict != nil {
-			if attempt > 0 {
+			if conflicts++; conflicts > 1 {
 				return fmt.Errorf("put %s: conflict again at size %d", f.path, conflict.Size)
 			}
 			entry = &wire.Source{SrcID: srcID, Size: conflict.Size, HeadHash: conflict.HeadHash}
 			continue
 		}
 		st.Bytes += int64(len(body))
-		if offset == 0 {
-			st.Replaced++
-		} else {
-			st.Appended++
-		}
-		return nil
+		sent, replaced = true, replaced || offset == 0
+		entry = &wire.Source{SrcID: srcID, Size: offset + int64(len(body)), HeadHash: head}
 	}
+}
+
+// maxChunk bounds one PUT body, so a first push of a huge transcript lands in
+// pieces that each fit the HTTP timeout and the proxy's body limit.
+var maxChunk = 32 << 20
+
+// firstChunk is the longest prefix of whole lines within max bytes, or the
+// first line alone when that line is longer than max.
+func firstChunk(body []byte, max int) []byte {
+	if len(body) <= max {
+		return body
+	}
+	if i := bytes.LastIndexByte(body[:max], '\n'); i >= 0 {
+		return body[:i+1]
+	}
+	return body[:bytes.IndexByte(body, '\n')+1]
 }
 
 // decide picks the PUT for one attempt: whole at offset 0 whenever we cannot
