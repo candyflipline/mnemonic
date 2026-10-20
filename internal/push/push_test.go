@@ -25,6 +25,14 @@ type identityRedactor struct{}
 
 func (identityRedactor) Line(line []byte) []byte { return line }
 
+// countingRedactor is identityRedactor with a byte counter on Line.
+type countingRedactor struct{ n int64 }
+
+func (c *countingRedactor) Line(line []byte) []byte {
+	c.n += int64(len(line))
+	return line
+}
+
 // fakeStore is the server side of the wire protocol, in memory: offset 0
 // replaces, offset == size appends, anything else is a 409. The stale map lets
 // a test serve a manifest whose sizes lag the store, as they do when another
@@ -42,6 +50,7 @@ type fakeStore struct {
 
 type fakeSource struct {
 	raw     []byte
+	rawEnd  int64
 	head    string
 	harness string
 	srcName string
@@ -52,6 +61,7 @@ type fakePut struct {
 	srcID      string
 	offset     int64
 	body, head string
+	rawEnd     int64
 	conflicted bool
 }
 
@@ -79,7 +89,7 @@ func (s *fakeStore) serveManifest(w http.ResponseWriter, r *http.Request) {
 		}
 		man.Sources = append(man.Sources, wire.Source{
 			SrcID: id, Harness: src.harness, SourceName: src.srcName, Path: src.path,
-			Size: size, HeadHash: src.head, UpdatedMs: s.updatedMs,
+			Size: size, RawEnd: src.rawEnd, HeadHash: src.head, UpdatedMs: s.updatedMs,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -99,6 +109,14 @@ func (s *fakeStore) servePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	head := r.URL.Query().Get("head_hash")
+	rawEnd, err := strconv.ParseInt(r.URL.Query().Get("raw_end"), 10, 64)
+	if err != nil {
+		rawEnd = 0
+	}
+	if rawEnd < 0 {
+		http.Error(w, "bad raw_end", http.StatusBadRequest)
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	src := s.sources[srcID]
@@ -107,29 +125,31 @@ func (s *fakeStore) servePut(w http.ResponseWriter, r *http.Request) {
 		s.sources[srcID] = src
 	}
 	s.puts = append(s.puts, fakePut{
-		srcID: srcID, offset: offset, body: string(body), head: head,
+		srcID: srcID, offset: offset, body: string(body), head: head, rawEnd: rawEnd,
 		conflicted: offset != 0 && offset != int64(len(src.raw)),
 	})
 	switch {
 	case offset == 0:
 		src.raw = body
+		src.rawEnd = rawEnd
 		src.head = head
 		src.harness = r.PathValue("harness")
 		src.srcName = r.URL.Query().Get("source_name")
 		src.path = r.URL.Query().Get("path")
 	case offset == int64(len(src.raw)):
 		src.raw = append(src.raw, body...)
+		src.rawEnd = rawEnd
 		src.head = head
 	default:
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
-		json.NewEncoder(w).Encode(wire.Conflict{Size: int64(len(src.raw)), HeadHash: src.head})
+		json.NewEncoder(w).Encode(wire.Conflict{Size: int64(len(src.raw)), HeadHash: src.head, RawEnd: src.rawEnd})
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(wire.Source{
 		SrcID: srcID, Harness: src.harness, SourceName: src.srcName, Path: src.path,
-		Size: int64(len(src.raw)), HeadHash: src.head, UpdatedMs: 2,
+		Size: int64(len(src.raw)), RawEnd: src.rawEnd, HeadHash: src.head, UpdatedMs: 2,
 	})
 }
 
@@ -196,6 +216,20 @@ func assertRaw(t *testing.T, s *fakeStore, path, want string) {
 	}
 	if string(src.raw) != want {
 		t.Fatalf("server holds %q, want %q", src.raw, want)
+	}
+}
+
+// manifestSource is the Source the manifest serves for path.
+func manifestSource(t *testing.T, s *fakeStore, path string) wire.Source {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	src := s.sources[wire.SrcID(path)]
+	if src == nil {
+		t.Fatalf("server has no entry for %s", path)
+	}
+	return wire.Source{
+		SrcID: wire.SrcID(path), Size: int64(len(src.raw)), RawEnd: src.rawEnd, HeadHash: src.head,
 	}
 }
 
@@ -316,6 +350,37 @@ func TestAppendSendsOnlyNewLine(t *testing.T) {
 		t.Fatalf("PUT offset %d body %q, want offset 10 body %q", put.offset, put.body, "gamma three\n")
 	}
 	assertRaw(t, s, p, "alpha one\ngamma three\n")
+}
+
+// Growing a file whose raw offset the server knows redacts only the new tail:
+// Line sees the first line (for the head hash) plus the appended lines, the
+// server ends up with the whole redacted file, and the manifest records the
+// redacted size and the raw offset it came from.
+func TestAppendTailRedactsOnlyNewBytes(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFile(t, dir, "a.jsonl", "head line\n"+strings.Repeat("filler line\n", 999)) // 10 + 999*12 = 11998 bytes
+	s := newTestServer(t)
+	runPass(t, s, dir)
+
+	body := "head line\n" + strings.Repeat("filler line\n", 999) + "new one\nnew two\n" // 12014 bytes
+	writeFile(t, dir, "a.jsonl", body)
+	red := &countingRedactor{}
+	st, err := Run(context.Background(), testConfig(s.srv.URL, dir), red, s.srv.Client())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if want := (Stats{Scanned: 1, Appended: 1, Bytes: 16}); st != want {
+		t.Fatalf("stats = %+v, want %+v", st, want)
+	}
+	// Line never sees the terminators: "head line" + "new one" + "new two".
+	if red.n != 9+7+7 {
+		t.Fatalf("Line saw %d bytes, want %d", red.n, 9+7+7)
+	}
+	assertRaw(t, s, p, body)
+	src := manifestSource(t, s, p)
+	if src.Size != 12014 || src.RawEnd != 12014 {
+		t.Fatalf("manifest Size = %d RawEnd = %d, want 12014 and 12014", src.Size, src.RawEnd)
+	}
 }
 
 // A trailing partial line waits; completing it sends the whole line.

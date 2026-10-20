@@ -37,6 +37,7 @@ type Source struct {
 	SourceName string `json:"source_name"`
 	Path       string `json:"path"` // absolute path on the client
 	Size       int64  `json:"size"`
+	RawEnd     int64  `json:"raw_end"` // raw bytes of the client's file consumed into Size; 0 = unknown
 	HeadHash   string `json:"head_hash"`
 	UpdatedMs  int64  `json:"updated_ms"`
 }
@@ -48,14 +49,17 @@ type Manifest struct {
 	Sources []Source `json:"sources"`
 }
 
-// PUT /v1/raw/{machine}/{harness}/{src_id}?offset=N&head_hash=H&source_name=S&path=P
+// PUT /v1/raw/{machine}/{harness}/{src_id}?offset=N&head_hash=H&source_name=S&path=P&raw_end=R
 // Body: whole redacted lines, each ending in '\n'. offset=0 replaces the raw
 // file; offset>0 appends and must equal the server's Size, else 409 with a
-// Conflict body. Success is 200 with the updated Source.
+// Conflict body. raw_end=R is the offset in the client's raw file the sent
+// body ends at; R=0 (or absent) means unknown. Success is 200 with the
+// updated Source.
 const RawPathPrefix = "/v1/raw/"
 
 // Conflict is the 409 body: the client re-reads Size and retries from there.
 type Conflict struct {
 	Size     int64  `json:"size"`
 	HeadHash string `json:"head_hash"`
+	RawEnd   int64  `json:"raw_end"`
 }

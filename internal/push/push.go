@@ -111,17 +111,36 @@ func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.C
 		st.Unchanged++
 		return nil
 	}
-	redacted, head, ok, err := redactComplete(f.path, red)
+	entry := manifest[srcID]
+	sent, replaced := false, false
+	if entry != nil && entry.RawEnd > 0 && entry.Size > 0 {
+		done, tailSent, next, err := syncTail(ctx, cfg, red, hc, f, srcID, entry, st)
+		if err != nil {
+			return err
+		}
+		if done {
+			if tailSent {
+				st.Appended++
+			} else {
+				st.Unchanged++
+			}
+			return nil
+		}
+		// The fast path's premise failed; the full path re-decides from the
+		// freshest entry we have.
+		entry, sent = next, tailSent
+	}
+	redacted, head, rawEnds, ok, err := redactComplete(f.path, red)
 	if err != nil {
 		return err
 	}
 	if !ok {
 		// No whole line yet: nothing to send and nothing to compare.
-		st.Unchanged++
+		if !sent {
+			st.Unchanged++
+		}
 		return nil
 	}
-	entry := manifest[srcID]
-	sent, replaced := false, false
 	for conflicts := 0; ; {
 		body, offset, noop := decide(entry, head, redacted)
 		if noop {
@@ -136,7 +155,7 @@ func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.C
 			return nil
 		}
 		body = firstChunk(body, maxChunk)
-		conflict, err := putSource(ctx, cfg, hc, f, srcID, offset, head, body)
+		conflict, err := putSource(ctx, cfg, hc, f, srcID, offset, head, body, rawEndOf(rawEnds, redacted, offset, body))
 		if err != nil {
 			return err
 		}
@@ -151,6 +170,37 @@ func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.C
 		sent, replaced = true, replaced || offset == 0
 		entry = &wire.Source{SrcID: srcID, Size: offset + int64(len(body)), HeadHash: head}
 	}
+}
+
+// syncTail is the fast path: with the server vouching that its stored bytes
+// end at raw offset entry.RawEnd of this file, only the bytes past it are
+// read and redacted. It appends the new whole lines in chunks, each PUT
+// carrying the raw_end its own body ends at, and reports done once the tail
+// is sent or turns out empty. A 409 means our entry was stale, and the
+// redacted-length coincidence the full path checks is the only proof left, so
+// it hands the source back with the Conflict entry for the full path.
+func syncTail(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client, f fileRef, srcID string, entry *wire.Source, st *Stats) (done, sent bool, next *wire.Source, err error) {
+	tail, head, rawEnds, ok, err := redactTail(f.path, red, entry)
+	if err != nil || !ok {
+		return false, false, entry, err
+	}
+	for len(tail) > 0 {
+		chunk := firstChunk(tail, maxChunk)
+		lines := bytes.Count(chunk, []byte{'\n'})
+		rawEnd := rawEnds[lines-1]
+		conflict, err := putSource(ctx, cfg, hc, f, srcID, entry.Size, head, chunk, rawEnd)
+		if err != nil {
+			return true, sent, nil, err
+		}
+		if conflict != nil {
+			return false, sent, &wire.Source{SrcID: srcID, Size: conflict.Size, HeadHash: conflict.HeadHash, RawEnd: conflict.RawEnd}, nil
+		}
+		st.Bytes += int64(len(chunk))
+		sent = true
+		tail, rawEnds = tail[len(chunk):], rawEnds[lines:]
+		entry = &wire.Source{SrcID: srcID, Size: entry.Size + int64(len(chunk)), HeadHash: head, RawEnd: rawEnd}
+	}
+	return true, sent, nil, nil
 }
 
 // maxChunk bounds one PUT body, so a first push of a huge transcript lands in
@@ -188,15 +238,26 @@ func decide(entry *wire.Source, head string, redacted []byte) (body []byte, offs
 	return redacted[cut:], entry.Size, false
 }
 
+// rawEndOf maps a body of whole redacted lines starting at redacted offset
+// start back to the raw offset its last line ends at, using the per-line raw
+// ends redactComplete collected. The body is whole lines of redacted, so the
+// lines before it plus the lines in it index the right one.
+func rawEndOf(rawEnds []int64, redacted []byte, start int64, body []byte) int64 {
+	lines := bytes.Count(redacted[:start], []byte{'\n'}) + bytes.Count(body, []byte{'\n'})
+	return rawEnds[lines-1]
+}
+
 // putSource sends one PUT and decodes the updated Source just to validate the
-// 200 body. A 409 is not an error: the Conflict body comes back so the caller
-// can re-decide.
-func putSource(ctx context.Context, cfg config.Client, hc *http.Client, f fileRef, srcID string, offset int64, head string, body []byte) (*wire.Conflict, error) {
+// 200 body. rawEnd is the offset in the client's raw file the body ends at;
+// a server that predates raw_end ignores it. A 409 is not an error: the
+// Conflict body comes back so the caller can re-decide.
+func putSource(ctx context.Context, cfg config.Client, hc *http.Client, f fileRef, srcID string, offset int64, head string, body []byte, rawEnd int64) (*wire.Conflict, error) {
 	q := url.Values{
 		"offset":      {strconv.FormatInt(offset, 10)},
 		"head_hash":   {head},
 		"source_name": {f.sourceName},
 		"path":        {f.path},
+		"raw_end":     {strconv.FormatInt(rawEnd, 10)},
 	}
 	u := strings.TrimSuffix(cfg.Server, "/") + wire.RawPathPrefix +
 		url.PathEscape(cfg.Machine) + "/" + url.PathEscape(f.harness) + "/" + srcID + "?" + q.Encode()

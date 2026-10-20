@@ -126,6 +126,16 @@ func (s *Store) servePut(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing query parameter", http.StatusBadRequest)
 		return
 	}
+	// raw_end is optional: a client that predates it, or one that cannot
+	// prove where its body starts, sends nothing and the manifest reads 0.
+	rawEnd, err := strconv.ParseInt(q.Get("raw_end"), 10, 64)
+	if err != nil {
+		rawEnd = 0
+	}
+	if rawEnd < 0 {
+		http.Error(w, "bad raw_end", http.StatusBadRequest)
+		return
+	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "read body", http.StatusBadRequest)
@@ -140,10 +150,10 @@ func (s *Store) servePut(w http.ResponseWriter, r *http.Request) {
 	defer s.lockKey(key)()
 
 	if offset == 0 {
-		s.replace(w, key, headHash, sourceName, srcPath, body)
+		s.replace(w, key, headHash, sourceName, srcPath, body, rawEnd)
 		return
 	}
-	s.append(w, key, offset, headHash, body)
+	s.append(w, key, offset, headHash, body, rawEnd)
 }
 
 // replaceRaw drops the manifest before it swaps the raw file, then writes body
@@ -165,7 +175,7 @@ func (s *Store) replaceRaw(k layout.Key, body []byte) (int64, error) {
 // replace stores body as the whole raw file, then the manifest; replaceRaw has
 // already dropped the old manifest, so no manifest ever sits next to raw bytes
 // it does not describe.
-func (s *Store) replace(w http.ResponseWriter, k layout.Key, headHash, sourceName, srcPath string, body []byte) {
+func (s *Store) replace(w http.ResponseWriter, k layout.Key, headHash, sourceName, srcPath string, body []byte, rawEnd int64) {
 	zst, err := s.replaceRaw(k, body)
 	if err != nil {
 		http.Error(w, "write raw", http.StatusInternalServerError)
@@ -178,6 +188,7 @@ func (s *Store) replace(w http.ResponseWriter, k layout.Key, headHash, sourceNam
 			SourceName: sourceName,
 			Path:       srcPath,
 			Size:       int64(len(body)),
+			RawEnd:     rawEnd,
 			HeadHash:   headHash,
 			UpdatedMs:  time.Now().UnixMilli(),
 		},
@@ -190,7 +201,7 @@ func (s *Store) replace(w http.ResponseWriter, k layout.Key, headHash, sourceNam
 	writeJSON(w, http.StatusOK, m.Source)
 }
 
-func (s *Store) append(w http.ResponseWriter, k layout.Key, offset int64, headHash string, body []byte) {
+func (s *Store) append(w http.ResponseWriter, k layout.Key, offset int64, headHash string, body []byte, rawEnd int64) {
 	m, err := readManifest(k.Manifest(s.DataDir))
 	if err != nil {
 		// Nothing stored (or unreadable): there is no offset to append from.
@@ -198,7 +209,7 @@ func (s *Store) append(w http.ResponseWriter, k layout.Key, offset int64, headHa
 		return
 	}
 	if offset != m.Size || headHash != m.HeadHash {
-		writeJSON(w, http.StatusConflict, wire.Conflict{Size: m.Size, HeadHash: m.HeadHash})
+		writeJSON(w, http.StatusConflict, wire.Conflict{Size: m.Size, HeadHash: m.HeadHash, RawEnd: m.RawEnd})
 		return
 	}
 	zst, err := appendZst(k.Raw(s.DataDir), m.ZstSize, body)
@@ -207,6 +218,7 @@ func (s *Store) append(w http.ResponseWriter, k layout.Key, offset int64, headHa
 		return
 	}
 	m.Size += int64(len(body))
+	m.RawEnd = rawEnd
 	m.UpdatedMs = time.Now().UnixMilli()
 	m.ZstSize = zst
 	if err := writeManifest(k.Manifest(s.DataDir), *m); err != nil {
