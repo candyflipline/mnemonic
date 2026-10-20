@@ -363,8 +363,6 @@ func lsDataJSON(a *lsArgs, page *lsPage) map[string]any {
 	}
 }
 
-// nilPtr erases a typed nil pointer to untyped nil, matching how the
-// upstream Option serializes; it also lets text checks type-assert strings.
 func nilPtr[T any](p *T) any {
 	if p == nil {
 		return nil

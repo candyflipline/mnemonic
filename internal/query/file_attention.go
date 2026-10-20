@@ -276,8 +276,6 @@ func faFilterField(fields map[string]json.RawMessage, field string) (string, err
 	return trimmed, nil
 }
 
-// Validation errors carry the bare message; the offending field travels in
-// the envelope's details, which the mcp layer owns.
 func faCanonicalRequest(a *faArgs) map[string]any {
 	req := map[string]any{
 		"path":           a.Path,
