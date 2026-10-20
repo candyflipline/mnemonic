@@ -9,100 +9,76 @@ import (
 	"github.com/candyflipline/mnemonic/internal/wire"
 )
 
-// redactComplete reads path and returns every whole line of it, redacted:
-// bytes up to and including the last '\n', with each line redacted and
-// re-terminated so the wire keeps its one-line-per-line framing. The hash of
-// the first redacted line comes back too, since the manifest is keyed on it,
-// and rawEnds holds the offset in path after each line — line i's redacted
-// bytes end at the i-th '\n' of out and its raw bytes at rawEnds[i], so a
-// body cut on a redacted boundary knows the raw_end to send with it.
-// ok is false when the file has no whole line yet; its partial tail waits for
-// a later pass.
-func redactComplete(path string, red Redactor) (out []byte, head string, rawEnds []int64, ok bool, err error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, "", nil, false, err
-	}
-	end := bytes.LastIndexByte(raw, '\n')
-	if end < 0 {
-		return nil, "", nil, false, nil
-	}
-	out = make([]byte, 0, end+1)
-	rawEnds = make([]int64, 0, 64)
-	headLen := -1
-	for rest, at := raw[:end+1], int64(0); len(rest) > 0; {
-		nl := bytes.IndexByte(rest, '\n') + 1
-		out = append(out, red.Line(rest[:nl-1])...)
-		out = append(out, '\n')
-		at += int64(nl)
-		rawEnds = append(rawEnds, at)
-		if headLen < 0 {
-			headLen = len(out)
-		}
-		rest = rest[nl:]
-	}
-	return out, wire.HeadHash(out[:headLen]), rawEnds, true, nil
+type redactedLines struct {
+	body    []byte
+	rawEnds []int64
+	head    string
 }
 
-// redactTail verifies a manifest entry against the file's first line and
-// redacts only the raw bytes past entry.RawEnd, the same way redactComplete
-// does. It returns that redacted tail with each line's ending raw offset, and
-// the head hash the verification used. ok is false when the fast path's
-// premise does not hold — the file shrank below RawEnd, has no whole first
-// line, or RawEnd is not where the server's copy ends — and the caller must
-// take the full path.
-func redactTail(path string, red Redactor, entry *wire.Source) (tail []byte, head string, rawEnds []int64, ok bool, err error) {
+func redactLines(red Redactor, raw []byte, base int64) redactedLines {
+	r := redactedLines{body: make([]byte, 0, len(raw))}
+	for at := base; ; {
+		nl := bytes.IndexByte(raw, '\n')
+		if nl < 0 {
+			return r
+		}
+		r.body = append(r.body, red.Line(raw[:nl])...)
+		r.body = append(r.body, '\n')
+		at += int64(nl + 1)
+		r.rawEnds = append(r.rawEnds, at)
+		raw = raw[nl+1:]
+	}
+}
+
+func redactComplete(path string, red Redactor) (*redactedLines, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	r := redactLines(red, raw, 0)
+	if len(r.rawEnds) == 0 {
+		return nil, nil
+	}
+	r.head = wire.HeadHash(r.body[:bytes.IndexByte(r.body, '\n')+1])
+	return &r, nil
+}
+
+func redactTail(path string, red Redactor, entry *wire.Source) (*redactedLines, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, "", nil, false, err
+		return nil, err
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		return nil, "", nil, false, err
+		return nil, err
 	}
 	if info.Size() < entry.RawEnd {
-		return nil, "", nil, false, nil
+		return nil, nil
 	}
 	first, err := bufio.NewReader(f).ReadBytes('\n')
-	if err != nil {
-		if err == io.EOF {
-			return nil, "", nil, false, nil
-		}
-		return nil, "", nil, false, err
+	if err == io.EOF {
+		return nil, nil
 	}
-	red1 := red.Line(first[:len(first)-1])
-	headLine := make([]byte, 0, len(red1)+1)
-	headLine = append(headLine, red1...)
-	headLine = append(headLine, '\n')
-	head = wire.HeadHash(headLine)
+	if err != nil {
+		return nil, err
+	}
+	head := wire.HeadHash(redactLines(red, first, 0).body)
 	if head != entry.HeadHash {
-		return nil, "", nil, false, nil
+		return nil, nil
 	}
 	var one [1]byte
 	if _, err := f.ReadAt(one[:], entry.RawEnd-1); err != nil || one[0] != '\n' {
-		return nil, "", nil, false, nil
+		return nil, nil
 	}
-	rest := io.NewSectionReader(f, entry.RawEnd, info.Size()-entry.RawEnd)
-	sc := bufio.NewReader(rest)
-	tail = make([]byte, 0, info.Size()-entry.RawEnd)
-	rawEnds = make([]int64, 0, 64)
-	at := entry.RawEnd
-	for {
-		line, err := sc.ReadBytes('\n')
-		if len(line) > 0 && line[len(line)-1] == '\n' {
-			tail = append(tail, red.Line(line[:len(line)-1])...)
-			tail = append(tail, '\n')
-			at += int64(len(line))
-			rawEnds = append(rawEnds, at)
-			continue
-		}
-		if err != nil && err != io.EOF {
-			return nil, "", nil, false, err
-		}
-		break // a partial last line waits for the next pass, as redactComplete leaves it
+	raw := make([]byte, info.Size()-entry.RawEnd)
+	n, err := f.ReadAt(raw, entry.RawEnd)
+	if err != nil && err != io.EOF {
+		return nil, err
 	}
-	return tail, head, rawEnds, true, nil
+	r := redactLines(red, raw[:n], entry.RawEnd)
+	r.head = head
+	return &r, nil
 }
 
 func cutAtSize(redacted []byte, size int64) (cut int64, ok bool) {
