@@ -1,0 +1,23 @@
+[Unit]
+Description=mnemonic trace store (push, parse, cache, MCP)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mnemonic
+Group=mnemonic
+ExecStart=/usr/local/bin/mnemonic serve --config /etc/mnemonic/server.toml
+Restart=on-failure
+RestartSec=5
+
+# The server writes only under /var/lib/mnemonic; the config and binary are read-only.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/mnemonic
+PrivateTmp=true
+MemoryMax=4G
+
+[Install]
+WantedBy=multi-user.target

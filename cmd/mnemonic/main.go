@@ -15,7 +15,8 @@ import (
 
 // commands holds every subcommand this build has; server.go adds the rest.
 var commands = map[string]func(args []string) error{
-	"push": push,
+	"push":  push,
+	"token": token,
 }
 
 func main() {
