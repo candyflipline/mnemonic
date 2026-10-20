@@ -47,7 +47,7 @@ func ToU32(v JSON) uint32 {
 
 // ToU16 mirrors shared::to_u16, clamping to the u16 range.
 func ToU16(v JSON) uint16 {
-	return uint16(min(ToU32(v), uint64(^uint16(0))))
+	return uint16(min(uint64(ToU32(v)), uint64(^uint16(0))))
 }
 
 // ToU8Bool mirrors shared::to_u8_bool: bools directly, numbers by non-zero,

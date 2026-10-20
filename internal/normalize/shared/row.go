@@ -1,9 +1,9 @@
 package shared
 
 import (
+	"encoding/json"
 	"fmt"
-	"strings"
-	"time"
+	"strconv"
 
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
@@ -11,20 +11,20 @@ import (
 // Ctx is the record-scoped context every row of one JSONL line shares
 // (RecordContext upstream).
 type Ctx struct {
-	SourceName       string
-	Harness          string
+	SourceName        string
+	Harness           string
 	InferenceProvider string
-	SessionID        string
-	SessionHint      string
-	SessionDate      string
-	Cwd              string
-	SourceFile       string
-	SourceInode      uint64
-	SourceGeneration uint32
-	SourceLineNo     uint64
-	SourceOffset     uint64
-	RecordTS         string
-	EventTS          string
+	SessionID         string
+	SessionHint       string
+	SessionDate       string
+	Cwd               string
+	SourceFile        string
+	SourceInode       uint64
+	SourceGeneration  uint32
+	SourceLineNo      uint64
+	SourceOffset      uint64
+	RecordTS          string
+	EventTS           string
 }
 
 // EventRow is one event under construction: the schema columns plus the
@@ -44,28 +44,28 @@ type Partials struct {
 // ToolRow is the tool request/response detail later folded into its owning
 // event's payload.
 type ToolRow struct {
-	EventUID         string
-	SessionID        string
-	Harness          string
+	EventUID          string
+	SessionID         string
+	Harness           string
 	InferenceProvider string
-	SourceName       string
-	ToolCallID       string
-	ParentToolCallID string
-	ToolName         string
-	ToolPhase        string
-	ToolError        uint8
-	InputJSON        string
-	OutputJSON       string
-	OutputText       string
-	InputBytes       uint32
-	OutputBytes      uint32
-	InputPreview     string
-	OutputPreview    string
-	IOHash           uint64
-	ProjectID        string
-	RepoRelPath      string
-	WorktreeRoot     string
-	SourceRef        string
+	SourceName        string
+	ToolCallID        string
+	ParentToolCallID  string
+	ToolName          string
+	ToolPhase         string
+	ToolError         uint8
+	InputJSON         string
+	OutputJSON        string
+	OutputText        string
+	InputBytes        uint32
+	OutputBytes       uint32
+	InputPreview      string
+	OutputPreview     string
+	IOHash            uint64
+	ProjectID         string
+	RepoRelPath       string
+	WorktreeRoot      string
+	SourceRef         string
 }
 
 // Emitter builds rows for one record (SourceEmitter upstream).
@@ -124,8 +124,8 @@ var payloadTypeDomain = map[string]bool{
 	"queue-operation": true, "file-history-snapshot": true, "unknown": true,
 }
 
-func eventKindInDomain(value string) bool      { return eventKindDomain[value] }
-func payloadTypeInDomain(value string) bool    { return payloadTypeDomain[value] }
+func eventKindInDomain(value string) bool   { return eventKindDomain[value] }
+func payloadTypeInDomain(value string) bool { return payloadTypeDomain[value] }
 
 // Event opens a new event row with the base column defaults filled in.
 func (e *Emitter) Event(eventUID, eventKind, payloadType, actorKind, textContent, payloadJSON string) *EventRow {
@@ -133,35 +133,35 @@ func (e *Emitter) Event(eventUID, eventKind, payloadType, actorKind, textContent
 	text := TruncateChars(textContent, textLimit)
 	attention := EventFileAttentionFields(ctx.Cwd)
 	row := &EventRow{Event: schema.Event{
-		EventUID:         eventUID,
-		SessionID:        ctx.SessionID,
-		SessionDate:      ctx.SessionDate,
-		SourceName:       ctx.SourceName,
-		Harness:          ctx.Harness,
-		InferenceProvider: ctx.InferenceProvider,
-		SourceFile:       ctx.SourceFile,
-		SourceInode:      ctx.SourceInode,
-		SourceGeneration: ctx.SourceGeneration,
-		SourceLineNo:     ctx.SourceLineNo,
-		SourceOffset:     ctx.SourceOffset,
-		SourceRef:        ctx.SourceRef(),
-		RecordTS:         ctx.RecordTS,
-		EventTS:          ctx.EventTS,
-		EventKind:        canonicalEventKind(eventKind),
-		ActorKind:        actorKind,
-		PayloadType:      canonicalPayloadType(payloadType),
-		EndpointKind:     "generation",
-		ContentTypes:     []string{},
-		TextContent:      text,
-		TextPreview:      TruncateChars(text, previewLimit),
-		PayloadJSON:      payloadJSON,
-		TokenUsageBuckets: zeroBuckets(),
+		EventUID:              eventUID,
+		SessionID:             ctx.SessionID,
+		SessionDate:           ctx.SessionDate,
+		SourceName:            ctx.SourceName,
+		Harness:               ctx.Harness,
+		InferenceProvider:     ctx.InferenceProvider,
+		SourceFile:            ctx.SourceFile,
+		SourceInode:           ctx.SourceInode,
+		SourceGeneration:      ctx.SourceGeneration,
+		SourceLineNo:          ctx.SourceLineNo,
+		SourceOffset:          ctx.SourceOffset,
+		SourceRef:             ctx.SourceRef(),
+		RecordTS:              ctx.RecordTS,
+		EventTS:               ctx.EventTS,
+		EventKind:             canonicalEventKind(eventKind),
+		ActorKind:             actorKind,
+		PayloadType:           canonicalPayloadType(payloadType),
+		EndpointKind:          "generation",
+		ContentTypes:          []string{},
+		TextContent:           text,
+		TextPreview:           TruncateChars(text, previewLimit),
+		PayloadJSON:           payloadJSON,
+		TokenUsageBuckets:     zeroBuckets(),
 		TokenUsageNativeUnits: zeroNativeUnits(),
-		ProjectID:        attention.ProjectID,
-		RepoRelPath:      attention.RepoRelPath,
-		WorktreeRoot:     attention.WorktreeRoot,
-		EventVersion:     uint64(time.Now().UnixMilli()),
-		Cwd:              ctx.Cwd,
+		ProjectID:             attention.ProjectID,
+		RepoRelPath:           attention.RepoRelPath,
+		WorktreeRoot:          attention.WorktreeRoot,
+		EventVersion:          EventVersion(),
+		Cwd:                   ctx.Cwd,
 	}}
 	return row
 }
@@ -192,28 +192,28 @@ func (e *Emitter) toolRow(eventUID, toolCallID, parentToolCallID, toolName, tool
 	outputJSON = TruncateChars(outputJSON, textLimit)
 	outputText = TruncateChars(outputText, textLimit)
 	return &ToolRow{
-		EventUID:         eventUID,
-		SessionID:        e.Ctx.SessionID,
-		Harness:          e.Ctx.Harness,
+		EventUID:          eventUID,
+		SessionID:         e.Ctx.SessionID,
+		Harness:           e.Ctx.Harness,
 		InferenceProvider: e.Ctx.InferenceProvider,
-		SourceName:       e.Ctx.SourceName,
-		ToolCallID:       toolCallID,
-		ParentToolCallID: parentToolCallID,
-		ToolName:         toolName,
-		ToolPhase:        toolPhase,
-		ToolError:        toolError,
-		InputJSON:        inputJSON,
-		OutputJSON:       outputJSON,
-		OutputText:       outputText,
-		InputBytes:       uint32(len(inputJSON)),
-		OutputBytes:      uint32(len(outputJSON)),
-		InputPreview:     TruncateChars(inputJSON, previewLimit),
-		OutputPreview:    TruncateChars(outputText, previewLimit),
-		IOHash:           IOHash(inputJSON, outputJSON),
-		ProjectID:        attention.ProjectID,
-		RepoRelPath:      attention.RepoRelPath,
-		WorktreeRoot:     attention.WorktreeRoot,
-		SourceRef:        e.Ctx.SourceRef(),
+		SourceName:        e.Ctx.SourceName,
+		ToolCallID:        toolCallID,
+		ParentToolCallID:  parentToolCallID,
+		ToolName:          toolName,
+		ToolPhase:         toolPhase,
+		ToolError:         toolError,
+		InputJSON:         inputJSON,
+		OutputJSON:        outputJSON,
+		OutputText:        outputText,
+		InputBytes:        uint32(len(inputJSON)),
+		OutputBytes:       uint32(len(outputJSON)),
+		InputPreview:      TruncateChars(inputJSON, previewLimit),
+		OutputPreview:     TruncateChars(outputText, previewLimit),
+		IOHash:            IOHash(inputJSON, outputJSON),
+		ProjectID:         attention.ProjectID,
+		RepoRelPath:       attention.RepoRelPath,
+		WorktreeRoot:      attention.WorktreeRoot,
+		SourceRef:         e.Ctx.SourceRef(),
 	}
 }
 
@@ -257,47 +257,57 @@ func (r *EventRow) MarkReasoning() *EventRow {
 // moraine_tool_io.
 func (t *ToolRow) MapOf() map[string]any {
 	return map[string]any{
-		"event_uid":          t.EventUID,
-		"session_id":         t.SessionID,
-		"harness":            t.Harness,
-		"inference_provider": t.InferenceProvider,
-		"source_name":        t.SourceName,
-		"tool_call_id":       t.ToolCallID,
+		"event_uid":           t.EventUID,
+		"session_id":          t.SessionID,
+		"harness":             t.Harness,
+		"inference_provider":  t.InferenceProvider,
+		"source_name":         t.SourceName,
+		"tool_call_id":        t.ToolCallID,
 		"parent_tool_call_id": t.ParentToolCallID,
-		"tool_name":          t.ToolName,
-		"tool_phase":         t.ToolPhase,
-		"tool_error":         jsonNumberUint(uint64(t.ToolError)),
-		"input_json":         t.InputJSON,
-		"output_json":        t.OutputJSON,
-		"output_text":        t.OutputText,
-		"input_bytes":        jsonNumberUint(uint64(t.InputBytes)),
-		"output_bytes":       jsonNumberUint(uint64(t.OutputBytes)),
-		"input_preview":      t.InputPreview,
-		"output_preview":     t.OutputPreview,
-		"io_hash":            jsonNumberUint(t.IOHash),
-		"project_id":         t.ProjectID,
-		"repo_rel_path":      t.RepoRelPath,
-		"worktree_root":      t.WorktreeRoot,
-		"source_ref":         t.SourceRef,
+		"tool_name":           t.ToolName,
+		"tool_phase":          t.ToolPhase,
+		"tool_error":          jsonNumberUint(uint64(t.ToolError)),
+		"input_json":          t.InputJSON,
+		"output_json":         t.OutputJSON,
+		"output_text":         t.OutputText,
+		"input_bytes":         jsonNumberUint(uint64(t.InputBytes)),
+		"output_bytes":        jsonNumberUint(uint64(t.OutputBytes)),
+		"input_preview":       t.InputPreview,
+		"output_preview":      t.OutputPreview,
+		"io_hash":             jsonNumberUint(t.IOHash),
+		"project_id":          t.ProjectID,
+		"repo_rel_path":       t.RepoRelPath,
+		"worktree_root":       t.WorktreeRoot,
+		"source_ref":          t.SourceRef,
 	}
 }
 
 // ResolveModelHint mirrors resolve_model_hint: the last canonically
 // non-empty model among the record's events, else the fallback.
-func ResolveModelHint(events []schema.Event, harness, fallback string) string {
+func ResolveModelHint(events []*EventRow, harness, fallback string) string {
 	for i := len(events) - 1; i >= 0; i-- {
-		if normalized := CanonicalizeModel(harness, events[i].Model); normalized != "" {
+		if normalized := CanonicalizeModel(harness, events[i].Event.Model); normalized != "" {
 			return normalized
 		}
 	}
 	return CanonicalizeModel(harness, fallback)
 }
 
-var jsonNumberTrue = true
-
-func jsonNumberUint(v uint64) json.Number {
-	return json.Number(fmt.Sprintf("%d", v))
+// ToolIdentityFields encodes the tool identity fields the canonical uid
+// hashes, in TOOL_IDENTITY_FIELDS order.
+func ToolIdentityFields(t *ToolRow) []string {
+	return []string{
+		t.ToolCallID,
+		t.ParentToolCallID,
+		t.ToolName,
+		t.ToolPhase,
+		Compact(jsonNumberUint(uint64(t.ToolError))),
+		t.InputJSON,
+		t.OutputJSON,
+		t.OutputText,
+	}
 }
 
-var _ = strings.TrimSpace
-var _ = jsonNumberTrue
+func jsonNumberUint(v uint64) json.Number {
+	return json.Number(strconv.FormatUint(v, 10))
+}

@@ -254,7 +254,7 @@ func compactStrings(values []string) []byte {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		appendJSONString(&b, v)
+		writeJSONString(&b, v)
 	}
 	return []byte(b.String())
 }
@@ -340,7 +340,7 @@ func semanticPayloadParts(payloadJSON string) (string, []string, uint32) {
 	}
 	tool := obj["moraine_tool_io"]
 	delete(obj, "moraine_tool_io")
-	sanitizeSemanticPayload(obj)
+	SanitizeSemanticPayload(obj)
 	toolFields := make([]string, len(toolIdentityFields))
 	if toolObj, isObj := AsObject(tool); isObj {
 		for i, field := range toolIdentityFields {
@@ -350,7 +350,8 @@ func semanticPayloadParts(payloadJSON string) (string, []string, uint32) {
 	return Compact(parsed), toolFields, occurrence
 }
 
-func sanitizeSemanticPayload(obj map[string]any) {
+// SanitizeSemanticPayload drops the derived fields the canonical uid ignores.
+func SanitizeSemanticPayload(obj map[string]any) {
 	for _, field := range semanticPayloadExcludedFields {
 		delete(obj, field)
 	}

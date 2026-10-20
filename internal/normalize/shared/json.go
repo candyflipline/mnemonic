@@ -3,6 +3,8 @@ package shared
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,6 +23,13 @@ func DecodeJSON(data []byte) (JSON, error) {
 	var v JSON
 	if err := dec.Decode(&v); err != nil {
 		return nil, err
+	}
+	var trailing JSON
+	if err := dec.Decode(&trailing); err != io.EOF {
+		if err != nil {
+			return nil, err
+		}
+		return nil, io.ErrUnexpectedEOF
 	}
 	return v, nil
 }
@@ -76,9 +85,6 @@ func writeCompact(b *strings.Builder, v JSON) {
 		b.WriteString("null")
 	}
 }
-
-// appendJSONString writes s as a quoted JSON string.
-func appendJSONString(b *strings.Builder, s string) { writeJSONString(b, s) }
 
 // writeJSONString escapes exactly what serde_json escapes: quote, backslash
 // and the C0 controls. Everything else, including non-ASCII, passes through
@@ -152,12 +158,25 @@ func isIntegerLiteral(s string) bool {
 	return true
 }
 
-// FormatJSONFloat renders an f64 the way serde_json's ryu backend does for
-// the magnitudes that appear in trace payloads: shortest round-trip decimal,
-// always with a fractional part.
+// FormatJSONFloat renders an f64 the way serde_json's ryu backend does:
+// shortest round-trip decimal, fixed notation inside ryu's fixed window and
+// exponential (without a plus sign or padded mantissa) outside it.
 func FormatJSONFloat(f float64) string {
+	abs := math.Abs(f)
+	if f != 0 && (abs >= 1e16 || abs < 1e-5) {
+		mant, exp, _ := strings.Cut(strconv.FormatFloat(f, 'e', -1, 64), "e")
+		sign := ""
+		if exp[0] == '+' || exp[0] == '-' {
+			sign, exp = string(exp[0]), exp[1:]
+		}
+		exp = strings.TrimLeft(exp, "0")
+		if exp == "" {
+			exp = "0"
+		}
+		return mant + "e" + sign + exp
+	}
 	s := strconv.FormatFloat(f, 'f', -1, 64)
-	if !strings.ContainsAny(s, ".eE") {
+	if !strings.Contains(s, ".") {
 		s += ".0"
 	}
 	return s

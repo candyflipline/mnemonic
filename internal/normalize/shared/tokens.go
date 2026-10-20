@@ -128,6 +128,31 @@ func (t TokenAccounting) WithRawUsageJSON(s string) TokenAccounting {
 	return t
 }
 
+// WithRawUsage records the compact JSON of a usage object on the row, like
+// with_raw_usage.
+func (t TokenAccounting) WithRawUsage(usage JSON) TokenAccounting {
+	if IsNull(usage) {
+		return t
+	}
+	t.TokenUsageJSON = Compact(usage)
+	return t
+}
+
+// FirstOf returns the first member of v present under any of keys, explicit
+// null included, mirroring Rust's Option::or_else chains over Value::get.
+func FirstOf(v JSON, keys ...string) JSON {
+	m, ok := AsObject(v)
+	if !ok {
+		return nil
+	}
+	for _, key := range keys {
+		if val, present := m[key]; present {
+			return val
+		}
+	}
+	return nil
+}
+
 // Buckets returns a private copy of the bucket map.
 func (t TokenAccounting) Buckets() map[string]uint64 { return copyBuckets(t.buckets) }
 
@@ -145,15 +170,11 @@ func satSub(a, b uint64) uint64 {
 	return a - b
 }
 
-// usageFallback resolves the first non-null usage member and otherwise falls
-// back to an input-details subkey. Explicit JSON nulls are treated as absent,
-// which serde_json's Option chain would not do; no real usage object carries
-// them.
+// usageFallback resolves the first present usage member, explicit null
+// included, and otherwise falls back to an input-details subkey.
 func usageFallback(usage JSON, keys []string, details JSON, detailKey string) uint64 {
-	for _, key := range keys {
-		if v := Get(usage, key); !IsNull(v) {
-			return ToU64(v)
-		}
+	if v := FirstOf(usage, keys...); v != nil {
+		return ToU64(v)
 	}
 	return ToU64(Get(details, detailKey))
 }
@@ -165,10 +186,10 @@ func OpenAIGeneration(usage JSON) TokenAccounting {
 	if IsNull(usage) {
 		return t
 	}
-	inputTotal := ToU64(firstPresent(usage, "input_tokens", "prompt_tokens", "total_input_tokens"))
-	outputTotal := ToU64(firstPresent(usage, "output_tokens", "completion_tokens", "total_output_tokens"))
-	inputDetails := firstPresent(usage, "input_tokens_details", "prompt_tokens_details")
-	outputDetails := firstPresent(usage, "output_tokens_details", "completion_tokens_details")
+	inputTotal := ToU64(FirstOf(usage, "input_tokens", "prompt_tokens", "total_input_tokens"))
+	outputTotal := ToU64(FirstOf(usage, "output_tokens", "completion_tokens", "total_output_tokens"))
+	inputDetails := FirstOf(usage, "input_tokens_details", "prompt_tokens_details")
+	outputDetails := FirstOf(usage, "output_tokens_details", "completion_tokens_details")
 
 	cacheRead := usageFallback(usage, []string{"cached_input_tokens", "cache_read_input_tokens"}, inputDetails, "cached_tokens")
 	cacheWrite := usageFallback(usage, []string{"cache_creation_input_tokens", "cache_write_input_tokens"}, inputDetails, "cache_creation_tokens")
@@ -201,7 +222,8 @@ func OpenAIGeneration(usage JSON) TokenAccounting {
 		BucketValue{"output_audio", outputAudio},
 		BucketValue{"reasoning", reasoning},
 		BucketValue{"server_tool_use", serverToolUse},
-	).WithLegacyScalars(inputTotal, outputTotal, cacheRead, cacheWrite)
+	).WithLegacyScalars(inputTotal, outputTotal, cacheRead, cacheWrite).
+		WithRawUsage(usage)
 }
 
 // AsObjectOrEmpty returns the object form of v, or an empty map.

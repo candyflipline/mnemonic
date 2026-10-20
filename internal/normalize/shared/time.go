@@ -92,7 +92,6 @@ func ParseEventTS(recordTS string) (string, bool) {
 	return UnparseableEventTS, true
 }
 
-
 // FormatRecordTSMillis renders a timestamp as RFC 3339 with milliseconds and
 // Z, the spelling claude-style sources carry in their records.
 func FormatRecordTSMillis(dt time.Time) string {
