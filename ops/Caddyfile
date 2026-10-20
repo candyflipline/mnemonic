@@ -1,0 +1,12 @@
+{
+	admin off
+}
+
+{$MNEMONIC_HOST} {
+	# Pushes send whole raw files; 256MB keeps the largest session files
+	# from being rejected while still bounding abuse.
+	request_body {
+		max_size 256MB
+	}
+	reverse_proxy 127.0.0.1:8740
+}
