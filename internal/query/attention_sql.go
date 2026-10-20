@@ -9,18 +9,9 @@ import (
 	"strings"
 )
 
-// DuckDB ports of clickhouse_repo/file_attention.rs. The mcp_event_locator
-// and mcp_event_navigation tables have no cache counterpart: the exact pass
-// reads the canonical events columns directly, and both passes join the trace
-// view for (event_time, event_order, turn_seq). The durable
-// file_attention_project_roots mapping is likewise absent, so project scope
-// runs on registered roots alone.
-
 type faQuery struct {
-	Rel string
-	// NormalizedPID is the resolved project's identity (git:/dir: digest).
-	NormalizedPID string
-	// NormalizedRoots are the registered worktree roots for the resolved root.
+	Rel             string
+	NormalizedPID   string
 	NormalizedRoots []string
 	DeriveLegacy    bool
 	ProjectScope    bool
@@ -33,7 +24,6 @@ type faQuery struct {
 	MaxRows         int
 }
 
-// faTouch ports FileAttentionTouch (rows.rs).
 type faTouch struct {
 	SessionID     string
 	EventUID      string
@@ -60,11 +50,9 @@ var faPathKeys = []string{
 	"relative_workspace_path", "filepath", "file", "filename",
 }
 
-// faTouches ports file_attention_impl: the exact normalized-path pass, then
-// the suffix pass, merged newest-first and capped at MaxRows+1.
 func faTouches(ctx context.Context, db *sql.DB, q faQuery) ([]faTouch, error) {
 	if q.Rel == "" {
-		return nil, qErr("file_attention requires a non-empty path tail")
+		return nil, argErrorf("file_attention requires a non-empty path tail")
 	}
 	if q.ProjectScope && q.NormalizedPID == "" {
 		return []faTouch{}, nil
@@ -81,8 +69,6 @@ func faTouches(ctx context.Context, db *sql.DB, q faQuery) ([]faTouch, error) {
 	return faMergeTouches(append(touches, suffix...), limitPlus), nil
 }
 
-// faSinglePath ports single_path_sql: a value fit to attribute a worktree
-// root from (no separators or shell metacharacters).
 func faSinglePath(expr string) string {
 	var b strings.Builder
 	b.WriteString("(")
@@ -99,8 +85,6 @@ func faSinglePath(expr string) string {
 	return b.String()
 }
 
-// faNav ports file_attention_navigation_source over the trace view, scoped to
-// the already-matched events.
 func faNav(scope string) string {
 	return "nav AS (\n" +
 		"  SELECT session_id, event_uid, event_time,\n" +
@@ -111,8 +95,6 @@ func faNav(scope string) string {
 		")"
 }
 
-// faFilters renders the shared request-side clauses over a scope prefix
-// ("e." for events, "" for the matched subquery).
 func faFilters(prefix string, q faQuery) []string {
 	toolName := prefix + "tool_name"
 	clauses := []string{
@@ -120,10 +102,10 @@ func faFilters(prefix string, q faQuery) []string {
 		"NOT (lower(" + toolName + ") = 'file_attention' OR ends_with(lower(" + toolName + "), '_file_attention'))",
 	}
 	if q.Tool != "" {
-		clauses = append(clauses, "lower("+toolName+") = lower("+qQuote(q.Tool)+")")
+		clauses = append(clauses, "lower("+toolName+") = lower("+sqlQuote(q.Tool)+")")
 	}
 	if q.Harness != "" {
-		clauses = append(clauses, prefix+"harness = "+qQuote(q.Harness))
+		clauses = append(clauses, prefix+"harness = "+sqlQuote(q.Harness))
 	}
 	if q.MutationsOnly {
 		clauses = append(clauses, "lower("+toolName+") NOT IN ("+faReadToolNames+")")
@@ -131,8 +113,6 @@ func faFilters(prefix string, q faQuery) []string {
 	return clauses
 }
 
-// faTimeClauses renders the outer start/end/source clauses over the joined
-// trace row.
 func faTimeClauses(q faQuery) []string {
 	var outer []string
 	if q.StartUnixMs != nil {
@@ -142,7 +122,7 @@ func faTimeClauses(q faQuery) []string {
 		outer = append(outer, "epoch_ms(tr.event_time) < "+strconv.FormatInt(*q.EndUnixMs, 10))
 	}
 	if q.SourceName != "" {
-		outer = append(outer, "ti.source_name = "+qQuote(q.SourceName))
+		outer = append(outer, "ti.source_name = "+sqlQuote(q.SourceName))
 	}
 	return outer
 }
@@ -154,13 +134,12 @@ func faOuterWhere(q faQuery) string {
 	return "1"
 }
 
-// faExact ports file_attention_exact_impl.
 func faExact(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTouch, error) {
 	pred := "e.project_id != ''"
 	if q.ProjectScope {
-		pred = "e.project_id = " + qQuote(q.NormalizedPID)
+		pred = "e.project_id = " + sqlQuote(q.NormalizedPID)
 	}
-	clauses := append(faFilters("e.", q), pred+" AND e.repo_rel_path = "+qQuote(q.Rel))
+	clauses := append(faFilters("e.", q), pred+" AND e.repo_rel_path = "+sqlQuote(q.Rel))
 	single := faSinglePath("ti.worktree_root")
 
 	qry := "WITH\nmatched AS (\n" +
@@ -197,13 +176,10 @@ func faJStr(input, key string) string {
 	return "CASE WHEN json_valid(" + input + ") THEN coalesce(json_extract_string(" + input + ", '$." + key + "'), '') ELSE '' END"
 }
 
-// faSuffix ports file_attention_suffix_impl on its non-indexed path: the
-// payload moraine_tool_io block is matched by path key, nested JSON value, or
-// shell command text.
 func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTouch, error) {
 	rel := q.Rel
-	relQ := qQuote(rel)
-	slashRelQ := qQuote("/" + rel)
+	relQ := sqlQuote(rel)
+	slashRelQ := sqlQuote("/" + rel)
 	relRe := regexp.QuoteMeta(rel)
 	slashRelRe := regexp.QuoteMeta("/" + rel)
 
@@ -213,8 +189,8 @@ func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTo
 		keyMatch = append(keyMatch, "(ends_with("+v+", "+slashRelQ+") OR "+v+" = "+relQ+")")
 	}
 	keyRe := strings.Join(faPathKeys, "|")
-	nestedScalarRe := qQuote("\"(?:" + keyRe + ")\"[[:space:]]*:[[:space:]]*\"((?:[^\"\\\\]|\\\\.)*" + slashRelRe + "|" + relRe + ")\"")
-	nestedArrayRe := qQuote("\"(?:" + keyRe + ")\"[[:space:]]*:[[:space:]]*\\[[^\\]]*\"((?:[^\"\\\\]|\\\\.)*" + slashRelRe + "|" + relRe + ")\"")
+	nestedScalarRe := sqlQuote("\"(?:" + keyRe + ")\"[[:space:]]*:[[:space:]]*\"((?:[^\"\\\\]|\\\\.)*" + slashRelRe + "|" + relRe + ")\"")
+	nestedArrayRe := sqlQuote("\"(?:" + keyRe + ")\"[[:space:]]*:[[:space:]]*\\[[^\\]]*\"((?:[^\"\\\\]|\\\\.)*" + slashRelRe + "|" + relRe + ")\"")
 	nestedScalarExtract := "regexp_extract(ti.input_json, " + nestedScalarRe + ", 1)"
 	nestedArrayExtract := "regexp_extract(ti.input_json, " + nestedArrayRe + ", 1)"
 	nestedPathExpr := "ifnull(nullif(" + nestedScalarExtract + ", ''), " + nestedArrayExtract + ")"
@@ -225,7 +201,7 @@ func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTo
 		"      THEN json_extract_string(ti.input_json, '$.command')\n" +
 		"      ELSE coalesce(json_extract_string(ti.input_json, '$.cmd'), '') END\n" +
 		"    ELSE '' END"
-	shellRe := qQuote("(^|[[:space:]'\"`=(])(/[^/][^[:space:]'\"`<>|;&),]*" + slashRelRe + "|/" + relRe + "|" + relRe + ")([[:space:]'\"`,;|&<>)]|$)")
+	shellRe := sqlQuote("(^|[[:space:]'\"`=(])(/[^/][^[:space:]'\"`<>|;&),]*" + slashRelRe + "|/" + relRe + "|" + relRe + ")([[:space:]'\"`,;|&<>)]|$)")
 	shellMatch := "(json_valid(ti.input_json) AND regexp_matches(" + commandExpr + ", " + shellRe + "))"
 
 	toolEvents := "(SELECT\n" +
@@ -247,14 +223,12 @@ func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTo
 
 	scalarPaths := make([]string, 0, len(faPathKeys))
 	for _, key := range faPathKeys {
-		// json_valid-gated: rows with non-JSON input_json (free-text tool
-		// input) match nothing but still flow through the CTE ladder.
 		scalarPaths = append(scalarPaths, faJStr("ti.input_json", key))
 	}
 	legacyList := "[" + strings.Join(scalarPaths, ", ") + "]"
 	legacyFirst := "coalesce(list_filter(" + legacyList + ", lambda p: ends_with(p, " + slashRelQ + ") OR p = " + relQ + ")[1], '')"
 
-	provenanceRe := qQuote("\"(?:" + keyRe + "|command|cmd)\"[[:space:]]*:")
+	provenanceRe := sqlQuote("\"(?:" + keyRe + "|command|cmd)\"[[:space:]]*:")
 	provenanceCount := "len(regexp_extract_all(ti.input_json, " + provenanceRe + "))"
 	legacyScalarSingle := faSinglePath("legacy_scalar_path")
 	cwdSingle := faSinglePath("coalesce(ti.cwd, '')")
@@ -287,7 +261,7 @@ func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTo
 		roots = dedupAdjacent(roots)
 		quoted := make([]string, len(roots))
 		for i, root := range roots {
-			quoted[i] = qQuote(root)
+			quoted[i] = sqlQuote(root)
 		}
 		rootsLiteral := "[" + strings.Join(quoted, ", ") + "]"
 		withProjectRoots = rootsLiteral + " AS project_roots,\n"
@@ -297,9 +271,9 @@ func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTo
 			faSinglePath("ti.worktree_root") + " AND list_contains(" + rootsLiteral + ", ti.worktree_root))"
 		legacyEventScope := "(ti.event_project_id != '' AND NOT starts_with(ti.event_project_id, 'git:') AND " +
 			faSinglePath(eventRootExpr) + " AND list_contains(" + rootsLiteral + ", " + eventRootExpr + "))"
-		outer = append(outer, "(ti.project_id = "+qQuote(q.NormalizedPID)+"\n"+
+		outer = append(outer, "(ti.project_id = "+sqlQuote(q.NormalizedPID)+"\n"+
 			"      OR "+legacyToolScope+"\n"+
-			"      OR (ti.project_id = '' AND ti.event_project_id = "+qQuote(q.NormalizedPID)+")\n"+
+			"      OR (ti.project_id = '' AND ti.event_project_id = "+sqlQuote(q.NormalizedPID)+")\n"+
 			"      OR (ti.project_id = '' AND legacy_candidate_root != ''\n"+
 			"          AND ("+legacyEventScope+" OR (ti.event_project_id = '' AND verified_project_root != ''))))")
 		legacyRoot = "verified_project_root"
@@ -391,8 +365,6 @@ func faScanTouches(ctx context.Context, db *sql.DB, qry string) ([]faTouch, erro
 	return out, nil
 }
 
-// faMergeTouches ports merge_file_attention_touches: dedupe on
-// (session, call, uid), newest first, null timestamps last.
 func faMergeTouches(touches []faTouch, limit int) []faTouch {
 	seen := make(map[string]bool, len(touches))
 	merged := make([]faTouch, 0, len(touches))

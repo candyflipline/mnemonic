@@ -1,9 +1,5 @@
 package query
 
-// open: MCP open tool, ported from upstream
-// upstream mcp-core/src/open_v1.rs (args, data shapes, prose) over the
-// scan engine in open_repo.go. Owned by lane cache.
-
 import (
 	"context"
 	"database/sql"
@@ -19,22 +15,22 @@ func (openTool) Name() string { return "open" }
 
 func init() { register(openTool{}) }
 
-// canonicalOpenArgs is contract.rs CanonicalOpenV1Args.
 type canonicalOpenArgs struct {
-	target        mcpID
-	limit         int
-	hasLimit      bool
-	cursor        string
-	hasCursor     bool
-	cursorDecoded openCursor
+	target mcpID
+	page   *openPage
+	cursor string
 }
 
-const openCursorMaxChars = 16384
+type openPage struct {
+	limit int
+	after *openCursorAfter
+}
 
-// openCursor is my v2 continuation: deterministic JSON, base64url without
-// padding. Upstream seals it with HMAC plus a snapshot generation; serve has
-// no cursor key and each cache file is one immutable snapshot, so the
-// integrity and staleness machinery has nothing to protect here.
+const (
+	openCursorMaxChars = 16384
+	openCursorVersion  = 2
+)
+
 type openCursor struct {
 	Version  int             `json:"version"`
 	TargetID string          `json:"target_id"`
@@ -42,15 +38,13 @@ type openCursor struct {
 	After    openCursorAfter `json:"after"`
 }
 
-// openCursorAfter is where reading stopped: a session page continues after a
-// turn_seq, a turn page after an event_ordinal.
 type openCursorAfter struct {
 	Kind         string `json:"kind"`
 	TurnSeq      uint32 `json:"turn_seq,omitempty"`
 	EventOrdinal uint32 `json:"event_ordinal,omitempty"`
 }
 
-// parseOpenArgs ports OpenV1Args::validate; every message is upstream text.
+// parseOpenArgs: every message is upstream text.
 func parseOpenArgs(raw json.RawMessage) (canonicalOpenArgs, error) {
 	var args struct {
 		ID     *string `json:"id"`
@@ -60,7 +54,6 @@ func parseOpenArgs(raw json.RawMessage) (canonicalOpenArgs, error) {
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return canonicalOpenArgs{}, argErrorf("open expects id, optional limit, or a continuation cursor")
 	}
-	a := canonicalOpenArgs{}
 	if args.Cursor != nil {
 		if args.ID != nil || args.Limit != nil {
 			return canonicalOpenArgs{}, argErrorf("cursor must be provided without id or limit")
@@ -76,11 +69,7 @@ func parseOpenArgs(raw json.RawMessage) (canonicalOpenArgs, error) {
 		if err != nil {
 			return canonicalOpenArgs{}, err
 		}
-		maxLimit := openMaxResults
-		if maxLimit < 1 {
-			maxLimit = 1
-		}
-		if decoded.Limit < 1 || decoded.Limit > maxLimit {
+		if decoded.Limit < 1 || decoded.Limit > openMaxResults {
 			return canonicalOpenArgs{}, argErrorf("cursor page size is invalid; reopen the target")
 		}
 		target, err := parseMcpID(decoded.TargetID)
@@ -90,8 +79,7 @@ func parseOpenArgs(raw json.RawMessage) (canonicalOpenArgs, error) {
 		if target.kind == kindEvent {
 			return canonicalOpenArgs{}, argErrorf("cursor target kind is invalid; reopen the target")
 		}
-		a.cursor, a.hasCursor, a.cursorDecoded, a.target = cursor, true, decoded, target
-		return a, nil
+		return canonicalOpenArgs{target: target, page: &openPage{limit: decoded.Limit, after: &decoded.After}, cursor: cursor}, nil
 	}
 
 	if args.ID == nil {
@@ -104,19 +92,15 @@ func parseOpenArgs(raw json.RawMessage) (canonicalOpenArgs, error) {
 	if err != nil {
 		return canonicalOpenArgs{}, err
 	}
-	a.target = id
+	a := canonicalOpenArgs{target: id}
 	if args.Limit != nil {
-		maxLimit := openMaxResults
-		if maxLimit < 1 {
-			maxLimit = 1
-		}
-		if *args.Limit < 1 || *args.Limit > int64(maxLimit) {
-			return canonicalOpenArgs{}, argErrorf("limit must be between 1 and %d", maxLimit)
+		if *args.Limit < 1 || *args.Limit > openMaxResults {
+			return canonicalOpenArgs{}, argErrorf("limit must be between 1 and %d", openMaxResults)
 		}
 		if id.kind == kindEvent {
 			return canonicalOpenArgs{}, argErrorf("limit is only supported for session and turn IDs")
 		}
-		a.limit, a.hasLimit = int(*args.Limit), true
+		a.page = &openPage{limit: int(*args.Limit)}
 	}
 	return a, nil
 }
@@ -130,7 +114,7 @@ func decodeOpenCursor(token string) (openCursor, error) {
 	if err := json.Unmarshal(bytes, &cursor); err != nil {
 		return openCursor{}, argErrorf("cursor is malformed; reopen the target")
 	}
-	if cursor.Version != 2 {
+	if cursor.Version != openCursorVersion {
 		return openCursor{}, argErrorf("cursor snapshot is stale; reopen the target to restart expansion")
 	}
 	return cursor, nil
@@ -144,14 +128,12 @@ func encodeOpenCursor(cursor openCursor) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(bytes), nil
 }
 
-// requestShape is the canonical request the envelope echoes (resolve_open):
-// the re-encoded ID, limit only when provided, or the cursor verbatim.
 func (a canonicalOpenArgs) requestShape() map[string]any {
-	if a.hasCursor {
+	if a.cursor != "" {
 		return map[string]any{"cursor": a.cursor}
 	}
-	if a.hasLimit {
-		return map[string]any{"id": a.target.String(), "limit": a.limit}
+	if a.page != nil {
+		return map[string]any{"id": a.target.String(), "limit": a.page.limit}
 	}
 	return map[string]any{"id": a.target.String()}
 }
@@ -174,34 +156,30 @@ func (openTool) Call(ctx context.Context, db *sql.DB, raw json.RawMessage) (any,
 }
 
 func openSessionFlow(ctx context.Context, db *sql.DB, request map[string]any, args canonicalOpenArgs) (any, string, error) {
-	scan, err := loadSessionScan(ctx, db, args.target.session, 0, false, "")
+	scan, err := loadSessionScan(ctx, db, args.target.session, scanOpts{})
 	if err != nil {
 		return nil, "", err
 	}
 	if scan == nil {
 		return nil, "", argErrorf("session not found")
 	}
-	// A cursor carries its own page size; summary mode is id-only.
-	limit := args.limit
-	if args.hasCursor {
-		limit = args.cursorDecoded.Limit
-	}
-	if !args.hasLimit && !args.hasCursor {
+	page := args.page
+	if page == nil {
 		data := openSessionData(scan, nil, nil)
 		return data, openResultText(request, data), nil
 	}
+	limit := page.limit
 	afterSeq := uint32(0)
-	hasAfter := false
-	if args.hasCursor {
-		afterSeq, hasAfter = args.cursorDecoded.After.TurnSeq, true
+	if page.after != nil {
+		afterSeq = page.after.TurnSeq
 	}
 	var seqs []uint32
-	for _, seq := range scan.turnSeqs {
+	for _, seq := range scan.turnSeqs() {
 		if seq > afterSeq {
 			seqs = append(seqs, seq)
 		}
 	}
-	if hasAfter && len(seqs) == 0 {
+	if page.after != nil && len(seqs) == 0 {
 		// Upstream reports an exhausted continuation as a stale snapshot.
 		return nil, "", argErrorf("cursor snapshot is stale; reopen the target to restart expansion")
 	}
@@ -216,7 +194,7 @@ func openSessionFlow(ctx context.Context, db *sql.DB, request map[string]any, ar
 	var nextCursor any
 	if hasMore {
 		encoded, err := encodeOpenCursor(openCursor{
-			Version:  2,
+			Version:  openCursorVersion,
 			TargetID: args.target.String(),
 			Limit:    limit,
 			After:    openCursorAfter{Kind: "turn", TurnSeq: seqs[len(seqs)-1]},
@@ -231,7 +209,7 @@ func openSessionFlow(ctx context.Context, db *sql.DB, request map[string]any, ar
 }
 
 func openTurnFlow(ctx context.Context, db *sql.DB, request map[string]any, args canonicalOpenArgs) (any, string, error) {
-	scan, err := loadSessionScan(ctx, db, args.target.session, args.target.turnSeq, true, "")
+	scan, err := loadSessionScan(ctx, db, args.target.session, scanOpts{turn: &args.target.turnSeq})
 	if err != nil {
 		return nil, "", err
 	}
@@ -242,21 +220,18 @@ func openTurnFlow(ctx context.Context, db *sql.DB, request map[string]any, args 
 	compact := compactTurn(turn, summaryPreviewChars)
 
 	afterOrdinal := uint32(0)
-	hasAfter := false
-	if args.hasCursor {
-		if args.cursorDecoded.After.Kind != "event" {
-			return nil, "", argErrorf("cursor is malformed; reopen the target")
-		}
-		afterOrdinal, hasAfter = args.cursorDecoded.After.EventOrdinal, true
-	}
-	limit := args.limit
-	if args.hasCursor {
-		limit = args.cursorDecoded.Limit
-	}
+	limit := 0
 	var pageRows []*navRow
-	if args.hasLimit || args.hasCursor {
+	if page := args.page; page != nil {
+		if page.after != nil {
+			if page.after.Kind != "event" {
+				return nil, "", argErrorf("cursor is malformed; reopen the target")
+			}
+			afterOrdinal = page.after.EventOrdinal
+		}
+		limit = page.limit
 		for _, row := range turn.selected {
-			if !hasAfter || row.eventOrdinal > afterOrdinal {
+			if row.eventOrdinal > afterOrdinal {
 				pageRows = append(pageRows, row)
 			}
 		}
@@ -272,7 +247,7 @@ func openTurnFlow(ctx context.Context, db *sql.DB, request map[string]any, args 
 	var nextCursor any
 	if hasMore {
 		encoded, err := encodeOpenCursor(openCursor{
-			Version:  2,
+			Version:  openCursorVersion,
 			TargetID: args.target.String(),
 			Limit:    limit,
 			After:    openCursorAfter{Kind: "event", EventOrdinal: pageRows[len(pageRows)-1].eventOrdinal},
@@ -296,7 +271,7 @@ func openEventFlow(ctx context.Context, db *sql.DB, request map[string]any, args
 		}
 		return nil, "", err
 	}
-	scan, err := loadSessionScan(ctx, db, sessionID, 0, false, uid)
+	scan, err := loadSessionScan(ctx, db, sessionID, scanOpts{targetUID: uid})
 	if err != nil {
 		return nil, "", err
 	}
@@ -332,20 +307,10 @@ func optionalTurnRefID(ref *turnRef) any {
 	return formatTurnID(ref.sessionID, ref.turnSeq)
 }
 
-// compactOptionalValue adapts an optional string (nil = absent) to
-// compact_optional_line.
-func compactOptionalValue(v any, maxChars int) any {
-	s, ok := v.(string)
-	if !ok {
-		return nil
-	}
-	return compactOptionalLine(s, maxChars)
-}
-
-// openSessionData ports open_v1.rs open_session_data.
 func openSessionData(scan *sessionScan, pageTurns []any, nextCursor any) map[string]any {
 	m := scan.metadata
-	title, slug, summary := sessionLabels(scan)
+	seqs := scan.turnSeqs()
+	label := sessionLabels(scan)
 	if pageTurns == nil {
 		pageTurns = []any{}
 	}
@@ -353,8 +318,8 @@ func openSessionData(scan *sessionScan, pageTurns []any, nextCursor any) map[str
 		"kind": "session",
 		"session": map[string]any{
 			"id":                 formatSessionID(m.sessionID),
-			"title":              compactOptionalValue(title, summaryPreviewChars),
-			"source":             compactOptionalValue(nonEmpty(scan.source), summaryToolNameChars),
+			"title":              compactOptionalLine(label.title, summaryPreviewChars),
+			"source":             compactOptionalLine(scan.source, summaryToolNameChars),
 			"started_at":         formatRFC3339UTCMillis(m.firstEventUnixMs),
 			"updated_at":         formatRFC3339UTCMillis(m.lastEventUnixMs),
 			"completed":          scan.completed,
@@ -362,23 +327,22 @@ func openSessionData(scan *sessionScan, pageTurns []any, nextCursor any) map[str
 			"turn_count":         m.totalTurns,
 			"event_count":        m.totalEvents,
 			"mode":               m.mode,
-			"harness":            compactOptionalValue(nonEmpty(scan.harness), summaryToolNameChars),
-			"inference_provider": compactOptionalValue(nonEmpty(scan.inferenceProvider), summaryToolNameChars),
-			"session_slug":       compactOptionalValue(slug, summaryPreviewChars),
-			"session_summary":    compactOptionalValue(summary, summaryPreviewChars),
+			"harness":            compactOptionalLine(scan.harness, summaryToolNameChars),
+			"inference_provider": compactOptionalLine(scan.inferenceProvider, summaryToolNameChars),
+			"session_slug":       compactOptionalLine(label.slug, summaryPreviewChars),
+			"session_summary":    compactOptionalLine(label.summary, summaryPreviewChars),
 		},
 		"turns":       pageTurns,
 		"next_cursor": nextCursor,
 		"traversal": map[string]any{
 			"previous_session_id": nil,
 			"next_session_id":     nil,
-			"first_turn_id":       formatTurnID(m.sessionID, scan.turnSeqs[0]),
-			"last_turn_id":        formatTurnID(m.sessionID, scan.turnSeqs[len(scan.turnSeqs)-1]),
+			"first_turn_id":       formatTurnID(m.sessionID, seqs[0]),
+			"last_turn_id":        formatTurnID(m.sessionID, seqs[len(seqs)-1]),
 		},
 	}
 }
 
-// openSessionTurnSummary ports open_v1.rs open_session_turn_summary.
 func openSessionTurnSummary(c *turnCompact) map[string]any {
 	turnID := formatTurnID(c.metadata.sessionID, c.metadata.turnSeq)
 	terminalEventID := optionalEventID(c.terminalEventUID)
@@ -405,16 +369,14 @@ func openSessionTurnSummary(c *turnCompact) map[string]any {
 	}
 }
 
-// compactTextContent ports open_v1.rs compact_text_content.
-func compactTextContent(eventID any, text any) any {
-	s, ok := text.(string)
-	if !ok || strings.TrimSpace(s) == "" {
+func compactTextContent(eventID any, text string) any {
+	if strings.TrimSpace(text) == "" {
 		if eventID != nil {
 			return map[string]any{"event_id": eventID, "text": nil, "truncated": false}
 		}
 		return nil
 	}
-	compact := compactTextLine(s, summaryPreviewChars)
+	compact := compactTextLine(text, summaryPreviewChars)
 	return map[string]any{
 		"event_id":  eventID,
 		"text":      compact,
@@ -422,7 +384,6 @@ func compactTextContent(eventID any, text any) any {
 	}
 }
 
-// compactTools ports open_v1.rs compact_tools.
 func compactTools(tools []string) ([]any, bool) {
 	out := make([]any, 0, len(tools))
 	for i, tool := range tools {
@@ -442,8 +403,6 @@ func stringSliceAny(values []string) []any {
 	return out
 }
 
-// openTurnData ports open_v1.rs open_turn_data_with_offset (offset rides in
-// the page ordinals).
 func openTurnData(scan *sessionScan, turn *turnAccum, c *turnCompact, events []any, nextCursor any) map[string]any {
 	m := c.metadata
 	turnID := formatTurnID(m.sessionID, m.turnSeq)
@@ -488,11 +447,10 @@ func openTurnData(scan *sessionScan, turn *turnAccum, c *turnCompact, events []a
 	}
 }
 
-// openTurnEventSummary ports open_v1.rs open_turn_event_summary.
 func openTurnEventSummary(r *navRow, ordinal int, terminalEventUID string) map[string]any {
-	toolName := toolNameFor(r.eventType(), r.name, r.callID)
-	if toolName != nil {
-		toolName = compactTextLine(toolName.(string), summaryToolNameChars)
+	var toolName any
+	if name := toolNameFor(r.eventType(), r.name, r.callID); name != "" {
+		toolName = compactTextLine(name, summaryToolNameChars)
 	}
 	summary, truncated := compactEventSummary(r)
 	return map[string]any{
@@ -508,10 +466,9 @@ func openTurnEventSummary(r *navRow, ordinal int, terminalEventUID string) map[s
 	}
 }
 
-// compactEventSummary ports open_v1.rs compact_event_summary.
 func compactEventSummary(r *navRow) (string, bool) {
-	text, ok := previewFromWide(r, summaryPreviewChars).(string)
-	if !ok {
+	text := previewFromWide(r, summaryPreviewChars)
+	if text == "" {
 		return "", false
 	}
 	if r.eventType() == "reasoning" && hasEncryptedContentField(text) {
@@ -520,7 +477,6 @@ func compactEventSummary(r *navRow) (string, bool) {
 	return compactTextLine(text, summaryPreviewChars), looksTruncated(text)
 }
 
-// openEventData ports open_v1.rs open_event_data.
 func openEventData(scan *sessionScan, r *navRow, parentTurn *turnAccum) map[string]any {
 	m := scan.metadata
 	eventID := formatEventID(r.eventUID)
@@ -544,9 +500,9 @@ func openEventData(scan *sessionScan, r *navRow, parentTurn *turnAccum) map[stri
 			"type":              r.eventType(),
 			"timestamp":         formatRFC3339UTCMillis(r.eventUnixMs),
 			"terminal":          terminal,
-			"model":             extractStringField(payload, "model", "model_name"),
-			"originating_model": extractStringField(payload, "originating_model", "model", "model_name"),
-			"tool_name":         toolName,
+			"model":             nonEmpty(extractStringField(payload, "model", "model_name")),
+			"originating_model": nonEmpty(extractStringField(payload, "originating_model", "model", "model_name")),
+			"tool_name":         nonEmpty(toolName),
 		},
 		"content": fullEventContent(r, r.eventType(), toolName, payload),
 		"session": map[string]any{
@@ -575,8 +531,7 @@ func openEventData(scan *sessionScan, r *navRow, parentTurn *turnAccum) map[stri
 	}
 }
 
-// fullEventContent ports open_v1.rs full_event_content.
-func fullEventContent(r *navRow, eventType string, toolName any, payload any) map[string]any {
+func fullEventContent(r *navRow, eventType string, toolName string, payload any) map[string]any {
 	text := fullEventText(r, payload)
 	format := "text"
 	switch eventType {
@@ -588,7 +543,7 @@ func fullEventContent(r *navRow, eventType string, toolName any, payload any) ma
 		"text":      text,
 		"truncated": false,
 	}
-	if toolName != nil {
+	if toolName != "" {
 		content["tool_name"] = toolName
 	}
 	if format == "tool_call" {
@@ -622,7 +577,6 @@ func fullEventContent(r *navRow, eventType string, toolName any, payload any) ma
 	return content
 }
 
-// fullEventText ports open_v1.rs full_event_text.
 func fullEventText(r *navRow, payload any) string {
 	if strings.TrimSpace(r.textContent) != "" {
 		return r.textContent
@@ -637,9 +591,9 @@ func fullEventText(r *navRow, payload any) string {
 	return r.payloadJSON
 }
 
-// parsePayloadJSON ports open_v1.rs parse_payload_json. UseNumber keeps
-// integer literals exact, matching serde_json's u64/i64 Value numbers when
-// the payload is re-encoded into the content object.
+// parsePayloadJSON: UseNumber keeps integer literals exact, matching
+// serde_json's u64/i64 Value numbers when the payload is re-encoded into the
+// content object.
 func parsePayloadJSON(payloadJSON string) any {
 	if strings.TrimSpace(payloadJSON) == "" {
 		return nil
@@ -653,7 +607,6 @@ func parsePayloadJSON(payloadJSON string) any {
 	return payload
 }
 
-// extractToolArguments ports open_v1.rs extract_tool_arguments.
 func extractToolArguments(payload any) any {
 	object, ok := payload.(map[string]any)
 	if !ok {
@@ -667,7 +620,6 @@ func extractToolArguments(payload any) any {
 	return nil
 }
 
-// extractExitCode ports open_v1.rs extract_exit_code.
 func extractExitCode(payload any) (int64, bool) {
 	object, ok := payload.(map[string]any)
 	if !ok {
@@ -684,33 +636,26 @@ func extractExitCode(payload any) (int64, bool) {
 	return 0, false
 }
 
-// extractStringField ports open_v1.rs extract_string_field (trimmed values).
-func extractStringField(payload any, names ...string) any {
+func extractStringField(payload any, names ...string) string {
 	object, ok := payload.(map[string]any)
 	if !ok {
-		return nil
+		return ""
 	}
 	for _, name := range names {
 		if value, ok := object[name].(string); ok && strings.TrimSpace(value) != "" {
 			return strings.TrimSpace(value)
 		}
 	}
-	return nil
+	return ""
 }
 
-// toolNameFor ports open_v1.rs tool_name_for.
-func toolNameFor(eventType, name, callID string) any {
+func toolNameFor(eventType, name, callID string) string {
 	if eventType != "tool_call" && eventType != "tool_response" {
-		return nil
+		return ""
 	}
-	if v := nonEmpty(name); v != nil {
-		return v
-	}
-	return nonEmpty(callID)
+	return firstNonEmpty(name, callID)
 }
 
-// pathStr reads a /-separated path through the data map, filtering empty
-// strings (open_v1.rs str_at).
 func pathStr(value any, path ...string) (string, bool) {
 	for _, key := range path {
 		m, ok := value.(map[string]any)
@@ -726,8 +671,6 @@ func pathStr(value any, path ...string) (string, bool) {
 	return s, true
 }
 
-// openResultText ports open_v1.rs open_result_text: header plus a plain-text
-// rendering of the opened object.
 func openResultText(request, data map[string]any) string {
 	header := openResultHeader(request, data)
 	var body []string
@@ -745,8 +688,6 @@ func openResultText(request, data map[string]any) string {
 	return header + "\n\n" + strings.Join(body, "\n")
 }
 
-// OpenErrorText ports the error branch of open_result_header for the mcp
-// envelope layer.
 func OpenErrorText(code, message string) string {
 	if code == "" {
 		code = "error"
@@ -853,7 +794,6 @@ func openSessionText(data map[string]any) []string {
 	return lines
 }
 
-// openResultHeader ports open_v1.rs open_result_header.
 func openResultHeader(request, data map[string]any) string {
 	kind := "object"
 	if s, ok := pathStr(data, "kind"); ok {
@@ -897,8 +837,6 @@ func openResultHeader(request, data map[string]any) string {
 		return fmt.Sprintf("Opened %s %s summary only. %d %s available; call open with id and limit to expand.",
 			kind, id, total, unit)
 	}
-	// Upstream looks for a string cursor (as_str); a JSON null means the
-	// final page.
 	if s, ok := data["next_cursor"].(string); ok && s != "" {
 		return fmt.Sprintf("Opened %s %s with %d %s. More are available with next_cursor.",
 			kind, id, children, unit)

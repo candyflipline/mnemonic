@@ -5,12 +5,9 @@ import (
 	"strings"
 )
 
-// The response-side half of file_attention: summary, root breakdown, session
-// rollups or an event timeline, and the prose. Ports file_attention_v1.rs.
-
 const faUnknownRoot = "(unknown)"
 
-// faBuildData ports build_data. Warnings are appended in the upstream order.
+// faBuildData: warnings are appended in the upstream order.
 func faBuildData(a *faArgs, tail *faTail, touches []faTouch, warnings *[]string) map[string]any {
 	scanTruncated := len(touches) > faScanCap
 	if scanTruncated {
@@ -119,7 +116,7 @@ func faBuildData(a *faArgs, tail *faTail, touches []faTouch, warnings *[]string)
 	var bodyKey string
 	var body []any
 	var encodable, rollupSkipped int
-	if a.Granularity == "events" {
+	if a.Granularity == faGranularityEvents {
 		bodyKey = "events"
 		body, encodable, rollupSkipped = faEventTimeline(touches, limit)
 	} else {
@@ -134,10 +131,10 @@ func faBuildData(a *faArgs, tail *faTail, touches []faTouch, warnings *[]string)
 	data := map[string]any{
 		"path":             a.Path,
 		"tail":             tail.Rel,
-		"tail_is_absolute": tail.Abs,
+		"tail_is_absolute": strings.HasPrefix(tail.Rel, "/"),
 		"stripped_root":    nil,
-		"scope":            a.Scope,
-		"granularity":      a.Granularity,
+		"scope":            string(a.Scope),
+		"granularity":      string(a.Granularity),
 		"summary":          summary,
 		"roots":            roots,
 		"result_count":     len(body),
@@ -162,10 +159,9 @@ func faFormatMillisPtr(ms *int64) any {
 	if ms == nil {
 		return nil
 	}
-	return qFormatMillis(*ms)
+	return formatRFC3339UTCMillis(*ms)
 }
 
-// faSortedSet renders a unique, sorted string list (Rust BTreeSet output).
 func faSortedSet(values map[string]bool) []string {
 	out := make([]string, 0, len(values))
 	for v := range values {
@@ -187,7 +183,6 @@ type faSessionAgg struct {
 	latestTurnSeq   *uint32
 }
 
-// faSessionRollups folds the newest-first stream into per-session rollups.
 func faSessionRollups(touches []faTouch, limit int) ([]any, int, int) {
 	order := []string{}
 	aggs := map[string]*faSessionAgg{}
@@ -258,7 +253,7 @@ func faSessionRollups(touches []faTouch, limit int) ([]any, int, int) {
 			"event_id":   latestEventID,
 		}
 		if agg.latestTurnSeq != nil {
-			open["turn_id"] = qTurnID(sessionID, *agg.latestTurnSeq)
+			open["turn_id"] = formatTurnID(sessionID, *agg.latestTurnSeq)
 		}
 		sessions = append(sessions, map[string]any{
 			"rank": len(sessions) + 1,
@@ -280,7 +275,6 @@ func faSessionRollups(touches []faTouch, limit int) ([]any, int, int) {
 	return sessions, encodable, skipped
 }
 
-// faEventTimeline is the flat, newest-first touch-by-touch timeline.
 func faEventTimeline(touches []faTouch, limit int) ([]any, int, int) {
 	events := []any{}
 	encodable, skipped := 0, 0
@@ -305,7 +299,7 @@ func faEventTimeline(touches []faTouch, limit int) ([]any, int, int) {
 			"session_id": sessionID,
 		}
 		if touch.TurnSeq != nil {
-			open["turn_id"] = qTurnID(touch.SessionID, *touch.TurnSeq)
+			open["turn_id"] = formatTurnID(touch.SessionID, *touch.TurnSeq)
 		}
 		var worktreeRoot any
 		if touch.WorktreeRoot != "" {
@@ -359,7 +353,6 @@ func faActionPreview(touch *faTouch) any {
 	return collapsed
 }
 
-// faText ports format_text.
 func faText(payload map[string]any) string {
 	data, _ := payload["data"].(map[string]any)
 	tail := stringAt(data, "tail")
@@ -440,7 +433,6 @@ func faText(payload map[string]any) string {
 	return strings.Join(lines, "\n")
 }
 
-// faFormatErrorText ports format_error_text for the envelope's error block.
 func faFormatErrorText(code, message string) string {
 	if code == "" {
 		code = "internal_error"

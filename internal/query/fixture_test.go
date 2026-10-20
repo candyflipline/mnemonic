@@ -11,10 +11,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/cache/cachetest"
 )
 
-// Fixture tests over the real golden lake (codex + claude_code + cursor +
-// cursor_sqlite), through cache.Build/OpenNewest. Literals frozen from a
-// scratch dump; see *_scratch_test.go (git-ignored).
-
 // Fixture facts: all four goldens land under author "test", machine "m1";
 // codex is one session, claude_code another, and cursor + cursor_sqlite merge
 // into one shared session id. Every source reports the same updated_ms.
@@ -144,8 +140,6 @@ func TestFixtureFileAttentionGameJS(t *testing.T) {
 	}
 }
 
-// TestFixtureFileAttentionMutationsOnly: every Cargo.toml touch is a Read, so
-// mutations_only must empty the result; game.js keeps its edit.
 func TestFixtureFileAttentionMutationsOnly(t *testing.T) {
 	db := fixtureDB(t)
 	raw, _ := callTool(t, db, fileAttention{}, `{"path":"Cargo.toml","scope":"all","mutations_only":true}`)
@@ -160,8 +154,6 @@ func TestFixtureFileAttentionMutationsOnly(t *testing.T) {
 	}
 }
 
-// TestFixtureFileAttentionShellCommand: the cursor terminal command "npm test"
-// matches the shell pass (match_kind shell_path).
 func TestFixtureFileAttentionShellCommand(t *testing.T) {
 	db := fixtureDB(t)
 	raw, _ := callTool(t, db, fileAttention{}, `{"path":"npm","scope":"all"}`)
@@ -190,7 +182,6 @@ func TestFixtureGetIngestStatus(t *testing.T) {
 	if st.ObservedAtUnixMs <= 0 {
 		t.Fatalf("observed_at = %v", st.ObservedAtUnixMs)
 	}
-	// One (author, machine) group: test/m1, four parsed sources.
 	if st.Current == nil || st.Current.HeartbeatObservedAtUnixMs != fxSourceUpdatedMs {
 		t.Fatalf("current = %#v", st.Current)
 	}
@@ -203,8 +194,6 @@ func TestFixtureGetIngestStatus(t *testing.T) {
 		!p.DiscoveryComplete || p.SinkRetrying {
 		t.Fatalf("progress = %#v", p)
 	}
-	// The fixture predates any wall clock: health is stale, freshness unknown,
-	// readiness false, and the heartbeat_stale alert fires.
 	conditions := map[string]stConditionJSON{}
 	for _, c := range st.Conditions {
 		conditions[c.ConditionType] = c
@@ -228,7 +217,6 @@ func TestFixtureGetIngestStatus(t *testing.T) {
 		st.History[0].FilesTotal != fxSourceCount {
 		t.Fatalf("history = %#v", st.History)
 	}
-	// No rate/eta: the sources adapter has fewer than six same-instance samples.
 	if st.Rate != nil || st.Eta != nil {
 		t.Fatalf("rate/eta = %v/%v", st.Rate, st.Eta)
 	}

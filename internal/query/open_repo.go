@@ -1,23 +1,16 @@
 package query
 
-// The open engine: one ordered pass over a session's trace, ported from
-// upstream conversations/src/clickhouse_repo/canonical_open.rs
-// (scan_canonical_session, update_turn, session_labels, preview_from_wide,
-// event_mode_rank, adjacent_turn_ref). The cache is one immutable snapshot per
-// file, so the upstream version paging, FINAL/reconcile and
-// snapshot-generation machinery is a no-op here; trace carries the wide
-// columns inline, so hydration is folded into the scan.
-
 import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"maps"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 )
 
-// navRow is upstream NavRow + DerivedPosition + HydratedRow folded together.
 type navRow struct {
 	sessionID         string
 	eventUID          string
@@ -61,8 +54,6 @@ func (r *navRow) isTerminal() bool {
 	return r.payloadType == "task_complete" || r.payloadType == "turn_aborted"
 }
 
-// isMetadataBearing ports sql/033_replay_stable_events.sql: session_meta rows,
-// plus omp title payloads.
 func (r *navRow) isMetadataBearing() bool {
 	if r.eventClass == "session_meta" {
 		return true
@@ -74,7 +65,6 @@ func (r *navRow) isMetadataBearing() bool {
 	return t == "title" || t == "title_change"
 }
 
-// payloadString reads payload_json as an object and returns one string field.
 func payloadString(payloadJSON, field string) string {
 	if strings.TrimSpace(payloadJSON) == "" {
 		return ""
@@ -87,7 +77,6 @@ func payloadString(payloadJSON, field string) string {
 	return s
 }
 
-// eventRef is upstream McpEventRef.
 type eventRef struct {
 	sessionID  string
 	eventUID   string
@@ -108,8 +97,6 @@ func navEventRef(r *navRow) *eventRef {
 	}
 }
 
-// refBefore ports the (event_time, event_order, event_uid) tuple comparison
-// scan_canonical_session uses for first/last.
 func refBefore(a, b *eventRef) bool {
 	if a.eventTime != b.eventTime {
 		return a.eventTime < b.eventTime
@@ -120,7 +107,6 @@ func refBefore(a, b *eventRef) bool {
 	return a.eventUID < b.eventUID
 }
 
-// turnRef is upstream McpTurnRef.
 type turnRef struct {
 	sessionID string
 	turnSeq   uint32
@@ -139,7 +125,6 @@ func turnRefOf(m *turnSummary) *turnRef {
 	}
 }
 
-// sessionMetadata is upstream SessionMetadata.
 type sessionMetadata struct {
 	sessionID         string
 	firstEventTime    string
@@ -158,7 +143,6 @@ type sessionMetadata struct {
 	lastActorRole     string
 }
 
-// turnSummary is upstream TurnSummary, the per-turn metadata accumulator.
 type turnSummary struct {
 	sessionID         string
 	turnSeq           uint32
@@ -175,7 +159,6 @@ type turnSummary struct {
 	reasoningItems    uint64
 }
 
-// turnAccum is upstream TurnAccum (minus cursor-carry plumbing).
 type turnAccum struct {
 	metadata             *turnSummary
 	firstEvent           *eventRef
@@ -191,7 +174,6 @@ type turnAccum struct {
 	selected             []*navRow
 }
 
-// sessionScan is upstream SessionScan.
 type sessionScan struct {
 	metadata          sessionMetadata
 	source            string
@@ -199,7 +181,6 @@ type sessionScan struct {
 	inferenceProvider string
 	ompDispatchTitle  string
 	turns             map[uint32]*turnAccum
-	turnSeqs          []uint32 // ascending; mirrors the upstream BTreeMap order
 	metadataRows      []*navRow
 	completed         bool
 	terminalEventUID  string
@@ -208,10 +189,16 @@ type sessionScan struct {
 	nextEvent         *eventRef
 }
 
-// loadSessionScan ports scan_canonical_session: rows in event_order, per-turn
-// accumulators, session signals. selectedTurn (with hasSelectedTurn) marks the
-// turn whose events are kept; targetUID ("" = none) marks the open target.
-func loadSessionScan(ctx context.Context, db *sql.DB, sessionID string, selectedTurn uint32, hasSelectedTurn bool, targetUID string) (*sessionScan, error) {
+func (sc *sessionScan) turnSeqs() []uint32 {
+	return slices.Sorted(maps.Keys(sc.turns))
+}
+
+type scanOpts struct {
+	turn      *uint32
+	targetUID string
+}
+
+func loadSessionScan(ctx context.Context, db *sql.DB, sessionID string, opts scanOpts) (*sessionScan, error) {
 	const scanSQL = `SELECT t.session_id, t.event_uid, epoch_ms(t.event_time),
        t.source_file, t.source_ref, t.event_class, t.actor_role, t.payload_type,
        t.call_id, t.name, t.phase, t.item_id,
@@ -278,7 +265,7 @@ ORDER BY t.event_order`
 			last = ref
 			lastActorRole = r.actorRole
 		}
-		if targetUID != "" && r.eventUID == targetUID {
+		if opts.targetUID != "" && r.eventUID == opts.targetUID {
 			row := r
 			sc.target = &row
 			sc.previousEvent = lastRowRef
@@ -336,9 +323,8 @@ ORDER BY t.event_order`
 		if turn == nil {
 			turn = &turnAccum{toolNames: map[string]bool{}, seenTypes: map[string]bool{}}
 			sc.turns[r.turnSeq] = turn
-			sc.turnSeqs = append(sc.turnSeqs, r.turnSeq)
 		}
-		updateTurn(turn, &r, ref, hasSelectedTurn && r.turnSeq == selectedTurn)
+		updateTurn(turn, &r, ref, opts.turn != nil && r.turnSeq == *opts.turn)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -349,11 +335,11 @@ ORDER BY t.event_order`
 	if err := hydrateKept(ctx, db, sc); err != nil {
 		return nil, err
 	}
-	sort.Slice(sc.turnSeqs, func(i, j int) bool { return sc.turnSeqs[i] < sc.turnSeqs[j] })
+	seqs := sc.turnSeqs()
 
 	// Session time bounds come from the turn accumulators, as upstream.
 	var minStart, maxEnd int64
-	for i, seq := range sc.turnSeqs {
+	for i, seq := range seqs {
 		m := sc.turns[seq].metadata
 		if i == 0 || m.startedAtUnixMs < minStart {
 			minStart = m.startedAtUnixMs
@@ -362,12 +348,7 @@ ORDER BY t.event_order`
 			maxEnd = m.endedAtUnixMs
 		}
 	}
-	var maxTurn uint32
-	for _, seq := range sc.turnSeqs {
-		if seq > maxTurn {
-			maxTurn = seq
-		}
-	}
+	maxTurn := seqs[len(seqs)-1]
 	sc.metadata = sessionMetadata{
 		sessionID:         sessionID,
 		firstEventTime:    first.eventTime,
@@ -410,7 +391,6 @@ func decodeFloatMap(s string) map[string]float64 {
 	return m
 }
 
-// updateTurn ports update_turn.
 func updateTurn(turn *turnAccum, r *navRow, ref *eventRef, selected bool) {
 	if turn.metadata == nil {
 		turn.metadata = &turnSummary{
@@ -482,19 +462,19 @@ func updateTurn(turn *turnAccum, r *navRow, ref *eventRef, selected bool) {
 	}
 }
 
-// adjacentTurnRef ports adjacent_turn_ref over the ordered turn keys.
 func adjacentTurnRef(sc *sessionScan, turnSeq uint32, next bool) *turnRef {
 	var seq uint32
 	found := false
+	seqs := sc.turnSeqs()
 	if next {
-		for _, s := range sc.turnSeqs {
+		for _, s := range seqs {
 			if s > turnSeq {
 				seq, found = s, true
 				break
 			}
 		}
 	} else {
-		for _, s := range sc.turnSeqs {
+		for _, s := range seqs {
 			if s < turnSeq {
 				seq, found = s, true
 			}
@@ -510,11 +490,10 @@ func adjacentTurnRef(sc *sessionScan, turnSeq uint32, next bool) *turnRef {
 	return turnRefOf(turn.metadata)
 }
 
-// turnCompact is upstream McpTurnCompact.
 type turnCompact struct {
 	metadata             *turnSummary
-	userInputSummary     any
-	finalResponseSummary any
+	userInputSummary     string
+	finalResponseSummary string
 	userInputEvent       *eventRef
 	finalResponseEvent   *eventRef
 	toolsCalled          []string
@@ -525,7 +504,6 @@ type turnCompact struct {
 	lastEvent            *eventRef
 }
 
-// compactTurn ports compact_turn.
 func compactTurn(turn *turnAccum, previewChars int) *turnCompact {
 	c := &turnCompact{
 		metadata:             turn.metadata,
@@ -547,9 +525,11 @@ func compactTurn(turn *turnAccum, previewChars int) *turnCompact {
 	return c
 }
 
-// sessionLabels ports session_labels; returns (title, slug, summary), each
-// nil when empty.
-func sessionLabels(sc *sessionScan) (any, any, any) {
+type sessionLabel struct {
+	title, slug, summary string
+}
+
+func sessionLabels(sc *sessionScan) sessionLabel {
 	ordered := append([]*navRow(nil), sc.metadataRows...)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		a, b := ordered[i], ordered[j]
@@ -583,25 +563,20 @@ func sessionLabels(sc *sessionScan) (any, any, any) {
 		resolvedTitle = firstNonEmpty(title, name)
 		resolvedSummary = firstNonEmpty(summary, resolvedTitle, name)
 	}
-	return nonEmpty(resolvedTitle), nonEmpty(slug), nonEmpty(resolvedSummary)
+	return sessionLabel{title: resolvedTitle, slug: slug, summary: resolvedSummary}
 }
 
-// previewFromWide ports preview_from_wide.
-func previewFromWide(row *navRow, previewChars int) any {
+func previewFromWide(row *navRow, previewChars int) string {
 	source, isPayload := row.textContent, false
 	if strings.TrimSpace(row.textContent) == "" {
 		source, isPayload = row.payloadJSON, true
 	}
-	if s, ok := compactSource(source, isPayload, previewChars); ok {
-		return s
-	}
-	return nil
+	return compactSource(source, isPayload, previewChars)
 }
 
-// compactSource ports compact_source: returns ("", false) for None.
-func compactSource(source string, isPayload bool, previewChars int) (string, bool) {
+func compactSource(source string, isPayload bool, previewChars int) string {
 	if strings.TrimSpace(source) == "" {
-		return "", false
+		return ""
 	}
 	outputLimit := previewChars
 	if outputLimit < 1 {
@@ -618,14 +593,9 @@ func compactSource(source string, isPayload bool, previewChars int) (string, boo
 	if len([]rune(source)) > sourceLimit {
 		truncated = string([]rune(source)[:sourceLimit-3]) + "..."
 	}
-	compact := compactTextLine(truncated, outputLimit)
-	if compact == "" {
-		return "", false
-	}
-	return compact, true
+	return compactTextLine(truncated, outputLimit)
 }
 
-// eventModeRank ports event_mode_rank.
 func eventModeRank(r *navRow) uint8 {
 	if r.payloadType == "web_search_call" || r.payloadType == "search_results_received" ||
 		(r.payloadType == "tool_use" && (r.name == "WebSearch" || r.name == "WebFetch")) {
@@ -640,7 +610,6 @@ func eventModeRank(r *navRow) uint8 {
 	return 0
 }
 
-// modeFromRank ports mode_from_rank -> ConversationMode::as_str.
 func modeFromRank(rank uint8) string {
 	switch rank {
 	case 3:
@@ -652,22 +621,4 @@ func modeFromRank(rank uint8) string {
 	default:
 		return "chat"
 	}
-}
-
-// isMcpInternalToolName ports the upstream clickhouse/src/mcp_tool_names.rs
-// is_mcp_internal_tool_name (the Go twin of the SQL predicate in common.go).
-func isMcpInternalToolName(name string) bool {
-	n := strings.ToLower(strings.TrimSpace(name))
-	if n == "" {
-		return false
-	}
-	const names = "search\x00search_sessions\x00open\x00list_sessions\x00file_attention"
-	if strings.Contains("\x00"+names+"\x00", "\x00"+n+"\x00") {
-		return true
-	}
-	parts := strings.Split(n, "__")
-	if len(parts) != 3 || parts[0] != "mcp" || (parts[1] != "moraine" && parts[1] != "mnemonic") {
-		return false
-	}
-	return strings.Contains("\x00"+names+"\x00", "\x00"+parts[2]+"\x00")
 }

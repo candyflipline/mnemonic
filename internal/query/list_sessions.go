@@ -8,16 +8,12 @@ import (
 	"strings"
 )
 
-// list_sessions ports upstream mcp-core/src/list_sessions_v1.rs
-// over the DuckDB cache, with the page SQL from
-// upstream conversations/src/clickhouse_repo/{list,session_page}.rs.
 type listSessions struct{}
 
 func (listSessions) Name() string { return "list_sessions" }
 
 func init() { register(listSessions{}) }
 
-// Limits from contract.rs; max_results is the server cap the MCP layer pins.
 const (
 	lsDefaultLimit = 20
 	lsMinLimit     = 1
@@ -29,10 +25,16 @@ type lsArgs struct {
 	StartUnixMs, EndUnixMs     int64
 	Limit                      int
 	Cursor                     string
-	Mode                       string // "" = unset
-	Harness, Source            *string
-	Sort                       string // "asc" | "desc"
+	Mode, Harness, Source      *string
+	Sort                       lsSort
 }
+
+type lsSort string
+
+const (
+	lsSortAsc  lsSort = "asc"
+	lsSortDesc lsSort = "desc"
+)
 
 var lsModes = map[string]bool{"web_search": true, "mcp_internal": true, "tool_calling": true, "chat": true}
 
@@ -52,8 +54,7 @@ func (listSessions) Call(ctx context.Context, db *sql.DB, args json.RawMessage) 
 	return payload["data"], lsText(payload), nil
 }
 
-// lsParseArgs ports parse_list_sessions_args + ListSessionsArgs::validate.
-// Every serde-level failure carries the same upstream message.
+// lsParseArgs: every serde-level failure carries the same upstream message.
 func lsParseArgs(raw json.RawMessage) (*lsArgs, error) {
 	fields, err := lsObjectFields(raw,
 		"start_datetime", "end_datetime", "limit", "cursor", "mode", "harness", "source", "sort")
@@ -114,11 +115,11 @@ func lsParseArgs(raw json.RawMessage) (*lsArgs, error) {
 	if in.sort, err = str("sort"); err != nil {
 		return nil, lsSerdeError()
 	}
-	if in.sort != nil && *in.sort != "asc" && *in.sort != "desc" {
+	if in.sort != nil && lsSort(*in.sort) != lsSortAsc && lsSort(*in.sort) != lsSortDesc {
 		return nil, lsSerdeError()
 	}
 
-	a := &lsArgs{Sort: "desc"}
+	a := &lsArgs{Sort: lsSortDesc}
 	maxLimit := lsMaxResults
 	if maxLimit < lsMinLimit {
 		maxLimit = lsMinLimit
@@ -131,10 +132,10 @@ func lsParseArgs(raw json.RawMessage) (*lsArgs, error) {
 		a.Limit = int(*in.limit)
 	}
 	if a.Limit < lsMinLimit || a.Limit > maxLimit {
-		return nil, qErr("limit must be between 1 and %d", maxLimit)
+		return nil, argErrorf("limit must be between 1 and %d", maxLimit)
 	}
 	if in.start == nil || in.end == nil {
-		return nil, qErr("list_sessions requires start_datetime and end_datetime with explicit timezones")
+		return nil, argErrorf("list_sessions requires start_datetime and end_datetime with explicit timezones")
 	}
 	a.StartDatetime = strings.TrimSpace(*in.start)
 	a.EndDatetime = strings.TrimSpace(*in.end)
@@ -146,12 +147,12 @@ func lsParseArgs(raw json.RawMessage) (*lsArgs, error) {
 		return nil, aerr
 	}
 	if a.EndUnixMs <= a.StartUnixMs {
-		return nil, qErr("end_datetime must be later than start_datetime")
+		return nil, argErrorf("end_datetime must be later than start_datetime")
 	}
 	if in.cursor != nil {
 		a.Cursor = strings.TrimSpace(*in.cursor)
 		if a.Cursor == "" {
-			return nil, qErr("cursor must be a non-empty string when provided")
+			return nil, argErrorf("cursor must be a non-empty string when provided")
 		}
 	}
 	if a.Harness, aerr = qNonEmptyFilter("harness", derefStr(in.harness), in.harness != nil); aerr != nil {
@@ -160,17 +161,15 @@ func lsParseArgs(raw json.RawMessage) (*lsArgs, error) {
 	if a.Source, aerr = qNonEmptyFilter("source", derefStr(in.src), in.src != nil); aerr != nil {
 		return nil, aerr
 	}
-	if in.mode != nil {
-		a.Mode = *in.mode
-	}
+	a.Mode = in.mode
 	if in.sort != nil {
-		a.Sort = *in.sort
+		a.Sort = lsSort(*in.sort)
 	}
 	return a, nil
 }
 
 func lsSerdeError() error {
-	return qErr("list_sessions expects a JSON object with start_datetime and end_datetime")
+	return argErrorf("list_sessions expects a JSON object with start_datetime and end_datetime")
 }
 
 func derefStr(s *string) string {
@@ -196,7 +195,7 @@ func lsObjectFields(raw json.RawMessage, allowed ...string) (map[string]json.Raw
 			}
 		}
 		if !ok {
-			return nil, qErr("unknown field %q", key)
+			return nil, argErrorf("unknown field %q", key)
 		}
 	}
 	return fields, nil
@@ -206,7 +205,7 @@ func lsCanonicalRequest(a *lsArgs) map[string]any {
 	req := map[string]any{
 		"start_datetime": a.StartDatetime,
 		"end_datetime":   a.EndDatetime,
-		"sort":           a.Sort,
+		"sort":           string(a.Sort),
 		"limit":          a.Limit,
 		"cursor":         nil,
 		"harness":        nil,
@@ -215,8 +214,8 @@ func lsCanonicalRequest(a *lsArgs) map[string]any {
 	if a.Cursor != "" {
 		req["cursor"] = a.Cursor
 	}
-	if a.Mode != "" {
-		req["mode"] = a.Mode
+	if a.Mode != nil {
+		req["mode"] = *a.Mode
 	} else {
 		req["mode"] = nil
 	}
@@ -229,7 +228,6 @@ func lsCanonicalRequest(a *lsArgs) map[string]any {
 	return req
 }
 
-// lsItem is one mapped McpSessionListItem.
 type lsItem struct {
 	SessionID                         string
 	FirstEventTime, LastEventTime     string
@@ -244,34 +242,24 @@ type lsItem struct {
 	DisplayLabel                      string
 }
 
-// lsPage is the repo-layer result: items plus the opaque next cursor.
 type lsPage struct {
 	Items      []lsItem
 	NextCursor *string
 }
 
-// lsFilterSig ports mcp_session_list_filter_sig: the cursor carries a
-// signature of every filter it only resumes under.
 func lsFilterSig(a *lsArgs) string {
-	b, err := json.Marshal([]any{a.StartUnixMs, a.EndUnixMs, optStr(a.Mode), a.Harness, a.Source, a.Sort, nil})
+	b, err := json.Marshal([]any{a.StartUnixMs, a.EndUnixMs, a.Mode, a.Harness, a.Source, a.Sort, nil})
 	if err != nil {
 		return ""
 	}
 	return string(b)
 }
 
-func optStr(s string) any {
-	if s == "" {
-		return nil
-	}
-	return s
-}
-
 type lsCursor struct {
 	LastEventUnixMs int64
 	SessionID       string
 	FilterSig       string
-	Sort            string
+	Sort            lsSort
 }
 
 func lsEncodeCursor(c *lsCursor) (*string, error) {
@@ -279,24 +267,22 @@ func lsEncodeCursor(c *lsCursor) (*string, error) {
 	if err != nil {
 		return nil, err
 	}
-	token := qB64URL(b)
+	token := b64RawURL.EncodeToString(b)
 	return &token, nil
 }
 
 func lsDecodeCursor(token string) (*lsCursor, error) {
 	raw, err := qDecodeB64URL(token)
 	if err != nil {
-		return nil, qErr("invalid base64 cursor")
+		return nil, argErrorf("invalid base64 cursor")
 	}
 	var c lsCursor
 	if err := json.Unmarshal(raw, &c); err != nil {
-		return nil, qErr("invalid cursor payload")
+		return nil, argErrorf("invalid cursor payload")
 	}
 	return &c, nil
 }
 
-// lsQueryPage ports list_mcp_sessions_impl: phase 1 picks the page of ids
-// from narrow columns, phase 2 summarizes only those sessions.
 func lsQueryPage(ctx context.Context, db *sql.DB, a *lsArgs) (*lsPage, error) {
 	var cursor *lsCursor
 	if a.Cursor != "" {
@@ -305,10 +291,10 @@ func lsQueryPage(ctx context.Context, db *sql.DB, a *lsArgs) (*lsPage, error) {
 			return nil, err
 		}
 		if c.FilterSig != lsFilterSig(a) {
-			return nil, qErr("cursor does not match current list_sessions filter")
+			return nil, argErrorf("cursor does not match current list_sessions filter")
 		}
 		if c.Sort != a.Sort {
-			return nil, qErr("cursor sort does not match requested sort order")
+			return nil, argErrorf("cursor sort does not match requested sort order")
 		}
 		cursor = c
 	}
@@ -340,7 +326,6 @@ func lsQueryPage(ctx context.Context, db *sql.DB, a *lsArgs) (*lsPage, error) {
 	return &lsPage{Items: items, NextCursor: next}, nil
 }
 
-// lsDataJSON ports list_sessions_data_json.
 func lsDataJSON(a *lsArgs, page *lsPage) map[string]any {
 	sessions := make([]any, 0, len(page.Items))
 	for _, item := range page.Items {
@@ -357,8 +342,8 @@ func lsDataJSON(a *lsArgs, page *lsPage) map[string]any {
 				"display_label":   item.DisplayLabel,
 				"harness":         nilPtr(item.Harness),
 				"source":          nilPtr(item.Source),
-				"started_at":      qFormatMillis(item.FirstEventUnixMs),
-				"updated_at":      qFormatMillis(item.LastEventUnixMs),
+				"started_at":      formatRFC3339UTCMillis(item.FirstEventUnixMs),
+				"updated_at":      formatRFC3339UTCMillis(item.LastEventUnixMs),
 				"completed":       item.Completed,
 				"turn_count":      item.TotalTurns,
 				"event_count":     item.TotalEvents,
@@ -378,8 +363,6 @@ func lsDataJSON(a *lsArgs, page *lsPage) map[string]any {
 	}
 }
 
-// nilPtr erases a typed nil pointer to untyped nil, matching how the
-// upstream Option serializes; it also lets text checks type-assert strings.
 func nilPtr[T any](p *T) any {
 	if p == nil {
 		return nil
@@ -387,7 +370,6 @@ func nilPtr[T any](p *T) any {
 	return *p
 }
 
-// lsText ports format_list_sessions_text.
 func lsText(payload map[string]any) string {
 	req, _ := payload["request"].(map[string]any)
 	start := stringAt(req, "start_datetime")

@@ -9,13 +9,6 @@ import (
 	"time"
 )
 
-// get_ingest_status ports upstream mcp-core/src/get_ingest_status_v1.rs.
-// Upstream reads ClickHouse ingest heartbeats; this server has no heartbeats,
-// so the read side maps the `sources` table (per author/machine: newest
-// updated_ms, source count, total size, sources without a parser) onto the
-// same heartbeat shape and every field without a counterpart takes the honest
-// zero/empty value. The mapping is listed in the lane report.
-
 type getIngestStatus struct{}
 
 func (getIngestStatus) Name() string { return "get_ingest_status" }
@@ -24,7 +17,7 @@ func init() { register(getIngestStatus{}) }
 
 func (getIngestStatus) Call(ctx context.Context, db *sql.DB, args json.RawMessage) (any, string, error) {
 	if !stEmptyArgs(args) {
-		return nil, "", qErr("get_ingest_status expects an empty JSON object")
+		return nil, "", argErrorf("get_ingest_status expects an empty JSON object")
 	}
 	read, err := stReadSources(ctx, db)
 	if err != nil {
@@ -35,8 +28,6 @@ func (getIngestStatus) Call(ctx context.Context, db *sql.DB, args json.RawMessag
 	return data, stStatusText(status), nil
 }
 
-// stEmptyArgs ports GetIngestStatusArgs (an empty struct with
-// deny_unknown_fields): only the literal empty object parses.
 func stEmptyArgs(args json.RawMessage) bool {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(args, &fields); err != nil || fields == nil {
@@ -57,8 +48,6 @@ type stGroupRow struct {
 	parsedBytes int64
 }
 
-// stReadSources maps the sources table onto IngestStatusRead: one synthetic
-// heartbeat per (author, machine_id) group, the newest group as latest.
 func stReadSources(ctx context.Context, db *sql.DB) (stStatusRead, error) {
 	rows, err := db.QueryContext(ctx,
 		"SELECT author, machine_id, max(updated_ms), count(*), coalesce(sum(size), 0),"+
@@ -86,7 +75,6 @@ func stReadSources(ctx context.Context, db *sql.DB) (stStatusRead, error) {
 	for _, g := range groups {
 		heartbeats = append(heartbeats, stGroupHeartbeat(g))
 	}
-	// Latest = newest group; ties break on host descending for determinism.
 	latestIdx := 0
 	for i := range heartbeats {
 		a, b := heartbeats[i], heartbeats[latestIdx]
@@ -96,30 +84,21 @@ func stReadSources(ctx context.Context, db *sql.DB) (stStatusRead, error) {
 	}
 	history := append([]stHeartbeat{}, heartbeats...)
 	sort.SliceStable(history, func(i, j int) bool { return history[i].TsUnixMs < history[j].TsUnixMs })
-	return stStatusRead{TablePresent: true, Latest: &heartbeats[latestIdx], History: history}, nil
+	return stStatusRead{Latest: &heartbeats[latestIdx], History: history}, nil
 }
 
-// stGroupHeartbeat fills the heartbeat shape from one (author, machine) group.
-// Queue and sink fields have no live counterpart on a pull-based server and
-// stay zero; discovery is complete by construction (the manifest is closed).
 func stGroupHeartbeat(g stGroupRow) stHeartbeat {
 	return stHeartbeat{
-		TsUnixMs:     g.updatedMs,
-		Host:         g.author + "/" + g.machine,
-		FilesWatched: uint32(g.sourceCount),
-		Progress: &stProgress{
-			DiscoveryComplete:         true,
-			LastDurableProgressUnixMs: uint64(g.updatedMs),
-			FilesTotal:                uint64(g.sourceCount),
-			FilesCompleted:            uint64(g.parsedCount),
-			BytesTotal:                uint64(g.totalBytes),
-			BytesCompleted:            uint64(g.parsedBytes),
-		},
+		TsUnixMs:                  g.updatedMs,
+		Host:                      g.author + "/" + g.machine,
+		FilesWatched:              uint32(g.sourceCount),
+		LastDurableProgressUnixMs: uint64(g.updatedMs),
+		FilesTotal:                uint64(g.sourceCount),
+		FilesCompleted:            uint64(g.parsedCount),
+		BytesTotal:                uint64(g.totalBytes),
+		BytesCompleted:            uint64(g.parsedBytes),
 	}
 }
-
-// The wire projection: only these fields leave the server. The raw heartbeat
-// (stHeartbeat) never serializes.
 
 type stStatusJSONShape struct {
 	ObservedAtUnixMs int64                `json:"observed_at_unix_ms"`
@@ -197,30 +176,19 @@ func stStatusJSON(status stStatus) *stStatusJSONShape {
 		Alerts:           make([]stAlertJSON, 0, len(status.Alerts)),
 		History:          make([]stHistoryPointJSON, 0, len(status.History)),
 	}
-	if status.Current != nil {
-		current := &stCurrentJSON{
-			HeartbeatObservedAtUnixMs: status.Current.TsUnixMs,
-			QueueDepth:                status.Current.QueueDepth,
-			FilesActive:               status.Current.FilesActive,
-			FilesWatched:              status.Current.FilesWatched,
+	if c := status.Current; c != nil {
+		out.Current = &stCurrentJSON{
+			HeartbeatObservedAtUnixMs: c.TsUnixMs,
+			FilesWatched:              c.FilesWatched,
+			Progress: &stProgressJSON{
+				DiscoveryComplete:         true,
+				LastDurableProgressUnixMs: c.LastDurableProgressUnixMs,
+				FilesTotal:                c.FilesTotal,
+				FilesCompleted:            c.FilesCompleted,
+				BytesTotal:                c.BytesTotal,
+				BytesCompleted:            c.BytesCompleted,
+			},
 		}
-		if status.Current.Progress != nil {
-			p := status.Current.Progress
-			current.Progress = &stProgressJSON{
-				DiscoveryComplete:         p.DiscoveryComplete,
-				QueueCapacity:             p.QueueCapacity,
-				SinkPendingRows:           p.SinkPendingRows,
-				SinkPendingBytes:          p.SinkPendingBytes,
-				SinkRetrying:              p.SinkRetrying,
-				OldestPendingUnixMs:       p.OldestPendingUnixMs,
-				LastDurableProgressUnixMs: p.LastDurableProgressUnixMs,
-				FilesTotal:                p.FilesTotal,
-				FilesCompleted:            p.FilesCompleted,
-				BytesTotal:                p.BytesTotal,
-				BytesCompleted:            p.BytesCompleted,
-			}
-		}
-		out.Current = current
 	}
 	for _, c := range status.Conditions {
 		out.Conditions = append(out.Conditions, stConditionJSON{
@@ -238,9 +206,7 @@ func stStatusJSON(status stStatus) *stStatusJSONShape {
 	}
 	for _, h := range status.History {
 		out.History = append(out.History, stHistoryPointJSON{
-			TsUnixMs: h.TsUnixMs, QueueDepth: h.QueueDepth, FilesActive: h.FilesActive,
-			QueueCapacity: h.QueueCapacity, SinkPendingRows: h.SinkPendingRows,
-			SinkRetrying: h.SinkRetrying, DiscoveryComplete: h.DiscoveryComplete,
+			TsUnixMs: h.TsUnixMs, DiscoveryComplete: true,
 			FilesTotal: h.FilesTotal, FilesCompleted: h.FilesCompleted,
 			BytesTotal: h.BytesTotal, BytesCompleted: h.BytesCompleted,
 		})
@@ -248,7 +214,6 @@ func stStatusJSON(status stStatus) *stStatusJSONShape {
 	return out
 }
 
-// stConditionStateText ports condition_state.
 func stConditionStateText(status stStatus, kind stConditionType) (string, string) {
 	for _, c := range status.Conditions {
 		if c.Type != kind {
@@ -266,7 +231,6 @@ func stConditionStateText(status stStatus, kind stConditionType) (string, string
 	return "unknown", "condition_missing"
 }
 
-// stStatusText ports format_status_text.
 func stStatusText(status stStatus) string {
 	health, healthReason := stConditionStateText(status, stCondHealth)
 	coverage, coverageReason := stConditionStateText(status, stCondCoverage)
@@ -276,8 +240,7 @@ func stStatusText(status stStatus) string {
 		"Ingestion health=%s (%s); coverage=%s (%s); freshness=%s (%s); readiness=%s (%s).",
 		health, healthReason, coverage, coverageReason, freshness, freshnessReason, readiness, readinessReason)}
 
-	if status.Current != nil && status.Current.Progress != nil {
-		progress := status.Current.Progress
+	if progress := status.Current; progress != nil {
 		var percent float64
 		switch {
 		case progress.BytesTotal > 0:

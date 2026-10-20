@@ -8,21 +8,16 @@ import (
 	"time"
 )
 
-// DuckDB ports of the ClickHouse SQL in session_page.rs and list.rs's
-// list_mcp_sessions_impl. The events table is deduped at build time, so the
-// upstream FINAL reads and ANY joins collapse to plain reads.
-
 // lsEventTime is v_conversation_trace.event_time: TIMESTAMPTZ parsing honors
 // record_ts's trailing Z, and the session runs in UTC.
 const lsEventTime = "coalesce(try_cast(record_ts AS TIMESTAMPTZ), ingested_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'"
 
-// lsModeAggregate ports helpers.rs mode_aggregate_sql.
 func lsModeAggregate() string {
 	return "CASE\n" +
 		"  WHEN count(*) FILTER (WHERE payload_type = 'web_search_call'\n" +
 		"    OR payload_type = 'search_results_received'\n" +
 		"    OR (payload_type = 'tool_use' AND tool_name IN ('WebSearch', 'WebFetch'))) > 0 THEN 'web_search'\n" +
-		"  WHEN count(*) FILTER (WHERE source_name = 'codex-mcp' OR " + qInternalToolPredicate("tool_name") + ") > 0 THEN 'mcp_internal'\n" +
+		"  WHEN count(*) FILTER (WHERE source_name = 'codex-mcp' OR " + mcpInternalToolPredicate("tool_name") + ") > 0 THEN 'mcp_internal'\n" +
 		"  WHEN count(*) FILTER (WHERE event_kind IN ('tool_call', 'tool_result') OR payload_type = 'tool_use') > 0 THEN 'tool_calling'\n" +
 		"  ELSE 'chat' END"
 }
@@ -41,18 +36,11 @@ func lsArgMaxIf(arg, pred string) string {
 	return "arg_max(" + arg + ", " + lsArgMaxOrder + ") FILTER (WHERE " + pred + " AND " + arg + " IS NOT NULL)"
 }
 
-// lsArgMinIf orders a trusted arg expression by
-// (event_ts, source_name, source_file, source_generation, source_offset,
-// source_line_no, event_uid), skipping NULL args like ClickHouse argMinIf.
 func lsArgMinIf(arg, pred string) string {
 	orderBy := "struct_pack(a := event_ts, b := source_name, c := source_file, d := source_generation, e := source_offset, f := source_line_no, g := event_uid)"
 	return "arg_min(" + arg + ", " + orderBy + ") FILTER (WHERE " + pred + " AND " + arg + " IS NOT NULL)"
 }
 
-// lsSelectPage ports SessionPageSelect::to_sql for the MCP list: sessions
-// overlapping [start, end), keyset cursor, aggregate mode/harness/source
-// filters. Only the ids come back; phase 2 recomputes every event-backed
-// field.
 func lsSelectPage(ctx context.Context, db *sql.DB, a *lsArgs, cursor *lsCursor) ([]lsItem, error) {
 	columns := []string{"session_id", "record_ts", "ingested_at"}
 	aggregates := ""
@@ -60,10 +48,10 @@ func lsSelectPage(ctx context.Context, db *sql.DB, a *lsArgs, cursor *lsCursor) 
 		"epoch_ms(last_event_time) >= " + strconv.FormatInt(a.StartUnixMs, 10),
 		"epoch_ms(first_event_time) < " + strconv.FormatInt(a.EndUnixMs, 10),
 	}
-	if a.Mode != "" {
+	if a.Mode != nil {
 		columns = append(columns, "event_kind", "payload_type", "tool_name", "source_name")
 		aggregates += ",\n    " + lsModeAggregate() + " AS session_mode"
-		having = append(having, "session_mode = "+qQuote(a.Mode))
+		having = append(having, "session_mode = "+sqlQuote(*a.Mode))
 	}
 	if a.Harness != nil || a.Source != nil {
 		columns = append(columns, "event_ts", "event_uid")
@@ -71,24 +59,24 @@ func lsSelectPage(ctx context.Context, db *sql.DB, a *lsArgs, cursor *lsCursor) 
 	if a.Harness != nil {
 		columns = append(columns, "harness")
 		aggregates += ",\n    " + lsArgMax("nullif(harness, '')") + " AS latest_harness"
-		having = append(having, "latest_harness = "+qQuote(*a.Harness))
+		having = append(having, "latest_harness = "+sqlQuote(*a.Harness))
 	}
 	if a.Source != nil {
 		if !contains(columns, "source_name") {
 			columns = append(columns, "source_name")
 		}
 		aggregates += ",\n    " + lsArgMax("nullif(source_name, '')") + " AS latest_source_name"
-		having = append(having, "latest_source_name = "+qQuote(*a.Source))
+		having = append(having, "latest_source_name = "+sqlQuote(*a.Source))
 	}
 	cmp := ">"
-	if a.Sort == "desc" {
+	if a.Sort == lsSortDesc {
 		cmp = "<"
 	}
 	if cursor != nil {
 		ms := strconv.FormatInt(cursor.LastEventUnixMs, 10)
 		having = append(having, "(epoch_ms(last_event_time) "+cmp+" "+ms+
 			" OR (epoch_ms(last_event_time) = "+ms+
-			" AND session_id "+cmp+" "+qQuote(cursor.SessionID)+"))")
+			" AND session_id "+cmp+" "+sqlQuote(cursor.SessionID)+"))")
 	}
 
 	q := "SELECT session_id, first_event_time, last_event_time\nFROM (\n" +
@@ -124,8 +112,8 @@ func lsSelectPage(ctx context.Context, db *sql.DB, a *lsArgs, cursor *lsCursor) 
 	return lsSummarizePage(ctx, db, ids, a.Sort)
 }
 
-func dirSQL(sort string) string {
-	if sort == "asc" {
+func dirSQL(sort lsSort) string {
+	if sort == lsSortAsc {
 		return "ASC"
 	}
 	return "DESC"
@@ -140,9 +128,7 @@ func contains(xs []string, s string) bool {
 	return false
 }
 
-// lsSummarizePage ports phase 2 of list_mcp_sessions_impl: one grouped pass
-// over the page's events.
-func lsSummarizePage(ctx context.Context, db *sql.DB, ids []string, sort string) ([]lsItem, error) {
+func lsSummarizePage(ctx context.Context, db *sql.DB, ids []string, sort lsSort) ([]lsItem, error) {
 	idsSQL := qQuoteJoin(ids)
 	modeAgg := lsModeAggregate()
 	q := "WITH\n" +
@@ -237,8 +223,6 @@ func lsSummarizePage(ctx context.Context, db *sql.DB, ids []string, sort string)
 	return out, nil
 }
 
-// lsMetadataRollups ports the metadata_rollups CTE over session_meta and omp
-// payload rows.
 func lsMetadataRollups(idsSQL string) string {
 	str := func(expr string) string { return "nullif(json_extract_string(payload_json, '$." + expr + "'), '')" }
 	title, name, summ := str("title"), str("name"), str("summary")
@@ -285,12 +269,11 @@ func strPtr(s string) *string {
 func qQuoteJoin(ids []string) string {
 	quoted := make([]string, len(ids))
 	for i, id := range ids {
-		quoted[i] = qQuote(id)
+		quoted[i] = sqlQuote(id)
 	}
 	return strings.Join(quoted, ", ")
 }
 
-// lsDisplayLabel ports session_label.rs build_session_display_label.
 func lsDisplayLabel(explicitTitle, userMessagePreview, wireTitle, summary, slug, harness, mode, updatedAt string, totalTurns int) string {
 	if strings.TrimSpace(explicitTitle) != "" {
 		return explicitTitle
@@ -311,8 +294,6 @@ func lsDisplayLabel(explicitTitle, userMessagePreview, wireTitle, summary, slug,
 	return h + ", " + lsReadableMode(mode) + ", " + strings.TrimSpace(updatedAt) + ", " + turns
 }
 
-// lsCompactPreview ports compact_user_message_preview: first line, capped at
-// 120 characters with an ellipsis.
 func lsCompactPreview(preview string) string {
 	trimmed := strings.TrimSpace(preview)
 	if trimmed == "" {
@@ -371,7 +352,6 @@ func lsReadableMode(mode string) string {
 	return "session"
 }
 
-// lsParseMode ports helpers.rs parse_mode.
 func lsParseMode(raw string) string {
 	switch raw {
 	case "web_search", "mcp_internal", "tool_calling":

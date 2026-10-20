@@ -6,11 +6,6 @@ import (
 	"testing"
 )
 
-// Ports of the formatter and argument tests in upstream
-// upstream mcp-core/src/list_sessions_v1.rs, with the server cap pinned
-// to 25 (tools.json), so the over-limit cases use 26/25 where upstream used
-// 51/50.
-
 func TestListSessionsParsesAndCanonicalizes(t *testing.T) {
 	raw := json.RawMessage(`{
 		"start_datetime": "2026-04-30T09:00:00-04:00",
@@ -27,8 +22,8 @@ func TestListSessionsParsesAndCanonicalizes(t *testing.T) {
 	if a.StartUnixMs != 1777554000000 || a.EndUnixMs != 1777568400000 {
 		t.Fatalf("range = %d..%d, want 1777554000000..1777568400000", a.StartUnixMs, a.EndUnixMs)
 	}
-	if a.Mode != "chat" || a.Sort != "asc" || a.Limit != 12 || a.Cursor != "abc" {
-		t.Fatalf("mode/sort/limit/cursor = %q/%q/%d/%q", a.Mode, a.Sort, a.Limit, a.Cursor)
+	if a.Mode == nil || *a.Mode != "chat" || a.Sort != "asc" || a.Limit != 12 || a.Cursor != "abc" {
+		t.Fatalf("mode/sort/limit/cursor = %v/%q/%d/%q", a.Mode, a.Sort, a.Limit, a.Cursor)
 	}
 }
 
@@ -82,9 +77,6 @@ func TestListSessionsRejectsNegativeLimit(t *testing.T) {
 	}
 }
 
-// TestListSessionsShapesSessionMetadataOnly ports
-// shapes_session_metadata_only_with_open_handle. The limit stays at upstream's
-// 50: this is the formatter's echo of the request, not the server cap.
 func TestListSessionsShapesSessionMetadataOnly(t *testing.T) {
 	page := &lsPage{Items: []lsItem{{
 		SessionID:        "sess-open",

@@ -9,9 +9,6 @@ import (
 	"unicode/utf8"
 )
 
-// Ports of the resolve_tail, build_data and format_text tests in upstream
-// upstream mcp-core/src/file_attention_v1.rs.
-
 func TestFaRejectsNegativeLimit(t *testing.T) {
 	raw := json.RawMessage(`{"path": "crates/foo/tee.rs", "limit": -1}`)
 	if _, err := faParseArgs(raw); err == nil || err.Error() != "limit must be between 1 and 25" {
@@ -35,11 +32,11 @@ func TestFaStripRootRemovesPrefixWithOneSlash(t *testing.T) {
 }
 
 func TestFaResolveTailPassesUnscopedRelativePathsThrough(t *testing.T) {
-	tail := faResolveTail("crates/foo/tee.rs", "")
-	if tail.Rel != "crates/foo/tee.rs" || tail.Abs || tail.DeriveRoots {
+	tail := faResolveTail("crates/foo/tee.rs")
+	if tail.Rel != "crates/foo/tee.rs" || tail.Root != "" {
 		t.Fatalf("tail = %#v", tail)
 	}
-	tail = faResolveTail("./crates/foo/tee.rs", "")
+	tail = faResolveTail("./crates/foo/tee.rs")
 	if tail.Rel != "crates/foo/tee.rs" || !tail.Normalized {
 		t.Fatalf("./ tail = %#v", tail)
 	}
@@ -51,9 +48,9 @@ func TestFaResolveTailNormalizesDotDotAndRepeatedSlashes(t *testing.T) {
 		{"crates//foo///bar.rs", "crates/foo/bar.rs"},
 		{"crates/foo dir/x.rs", "crates/foo dir/x.rs"},
 	} {
-		tail := faResolveTail(tc.in, "")
-		if tail.Rel != tc.want || tail.Abs {
-			t.Fatalf("%q -> %q (abs=%v), want %q", tc.in, tail.Rel, tail.Abs, tc.want)
+		tail := faResolveTail(tc.in)
+		if tail.Rel != tc.want {
+			t.Fatalf("%q -> %q, want %q", tc.in, tail.Rel, tc.want)
 		}
 	}
 }
@@ -79,7 +76,6 @@ func TestFaTailSegmentsCountsNonEmptyComponents(t *testing.T) {
 	}
 }
 
-// faGitDir makes an empty Git repository root (a .git directory, no objects).
 func faGitDir(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -87,56 +83,6 @@ func faGitDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return root
-}
-
-func TestFaResolveTailCarriesLaunchProjectIdentity(t *testing.T) {
-	root := faGitDir(t)
-	tail := faResolveTail("crates/new/file.rs", root)
-	if tail.Rel != "crates/new/file.rs" || tail.Root != root || tail.ProjID != qProjectIDForRoot(root) || !tail.DeriveRoots {
-		t.Fatalf("tail = %#v", tail)
-	}
-}
-
-func TestFaResolveTailUsesExactLaunchDirectoryWithoutGit(t *testing.T) {
-	launch := t.TempDir()
-	tail := faResolveTail("crates/foo/tee.rs", launch)
-	if tail.Rel != "crates/foo/tee.rs" || tail.Root != launch || !strings.HasPrefix(tail.ProjID, "dir:") || !tail.DeriveRoots {
-		t.Fatalf("tail = %#v", tail)
-	}
-	escape := faResolveTail("../outside.rs", launch)
-	if escape.ProjID != "" || escape.Root != "" || escape.DeriveRoots {
-		t.Fatalf("escape = %#v", escape)
-	}
-}
-
-func TestFaResolveTailMakesNestedLaunchPathsRepositoryRelative(t *testing.T) {
-	repo := faGitDir(t)
-	nested := filepath.Join(repo, "crates", "foo")
-	if err := os.MkdirAll(nested, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	tail := faResolveTail("src/lib.rs", nested)
-	if tail.Rel != "crates/foo/src/lib.rs" {
-		t.Fatalf("nested rel = %q", tail.Rel)
-	}
-	tail = faResolveTail("../shared.rs", nested)
-	if tail.Rel != "crates/shared.rs" {
-		t.Fatalf("parent rel = %q", tail.Rel)
-	}
-	tail = faResolveTail("../../../outside.rs", nested)
-	if tail.ProjID != "" || tail.DeriveRoots {
-		t.Fatalf("outside = %#v", tail)
-	}
-}
-
-func TestFaResolveTailNeverDerivesProvenanceFromCompoundInput(t *testing.T) {
-	root := faGitDir(t)
-	for _, delim := range []string{"\x00", "\n", "\r", ";", "|", "&", "`"} {
-		tail := faResolveTail("bad"+delim+"command/../src/lib.rs", root)
-		if tail.DeriveRoots || tail.Root != "" || tail.ProjID != "" {
-			t.Fatalf("delimiter %q: tail = %#v", delim, tail)
-		}
-	}
 }
 
 func TestFaResolveTailStripsAbsolutePathToMarkerRoot(t *testing.T) {
@@ -148,78 +94,21 @@ func TestFaResolveTailStripsAbsolutePathToMarkerRoot(t *testing.T) {
 	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tail := faResolveTail(file, "")
-	if tail.Rel != "crates/foo/tee.rs" || tail.Abs || tail.Root != root ||
-		tail.ProjID != qProjectIDForRoot(root) || !tail.DeriveRoots {
-		t.Fatalf("tail = %#v", tail)
-	}
-}
-
-func TestFaResolveTailClosesProjectScopeForAbsolutePathInAnotherProject(t *testing.T) {
-	launch := faGitDir(t)
-	other := faGitDir(t)
-	file := filepath.Join(other, "src", "lib.rs")
-	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	tail := faResolveTail(file, launch)
-	if tail.Rel != "src/lib.rs" || tail.Root != other || tail.ProjID != "" {
-		t.Fatalf("tail = %#v", tail)
-	}
-}
-
-func TestFaResolveTailClosesDirectoryScopeForAbsolutePathOutsideLaunch(t *testing.T) {
-	launch := t.TempDir()
-	outside := t.TempDir()
-	file := filepath.Join(outside, "deep", "file.rs")
-	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	tail := faResolveTail(file, launch)
-	if !tail.Abs || tail.Rel != file || tail.ProjID != "" {
-		t.Fatalf("tail = %#v", tail)
-	}
-}
-
-func TestFaResolveTailKeepsUnmarkedLinkedWorktreeRoot(t *testing.T) {
-	root := faGitDir(t)
-	wtName := filepath.Join(root, ".git", "worktrees", "linked")
-	if err := os.MkdirAll(wtName, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(wtName, "commondir"), []byte("../..\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	worktree := t.TempDir()
-	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+wtName+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(worktree, "src"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	tail := faResolveTail(filepath.Join("src", "lib.rs"), worktree)
-	if tail.Root != worktree || tail.ProjID != qProjectIDForRoot(root) {
+	tail := faResolveTail(file)
+	if tail.Rel != "crates/foo/tee.rs" || tail.Root != root ||
+		tail.ProjID != qProjectIDForRoot(root) {
 		t.Fatalf("tail = %#v", tail)
 	}
 }
 
 func TestFaResolveTailFallsBackToAbsoluteWhenNoMarker(t *testing.T) {
 	path := "/nonexistent-xyz/deep/unmarked/file.rs"
-	tail := faResolveTail(path, "")
-	if !tail.Abs || tail.Rel != path {
+	tail := faResolveTail(path)
+	if tail.Rel != path || tail.Root != "" {
 		t.Fatalf("tail = %#v", tail)
 	}
 }
 
-// --- build_data ---
-
-// faTouchFixture builds one newest-first touch like upstream's touch() helper.
 func faTouchFixture(session, event, tool, matchKind, root string, ts int64) faTouch {
 	var ms *int64
 	var turn *uint32
@@ -299,7 +188,7 @@ func TestFaBuildDataEventsGranularity(t *testing.T) {
 	if event["timestamp"] != "2026-04-29T12:00:01.123Z" {
 		t.Fatalf("timestamp = %v", event["timestamp"])
 	}
-	wantTurn := "turn:" + qB64URL([]byte("sess-ev")) + ":7"
+	wantTurn := "turn:" + b64RawURL.EncodeToString([]byte("sess-ev")) + ":7"
 	if item["open"].(map[string]any)["turn_id"] != wantTurn {
 		t.Fatalf("turn_id = %v", item["open"].(map[string]any)["turn_id"])
 	}
@@ -425,7 +314,7 @@ func TestFaSessionRollupsRankContiguousWhenMiddleRowSkipped(t *testing.T) {
 	if len(sessions) != 2 {
 		t.Fatalf("sessions = %d", len(sessions))
 	}
-	for i, want := range []string{"session:" + qB64URL([]byte("sess-a")), "session:" + qB64URL([]byte("sess-b"))} {
+	for i, want := range []string{"session:" + b64RawURL.EncodeToString([]byte("sess-a")), "session:" + b64RawURL.EncodeToString([]byte("sess-b"))} {
 		item := sessions[i].(map[string]any)
 		if item["rank"] != i+1 || item["id"] != want {
 			t.Fatalf("sessions[%d] = %#v, want rank %d id %s", i, item, i+1, want)
@@ -445,8 +334,6 @@ func TestFaActionPreviewCollapsesWhitespaceAndTruncatesByChars(t *testing.T) {
 		t.Fatalf("collapsed = %q", got)
 	}
 }
-
-// --- format_text ---
 
 func TestFaFormatTextDescribesUnknownOnlyRootsAsIncompleteAttribution(t *testing.T) {
 	data := map[string]any{

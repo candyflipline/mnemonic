@@ -10,7 +10,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/cache/cachetest"
 )
 
-// TestOpenArgValidation ports the OpenV1Args::validate messages.
 func TestOpenArgValidation(t *testing.T) {
 	sessionID := formatSessionID("sess-1")
 	validCursor, err := encodeOpenCursor(openCursor{
@@ -46,7 +45,6 @@ func TestOpenArgValidation(t *testing.T) {
 		}
 	}
 
-	// A cursor is parsed into its target, page size and continuation point.
 	args, err := parseOpenArgs([]byte(`{"cursor":"` + validCursor + `"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -54,16 +52,14 @@ func TestOpenArgValidation(t *testing.T) {
 	if args.target.kind != kindSession || args.target.session != "sess-1" {
 		t.Fatalf("cursor target: %v", args.target)
 	}
-	if args.cursorDecoded.Limit != 3 || args.cursorDecoded.After.EventOrdinal != 1 {
-		t.Fatalf("cursor decode: %+v", args.cursorDecoded)
+	if args.page.limit != 3 || args.page.after.EventOrdinal != 1 {
+		t.Fatalf("cursor decode: %+v", args.page)
 	}
 }
 
-// TestCompactTextKeepsKnownEventHandle ports
-// compact_text_keeps_known_event_handle_without_preview_text.
 func TestCompactTextKeepsKnownEventHandle(t *testing.T) {
 	eventID := formatEventID("event-empty")
-	compact := compactTextContent(eventID, nil)
+	compact := compactTextContent(eventID, "")
 	if compact == nil {
 		t.Fatal("compact is nil")
 	}
@@ -74,13 +70,11 @@ func TestCompactTextKeepsKnownEventHandle(t *testing.T) {
 	if m["text"] != nil || m["truncated"] != false {
 		t.Fatalf("compact: %v", m)
 	}
-	if compactTextContent(nil, nil) != nil {
+	if compactTextContent(nil, "") != nil {
 		t.Fatal("unknown handle must collapse to null")
 	}
 }
 
-// TestSessionOpenUsesTypedIDsAndCompactTurns ports
-// session_open_uses_typed_ids_and_compact_turns.
 func TestSessionOpenUsesTypedIDsAndCompactTurns(t *testing.T) {
 	turn := &turnAccum{
 		metadata: &turnSummary{
@@ -117,8 +111,7 @@ func TestSessionOpenUsesTypedIDsAndCompactTurns(t *testing.T) {
 			mode: "tool_calling", firstEventUID: "event-user", lastEventUID: "event-final",
 		},
 		source: "codex", harness: "cli", inferenceProvider: "openai",
-		turnSeqs: []uint32{1},
-		turns:    map[uint32]*turnAccum{1: turn},
+		turns: map[uint32]*turnAccum{1: turn},
 		metadataRows: []*navRow{{
 			sessionID:   "session-a",
 			eventClass:  "session_meta",
@@ -169,7 +162,6 @@ func TestSessionOpenUsesTypedIDsAndCompactTurns(t *testing.T) {
 	}
 }
 
-// rowInput builds a navRow for tests.
 type rowInput struct {
 	uid     string
 	class   string
@@ -202,8 +194,6 @@ func mustRow(in rowInput) *navRow {
 	}
 }
 
-// TestTurnOpenReturnsCompactEventHandlesWithoutPayloads ports
-// turn_open_returns_compact_event_handles_without_payloads.
 func TestTurnOpenReturnsCompactEventHandlesWithoutPayloads(t *testing.T) {
 	toolRow := &navRow{
 		sessionID: "session-a", eventUID: "event-tool",
@@ -237,7 +227,6 @@ func TestTurnOpenReturnsCompactEventHandlesWithoutPayloads(t *testing.T) {
 	scan := &sessionScan{
 		metadata: sessionMetadata{sessionID: "session-a", totalTurns: 2, totalEvents: 4, mode: "tool_calling"},
 		source:   "codex",
-		turnSeqs: []uint32{1, 2},
 		turns:    map[uint32]*turnAccum{1: turn, 2: nextTurn},
 	}
 	events := []any{}
@@ -278,7 +267,6 @@ func TestTurnOpenReturnsCompactEventHandlesWithoutPayloads(t *testing.T) {
 	}
 }
 
-// TestEncryptedReasoningSummary ports turn_expansion_omits_encrypted_reasoning_payloads.
 func TestEncryptedReasoningSummary(t *testing.T) {
 	row := &navRow{
 		sessionID: "session-a", eventUID: "event-reasoning",
@@ -305,8 +293,6 @@ func TestEncryptedReasoningSummary(t *testing.T) {
 	}
 }
 
-// TestEventOpenIncludesFullToolCallContent ports
-// event_open_includes_full_tool_call_content.
 func TestEventOpenIncludesFullToolCallContent(t *testing.T) {
 	target := &navRow{
 		sessionID: "session-a", eventUID: "event-tool",
@@ -331,7 +317,6 @@ func TestEventOpenIncludesFullToolCallContent(t *testing.T) {
 			mode: "tool_calling",
 		},
 		source:           "claude",
-		turnSeqs:         []uint32{1},
 		turns:            map[uint32]*turnAccum{1: parentTurn},
 		completed:        true,
 		terminalEventUID: "event-final",
@@ -371,9 +356,6 @@ func TestEventOpenIncludesFullToolCallContent(t *testing.T) {
 	}
 }
 
-// TestOpenResultTextProse ports event_text_carries_the_full_body_for_content_only_clients,
-// tool_call_event_text_includes_arguments_and_exit_code,
-// turn_and_session_text_list_their_children and error_text_is_unchanged.
 func TestOpenResultTextProse(t *testing.T) {
 	t.Run("event body", func(t *testing.T) {
 		body := "search label near the start. " + strings.Repeat("x", 4000) + " synthetic-fact-42"
@@ -446,7 +428,6 @@ func TestOpenResultTextProse(t *testing.T) {
 		if !strings.Contains(text, "2. tool_call [exec_command]: cargo test (event:2)") {
 			t.Fatalf("child line missing:\n%s", text)
 		}
-		// A null next_cursor is the final page (upstream as_str check).
 		if !strings.Contains(text, "Opened turn turn:t1 with the final 2 events.") {
 			t.Fatalf("final header missing:\n%s", text)
 		}
@@ -476,14 +457,12 @@ func TestOpenResultTextProse(t *testing.T) {
 	})
 }
 
-// Fixture literals over the golden lake (codex + claude_code).
 const (
 	fixtureCodexSession  = "019c5f6a-49bd-7920-ac67-1dd8e33b0e95"
 	fixtureClaudeSession = "7c666c01-d38e-4658-8650-854ffb5b626e"
 	fixtureClaudeToolUID = "b7a60c19257e13643a612279032f92153761008a208238f7ed2948420698cc0d"
 )
 
-// TestOpenFixture locks the open shapes over the golden cache.
 func TestOpenFixture(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
@@ -502,7 +481,6 @@ func TestOpenFixture(t *testing.T) {
 	sessionID := formatSessionID(fixtureCodexSession)
 	turnID := formatTurnID(fixtureCodexSession, 1)
 
-	// Summary-only session open.
 	data, text, err := tool.Call(ctx, db, []byte(`{"id":"`+sessionID+`"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -536,7 +514,6 @@ func TestOpenFixture(t *testing.T) {
 		t.Fatalf("prose:\n%s\nwant:\n%s", text, wantText)
 	}
 
-	// Paged turn open: limit 3, then walk cursors to the end.
 	data, text, err = tool.Call(ctx, db, []byte(`{"id":"`+turnID+`","limit":3}`))
 	if err != nil {
 		t.Fatal(err)
@@ -576,7 +553,6 @@ func TestOpenFixture(t *testing.T) {
 		t.Fatalf("page prose: %s", text)
 	}
 
-	// Walk to exhaustion: 15 events at 3 per page = 5 pages.
 	gotOrdinals := []int{1, 2, 3}
 	pages := 1
 	for cursor != "" {
@@ -605,7 +581,6 @@ func TestOpenFixture(t *testing.T) {
 		t.Fatalf("final prose: %s", text)
 	}
 
-	// Second page literals (cursor continuation past ordinal 3).
 	data, _, err = tool.Call(ctx, db, []byte(
 		`{"cursor":"eyJ2ZXJzaW9uIjoyLCJ0YXJnZXRfaWQiOiJ0dXJuOk1ERTVZelZtTm1FdE5EbGlaQzAzT1RJd0xXRmpOamN0TVdSa09HVXpNMkl3WlRrMToxIiwibGltaXQiOjMsImFmdGVyIjp7ImtpbmQiOiJldmVudCIsImV2ZW50X29yZGluYWwiOjN9fQ"}`))
 	if err != nil {
@@ -624,7 +599,6 @@ func TestOpenFixture(t *testing.T) {
 		}
 	}
 
-	// Full event open: the claude Read tool_call.
 	eventID := formatEventID(fixtureClaudeToolUID)
 	data, text, err = tool.Call(ctx, db, []byte(`{"id":"`+eventID+`"}`))
 	if err != nil {
@@ -672,7 +646,6 @@ func TestOpenFixture(t *testing.T) {
 		}
 	}
 
-	// Not-found errors.
 	for _, tc := range []struct{ raw, want string }{
 		{`{"id":"session:bm9wZQ"}`, "session not found"},
 		{`{"id":"` + formatTurnID(fixtureCodexSession, 99) + `"}`, "turn not found"},

@@ -7,9 +7,6 @@ import (
 	"strings"
 )
 
-// hydrateKept fills payload_json and token_usage_json, which live only in the
-// lake, on the rows an open can render: the target, each turn's user input
-// and final response, and the selected turn's events.
 func hydrateKept(ctx context.Context, db *sql.DB, sc *sessionScan) error {
 	var rows []*navRow
 	if sc.target != nil {

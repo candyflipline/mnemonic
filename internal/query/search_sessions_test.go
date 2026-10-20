@@ -11,8 +11,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/cache/cachetest"
 )
 
-// TestParseSearchSessionsArgsCanonicalizes ports search_sessions_v1.rs
-// parses_and_canonicalizes_search_sessions_args.
 func TestParseSearchSessionsArgsCanonicalizes(t *testing.T) {
 	args, err := parseSearchSessionsArgs([]byte(
 		`{"query":"  cargo test failure  ",
@@ -38,9 +36,6 @@ func TestParseSearchSessionsArgsCanonicalizes(t *testing.T) {
 	}
 }
 
-// The v1 layer defaults absent event_types to the search defaults and
-// reports the effective list in the canonical request (ported from
-// forwards_effective_event_types_and_reports_them_in_canonical_request).
 func TestSearchSessionsDefaultEventTypes(t *testing.T) {
 	for _, raw := range []string{
 		`{"query":"migration"}`,
@@ -75,7 +70,6 @@ func TestSearchSessionsDefaultEventTypes(t *testing.T) {
 	}
 }
 
-// TestSearchSessionsArgValidation ports the contract validation messages.
 func TestSearchSessionsArgValidation(t *testing.T) {
 	cases := []struct {
 		raw     string
@@ -104,22 +98,18 @@ func TestSearchSessionsArgValidation(t *testing.T) {
 		}
 	}
 
-	// rejects_event_scope_before_repository_search.
 	eventID := formatEventID("evt-1")
 	_, err := parseSearchSessionsArgs([]byte(`{"query":"migration","within_id":"` + eventID + `"}`))
 	if err == nil || err.Error() != "within_id accepts session and turn IDs, not event IDs" {
 		t.Fatalf("event scope: %v", err)
 	}
 
-	// Engine-level: a query whose tokens are all excluded (search.rs
-	// search_mcp_events fails before touching the repository).
 	_, _, err = (searchSessionsTool{}).Call(context.Background(), nil, []byte(`{"query":"x"}`))
 	if err == nil || err.Error() != "query has no searchable terms (tokens shorter than 2 characters are excluded)" {
 		t.Fatalf("short tokens: %v", err)
 	}
 }
 
-// TestSearchHitShape ports shapes_search_hit_with_mcp_ids_and_no_full_payloads.
 func TestSearchHitShape(t *testing.T) {
 	hit := searchHit{
 		rank:                   1,
@@ -183,8 +173,6 @@ func TestSearchHitShape(t *testing.T) {
 	}
 }
 
-// TestShapedSearchOpenIdsAreValidOpenArgs ports
-// shaped_search_open_ids_are_valid_open_args.
 func TestShapedSearchOpenIdsAreValidOpenArgs(t *testing.T) {
 	hit := searchHit{
 		eventUID:  "evt-open",
@@ -198,7 +186,7 @@ func TestShapedSearchOpenIdsAreValidOpenArgs(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", id, err)
 		}
-		if args.hasCursor {
+		if args.cursor != "" {
 			t.Fatalf("%s: parsed as continuation", id)
 		}
 		if got := args.target.String(); got != id {
@@ -212,7 +200,6 @@ func mustJSON(v string) string {
 	return string(b)
 }
 
-// TestFormatSearchSessionsText ports format_search_sessions_text.
 func TestFormatSearchSessionsText(t *testing.T) {
 	request := map[string]any{"query": "workspace"}
 	first := searchHitJSON(searchHit{
@@ -237,7 +224,6 @@ func TestFormatSearchSessionsText(t *testing.T) {
 	}
 }
 
-// TestSearchSessionsFixture locks the ranked results over the golden lake.
 func TestSearchSessionsFixture(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()

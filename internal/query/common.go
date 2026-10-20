@@ -1,31 +1,23 @@
 package query
 
-// Shared helpers for the query tools: MCP IDs, timestamps, tokenization and
-// the event-type machinery, ported from upstream
-// upstream mcp-core/src/contract.rs and
-// upstream conversations/src/clickhouse_repo/helpers.rs. Owned by lane
-// cache (search_sessions and open).
-
 import (
 	"context"
 	"database/sql"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
 
 const (
-	// Upstream RepoConfig defaults (upstream conversations domain.rs).
-	bm25K1            = 1.2
-	bm25B             = 0.75
-	bm25MaxQueryTerms = 16
-	minShouldMatch    = 1
-	minScore          = 0.0
-	previewChars      = 220
-	// upstream mcp-core contract.rs.
+	bm25K1                 = 1.2
+	bm25B                  = 0.75
+	bm25MaxQueryTerms      = 16
+	minShouldMatch         = 1
+	minScore               = 0.0
+	previewChars           = 220
 	maxSnippetChars        = 600
 	summaryPreviewChars    = 240
 	summaryMaxTools        = 25
@@ -35,22 +27,16 @@ const (
 	encryptedReasoningText = "[encrypted reasoning omitted]"
 )
 
-// sqlQuote quotes a literal for DuckDB SQL.
 func sqlQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
-func sqlQuoteInt(n int) string { return fmt.Sprintf("%d", n) }
-
-// b64RawURL is the URL-safe no-pad alphabet upstream uses for MCP IDs.
 var b64RawURL = base64.RawURLEncoding
 
-// argErrorf builds a caller mistake with the upstream message text.
 func argErrorf(format string, args ...any) *ArgError {
 	return &ArgError{Msg: fmt.Sprintf(format, args...)}
 }
 
-// idKind discriminates a parsed McpId.
 type idKind string
 
 const (
@@ -59,7 +45,6 @@ const (
 	kindEvent   idKind = "event"
 )
 
-// mcpID is one parsed session:/turn:/event: MCP ID (contract.rs McpId).
 type mcpID struct {
 	kind     idKind
 	session  string
@@ -70,15 +55,15 @@ type mcpID struct {
 func (id mcpID) String() string {
 	switch id.kind {
 	case kindSession:
-		return "session:" + b64RawURL.EncodeToString([]byte(id.session))
+		return formatSessionID(id.session)
 	case kindTurn:
-		return "turn:" + b64RawURL.EncodeToString([]byte(id.session)) + ":" + fmt.Sprintf("%d", id.turnSeq)
+		return formatTurnID(id.session, id.turnSeq)
 	default:
-		return "event:" + b64RawURL.EncodeToString([]byte(id.eventUID))
+		return formatEventID(id.eventUID)
 	}
 }
 
-// parseMcpID ports McpId::from_str; messages are upstream contract.rs.
+// parseMcpID: every message is upstream text.
 func parseMcpID(input string) (mcpID, error) {
 	switch {
 	case strings.HasPrefix(input, "session:"):
@@ -89,7 +74,6 @@ func parseMcpID(input string) (mcpID, error) {
 		return mcpID{kind: kindSession, session: raw}, nil
 	case strings.HasPrefix(input, "turn:"):
 		payload := strings.TrimPrefix(input, "turn:")
-		// Upstream rsplit_once: the last colon separates session from seq.
 		idx := strings.LastIndex(payload, ":")
 		if idx < 0 {
 			return mcpID{}, argErrorf("turn ID must contain session and turn sequence")
@@ -124,7 +108,6 @@ func parseMcpID(input string) (mcpID, error) {
 	}
 }
 
-// decodeRawID ports contract.rs decode_raw_id.
 func decodeRawID(field, encoded string) (string, error) {
 	b, err := b64RawURL.DecodeString(encoded)
 	if err != nil {
@@ -175,12 +158,10 @@ func validUTF8(b []byte) bool {
 	return true
 }
 
-// formatRFC3339UTCMillis ports contract.rs format_rfc3339_utc_millis.
 func formatRFC3339UTCMillis(unixMs int64) string {
 	return time.UnixMilli(unixMs).UTC().Format("2006-01-02T15:04:05.000Z")
 }
 
-// formatSessionID / formatTurnID / formatEventID port the Mcp*Id Display impls.
 func formatSessionID(raw string) string {
 	return "session:" + b64RawURL.EncodeToString([]byte(raw))
 }
@@ -193,8 +174,6 @@ func formatEventID(rawUID string) string {
 	return "event:" + b64RawURL.EncodeToString([]byte(rawUID))
 }
 
-// tokenizeQuery ports helpers.rs tokenize_query: [A-Za-z0-9_]+ tokens,
-// lowercased, 2..64 bytes, first-seen order, at most maxTerms.
 func tokenizeQuery(text string, maxTerms int) []string {
 	var order []string
 	seen := map[string]bool{}
@@ -218,15 +197,12 @@ var tokenRe = regexp.MustCompile(`[A-Za-z0-9_]+`)
 
 var safeValueRe = regexp.MustCompile(`^[A-Za-z0-9._:@/-]{1,256}$`)
 
-// isSafeFilterValue gates session and event ids before they reach SQL.
 func isSafeFilterValue(value string) bool { return safeValueRe.MatchString(value) }
 
-// compactWhitespace joins split-with pieces with single spaces.
 func compactWhitespace(text string) string {
 	return strings.Join(strings.Fields(text), " ")
 }
 
-// compactTextLine ports helpers.rs compact_text_line (rune counts).
 func compactTextLine(text string, maxChars int) string {
 	compact := compactWhitespace(text)
 	if len([]rune(compact)) <= maxChars {
@@ -238,7 +214,6 @@ func compactTextLine(text string, maxChars int) string {
 
 func looksTruncated(text string) bool { return strings.HasSuffix(text, "...") }
 
-// compactOptionalLine ports open_v1.rs compact_optional_line.
 func compactOptionalLine(text string, maxChars int) any {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
@@ -247,7 +222,6 @@ func compactOptionalLine(text string, maxChars int) any {
 	return compactTextLine(trimmed, maxChars)
 }
 
-// nonEmpty ports helpers.rs non_empty_string.
 func nonEmpty(s string) any {
 	if s == "" {
 		return nil
@@ -264,7 +238,6 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-// hasEncryptedContentField ports open_v1.rs has_encrypted_content_field.
 func hasEncryptedContentField(text string) bool {
 	t := strings.TrimLeft(text, " \t\n\r")
 	if !strings.HasPrefix(t, "{") {
@@ -283,18 +256,12 @@ func hasEncryptedContentField(text string) bool {
 	}
 }
 
-// mcpEventType names, in upstream McpEventType declaration order.
-var allEventTypes = []string{
+// searchableEventTypes is the canonical order the search filter is emitted in.
+var searchableEventTypes = []string{
 	"user_input", "assistant_response", "reasoning", "tool_call", "tool_response",
-	"compaction", "system", "runtime", "unknown",
+	"compaction", "system", "runtime",
 }
 
-// searchableEventTypes is McpEventType::searchable(), the canonical order the
-// search filter is emitted in.
-var searchableEventTypes = allEventTypes[:8]
-
-// searchDefaults is McpEventType::search_defaults(): the effective filter when
-// the caller omits event_types.
 var searchDefaults = []string{"user_input", "assistant_response"}
 
 func isSearchableEventType(name string) bool {
@@ -306,24 +273,13 @@ func isSearchableEventType(name string) bool {
 	return false
 }
 
-func isValidEventType(name string) bool {
-	for _, t := range allEventTypes {
-		if t == name {
-			return true
-		}
-	}
-	return false
-}
-
-// canonicalizeSearchEventTypeNames ports contract.rs of the same name: deduped
-// in searchable order, rejecting unknown and non-searchable names.
 func canonicalizeSearchEventTypeNames(names []string) ([]string, error) {
 	if len(names) == 0 {
 		return nil, argErrorf("event_types must contain at least one event type")
 	}
 	selected := map[string]bool{}
 	for _, raw := range names {
-		if !isValidEventType(raw) || !isSearchableEventType(raw) {
+		if !isSearchableEventType(raw) {
 			return nil, argErrorf("unsupported event type: %s", raw)
 		}
 		selected[raw] = true
@@ -417,8 +373,7 @@ func isMcpCompactionEvent(class, payloadType string) bool {
 	return false
 }
 
-// eventTypeFor ports helpers.rs mcp_event_type_for: the classification order
-// is the observable contract.
+// eventTypeFor: the classification order is the observable contract.
 func eventTypeFor(class, payloadType, actor string) string {
 	systemActor := strings.EqualFold(actor, "system")
 	switch {
@@ -443,8 +398,6 @@ func eventTypeFor(class, payloadType, actor string) string {
 	}
 }
 
-// sqlClauses for one event type, ported from helpers.rs single_*_clause with
-// lowerUTF8->lower and trimBoth->trim.
 func mcpMessageEventClause(class, payload string) string {
 	return "(" + class + " = 'message' OR (" + class + " = 'event_msg' AND " + payload + " IN ('user_message', 'agent_message', 'message', 'text', 'event_msg')))"
 }
@@ -492,7 +445,7 @@ func singleMcpEventTypeClause(class, payload, actor, eventType string) string {
 		return mcpSystemEventClause(class, payload, actor)
 	case "runtime":
 		return mcpRuntimeEventClause(class, payload)
-	default: // unknown: NOT (any known type)
+	default:
 		known := make([]string, 0, 8)
 		for _, t := range searchableEventTypes {
 			known = append(known, singleMcpEventTypeClause(class, payload, actor, t))
@@ -501,8 +454,8 @@ func singleMcpEventTypeClause(class, payload, actor, eventType string) string {
 	}
 }
 
-// mcpEventTypeFilterClause ports helpers.rs mcp_event_type_filter_clause.
-func mcpEventTypeFilterClause(class, payload, actor string, eventTypes []string) string {
+func mcpEventTypeFilterClause(eventsAlias string, eventTypes []string) string {
+	class, payload, actor := eventsAlias+".event_kind", eventsAlias+".payload_type", eventsAlias+".actor_kind"
 	clauses := make([]string, 0, len(eventTypes))
 	for _, t := range eventTypes {
 		clauses = append(clauses, singleMcpEventTypeClause(class, payload, actor, t))
@@ -513,20 +466,37 @@ func mcpEventTypeFilterClause(class, payload, actor string, eventTypes []string)
 	return "(" + strings.Join(clauses, " OR ") + ")"
 }
 
-// mcpToolNamesPredicate ports the upstream clickhouse/src/mcp_tool_names.rs
-// sql_predicate: the internal tool names, bare or mcp__<server>__-qualified
-// (transcripts say either server name).
-func mcpToolNamesPredicate(column string) string {
-	const names = "'search', 'search_sessions', 'open', 'list_sessions', 'file_attention'"
+var mcpInternalToolNames = []string{"search", "search_sessions", "open", "list_sessions", "file_attention"}
+
+const (
+	mcpServerName       = "mnemonic"
+	legacyMcpServerName = "moraine"
+)
+
+func isMcpInternalToolName(name string) bool {
+	n := strings.ToLower(strings.TrimSpace(name))
+	if slices.Contains(mcpInternalToolNames, n) {
+		return true
+	}
+	parts := strings.Split(n, "__")
+	return len(parts) == 3 && parts[0] == "mcp" &&
+		(parts[1] == legacyMcpServerName || parts[1] == mcpServerName) &&
+		slices.Contains(mcpInternalToolNames, parts[2])
+}
+
+func mcpInternalToolPredicate(column string) string {
+	quoted := make([]string, len(mcpInternalToolNames))
+	for i, n := range mcpInternalToolNames {
+		quoted[i] = sqlQuote(n)
+	}
+	names := strings.Join(quoted, ", ")
 	norm := "lower(trim(" + column + "))"
 	parts := "str_split(" + norm + ", '__')"
 	return "(" + norm + " IN (" + names + ") OR (len(" + parts + ") = 3 AND " +
-		"list_extract(" + parts + ", 1) = 'mcp' AND list_extract(" + parts + ", 2) IN ('moraine', 'mnemonic') AND " +
+		"list_extract(" + parts + ", 1) = 'mcp' AND list_extract(" + parts + ", 2) IN (" + sqlQuote(legacyMcpServerName) + ", " + sqlQuote(mcpServerName) + ") AND " +
 		"list_extract(" + parts + ", 3) IN (" + names + ")))"
 }
 
-// queryRows runs q and scans each row into a []sql.RawBytes-style map keyed by
-// the requested column names, in the order of cols.
 func queryRows(ctx context.Context, db *sql.DB, q string, cols []string) ([]map[string]any, error) {
 	rows, err := db.QueryContext(ctx, q)
 	if err != nil {
@@ -556,7 +526,6 @@ func queryRows(ctx context.Context, db *sql.DB, q string, cols []string) ([]map[
 	return out, rows.Err()
 }
 
-// jsonAsString coerces a scanned SQL value to a string ("" for NULL).
 func jsonAsString(v any) string {
 	if v == nil {
 		return ""
@@ -610,11 +579,4 @@ func jsonAsFloat64(v any) float64 {
 	default:
 		return 0
 	}
-}
-
-// requestJSON returns the canonical request object the tools echo back; the
-// mcp lane wraps it in the envelope.
-func requestJSON(v map[string]any) json.RawMessage {
-	b, _ := json.Marshal(v)
-	return b
 }

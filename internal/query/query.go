@@ -1,7 +1,3 @@
-// Package query answers the five MCP tools from the cache. Each tool owns its
-// args, SQL, data shape (tools.json outputSchema "data") and prose text,
-// ported from upstream conversations/src/clickhouse_repo/*
-// and upstream mcp-core/src/*_v1.rs.
 package query
 
 import (
@@ -26,7 +22,6 @@ var tools = map[string]Tool{}
 
 func register(t Tool) { tools[t.Name()] = t }
 
-// Lookup returns the tool by MCP name.
 func Lookup(name string) (Tool, bool) {
 	t, ok := tools[name]
 	return t, ok
