@@ -252,7 +252,7 @@ func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTo
 		scalarPaths = append(scalarPaths, faJStr("ti.input_json", key))
 	}
 	legacyList := "[" + strings.Join(scalarPaths, ", ") + "]"
-	legacyFirst := "coalesce(list_filter(" + legacyList + ", p -> ends_with(p, " + slashRelQ + ") OR p = " + relQ + ")[1], '')"
+	legacyFirst := "coalesce(list_filter(" + legacyList + ", lambda p: ends_with(p, " + slashRelQ + ") OR p = " + relQ + ")[1], '')"
 
 	provenanceRe := qQuote("\"(?:" + keyRe + "|command|cmd)\"[[:space:]]*:")
 	provenanceCount := "len(regexp_extract_all(ti.input_json, " + provenanceRe + "))"
@@ -261,7 +261,7 @@ func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTo
 	var candidateRoot string
 	if q.DeriveLegacy && !strings.HasPrefix(rel, "/") {
 		candidateRoot = "CASE WHEN " + provenanceCount + " = 1\n" +
-			"       AND len(list_filter(legacy_scalar_paths, p -> p != '')) = 1\n" +
+			"       AND len(list_filter(legacy_scalar_paths, lambda p: p != '')) = 1\n" +
 			"       AND " + legacyScalarSingle + "\n" +
 			"       AND " + cwdSingle + "\n" +
 			"       AND (legacy_scalar_path = " + relQ + " OR legacy_scalar_path = concat(coalesce(ti.cwd, ''), '/', " + relQ + "))\n" +
@@ -291,7 +291,7 @@ func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTo
 		}
 		rootsLiteral := "[" + strings.Join(quoted, ", ") + "]"
 		withProjectRoots = rootsLiteral + " AS project_roots,\n"
-		verifiedColumn = ",\n  coalesce(list_filter(" + rootsLiteral + ", r -> legacy_candidate_root = r)[1], '') AS verified_project_root"
+		verifiedColumn = ",\n  coalesce(list_filter(" + rootsLiteral + ", lambda r: legacy_candidate_root = r)[1], '') AS verified_project_root"
 		eventRootExpr := "coalesce(ti.event_worktree_root, '')"
 		legacyToolScope := "(ti.project_id != '' AND NOT starts_with(ti.project_id, 'git:') AND " +
 			faSinglePath("ti.worktree_root") + " AND list_contains(" + rootsLiteral + ", ti.worktree_root))"
