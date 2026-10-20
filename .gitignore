@@ -1,32 +1,4 @@
-# Python
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.mypy_cache/
-.venv/
-
-# Rust
-target/
-
-# Local/editor/OS files
-.DS_Store
-.worktrees/
-.vscode/
-.idea/
-plans/
-
-# Build and generated output
-*.log
-site/
-docs/_source/
-
-# Frontend workspace output
-web/monitor/node_modules/
-web/monitor/dist/
-web/monitor/.vite/
-web/monitor/.playwright/
-web/monitor/playwright-report/
-web/monitor/test-results/
-
-# Landing-page QA screenshots (generated)
-web/landing/qa-shots/
+*_scratch_test.go
+/mnemonic
+*.duckdb
+*.duckdb.tmp

@@ -1,0 +1,1107 @@
+[
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Search Moraine session history and return compact event-ranked handles. By default, searches user_input and assistant_response events. Select tool_call or tool_response with event_types for raw tool evidence, then use open on a returned turn_id or session_id for full context.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "event_types": {
+          "default": [
+            "user_input",
+            "assistant_response"
+          ],
+          "description": "Optional normalized event type filter. Defaults to user_input and assistant_response. Select tool_call or tool_response explicitly for raw tool evidence.",
+          "items": {
+            "enum": [
+              "user_input",
+              "assistant_response",
+              "reasoning",
+              "tool_call",
+              "tool_response",
+              "compaction",
+              "system",
+              "runtime"
+            ],
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "harness": {
+          "description": "Optional exact, case-sensitive normalized harness filter. Supported values: codex, claude-code, cursor, hermes, kiro-cli, kimi-cli, nac, opencode, pi-coding-agent, prime-agent, qwen-code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "n_hits": {
+          "default": 10,
+          "maximum": 50,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "query": {
+          "description": "Keyword (BM25) search query. Matching is bag-of-words: quotes and punctuation are ignored, and a quoted phrase is matched as independent terms subject to the configured minimum-match threshold, not as an exact phrase.",
+          "type": "string"
+        },
+        "source": {
+          "description": "Optional exact, case-sensitive ingest source filter. Configured values for this server: claude, claude-cowork, codex, cursor, cursor-sqlite, hermes, kimi-cli, omp, opencode, pi, prime-agent, prime-agent-subagents. Use source to distinguish sources such as pi and omp that share a harness.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "within_id": {
+          "description": "Optional session:... or turn:... ID to constrain search scope.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    },
+    "name": "search_sessions",
+    "outputSchema": {
+      "oneOf": [
+        {
+          "properties": {
+            "request": {
+              "type": "object"
+            },
+            "schema_version": {
+              "const": "moraine.mcp.search_sessions.v1"
+            }
+          },
+          "required": [
+            "data"
+          ]
+        },
+        {
+          "properties": {
+            "schema_version": {
+              "const": "moraine.mcp.error.v1"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        }
+      ],
+      "properties": {
+        "data": {
+          "required": [
+            "result_count",
+            "limit",
+            "truncated",
+            "results"
+          ],
+          "type": "object"
+        },
+        "error": {
+          "properties": {
+            "code": {
+              "enum": [
+                "invalid_request",
+                "invalid_id",
+                "not_found",
+                "unsupported_event_type",
+                "cancelled",
+                "deadline_exceeded",
+                "busy",
+                "resource_exhausted",
+                "backend_failure",
+                "internal_error"
+              ]
+            },
+            "details": {},
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "type": "object"
+        },
+        "performance": {
+          "properties": {
+            "elapsed_ms": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "elapsed_ms"
+          ],
+          "type": "object"
+        },
+        "request": {},
+        "schema_version": {
+          "type": "string"
+        },
+        "tool": {
+          "const": "search_sessions"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "tool",
+        "request",
+        "warnings",
+        "performance"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Open a Moraine session, turn, or event ID. Session and turn opens are summary-only by default so they stay small. Add limit to expand a bounded first page, then continue with {\"cursor\": next_cursor}. Open an event ID for its full content.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "description": "Opaque next_cursor from a prior open response. Provide cursor by itself to continue with the original target and page size.",
+          "maxLength": 16384,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "A session:..., turn:..., or event:... Moraine MCP ID. Use alone for a bounded summary, or pair a session/turn ID with limit to start expansion.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "Number of compact turn or event summaries to return. Omit for summary-only output. Cannot be used with cursor.",
+          "maximum": 25,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "name": "open",
+    "outputSchema": {
+      "oneOf": [
+        {
+          "properties": {
+            "request": {
+              "type": "object"
+            },
+            "schema_version": {
+              "const": "moraine.mcp.open.v1"
+            }
+          },
+          "required": [
+            "data"
+          ]
+        },
+        {
+          "properties": {
+            "schema_version": {
+              "const": "moraine.mcp.error.v1"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        }
+      ],
+      "properties": {
+        "data": {
+          "properties": {
+            "events": {
+              "type": "array"
+            },
+            "kind": {
+              "enum": [
+                "session",
+                "turn",
+                "event"
+              ]
+            },
+            "next_cursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "turns": {
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        "error": {
+          "properties": {
+            "code": {
+              "enum": [
+                "invalid_request",
+                "invalid_id",
+                "not_found",
+                "unsupported_event_type",
+                "cancelled",
+                "deadline_exceeded",
+                "busy",
+                "resource_exhausted",
+                "backend_failure",
+                "internal_error"
+              ]
+            },
+            "details": {},
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "type": "object"
+        },
+        "performance": {
+          "properties": {
+            "elapsed_ms": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "elapsed_ms"
+          ],
+          "type": "object"
+        },
+        "request": {},
+        "schema_version": {
+          "type": "string"
+        },
+        "tool": {
+          "const": "open"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "tool",
+        "request",
+        "warnings",
+        "performance"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "List Moraine sessions that overlap a start/end datetime range. Returns typed session IDs, compact metadata, pagination, and open handles. Use this for metadata browsing by time; use search_sessions for content search and open to inspect a selected session.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "description": "Opaque cursor from a previous list_sessions response with the same filter and sort values.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "end_datetime": {
+          "description": "Exclusive upper bound for session activity. Must be RFC 3339 / ISO 8601 with an explicit timezone and later than start_datetime.",
+          "type": "string"
+        },
+        "harness": {
+          "description": "Optional exact, case-sensitive normalized harness filter. Supported values: codex, claude-code, cursor, hermes, kiro-cli, kimi-cli, nac, opencode, pi-coding-agent, prime-agent, qwen-code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "default": 20,
+          "maximum": 25,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "enum": [
+                "web_search",
+                "mcp_internal",
+                "tool_calling",
+                "chat"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional session mode filter."
+        },
+        "sort": {
+          "anyOf": [
+            {
+              "enum": [
+                "desc",
+                "asc"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "desc",
+          "description": "Sort order by session updated_at and session ID."
+        },
+        "source": {
+          "description": "Optional exact, case-sensitive ingest source filter. Configured values for this server: claude, claude-cowork, codex, cursor, cursor-sqlite, hermes, kimi-cli, omp, opencode, pi, prime-agent, prime-agent-subagents. Use source to distinguish sources such as pi and omp that share a harness.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "start_datetime": {
+          "description": "Inclusive lower bound for session activity. Must be RFC 3339 / ISO 8601 with an explicit timezone, for example 2026-04-30T09:00:00-04:00 or 2026-04-30T13:00:00Z.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start_datetime",
+        "end_datetime"
+      ],
+      "type": "object"
+    },
+    "name": "list_sessions",
+    "outputSchema": {
+      "oneOf": [
+        {
+          "properties": {
+            "request": {
+              "type": "object"
+            },
+            "schema_version": {
+              "const": "moraine.mcp.list_sessions.v1"
+            }
+          },
+          "required": [
+            "data"
+          ]
+        },
+        {
+          "properties": {
+            "schema_version": {
+              "const": "moraine.mcp.error.v1"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        }
+      ],
+      "properties": {
+        "data": {
+          "required": [
+            "result_count",
+            "limit",
+            "truncated",
+            "sessions",
+            "next_cursor"
+          ],
+          "type": "object"
+        },
+        "error": {
+          "properties": {
+            "code": {
+              "enum": [
+                "invalid_request",
+                "invalid_id",
+                "not_found",
+                "unsupported_event_type",
+                "cancelled",
+                "deadline_exceeded",
+                "busy",
+                "resource_exhausted",
+                "backend_failure",
+                "internal_error"
+              ]
+            },
+            "details": {},
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "type": "object"
+        },
+        "performance": {
+          "properties": {
+            "elapsed_ms": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "elapsed_ms"
+          ],
+          "type": "object"
+        },
+        "request": {},
+        "schema_version": {
+          "type": "string"
+        },
+        "tool": {
+          "const": "list_sessions"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "tool",
+        "request",
+        "warnings",
+        "performance"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Show every session that touched a file, across every worktree, drillable through open. Given a path, returns the agent-attention history of that file \u2014 edits, reads, and aborted attempts in the main checkout, sibling worktrees, and agent-isolation worktrees \u2014 as time-ordered typed session/event IDs. Unlike git blame, this includes work that never landed in git. Matching is by the repo-relative path tail; pass a path specific enough (not a bare basename) and check the surfaced roots for over-match.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "end_datetime": {
+          "description": "Optional exclusive upper bound (RFC 3339 with explicit timezone) on touch time; must be later than start_datetime.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "granularity": {
+          "anyOf": [
+            {
+              "enum": [
+                "sessions",
+                "events"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "sessions",
+          "description": "sessions (default) returns one rollup per session; events returns the flat touch-by-touch timeline."
+        },
+        "harness": {
+          "description": "Optional exact, case-sensitive normalized harness filter. Supported values: codex, claude-code, cursor, hermes, kiro-cli, kimi-cli, nac, opencode, pi-coding-agent, prime-agent, qwen-code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "default": 25,
+          "description": "Maximum sessions (or events) returned in the body. Summary and roots are computed over all matched touches regardless.",
+          "maximum": 25,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "mutations_only": {
+          "default": false,
+          "description": "Exclude pure reads (tools named Read) when true.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "File to trace. Absolute paths are reduced to a repo-relative tail (by walking up to .moraine.toml/.git); a repo-relative path is used as the tail directly and gives the best cross-worktree coverage.",
+          "type": "string"
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "enum": [
+                "project",
+                "all"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "project",
+          "description": "project (default) restricts results to the normalized launch-project identity even without --project-only; all is the deliberate widening path on an unscoped server. A configured --project-only origin boundary remains enforced."
+        },
+        "source": {
+          "description": "Optional exact, case-sensitive ingest source filter. Configured values for this server: claude, claude-cowork, codex, cursor, cursor-sqlite, hermes, kimi-cli, omp, opencode, pi, prime-agent, prime-agent-subagents. Use source to distinguish sources such as pi and omp that share a harness.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "start_datetime": {
+          "description": "Optional inclusive lower bound (RFC 3339 with explicit timezone) on touch time.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool": {
+          "description": "Optional case-insensitive tool-name filter (e.g. Edit, Write, Read, Bash).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "name": "file_attention",
+    "outputSchema": {
+      "oneOf": [
+        {
+          "properties": {
+            "request": {
+              "type": "object"
+            },
+            "schema_version": {
+              "const": "moraine.mcp.file_attention.v1"
+            }
+          },
+          "required": [
+            "data"
+          ]
+        },
+        {
+          "properties": {
+            "schema_version": {
+              "const": "moraine.mcp.error.v1"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        }
+      ],
+      "properties": {
+        "data": {
+          "required": [
+            "tail",
+            "scope",
+            "granularity",
+            "summary",
+            "roots",
+            "result_count",
+            "truncated"
+          ],
+          "type": "object"
+        },
+        "error": {
+          "properties": {
+            "code": {
+              "enum": [
+                "invalid_request",
+                "invalid_id",
+                "not_found",
+                "unsupported_event_type",
+                "cancelled",
+                "deadline_exceeded",
+                "busy",
+                "resource_exhausted",
+                "backend_failure",
+                "internal_error"
+              ]
+            },
+            "details": {},
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "type": "object"
+        },
+        "performance": {
+          "properties": {
+            "elapsed_ms": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "elapsed_ms"
+          ],
+          "type": "object"
+        },
+        "request": {},
+        "schema_version": {
+          "type": "string"
+        },
+        "tool": {
+          "const": "file_attention"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "tool",
+        "request",
+        "warnings",
+        "performance"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Report ingestion health, finite historical coverage, durable progress, freshness, alerts, and a conservative ETA when enough stable checkpoint history exists. Use this before concluding that a missing retrieval result never existed.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "name": "get_ingest_status",
+    "outputSchema": {
+      "oneOf": [
+        {
+          "properties": {
+            "request": {
+              "type": "object"
+            },
+            "schema_version": {
+              "const": "moraine.mcp.get_ingest_status.v1"
+            }
+          },
+          "required": [
+            "data"
+          ]
+        },
+        {
+          "properties": {
+            "schema_version": {
+              "const": "moraine.mcp.error.v1"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        }
+      ],
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "alerts": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "code": {
+                    "enum": [
+                      "heartbeat_stale",
+                      "progress_stalled",
+                      "queue_saturated",
+                      "sink_retrying",
+                      "coverage_degraded"
+                    ],
+                    "type": "string"
+                  },
+                  "observed_at_unix_ms": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "code",
+                  "observed_at_unix_ms"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "conditions": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "condition_type": {
+                    "enum": [
+                      "health",
+                      "coverage",
+                      "freshness",
+                      "readiness"
+                    ],
+                    "type": "string"
+                  },
+                  "observed_at_unix_ms": {
+                    "type": "integer"
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "state": {
+                    "enum": [
+                      "true",
+                      "false",
+                      "unknown"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "condition_type",
+                  "state",
+                  "reason",
+                  "observed_at_unix_ms"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "current": {
+              "additionalProperties": false,
+              "properties": {
+                "files_active": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "files_watched": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "heartbeat_observed_at_unix_ms": {
+                  "type": "integer"
+                },
+                "progress": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "bytes_completed": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "bytes_total": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "discovery_complete": {
+                      "type": "boolean"
+                    },
+                    "files_completed": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "files_total": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "last_durable_progress_unix_ms": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "oldest_pending_unix_ms": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "queue_capacity": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "sink_pending_bytes": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "sink_pending_rows": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "sink_retrying": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "discovery_complete",
+                    "queue_capacity",
+                    "sink_pending_rows",
+                    "sink_pending_bytes",
+                    "sink_retrying",
+                    "oldest_pending_unix_ms",
+                    "last_durable_progress_unix_ms",
+                    "files_total",
+                    "files_completed",
+                    "bytes_total",
+                    "bytes_completed"
+                  ],
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
+                "queue_depth": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "heartbeat_observed_at_unix_ms",
+                "queue_depth",
+                "files_active",
+                "files_watched",
+                "progress"
+              ],
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "eta": {
+              "additionalProperties": false,
+              "properties": {
+                "high_seconds": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "low_seconds": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "scope": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "scope",
+                "low_seconds",
+                "high_seconds"
+              ],
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "history": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "bytes_completed": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "bytes_total": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "discovery_complete": {
+                    "type": "boolean"
+                  },
+                  "files_active": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "files_completed": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "files_total": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "queue_capacity": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "queue_depth": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "sink_pending_rows": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "sink_retrying": {
+                    "type": "boolean"
+                  },
+                  "ts_unix_ms": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "ts_unix_ms",
+                  "queue_depth",
+                  "files_active",
+                  "queue_capacity",
+                  "sink_pending_rows",
+                  "sink_retrying",
+                  "discovery_complete",
+                  "files_total",
+                  "files_completed",
+                  "bytes_total",
+                  "bytes_completed"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "observed_at_unix_ms": {
+              "type": "integer"
+            },
+            "rate": {
+              "additionalProperties": false,
+              "properties": {
+                "bytes_per_second": {
+                  "minimum": 0,
+                  "type": "number"
+                },
+                "sample_seconds": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "bytes_per_second",
+                "sample_seconds"
+              ],
+              "type": [
+                "object",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "observed_at_unix_ms",
+            "current",
+            "conditions",
+            "alerts",
+            "rate",
+            "eta",
+            "history"
+          ],
+          "type": "object"
+        },
+        "error": {
+          "properties": {
+            "code": {
+              "enum": [
+                "invalid_request",
+                "invalid_id",
+                "not_found",
+                "unsupported_event_type",
+                "cancelled",
+                "deadline_exceeded",
+                "busy",
+                "resource_exhausted",
+                "backend_failure",
+                "internal_error"
+              ]
+            },
+            "details": {},
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "type": "object"
+        },
+        "performance": {
+          "properties": {
+            "elapsed_ms": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "elapsed_ms"
+          ],
+          "type": "object"
+        },
+        "request": {},
+        "schema_version": {
+          "type": "string"
+        },
+        "tool": {
+          "const": "get_ingest_status"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "tool",
+        "request",
+        "warnings",
+        "performance"
+      ],
+      "type": "object"
+    }
+  }
+]

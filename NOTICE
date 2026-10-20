@@ -1,0 +1,10 @@
+mnemonic
+Copyright 2026 Chris Cherniakov
+
+This product includes software derived from Moraine
+(https://github.com/eric-tramel/moraine), licensed under the Apache License 2.0:
+the source parsers (internal/normalize), secret redaction rules
+(internal/redact), the MCP tool contract (internal/mcp/tools.json), the
+response formats (internal/query) and the test fixtures (testdata/), ported
+from Rust to Go. The ClickHouse SQL under docs/clickhouse is reference
+material dumped from a Moraine deployment.

@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "moraine": {
-      "command": "./target/debug/moraine-mcp",
-      "args": []
-    }
-  }
-}
