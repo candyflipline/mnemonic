@@ -195,8 +195,6 @@ func Handler(open func() (*sql.DB, error)) http.Handler {
 			switch result := result.(type) {
 			case *rpcErrorObj:
 				writeJSON(w, rpcResponse{JSONRPC: "2.0", ID: id, Error: result})
-			case nil:
-				w.WriteHeader(http.StatusServiceUnavailable)
 			default:
 				writeJSON(w, rpcResponse{JSONRPC: "2.0", ID: id, Result: result})
 			}
@@ -215,9 +213,10 @@ func Handler(open func() (*sql.DB, error)) http.Handler {
 
 type handler struct{ open func() (*sql.DB, error) }
 
-// toolsCall runs one tool and wraps it in the moraine envelope. It returns a
-// *rpcErrorObj for JSON-RPC errors (bad params, unknown tool) and nil when the
-// backend (cache) is unavailable.
+// toolsCall runs one tool and wraps it in the moraine envelope. Only a params
+// payload that cannot decode is a JSON-RPC error; like upstream, every
+// tool-level failure — unknown name, unreachable cache — is an isError result
+// so the client sees the message as tool output, not a protocol failure.
 func (h handler) toolsCall(r *http.Request, paramsJSON json.RawMessage) any {
 	var p struct {
 		Name      string          `json:"name"`
@@ -232,11 +231,11 @@ func (h handler) toolsCall(r *http.Request, paramsJSON json.RawMessage) any {
 	}
 	tool, ok := lookup(p.Name)
 	if !ok {
-		return &rpcErrorObj{Code: -32602, Message: fmt.Sprintf("unknown tool: %s", p.Name)}
+		return unstructuredToolError(fmt.Sprintf("unknown tool: %s", p.Name))
 	}
 	db, err := h.open()
 	if err != nil {
-		return nil
+		return unstructuredToolError(fmt.Sprintf("cache unavailable: %s", err))
 	}
 	start := time.Now()
 	data, text, err := tool.Call(r.Context(), db, args)
@@ -272,6 +271,15 @@ func (h handler) toolsCall(r *http.Request, paramsJSON json.RawMessage) any {
 	return toolResult{
 		Content:           []contentBlock{{Type: "text", Text: text}},
 		StructuredContent: env,
+	}
+}
+
+// unstructuredToolError ports upstream unstructured_tool_error_result: the
+// message as a lone text block with isError, no structuredContent.
+func unstructuredToolError(text string) toolResult {
+	return toolResult{
+		Content: []contentBlock{{Type: "text", Text: text}},
+		IsError: true,
 	}
 }
 

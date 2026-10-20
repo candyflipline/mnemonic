@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -234,19 +235,49 @@ func TestToolsCallArgErrorIsErrorResult(t *testing.T) {
 	}
 }
 
-func TestToolsCallUnknownToolIsJSONRPCError(t *testing.T) {
+func TestToolsCallUnknownToolIsErrorResult(t *testing.T) {
 	srv := mcpServer(t)
-	resp := postRPC(t, srv, `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"not_a_tool","arguments":{}}}`)
+	resp := postRPC(t, srv, `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"nope","arguments":{}}}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d, want 200", resp.StatusCode)
+	}
 	payload := decode(t, resp)
-	errObj, _ := payload["error"].(map[string]any)
-	if errObj["code"] != float64(-32602) {
-		t.Errorf("error.code = %v, want -32602", errObj["code"])
+	if _, has := payload["error"]; has {
+		t.Error("unknown tool must not be a JSON-RPC error")
 	}
-	if errObj["message"] != "unknown tool: not_a_tool" {
-		t.Errorf("error.message = %v, want \"unknown tool: not_a_tool\"", errObj["message"])
+	result, _ := payload["result"].(map[string]any)
+	want := map[string]any{
+		"content": []any{map[string]any{"type": "text", "text": "unknown tool: nope"}},
+		"isError": true,
 	}
-	if _, has := payload["result"]; has {
-		t.Error("unknown tool must not produce a result object")
+	if !reflect.DeepEqual(result, want) {
+		t.Errorf("result = %v, want %v", result, want)
+	}
+}
+
+func TestToolsCallCacheUnavailableIsErrorResult(t *testing.T) {
+	open := func() (*sql.DB, error) { return nil, errors.New("no cache yet") }
+	srv := httptest.NewServer(auth.Middleware(map[string]string{auth.Hash("tok"): "chris"})(Handler(open)))
+	t.Cleanup(srv.Close)
+	withLookup(t, "open", stubTool{name: "open"})
+	resp := postRPC(t, srv, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"open","arguments":{"id":"session:abc"}}}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d, want 200", resp.StatusCode)
+	}
+	payload := decode(t, resp)
+	if _, has := payload["error"]; has {
+		t.Error("cache unavailable must not be a JSON-RPC error")
+	}
+	result, _ := payload["result"].(map[string]any)
+	if result["isError"] != true {
+		t.Errorf("isError = %v, want true", result["isError"])
+	}
+	if _, has := result["structuredContent"]; has {
+		t.Error("cache unavailable result must not carry structuredContent")
+	}
+	block, _ := result["content"].([]any)[0].(map[string]any)
+	if block["text"] != "cache unavailable: no cache yet" {
+		t.Errorf("content[0].text = %v, want \"cache unavailable: no cache yet\"", block["text"])
 	}
 }
 
