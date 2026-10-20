@@ -146,10 +146,16 @@ func (s *Store) servePut(w http.ResponseWriter, r *http.Request) {
 	s.append(w, key, offset, headHash, body)
 }
 
+// replaceRaw writes body as the whole raw file and returns the compressed
+// length; the caller owns the manifest, so a test can crash between the two.
+func (s *Store) replaceRaw(k layout.Key, body []byte) (int64, error) {
+	return writeZst(k.Raw(s.DataDir), body)
+}
+
 // replace stores body as the whole raw file, then the manifest: data first, so
 // a manifest never describes bytes that are not on disk.
 func (s *Store) replace(w http.ResponseWriter, k layout.Key, headHash, sourceName, srcPath string, body []byte) {
-	zst, err := writeZst(k.Raw(s.DataDir), body)
+	zst, err := s.replaceRaw(k, body)
 	if err != nil {
 		http.Error(w, "write raw", http.StatusInternalServerError)
 		return
