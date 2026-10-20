@@ -1,6 +1,3 @@
-// Package ops gives the client binary the install assets it needs, so
-// `mnemonic init` works from one file with nothing else on disk. The server
-// scripts here (deploy.sh, install-server.sh) are not embedded.
 package ops
 
 import _ "embed"

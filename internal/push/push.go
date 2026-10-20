@@ -1,6 +1,5 @@
 // Package push is the client side of the wire protocol: scan the configured
 // globs, diff against the server's manifest, send only whole redacted lines.
-// Owned by lane push.
 package push
 
 import (
@@ -23,9 +22,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/wire"
 )
 
-// Redactor is the part of *redact.Redactor a pass needs. It is an interface
-// rather than the concrete type so the pass — and its tests — do not depend on
-// internal/redact's rules landing first.
 type Redactor interface {
 	Line(line []byte) []byte
 }
@@ -42,8 +38,6 @@ const manifestPath = "/v1/manifest"
 // and server clocks need not agree.
 const skewMs = 5 * 60 * 1000
 
-// fileRef is one matched file and the source it belongs to. mtimeMs and size
-// ride along from the scan's stat so the skips cost no second stat.
 type fileRef struct {
 	path       string
 	harness    string
@@ -52,11 +46,6 @@ type fileRef struct {
 	size       int64
 }
 
-// Run does one pass. Per source: head hash equal and the redacted size grew
-// means append from the server's Size; otherwise send the whole file with
-// offset 0. A trailing line without '\n' waits for the next pass. A 409
-// re-reads the manifest once for that source. Rerunning with no new bytes
-// sends nothing.
 func Run(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client) (Stats, error) {
 	manifest, err := fetchManifest(ctx, cfg, hc)
 	if err != nil {
@@ -72,8 +61,6 @@ func Run(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client) 
 	return st, nil
 }
 
-// fetchManifest maps the server's manifest by SrcID. The author comes from the
-// token, not from us.
 func fetchManifest(ctx context.Context, cfg config.Client, hc *http.Client) (map[string]*wire.Source, error) {
 	u := strings.TrimSuffix(cfg.Server, "/") + manifestPath + "?" + url.Values{"machine": {cfg.Machine}}.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
@@ -100,15 +87,9 @@ func fetchManifest(ctx context.Context, cfg config.Client, hc *http.Client) (map
 	return byID, nil
 }
 
-// syncSource diffs one file against its manifest entry and sends what is
-// missing. A 409 means our manifest view was stale; the Conflict body carries
-// the server's Size and head hash, and exactly one retry re-decides from it.
 func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client, manifest map[string]*wire.Source, f fileRef, st *Stats) error {
 	srcID := wire.SrcID(f.path)
 	entry := manifest[srcID]
-	// RawEnd is the raw offset the server's stored bytes cover, so a file whose
-	// size still equals it is, byte for byte, what was sent last time; skip it
-	// unread, before anything else and with no clock in sight.
 	if entry != nil && entry.RawEnd > 0 && f.size == entry.RawEnd {
 		st.Unchanged++
 		return nil
@@ -136,8 +117,6 @@ func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.C
 			}
 			return nil
 		}
-		// The fast path's premise failed; the full path re-decides from the
-		// freshest entry we have.
 		entry, sent = next, tailSent
 	}
 	redacted, head, rawEnds, ok, err := redactComplete(f.path, red)
@@ -145,7 +124,6 @@ func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.C
 		return err
 	}
 	if !ok {
-		// No whole line yet: nothing to send and nothing to compare.
 		if !sent {
 			st.Unchanged++
 		}
@@ -225,8 +203,6 @@ func syncTail(ctx context.Context, cfg config.Client, red Redactor, hc *http.Cli
 // pieces that each fit the HTTP timeout and the proxy's body limit.
 var maxChunk = 32 << 20
 
-// firstChunk is the longest prefix of whole lines within max bytes, or the
-// first line alone when that line is longer than max.
 func firstChunk(body []byte, max int) []byte {
 	if len(body) <= max {
 		return body
@@ -237,9 +213,6 @@ func firstChunk(body []byte, max int) []byte {
 	return body[:bytes.IndexByte(body, '\n')+1]
 }
 
-// decide picks the PUT for one attempt: whole at offset 0 whenever we cannot
-// prove the server holds our exact redacted prefix, append from Size when it
-// does and the file grew, nothing when it holds all of it.
 func decide(entry *wire.Source, head string, redacted []byte) (body []byte, offset int64, noop bool) {
 	if entry == nil || entry.HeadHash != head || int64(len(redacted)) < entry.Size {
 		return redacted, 0, false
@@ -256,10 +229,6 @@ func decide(entry *wire.Source, head string, redacted []byte) (body []byte, offs
 	return redacted[cut:], entry.Size, false
 }
 
-// rawEndOf maps a body of whole redacted lines starting at redacted offset
-// start back to the raw offset its last line ends at, using the per-line raw
-// ends redactComplete collected. The body is whole lines of redacted, so the
-// lines before it plus the lines in it index the right one.
 func rawEndOf(rawEnds []int64, redacted []byte, start int64, body []byte) int64 {
 	lines := bytes.Count(redacted[:start], []byte{'\n'}) + bytes.Count(body, []byte{'\n'})
 	return rawEnds[lines-1]
@@ -307,7 +276,6 @@ func putSource(ctx context.Context, cfg config.Client, hc *http.Client, f fileRe
 	return nil, nil
 }
 
-// readErrBody caps an error body so a chatty server cannot blow up a log line.
 func readErrBody(r io.Reader) string {
 	b, err := io.ReadAll(io.LimitReader(r, 512))
 	if err != nil {

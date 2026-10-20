@@ -9,7 +9,6 @@ import (
 	"encoding/hex"
 )
 
-// HeadCap bounds the bytes HeadHash reads, so a huge first line costs little.
 const HeadCap = 64 << 10
 
 // SrcID names a source file on the server: the first 16 hex chars of
@@ -35,7 +34,7 @@ type Source struct {
 	SrcID      string `json:"src_id"`
 	Harness    string `json:"harness"`
 	SourceName string `json:"source_name"`
-	Path       string `json:"path"` // absolute path on the client
+	Path       string `json:"path"`
 	Size       int64  `json:"size"`
 	RawEnd     int64  `json:"raw_end"` // raw bytes of the client's file consumed into Size; 0 = unknown
 	HeadHash   string `json:"head_hash"`

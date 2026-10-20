@@ -83,7 +83,6 @@ func decode[T any](t *testing.T, res *http.Response) (v T) {
 	return v
 }
 
-// rawOf decompresses the raw file a key points at.
 func rawOf(t *testing.T, dir string, k layout.Key) string {
 	t.Helper()
 	f, err := os.Open(k.Raw(dir))
@@ -108,7 +107,6 @@ func TestStoreProtocol(t *testing.T) {
 	k := testKey()
 	head := wire.HeadHash([]byte("a\n"))
 
-	// offset 0 replaces: the raw file and the manifest come up together.
 	res := put(t, srv, rawTarget(testMachine, testHarness, testSrcID, "0", head), "a\nb\n")
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("replace: status %d, want 200", res.StatusCode)
@@ -120,7 +118,6 @@ func TestStoreProtocol(t *testing.T) {
 		t.Fatalf("replace: raw = %q, want %q", got, "a\nb\n")
 	}
 
-	// append from Size extends the same stream.
 	res = put(t, srv, rawTarget(testMachine, testHarness, testSrcID, "4", head), "c\n")
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("append: status %d, want 200", res.StatusCode)
@@ -131,8 +128,6 @@ func TestStoreProtocol(t *testing.T) {
 	if got := rawOf(t, dir, k); got != "a\nb\nc\n" {
 		t.Fatalf("append: raw = %q, want %q", got, "a\nb\nc\n")
 	}
-	// zst_size covers exactly the bytes on disk, so the next append can drop
-	// any tail a crash left behind.
 	var m manifestBody
 	b, err := os.ReadFile(k.Manifest(dir))
 	if err != nil {
@@ -149,7 +144,6 @@ func TestStoreProtocol(t *testing.T) {
 		t.Fatalf("zst_size = %d, raw file is %d", m.ZstSize, info.Size())
 	}
 
-	// a stale offset is a conflict naming the server's state.
 	res = put(t, srv, rawTarget(testMachine, testHarness, testSrcID, "4", head), "d\n")
 	if res.StatusCode != http.StatusConflict {
 		t.Fatalf("stale append: status %d, want 409", res.StatusCode)
@@ -158,7 +152,6 @@ func TestStoreProtocol(t *testing.T) {
 		t.Fatalf("stale append: conflict = {%d %s}, want {6 %s}", c.Size, c.HeadHash, head)
 	}
 
-	// offset 0 replaces again.
 	head2 := wire.HeadHash([]byte("z\n"))
 	res = put(t, srv, rawTarget(testMachine, testHarness, testSrcID, "0", head2), "z\n")
 	if res.StatusCode != http.StatusOK {
@@ -171,7 +164,6 @@ func TestStoreProtocol(t *testing.T) {
 		t.Fatalf("re-replace: raw = %q, want %q", got, "z\n")
 	}
 
-	// the manifest lists the one source; an unknown machine lists none.
 	res = get(t, srv, "/v1/manifest?machine="+testMachine)
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("manifest: status %d, want 200", res.StatusCode)
@@ -198,10 +190,6 @@ func TestStoreProtocol(t *testing.T) {
 	}
 }
 
-// TestReplaceCrashBeforeManifest drives a replace that died between the raw
-// rename and the manifest write: the new raw sits next to the old manifest.
-// An append the old manifest would accept must be refused, and a re-send from
-// offset 0 must converge on the new raw plus appended lines.
 func TestReplaceCrashBeforeManifest(t *testing.T) {
 	srv, dir := newServer(t)
 	k := testKey()
@@ -213,7 +201,6 @@ func TestReplaceCrashBeforeManifest(t *testing.T) {
 		t.Fatalf("put body1: status %d, want 200", res.StatusCode)
 	}
 
-	// The crash: the replacement raw is on disk, the manifest never written.
 	if _, err := (&Store{DataDir: dir}).replaceRaw(k, []byte(body2)); err != nil {
 		t.Fatal(err)
 	}

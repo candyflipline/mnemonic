@@ -21,7 +21,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/redact"
 )
 
-// commands holds every subcommand this build has; server.go adds the rest.
 var commands = map[string]func(args []string) error{
 	"push":  push,
 	"token": token,
@@ -39,8 +38,6 @@ func main() {
 	}
 }
 
-// push: one client pass — load the config, scan, diff against the server's
-// manifest, send redacted whole lines.
 func push(args []string) error {
 	fs := flag.NewFlagSet("push", flag.ContinueOnError)
 	configPath := fs.String("config", "~/.mnemonic/config.toml", "path to the client config TOML")
@@ -55,8 +52,6 @@ func push(args []string) error {
 	if err != nil {
 		return err
 	}
-	// The pass is one manifest GET plus at most a couple of PUTs per source;
-	// 60 s covers a slow link without pinning a wedged connection.
 	stats, err := pushrun.Run(context.Background(), cfg, red, &http.Client{Timeout: 60 * time.Second})
 	if err != nil {
 		return err

@@ -1,4 +1,3 @@
-// Package store is the server side of the wire protocol.
 package store
 
 import (
@@ -38,7 +37,6 @@ type manifestBody struct {
 	ZstSize int64 `json:"zst_size"`
 }
 
-// Store holds raw sources under DataDir per internal/layout.
 type Store struct {
 	DataDir string
 
@@ -46,7 +44,6 @@ type Store struct {
 	locks map[layout.Key]*sync.Mutex
 }
 
-// lockKey serialises writers of one key; it returns the unlock func.
 func (s *Store) lockKey(k layout.Key) func() {
 	s.mu.Lock()
 	if s.locks == nil {
@@ -62,9 +59,6 @@ func (s *Store) lockKey(k layout.Key) func() {
 	return l.Unlock
 }
 
-// Handler serves GET /v1/manifest and PUT /v1/raw/... for the author that
-// auth.Middleware put on the context. The mux answers 405 for a known path
-// with the wrong method and 404 for everything else.
 func (s *Store) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /v1/manifest", http.HandlerFunc(s.serveManifest))
@@ -179,9 +173,6 @@ func (s *Store) replaceRaw(k layout.Key, body []byte) (int64, error) {
 	return writeZst(k.Raw(s.DataDir), body)
 }
 
-// replace stores body as the whole raw file, then the manifest; replaceRaw has
-// already dropped the old manifest, so no manifest ever sits next to raw bytes
-// it does not describe.
 func (s *Store) replace(w http.ResponseWriter, k layout.Key, headHash, sourceName, srcPath string, body []byte, rawEnd int64) {
 	zst, err := s.replaceRaw(k, body)
 	if err != nil {
@@ -211,7 +202,6 @@ func (s *Store) replace(w http.ResponseWriter, k layout.Key, headHash, sourceNam
 func (s *Store) append(w http.ResponseWriter, k layout.Key, offset int64, headHash string, body []byte, rawEnd int64) {
 	m, err := readManifest(k.Manifest(s.DataDir))
 	if err != nil {
-		// Nothing stored (or unreadable): there is no offset to append from.
 		writeJSON(w, http.StatusConflict, wire.Conflict{})
 		return
 	}
@@ -251,8 +241,6 @@ func (s *Store) append(w http.ResponseWriter, k layout.Key, offset int64, headHa
 	writeJSON(w, http.StatusOK, m.Source)
 }
 
-// requireAuthor answers 401 unless Middleware ran; the author never comes from
-// the request.
 func requireAuthor(w http.ResponseWriter, r *http.Request) bool {
 	if auth.Author(r.Context()) == "" {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -267,8 +255,6 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
-// writeZst replaces raw with one zstd frame of body and returns the compressed
-// length. Temp then rename: a reader never sees a partial frame.
 func writeZst(raw string, body []byte) (int64, error) {
 	dir := filepath.Dir(raw)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -279,7 +265,7 @@ func writeZst(raw string, body []byte) (int64, error) {
 		return 0, err
 	}
 	tmp := f.Name()
-	defer os.Remove(tmp) // no-op once renamed
+	defer os.Remove(tmp)
 	zst, err := writeFrame(f, body)
 	if cerr := f.Close(); err == nil {
 		err = cerr
@@ -294,9 +280,6 @@ func writeZst(raw string, body []byte) (int64, error) {
 	return zst, nil
 }
 
-// appendZst adds one zstd frame after dropping any bytes past zst, the length
-// the manifest vouches for: a crash after a raw write but before its manifest
-// write leaves exactly such a tail.
 func appendZst(raw string, zst int64, body []byte) (int64, error) {
 	f, err := os.OpenFile(raw, os.O_WRONLY, 0o644)
 	if err != nil {
@@ -309,8 +292,6 @@ func appendZst(raw string, zst int64, body []byte) (int64, error) {
 	return writeFrame(f, body)
 }
 
-// writeFrame encodes body as one independent zstd frame at the file's end and
-// returns the file length, which is the new zst_size.
 func writeFrame(f *os.File, body []byte) (int64, error) {
 	if _, err := f.Seek(0, io.SeekEnd); err != nil {
 		return 0, err
@@ -363,7 +344,7 @@ func writeManifest(path string, m manifestBody) error {
 		return err
 	}
 	tmp := f.Name()
-	defer os.Remove(tmp) // no-op once renamed
+	defer os.Remove(tmp)
 	if _, err := f.Write(b); err != nil {
 		f.Close()
 		return err

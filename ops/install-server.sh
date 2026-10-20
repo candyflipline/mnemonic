@@ -1,10 +1,4 @@
 #!/usr/bin/env bash
-# Install or upgrade the mnemonic server on a Linux host with systemd.
-# Idempotent: safe to re-run to ship a new binary or unit. It never creates,
-# prints or rewrites tokens; add one [[tokens]] entry per teammate, from
-# `mnemonic token new --author <name>`, in /etc/mnemonic/server.toml.
-#
-# Usage: sudo ./install-server.sh /path/to/mnemonic
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
@@ -30,8 +24,6 @@ install -o root -g root -m 755 "$BINARY" /usr/local/bin/mnemonic
 install -o root -g root -m 644 "$SCRIPT_DIR/systemd/mnemonic.service" /etc/systemd/system/mnemonic.service
 
 if [[ ! -f /etc/mnemonic/server.toml ]]; then
-	# No tokens here on purpose: the server refuses to start until the
-	# operator appends one [[tokens]] block per teammate.
 	install -o root -g mnemonic -m 640 /dev/null /etc/mnemonic/server.toml
 	cat > /etc/mnemonic/server.toml <<'EOF'
 data_dir = "/var/lib/mnemonic"

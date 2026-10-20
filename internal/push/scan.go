@@ -31,10 +31,7 @@ func redactComplete(path string, red Redactor) (out []byte, head string, rawEnds
 	rawEnds = make([]int64, 0, 64)
 	headLen := -1
 	for rest, at := raw[:end+1], int64(0); len(rest) > 0; {
-		nl := bytes.IndexByte(rest, '\n') + 1 // whole content ends in '\n', so nl > 0
-		// The terminator is held back from Line: a rule anchored at end of
-		// line must see end of input, and a replacement is documented never
-		// to introduce '\n', so re-appending it cannot corrupt a line.
+		nl := bytes.IndexByte(rest, '\n') + 1
 		out = append(out, red.Line(rest[:nl-1])...)
 		out = append(out, '\n')
 		at += int64(nl)
@@ -67,11 +64,9 @@ func redactTail(path string, red Redactor, entry *wire.Source) (tail []byte, hea
 	if info.Size() < entry.RawEnd {
 		return nil, "", nil, false, nil
 	}
-	// The head hash is the only proof the server's copy starts where ours
-	// does, so the first line is read and redacted in full for it.
 	first, err := bufio.NewReader(f).ReadBytes('\n')
 	if err != nil {
-		if err == io.EOF { // no whole line yet
+		if err == io.EOF {
 			return nil, "", nil, false, nil
 		}
 		return nil, "", nil, false, err
@@ -110,9 +105,6 @@ func redactTail(path string, red Redactor, entry *wire.Source) (tail []byte, hea
 	return tail, head, rawEnds, true, nil
 }
 
-// cutAtSize reports whether size falls on a redacted line boundary and, when
-// it does, the offset of the first byte after it — the only safe seam to
-// append from.
 func cutAtSize(redacted []byte, size int64) (cut int64, ok bool) {
 	for cut = 0; cut < int64(len(redacted)); {
 		cut += int64(bytes.IndexByte(redacted[cut:], '\n')) + 1

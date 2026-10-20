@@ -7,12 +7,8 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// sha256Hex is what auth.Hash writes into the file: 64 lowercase hex digits.
 var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-// LoadServer reads the server file and rejects an empty data_dir or listen,
-// no tokens, a token with an empty author or a non-sha256 hash, or one hash
-// mapped to two authors.
 func LoadServer(path string) (Server, error) {
 	var cfg Server
 	if _, err := toml.DecodeFile(path, &cfg); err != nil {

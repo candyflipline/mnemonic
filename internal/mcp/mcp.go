@@ -1,7 +1,3 @@
-// Package mcp serves MCP JSON-RPC over HTTP POST /mcp: initialize,
-// tools/list (tools.json verbatim) and tools/call (query.Lookup, wrapped in
-// the envelope tools.json outputSchema names: schema_version, tool, request,
-// data, warnings, error, performance). Owned by lane mcp.
 package mcp
 
 import (
@@ -25,13 +21,10 @@ import (
 //go:embed tools.json
 var toolsJSON []byte
 
-// Version is the value initialize reports as serverInfo.version; the release
-// build overrides it with -ldflags.
 var Version = "dev"
 
-// The protocol versions the upstream MCP 0.7.x speaks
-// (upstream mcp-core/src/lib.rs SUPPORTED_PROTOCOL_VERSIONS); a
-// requested version outside the list negotiates the default.
+// The protocol versions the upstream MCP 0.7.x speaks; a requested version
+// outside the list negotiates the default.
 const defaultProtocolVersion = "2024-11-05"
 
 var supportedProtocolVersions = []string{
@@ -42,14 +35,12 @@ var supportedProtocolVersions = []string{
 	"2026-07-28",
 }
 
-const maxRequestBytes = 32 << 20 // tool args are small; pushes go to /v1/
+const maxRequestBytes = 32 << 20
 
 // lookup is the seam the in-package test stubs (register is unexported in
 // query, so a test cannot install a tool there).
 var lookup = query.Lookup
 
-// Envelope field names, order and schema_version values follow the upstream
-// mcp-core/src/contract.rs ToolEnvelope / ToolErrorEnvelope.
 type performance struct {
 	ElapsedMS int64 `json:"elapsed_ms"`
 }
@@ -162,7 +153,7 @@ func Handler(open func() (*sql.DB, error)) http.Handler {
 			return
 		}
 		params, _ := obj["params"].(map[string]any)
-		paramsJSON, _ := json.Marshal(obj["params"]) // absent → null, like upstream's default
+		paramsJSON, _ := json.Marshal(obj["params"])
 
 		switch method {
 		case "notifications/initialized", "initialized":
@@ -274,8 +265,6 @@ func (h handler) toolsCall(r *http.Request, paramsJSON json.RawMessage) any {
 	}
 }
 
-// unstructuredToolError ports upstream unstructured_tool_error_result: the
-// message as a lone text block with isError, no structuredContent.
 func unstructuredToolError(text string) toolResult {
 	return toolResult{
 		Content: []contentBlock{{Type: "text", Text: text}},
@@ -283,7 +272,6 @@ func unstructuredToolError(text string) toolResult {
 	}
 }
 
-// toolsListResult serves the pinned tool surface verbatim.
 func toolsListResult() map[string]json.RawMessage {
 	return map[string]json.RawMessage{"tools": toolsJSON}
 }
@@ -328,8 +316,6 @@ func contentTypeIsJSON(h http.Header) bool {
 	return strings.EqualFold(strings.TrimSpace(strings.Split(ct, ";")[0]), "application/json")
 }
 
-// acceptsJSON ports upstream accepts_json: any Accept entry naming
-// application/json whose q parameter is not 0.
 func acceptsJSON(h http.Header) bool {
 	for _, header := range h.Values("Accept") {
 		for _, entry := range strings.Split(header, ",") {
@@ -369,8 +355,6 @@ func originIsAllowed(h http.Header) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// protocolVersionIsAllowed ports upstream protocol_version_is_allowed: the
-// header is required once the session is past initialize.
 func protocolVersionIsAllowed(h http.Header, initialize bool) bool {
 	v := h.Get("Mcp-Protocol-Version")
 	if v == "" {

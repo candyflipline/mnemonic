@@ -16,8 +16,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/query"
 )
 
-// stubTool stands in for the query tools lane L6 registers; register is
-// unexported there, so the test swaps the lookup seam instead.
 type stubTool struct {
 	name string
 	data any

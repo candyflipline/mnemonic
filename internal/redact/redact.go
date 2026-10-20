@@ -1,7 +1,5 @@
 // Package redact removes secrets from raw lines on the client, before they
-// leave the machine. Port of upstream ingest-core/src/redaction.rs:
-// the 26 built-in rules, the keyword prefilter and the non-overlapping span
-// selection, with the same [REDACTED:<rule_id>] replacement text.
+// leave the machine.
 //
 // Upstream scrubs parsed string fields on the server; here the client scrubs
 // the whole jsonl line before upload, and the server re-parses it. Line
@@ -29,15 +27,13 @@ type entropyGate uint8
 
 const (
 	gateNone entropyGate = iota
-	// gateGenericCredential holds a match until the candidate passes the
-	// shannon-entropy / false-positive check.
 	gateGenericCredential
 )
 
 type rule struct {
 	id          string
 	re          *regexp.Regexp
-	keywords    [][]byte // ascii-lowercased; a rule with none is always scanned
+	keywords    [][]byte
 	secretGroup int
 	gate        entropyGate
 	minLen      int
@@ -55,7 +51,7 @@ type Redactor struct {
 	rules      []rule
 	kwIndex    [][]byte // distinct keywords, ascii-lowercased
 	kwRules    [][]int  // rule indices selected by kwIndex[j]
-	alwaysScan []int    // rules the prefilter cannot skip
+	alwaysScan []int
 }
 
 const redactedMarker = "[REDACTED:"
@@ -184,10 +180,6 @@ func (r *Redactor) Line(line []byte) []byte {
 	return r.redactJSON(line)
 }
 
-// redactJSON scrubs each string literal's decoded content. Unchanged
-// literals keep their original bytes, so escapes the server would decode
-// differently (e.g. A) survive untouched unless the literal was
-// redacted anyway.
 func (r *Redactor) redactJSON(line []byte) []byte {
 	type literal struct{ q0, q1 int }
 	var lits []literal
@@ -201,7 +193,7 @@ func (r *Redactor) redactJSON(line []byte) []byte {
 			i++
 			continue
 		}
-		if c == '\\' { // inside a valid literal every escape is well-formed
+		if c == '\\' {
 			i += 2
 			continue
 		}
@@ -368,8 +360,6 @@ func appendJSONString(dst []byte, s []byte) []byte {
 	return append(dst, '"')
 }
 
-// scrub redacts secret spans in text, upstream scrub_text. Returns text
-// itself when nothing matched, so callers can keep the original bytes.
 func (r *Redactor) scrub(text []byte) ([]byte, map[string]uint64) {
 	spans := r.nonOverlappingSpans(text)
 	if len(spans) == 0 {
@@ -419,7 +409,6 @@ func (r *Redactor) nonOverlappingSpans(text []byte) []redactionSpan {
 			spans = append(spans, redactionSpan{start: g0, end: g1, ruleID: ru.id, priority: ru.priority})
 		}
 	}
-	// Leftmost first, then longest, then earliest rule: upstream's sort key.
 	slices.SortFunc(spans, func(a, b redactionSpan) int {
 		if c := cmp.Compare(a.start, b.start); c != 0 {
 			return c
@@ -451,10 +440,6 @@ func (r *Redactor) shouldRedact(ru *rule, candidate []byte) bool {
 	return true
 }
 
-// candidates selects the rules worth running on text: always-scan rules
-// plus every rule with a keyword occurring in it. A lowercase bytes.Contains
-// over the keyword list picks the same rules as upstream's case-insensitive
-// Aho-Corasick, which only ever answers presence.
 func (r *Redactor) candidates(text []byte) []bool {
 	c := make([]bool, len(r.rules))
 	for _, i := range r.alwaysScan {
@@ -506,7 +491,6 @@ func overlapsAny(ranges [][2]int, start, end int) bool {
 	return false
 }
 
-// genericCandidateIsSecret is upstream's entropy gate for generic-api-key.
 func genericCandidateIsSecret(candidate []byte) bool {
 	trimmed := bytes.Trim(candidate, "\"'`,;")
 	if len(trimmed) < 20 || isStructuralFalsePositive(trimmed) {

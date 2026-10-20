@@ -30,9 +30,6 @@ type ClientRedaction struct {
 	ExtraPatterns []string `toml:"extra_patterns"`
 }
 
-// DefaultSources are the upstream defaults
-// (upstream config/src/lib.rs:764-873 at upstream/main), used when the
-// file lists none. A harness without a parser is still pushed and kept raw.
 var DefaultSources = []SourceGlob{
 	{"claude-code", "claude", "~/.claude/projects/**/*.jsonl"},
 	{"codex", "codex", "~/.codex/sessions/**/*.jsonl"},

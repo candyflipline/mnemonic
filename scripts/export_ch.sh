@@ -19,7 +19,7 @@ conf=$(mktemp)
 trap 'rm -f "$conf"' EXIT
 printf 'user = "%s:%s"\n' "$user" "$password" >"$conf"
 
-post() { # post <query> [extra curl args...]
+post() {
 	curl -sS -f -X POST "$url/" -K "$conf" --data-binary "$1" "${@:2}"
 }
 

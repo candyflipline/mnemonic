@@ -31,9 +31,6 @@ func init() {
 	commands["import-ch"] = importCH
 }
 
-// serve: owned by lane mcp. Loads config.LoadServer, mounts
-// auth.Middleware around store.Handler on /v1/ and mcp.Handler on /mcp,
-// runs lake.Run then cache.Build every 120 s, and binds Listen.
 func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	home, _ := os.UserHomeDir()
@@ -86,7 +83,7 @@ func serve(args []string) error {
 		dbMu.Lock()
 		defer dbMu.Unlock()
 		if err == nil && newest == dbPath && db != nil {
-			return // nothing changed; keep the open handle
+			return
 		}
 		conn, path, err := cache.OpenNewest(cfg.DataDir)
 		if err != nil {
@@ -136,8 +133,6 @@ func serve(args []string) error {
 	return nil
 }
 
-// importCH folds per-month ClickHouse parquet exports into the lake as the
-// author's archive rows.
 func importCH(args []string) error {
 	fs := flag.NewFlagSet("import-ch", flag.ContinueOnError)
 	configPath := fs.String("config", "", "server config toml")

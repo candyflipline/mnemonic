@@ -13,9 +13,6 @@ import (
 // bad hostname fails at load, not on the wire.
 var machineRe = regexp.MustCompile(`^[a-z0-9._-]+$`)
 
-// LoadClient reads the client file, expands ~, fills Machine from the short
-// hostname and Sources from DefaultSources when empty, reads TokenFile, and
-// rejects a missing server or token. Owned by lane push.
 func LoadClient(path string) (Client, error) {
 	path, err := expandTilde(path)
 	if err != nil {
@@ -65,8 +62,6 @@ func LoadClient(path string) (Client, error) {
 	return cfg, nil
 }
 
-// expandTilde rewrites a leading ~ with the home directory, leaving the rest
-// of the path (wildcards included) untouched.
 func expandTilde(p string) (string, error) {
 	if p != "~" && !strings.HasPrefix(p, "~"+string(os.PathSeparator)) {
 		return p, nil
@@ -81,7 +76,6 @@ func expandTilde(p string) (string, error) {
 	return home + p[1:], nil
 }
 
-// shortHost is the hostname up to the first dot, lowercased.
 func shortHost(host string) string {
 	if i := strings.IndexByte(host, '.'); i >= 0 {
 		host = host[:i]
