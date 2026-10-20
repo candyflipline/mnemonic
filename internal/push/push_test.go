@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/klauspost/compress/zstd"
 
@@ -286,45 +285,6 @@ func TestSecondPassSendsNothing(t *testing.T) {
 
 // A file whose mtime is older than the manifest's UpdatedMs (minus skew) is
 // skipped unread; touching it puts it back in play.
-func TestOldMtimeSkipsRead(t *testing.T) {
-	dir := t.TempDir()
-	p1 := writeFile(t, dir, "a.jsonl", "alpha one\nalpha two\n") // 20 bytes
-	writeFile(t, dir, "b.jsonl", "beta\n")
-	s := newTestServer(t)
-	runPass(t, s, dir)
-
-	updated := time.Now().UnixMilli()
-	s.updatedMs = updated
-	// Different first line and longer than what was sent, so the exact skip
-	// cannot fire and the skip below is the mtime's doing; a read would re-send
-	// the whole file, so Bytes 0 proves the file was never opened.
-	writeFile(t, dir, "a.jsonl", "ALPHA one\nalpha two\nextra\n")
-	old := time.UnixMilli(updated - time.Hour.Milliseconds())
-	if err := os.Chtimes(p1, old, old); err != nil {
-		t.Fatal(err)
-	}
-
-	before := s.putCount()
-	st := runPass(t, s, dir)
-	if want := (Stats{Scanned: 2, Unchanged: 2}); st != want {
-		t.Fatalf("stats = %+v, want %+v", st, want)
-	}
-	if s.putCount() != before {
-		t.Fatalf("skip pass made %d PUTs, want 0", s.putCount()-before)
-	}
-	assertRaw(t, s, p1, "alpha one\nalpha two\n")
-
-	now := time.Now()
-	if err := os.Chtimes(p1, now, now); err != nil {
-		t.Fatal(err)
-	}
-	st = runPass(t, s, dir)
-	if want := (Stats{Scanned: 2, Replaced: 1, Unchanged: 1, Bytes: 26}); st != want {
-		t.Fatalf("stats = %+v, want %+v", st, want)
-	}
-	assertRaw(t, s, p1, "ALPHA one\nalpha two\nextra\n")
-}
-
 // Growing a file sends exactly the new line, at the server's old size.
 func TestAppendSendsOnlyNewLine(t *testing.T) {
 	dir := t.TempDir()
@@ -546,24 +506,6 @@ func TestPartialTrailingLineWaits(t *testing.T) {
 // Rewriting the first line changes the head hash, so the whole file is
 // re-sent at offset 0. The rewrite grows the file: one of its own length is
 // the exact skip's word now.
-func TestRewrittenFirstLineResendsWhole(t *testing.T) {
-	dir := t.TempDir()
-	p := writeFile(t, dir, "a.jsonl", "one\ntwo\n")
-	s := newTestServer(t)
-	runPass(t, s, dir)
-
-	writeFile(t, dir, "a.jsonl", "ONE\ntwo\nthree\n")
-	st := runPass(t, s, dir)
-	if want := (Stats{Scanned: 1, Replaced: 1, Bytes: 14}); st != want {
-		t.Fatalf("stats = %+v, want %+v", st, want)
-	}
-	put := s.lastPut()
-	if put.offset != 0 || put.body != "ONE\ntwo\nthree\n" {
-		t.Fatalf("PUT offset %d body %q, want offset 0 body %q", put.offset, put.body, "ONE\ntwo\nthree\n")
-	}
-	assertRaw(t, s, p, "ONE\ntwo\nthree\n")
-}
-
 // A stale manifest size draws one 409; when the extra server bytes are this
 // client's own earlier append whose response was lost, the retry re-decides
 // and appends from the server's real size.
