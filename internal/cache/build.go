@@ -29,10 +29,6 @@ type manifest struct {
 	ZSTSize int64 `json:"zst_size"`
 }
 
-// archiveFormat names the archive index layout; bump it when the SQL that
-// builds one changes, so a deploy rebuilds the index instead of reusing it.
-const archiveFormat = "archive-v1"
-
 // Build writes cache-<ms>.duckdb.tmp from the lake, renames it, and keeps the
 // newest two. It returns the zero Stats and no error when nothing changed
 // since the newest cache. Archive rows (machine=archive-ch) never change, so
@@ -199,7 +195,7 @@ func prune(dataDir, archPath string) error {
 // archiveKey names the archive index after the archive files' identity.
 func archiveKey(dataDir string, files []lakeFile) string {
 	h := sha256.New()
-	h.Write([]byte(archiveFormat + "\n"))
+	h.Write([]byte(strings.Join(archiveStmts("src"), "\n") + "\n"))
 	for _, f := range files {
 		rel, _ := filepath.Rel(dataDir, f.path)
 		fmt.Fprintf(h, "%s\t%d\t%d\n", rel, f.size, f.mtime)
@@ -216,15 +212,9 @@ func ensureArchive(dataDir, spill string, files []lakeFile) (string, error) {
 	tmp := path + ".tmp"
 	os.Remove(tmp)
 	err := withBuildConn(tmp, spill, "", func(ctx context.Context, c *sql.Conn) error {
-		stmts := []string{eventsDDL("events"), docsDDL("docs"), postingsDDL("postings")}
+		stmts := archiveStmts("")
 		if len(files) > 0 {
-			src := parquetSource(files)
-			stmts = append(stmts,
-				"CREATE TEMP TABLE w AS SELECT filename, file_row_number, "+
-					"cast(row_number() OVER () AS UINTEGER) AS doc FROM ("+winnersSQL(src)+")",
-				insertEventsSQL("events", src),
-				"DROP TABLE w")
-			stmts = append(stmts, insertPostingsSQL("events", "docs", "postings")...)
+			stmts = archiveStmts(parquetSource(files))
 		}
 		return execAll(ctx, c, stmts)
 	})
@@ -233,6 +223,21 @@ func ensureArchive(dataDir, spill string, files []lakeFile) (string, error) {
 		return "", err
 	}
 	return path, os.Rename(tmp, path)
+}
+
+// archiveStmts is the SQL that builds an archive index over src, or the empty
+// tables when src is "". archiveKey hashes it, so changing it rebuilds the index.
+func archiveStmts(src string) []string {
+	stmts := []string{eventsDDL("events"), docsDDL("docs"), postingsDDL("postings")}
+	if src == "" {
+		return stmts
+	}
+	stmts = append(stmts,
+		"CREATE TEMP TABLE w AS SELECT filename, file_row_number, "+
+			"cast(row_number() OVER () AS UINTEGER) AS doc FROM ("+winnersSQL(src)+")",
+		insertEventsSQL("events", src),
+		"DROP TABLE w")
+	return append(stmts, insertPostingsSQL("events", "docs", "postings")...)
 }
 
 // buildCache writes the per-cycle cache: the live rows' events, docs and
