@@ -1,9 +1,0 @@
-CREATE TABLE moraine.file_attention_project_roots
-(
-    `project_id` LowCardinality(String),
-    `worktree_root` String,
-    `observed_version` UInt64
-)
-ENGINE = ReplacingMergeTree(observed_version)
-ORDER BY (project_id, worktree_root)
-SETTINGS index_granularity = 8192

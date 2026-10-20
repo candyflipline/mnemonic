@@ -1,7 +1,8 @@
-# Cutover: moraine → mnemonic
+# Setup
 
-One mnemonic server replaces the ClickHouse host and every local moraine-mcp
-process. Clients push raw traces to it and point their MCP config at it.
+One mnemonic server keeps every machine's agent traces and serves them to
+agents over MCP. Clients push raw traces to it and point their MCP config
+at it.
 
 ## Build
 
@@ -75,25 +76,30 @@ mnemonic init --server https://loyal-agent-memory.5-78-147-233.sslip.io \
 `--machine NAME` overrides the machine name (it defaults to the short
 hostname); `--force` overwrites an existing config.
 
-Point Claude Code at the server:
+## Point your agents at it
+
+The MCP server name is `mnemonic`; its tools are `mcp__mnemonic__*`. The
+token never goes into a config file.
+
+Claude Code — add an `mcpServers` entry in `~/.claude.json`:
 
 ```
-claude mcp add --transport http moraine \
-  https://loyal-agent-memory.5-78-147-233.sslip.io/mcp \
-  --header "Authorization: Bearer $(cat ~/.mnemonic/token)"
+"mnemonic": {"type":"http","url":"https://loyal-agent-memory.5-78-147-233.sslip.io/mcp","headersHelper":"printf '{\"Authorization\":\"Bearer %s\"}' \"$(cat ~/.mnemonic/token)\""}
 ```
 
-Point Codex at it, in `~/.codex/config.toml`:
+Codex — in `~/.codex/config.toml`:
 
 ```
-[mcp_servers.moraine]
+[mcp_servers.mnemonic]
 url = "https://loyal-agent-memory.5-78-147-233.sslip.io/mcp"
-http_headers = { Authorization = "Bearer <token>" }
+bearer_token_env_var = "MNEMONIC_TOKEN"
 ```
 
-`bearer_token_env_var = "MNEMONIC_TOKEN"` instead keeps the token out of
-the file, if you export `MNEMONIC_TOKEN`. The MCP server name stays
-`moraine`, so existing agent prompts keep working.
+and in `~/.zshenv`:
+
+```
+export MNEMONIC_TOKEN="$(cat ~/.mnemonic/token)"
+```
 
 ## Client config
 
@@ -101,7 +107,6 @@ the file, if you export `MNEMONIC_TOKEN`. The MCP server name stays
 
 ```
 server  = "https://mnemonic.example.com"
-token   = "<the token from mnemonic token new>"
 machine = "chris-mbp"
 
 [[sources]]
@@ -110,79 +115,15 @@ source_name = "claude"
 glob        = "~/.claude/projects/**/*.jsonl"
 ```
 
-Omit `[[sources]]` to use the built-in defaults. `token_file` can hold the
-token instead of `token`.
+Omit `[[sources]]` to use the built-in defaults. The token lives in
+`~/.mnemonic/token`; `token_file` can point somewhere else if you would
+rather not use the default path.
 
 ## Push on every Mac
 
-`mnemonic push` runs from launchd every 60 s. Install the plist (shipped by
-the client lane as `com.mnemonic.push.plist`), then:
+`mnemonic push` runs from launchd every 60 s. `mnemonic init` installs the
+plist; to bootstrap it by hand:
 
 ```
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mnemonic.push.plist
 ```
-
-## Point Claude Code at it
-
-The MCP server name stays `moraine`, so existing `mcp__moraine__*` callers
-keep working:
-
-```
-claude mcp add --transport http moraine https://mnemonic.example.com/mcp \
-  --header "Authorization: Bearer <token>"
-```
-
-## Point Codex at it
-
-`~/.codex/config.toml`:
-
-```
-[mcp_servers.moraine]
-url = "https://mnemonic.example.com/mcp"
-
-[mcp_servers.moraine.http_headers]
-Authorization = "Bearer <token>"
-```
-
-## Import the ClickHouse archive
-
-On the old ClickHouse host:
-
-```
-scripts/export_ch.sh <export_dir>
-```
-
-Copy `<export_dir>` to the mnemonic server, then:
-
-```
-mnemonic import-ch --config /etc/mnemonic/server.toml --author chris <export_dir>
-```
-
-Idempotent: rows whose `source_file` is already in the lake are skipped.
-
-## Stop moraine
-
-After a mnemonic server answers search, open and list_sessions for your
-team:
-
-```
-launchctl bootout gui/$(id -u)/com.loyal.moraine.ingest
-```
-
-Remove the local `moraine` MCP entry from Claude Code (`claude mcp remove
-moraine`) and the `[mcp_servers.moraine]` block from Codex config — after
-saving a copy for rollback.
-
-Keep the ClickHouse data and the export dir until cutover is proven.
-
-## Rollback
-
-Put the saved moraine MCP entry back (or re-run `claude mcp add` with the old
-local command), then re-run moraine ingest:
-
-```
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.loyal.moraine.ingest.plist
-```
-
-Traces pushed to mnemonic are raw files under `/var/lib/mnemonic`; nothing is
-lost by rolling back.
