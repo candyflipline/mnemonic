@@ -239,10 +239,16 @@ func insertEvents(dataDir string, lakeFiles int) string {
 	if lakeFiles == 0 {
 		return "SELECT 1"
 	}
-	glob := sqlStr(filepath.Join(dataDir, layout.EventsGlob))
-	return "INSERT INTO events SELECT " + strings.Join(eventCols(), ", ") +
-		" FROM read_parquet(" + glob + ", hive_partitioning=false) " +
-		"QUALIFY row_number() OVER (PARTITION BY event_uid ORDER BY event_version DESC, ingested_at DESC) = 1"
+	// The winner per event_uid is chosen over key columns only; a window over
+	// whole rows holds every payload in memory and fails at archive scale.
+	// Full rows then stream in through a semi-join on (file, row).
+	src := "read_parquet(" + sqlStr(filepath.Join(dataDir, layout.EventsGlob)) +
+		", hive_partitioning=false, filename=true, file_row_number=true)"
+	return "CREATE TEMP TABLE winners AS SELECT filename, file_row_number FROM " + src +
+		" QUALIFY row_number() OVER (PARTITION BY event_uid ORDER BY event_version DESC, ingested_at DESC) = 1;\n" +
+		"INSERT INTO events SELECT " + strings.Join(eventCols(), ", ") + " FROM " + src +
+		" WHERE (filename, file_row_number) IN (SELECT filename, file_row_number FROM winners);\n" +
+		"DROP TABLE winners"
 }
 
 // sqlStr quotes a literal for DuckDB SQL.
