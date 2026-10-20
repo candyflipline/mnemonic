@@ -130,7 +130,7 @@ func handleUserMessage(rec, message shared.JSON, baseUID, modelHint, modelHarnes
 	row := stampMessageCommon(
 		em.EventForJSON(baseUID, "message", "user_message", "user",
 			shared.ExtractMessageText(content), message).
-			SetContentTypes(ContentTypes(content)),
+			SetContentTypes(contentTypes(content)),
 		message, modelHint, modelHarness)
 	row.Event.ItemID = shared.ToStr(shared.Get(rec, "id"))
 	em.PushEvent(row)
@@ -167,7 +167,7 @@ func handleAssistantMessage(rec, message shared.JSON, baseUID, modelHint, modelH
 		row := stampMessageCommon(
 			em.EventForJSON(baseUID, "message", "agent_message", "assistant",
 				shared.ExtractMessageText(content), message).
-				SetContentTypes(ContentTypes(content)),
+				SetContentTypes(contentTypes(content)),
 			message, modelHint, modelHarness)
 		row.Event.ItemID = shared.ToStr(shared.Get(rec, "id"))
 		em.PushEvent(stampTokenAccounting(row, take()))
@@ -182,7 +182,7 @@ func assistantTextBlock(message, block shared.JSON, blockUID, blockType, modelHi
 	row := stampMessageCommon(
 		em.EventForJSON(blockUID, "message", payloadType, "assistant",
 			shared.ExtractMessageText(block), block).
-			SetContentTypes(ContentTypes(block)),
+			SetContentTypes(contentTypes(block)),
 		message, modelHint, modelHarness)
 	return stampTokenAccounting(row, accounting)
 }
@@ -223,7 +223,7 @@ func handleToolResultMessage(rec, message shared.JSON, baseUID, modelHint, model
 	toolError := shared.ToU8Bool(shared.Get(message, "isError"))
 	row := stampMessageCommon(
 		em.EventForJSON(baseUID, "tool_result", "tool_result", "tool", outputText, message).
-			SetContentTypes(ContentTypes(content)),
+			SetContentTypes(contentTypes(content)),
 		message, modelHint, modelHarness)
 	row.Event.ItemID = shared.ToStr(shared.Get(rec, "id"))
 	row.Event.ToolCallID = toolCallID
@@ -261,7 +261,7 @@ func handleCustomRoleMessage(rec, message shared.JSON, baseUID, modelHint, model
 	row := stampMessageCommon(
 		em.EventForJSON(baseUID, "message", "message", "system",
 			shared.ExtractMessageText(content), message).
-			SetContentTypes(ContentTypes(content)),
+			SetContentTypes(contentTypes(content)),
 		message, modelHint, modelHarness)
 	row.Event.ItemID = shared.ToStr(shared.Get(rec, "id"))
 	row.Event.OpKind = shared.ToStr(shared.Get(message, "customType"))
@@ -346,7 +346,7 @@ func handleCustomMessage(rec shared.JSON, baseUID string, em *shared.Emitter) {
 	content := shared.Get(rec, "content")
 	row := em.EventForJSON(baseUID, "message", "message", "system",
 		shared.ExtractMessageText(content), rec)
-	row.SetContentTypes(ContentTypes(content))
+	row.SetContentTypes(contentTypes(content))
 	row.Event.ItemID = shared.ToStr(shared.Get(rec, "id"))
 	row.Event.OpKind = shared.ToStr(shared.Get(rec, "customType"))
 	em.PushEvent(row)
@@ -434,9 +434,9 @@ func satAdd(a, b uint64) uint64 {
 	return sum
 }
 
-// ContentTypes mirrors upstream pi_content_types: the block types of a
+// contentTypes mirrors upstream pi_content_types: the block types of a
 // message content, with toolCall/thinking renamed, sorted and deduplicated.
-func ContentTypes(content shared.JSON) []string {
+func contentTypes(content shared.JSON) []string {
 	switch t := content.(type) {
 	case string:
 		if strings.TrimSpace(t) == "" {
