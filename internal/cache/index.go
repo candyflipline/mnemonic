@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -200,20 +199,6 @@ func (ix *Index) Converge(ctx context.Context) (ConvergeStats, error) {
 	return st, errors.Join(errs...)
 }
 
-func (ix *Index) ConvergeFiles(ctx context.Context, paths []string) (ConvergeStats, error) {
-	c, err := ix.db.Conn(ctx)
-	if err != nil {
-		return ConvergeStats{}, err
-	}
-	defer c.Close()
-	changes, err := diffFiles(ctx, c, paths, false)
-	if err != nil {
-		return ConvergeStats{}, err
-	}
-	st, errs := ix.apply(ctx, c, changes)
-	return st, errors.Join(errs...)
-}
-
 func (ix *Index) apply(ctx context.Context, c *sql.Conn, changes []change) (ConvergeStats, []error) {
 	var st ConvergeStats
 	var errs []error
@@ -233,22 +218,8 @@ func diffLake(ctx context.Context, c *sql.Conn, dataDir string) ([]change, error
 	if err != nil {
 		return nil, err
 	}
-	return diffFiles(ctx, c, matches, true)
-}
-
-func diffFiles(ctx context.Context, c *sql.Conn, paths []string, whole bool) ([]change, error) {
-	matches := slices.Clone(paths)
-	sort.Strings(matches)
-	matches = slices.Compact(matches)
-	if len(matches) == 0 && !whole {
-		return nil, nil
-	}
-	q := "SELECT path, size, mtime_ns FROM lake_files"
-	if !whole {
-		q += " WHERE path IN (" + strings.Join(quoteAll(matches), ", ") + ")"
-	}
 	applied := map[string]lakeFile{}
-	rows, err := c.QueryContext(ctx, q)
+	rows, err := c.QueryContext(ctx, "SELECT path, size, mtime_ns FROM lake_files")
 	if err != nil {
 		return nil, err
 	}
