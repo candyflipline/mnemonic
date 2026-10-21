@@ -25,7 +25,7 @@ func newSourceWriter(dir string, c *segmentCodecs, previous uint64, budget int) 
 	return &sourceWriter{dir: dir, codecs: c, maxVersion: previous, versionFloor: previous, budget: budget}
 }
 func (w *sourceWriter) emit(e *schema.Event) error {
-	if w.current != nil && w.current.inputBytes >= w.budget && w.current.count > 0 {
+	if w.current != nil && (w.current.inputBytes >= w.budget || w.current.count >= 32768) && w.current.count > 0 {
 		name, err := w.current.finish()
 		if err != nil {
 			return err

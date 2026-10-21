@@ -225,11 +225,11 @@ func (w *segmentWriter) finish() (string, error) {
 		w.abort()
 		return "", e
 	}
-	if e := w.meta.Sync(); e != nil {
+	if e := syscall.Fsync(int(w.meta.Fd())); e != nil {
 		w.abort()
 		return "", e
 	}
-	if e := w.heavy.Sync(); e != nil {
+	if e := syscall.Fsync(int(w.heavy.Fd())); e != nil {
 		w.abort()
 		return "", e
 	}
@@ -286,7 +286,7 @@ func (w *segmentWriter) finish() (string, error) {
 		return bw.Flush()
 	}()
 	if writeErr == nil {
-		writeErr = f.Sync()
+		writeErr = syscall.Fsync(int(f.Fd()))
 	}
 	ce := f.Close()
 	if writeErr == nil {
@@ -296,7 +296,7 @@ func (w *segmentWriter) finish() (string, error) {
 		w.abort()
 		return "", writeErr
 	}
-	if e = syncDir(w.path); e != nil {
+	if e = syncStagedDir(w.path); e != nil {
 		w.abort()
 		return "", e
 	}
@@ -305,7 +305,7 @@ func (w *segmentWriter) finish() (string, error) {
 		w.abort()
 		return "", e
 	}
-	return name, syncDir(filepath.Dir(w.path))
+	return name, syncStagedDir(filepath.Dir(w.path))
 }
 
 // Keep front coding in memory too. Only every sixteenth term is materialized
@@ -468,3 +468,16 @@ type heavyKey struct {
 }
 
 func asciiTokenByte(b byte) bool { return b >= 'a' && b <= 'z' || b >= '0' && b <= '9' || b == '_' }
+
+// Staged files use ordinary fsync. The manifest's File.Sync and parent-directory
+// Sync form the full durability barriers before and after publication. On macOS
+// File.Sync is F_FULLFSYNC, so issuing it for every staged file needlessly repeats
+// a device-cache flush. All staged files and the manifest share this filesystem.
+func syncStagedDir(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return syscall.Fsync(int(f.Fd()))
+}

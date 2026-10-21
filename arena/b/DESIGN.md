@@ -17,10 +17,12 @@ A source transaction creates one or more immutable directories:
   delta-varint (local document, frequency) postings. Lengths are uvarints.
 - `manifest.json`: atomic publication of source checkpoints and segment names.
 
-A segment targets 8 MiB of normalized text/payload/token bytes, plus one event.
-Every file is fsynced, followed by directory sync and rename. Only then is a
-new manifest fsynced, renamed and its parent synced. Parser state advances with
-all segments for that source, never independently of them. Monotone append
+A segment targets 8 MiB of normalized text/payload/token bytes or 32,768 events,
+plus one event. Parsing stays serial; three writers overlap indexing, compression
+and I/O, with eight queued events each. Publication groups up to 16 sources.
+Staged files/directories use ordinary fsync. The manifest uses File.Sync before
+rename and parent-directory Sync afterward: on Darwin these are full device-cache
+flush barriers. Parser state advances with every referenced segment, never alone. Monotone append
 versions preserve the existing lake's replacement rule across process restarts.
 
 ## Query memory and structures
@@ -43,8 +45,11 @@ fence every 16 terms lives in the arena. No per-segment file descriptor stays op
 The heap retains source manifests, segment/session lookup entries, codecs, and a
 payload cache capped at 8 MiB of decoded wire bytes. Sample measurements after
 GC: startup heap 0.49 MB, warm heap 11.7 MB, versus 32.0/43.2 MB before this change.
-The metadata/index view maps about 30 MB here, in addition to mapped heavy files.
-Virtual mappings and reclaimable file pages are not the same as live Go heap.
+The metadata/index view maps about 31 MB here, in addition to mapped heavy files.
+This unlinked scratch backing consumes disk while batch is alive; it is additional
+to the directory-byte score. Virtual mappings are not live Go heap. After 300 ms
+idle, synchronous page invalidation and GC release reclaimable resident pages;
+queries fault them back on demand. Checker idle RSS fell from 98.0 to 41.8 MB.
 
 - `search_sessions`: exact global BM25 from segment postings and mapped columns.
   Terms sum lexically; the original two sort stages, tie order, pre-dedupe limit,
@@ -67,6 +72,8 @@ filesystem changes between ingests. Only files inside this lane are modified.
 Compressed input and heavy output are buffered; offsets are tracked directly.
 The ASCII scanner preserves lowercasing, length limits and token frequencies.
 All five tools pass public, hidden, incremental and three-kill recovery checks.
+Clean ingest improved from 6.12 to 3.06 seconds. macOS full flushes and serialized
+parse/write work were additional wall-time costs after removing repeated probes.
 
 ## Recovery and freshness
 
@@ -78,7 +85,7 @@ The batch process checks the manifest before every call and loads a new snapshot
 when it changes. There is no raw-tail query overlay or background daemon here.
 
 Source replacement/shrinkage, changed checkpoint windows, and parser-version
-changes reparse raw. A parser upgrade resets checkpoints, then publishes source
+changes reparse raw. A parser upgrade resets checkpoints, then publishes groups of source
 transactions with the new version. A kill resumes that sweep; queries during it
 can see a partially rebuilt corpus. A production upgrade should build and switch
 an entire generation if uninterrupted whole-corpus visibility is required.
@@ -96,17 +103,18 @@ incremental view publication would remove the full startup/reload rebuild.
 
 Current merge policy is append-only: no live segment is rewritten or compacted.
 Segment write amplification is one derived write per new event, including the
-intentional duplicate heavy payload; it is not one byte per raw byte. Each source
-publication rewrites the global manifest, O(S) metadata bytes per changed source
-and O(S squared) over a clean many-source build. This is a production limitation.
+intentional duplicate heavy payload; it is not one byte per raw byte. Each group of up to 16 sources
+rewrites the global manifest, O(S) metadata bytes per group and O(S squared / 16)
+over a clean many-source build. This is a production limitation.
 A production size-tiered merge with fanout 8 and four bounded levels would add at
 most four full rewrites per event (five including initial write), plus manifest
 metadata. A checkpoint journal should replace repeated whole-manifest writes.
 Neither that merge policy nor the journal is implemented in this prototype.
 
-Peak ingest memory is O(segment budget + largest normalized record + source
-manifest), independent of total event count for fixed source count. The sample
-peak is about 135 MB. The required 900 MiB Go soft limit remains enabled in runs;
+Peak ingest memory is O(three segment budgets + codecs + bounded in-flight
+records + source manifest), independent of total event count for fixed source
+count and record size. Each writer queues at most eight events. The sample peak
+is about 249 MB. The required 900 MiB Go soft limit remains enabled in runs;
 it is not a hard RSS ceiling. The parser accepts unbounded single raw lines, so
 there is no unconditional sub-1-GB bound for arbitrary inputs. Production needs
 an explicit oversized-record policy and a measured bound before adoption.

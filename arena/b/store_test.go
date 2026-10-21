@@ -263,6 +263,7 @@ func TestStore(t *testing.T) {
 			}
 			defer full.Close()
 			// Literal values come from the checked-in public parser golden, not private data.
+			db.releaseIdlePages()
 			if len(db.events) != tc.events || len(db.sessions) != 1 {
 				t.Fatalf("events=%d sessions=%d", len(db.events), len(db.sessions))
 			}

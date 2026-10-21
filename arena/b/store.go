@@ -182,11 +182,47 @@ func ingest(root, dir string) error {
 	if e != nil {
 		return e
 	}
-	var codecs *segmentCodecs
-	defer func() { codecs.close() }()
+	var codecs []*segmentCodecs
+	pool := make(chan *segmentCodecs, 3)
+	type pendingSource struct {
+		rel    string
+		cp     Checkpoint
+		writer *sourceStream
+	}
+	var pending []pendingSource
+	defer func() {
+		for _, p := range pending {
+			p.writer.abort()
+		}
+		for _, c := range codecs {
+			c.close()
+		}
+	}()
 	seen := map[string]bool{}
 	dirty := changedFormat
+	publish := func() error {
+		for _, p := range pending {
+			if err := p.writer.wait(); err != nil {
+				return err
+			}
+			p.cp.Events += p.writer.count
+			p.cp.MaxVersion = p.writer.maxVersion
+			p.cp.Segments = append(p.cp.Segments, p.writer.names...)
+			m.Sources[p.rel] = p.cp
+		}
+		if err := atomicManifest(dir, m); err != nil {
+			return err
+		}
+		pending = pending[:0]
+		dirty = false
+		return nil
+	}
 	for _, p := range paths {
+		if len(pending) >= 16 {
+			if err := publish(); err != nil {
+				return err
+			}
+		}
 		rel, e := filepath.Rel(filepath.Join(root, "raw"), p)
 		if e != nil {
 			return e
@@ -253,15 +289,19 @@ func ingest(root, dir string) error {
 			f.Close()
 			return e
 		}
-		if codecs == nil {
-			codecs, e = newSegmentCodecs()
-			if e != nil {
-				zr.Close()
-				f.Close()
-				return e
+		if len(codecs) == 0 {
+			for i := 0; i < cap(pool); i++ {
+				c, err := newSegmentCodecs()
+				if err != nil {
+					zr.Close()
+					f.Close()
+					return err
+				}
+				codecs = append(codecs, c)
+				pool <- c
 			}
 		}
-		writer := newSourceWriter(dir, codecs, cp.MaxVersion, segmentTextBudget)
+		writer := newSourceStream(dir, pool, cp.MaxVersion)
 		state, parseErr := parser.Parse(zr, normalize.SourceMeta{SourceName: src.SourceName, Harness: src.Harness, SourceFile: src.Path}, cp.State, writer.emit)
 		zr.Close()
 		if parseErr == nil && state.Offset != uint64(src.Size) {
@@ -278,11 +318,7 @@ func ingest(root, dir string) error {
 			writer.abort()
 			return e
 		}
-		names, e := writer.finish()
-		if e != nil {
-			return e
-		}
-		count := uint64(writer.count)
+		writer.seal()
 		parts := strings.Split(filepath.ToSlash(rel), "/")
 		cp.Author = strings.TrimPrefix(parts[0], "author=")
 		cp.Machine = strings.TrimPrefix(parts[1], "machine=")
@@ -290,14 +326,13 @@ func ingest(root, dir string) error {
 		cp.State = state
 		cp.Compressed = end
 		cp.Window = hash
-		cp.Events += count
-		cp.Segments = append(cp.Segments, names...)
-		cp.MaxVersion = writer.maxVersion
-		m.Sources[rel] = cp
-		if e = atomicManifest(dir, m); e != nil {
-			return e
+		pending = append(pending, pendingSource{rel, cp, writer})
+
+	}
+	for len(pending) > 0 {
+		if err := publish(); err != nil {
+			return err
 		}
-		dirty = false
 	}
 	for k := range m.Sources {
 		if !seen[k] {

@@ -149,3 +149,23 @@ func freezePaths(a *mappedArena, p *pathIndex) {
 	p.pathFallback = freezeSlice(a, p.pathFallback)
 	p.shellDocs = freezeSlice(a, p.shellDocs)
 }
+
+// On Darwin MADV_DONTNEED leaves the measured file-backed RSS unchanged.
+// Synchronous invalidation writes dirty view pages and drops their resident
+// translations while preserving backing bytes and all addresses. Queries fault
+// pages back on demand. This runs only in the single query owner's idle branch.
+func (db *Store) releaseIdlePages() {
+	release := func(b []byte) {
+		if len(b) == 0 {
+			return
+		}
+		syscall.Syscall(syscall.SYS_MSYNC, uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), syscall.MS_SYNC|syscall.MS_INVALIDATE)
+	}
+	for _, b := range db.arena.blocks {
+		release(b)
+	}
+	for _, sg := range db.segments {
+		release(sg.postings)
+		release(sg.heavy)
+	}
+}

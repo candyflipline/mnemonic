@@ -42,17 +42,56 @@ func run() error {
 	}
 	defer func() { db.Close() }()
 	debug.FreeOSMemory()
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 4096), 8<<20)
+	type inputLine struct {
+		raw []byte
+		err error
+	}
+	lines := make(chan inputLine, 1)
+	go func() {
+		defer close(lines)
+		scanner := bufio.NewScanner(os.Stdin)
+		scanner.Buffer(make([]byte, 4096), 8<<20)
+		for scanner.Scan() {
+			lines <- inputLine{raw: append([]byte(nil), scanner.Bytes()...)}
+		}
+		if err := scanner.Err(); err != nil {
+			lines <- inputLine{err: err}
+		}
+	}()
 	w := bufio.NewWriter(os.Stdout)
 	defer w.Flush()
-	for scanner.Scan() {
+	idle := time.NewTimer(300 * time.Millisecond)
+	defer idle.Stop()
+	for {
+		var input inputLine
+		select {
+		case next, ok := <-lines:
+			if !ok {
+				return nil
+			}
+			input = next
+		case <-idle.C:
+			if len(lines) == 0 {
+				db.releaseIdlePages()
+				debug.FreeOSMemory()
+			}
+			continue
+		}
+		if input.err != nil {
+			return input.err
+		}
+		if !idle.Stop() {
+			select {
+			case <-idle.C:
+			default:
+			}
+		}
 		var call struct {
 			ID   any             `json:"id"`
 			Tool string          `json:"tool"`
 			Args json.RawMessage `json:"args"`
 		}
-		if e = json.Unmarshal(scanner.Bytes(), &call); e != nil {
+		if e = json.Unmarshal(input.raw, &call); e != nil {
 			return e
 		}
 		start := time.Now()
@@ -89,6 +128,6 @@ func run() error {
 		if e = w.Flush(); e != nil {
 			return e
 		}
+		idle.Reset(300 * time.Millisecond)
 	}
-	return scanner.Err()
 }
