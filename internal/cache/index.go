@@ -533,12 +533,29 @@ FROM win w ANTI JOIN keep k USING (event_uid)`,
 		return err
 	}
 	st.Deleted = deleted
-	if deleted > 0 {
-		stmts := append([]string{
-			`UPDATE corpus SET docs = docs - (SELECT count(*) FILTER (WHERE doc_len > 0) FROM del),
-  total_len = total_len - (SELECT coalesce(sum(doc_len), 0) FROM del)`,
-		}, deletePostings(inDel)...)
-		if err := execAll(ctx, c, append(stmts, "DELETE FROM events WHERE "+inDel)); err != nil {
+	ranges, err := queryStrings(ctx, c, fmt.Sprintf("SELECT DISTINCT doc // %d FROM del ORDER BY 1", chunkRows))
+	if err != nil {
+		return err
+	}
+	if len(ranges) > 1 {
+		if _, err := c.ExecContext(ctx, "COMMIT"); err != nil {
+			return err
+		}
+		for _, r := range ranges {
+			lo, err := strconv.ParseInt(r, 10, 64)
+			if err != nil {
+				return err
+			}
+			in := fmt.Sprintf("doc >= %d AND doc < %d AND doc IN (SELECT doc FROM del)", lo*chunkRows, (lo+1)*chunkRows)
+			if err := execAll(ctx, c, append(append([]string{"BEGIN"}, deleteDocs(in)...), "COMMIT", "FORCE CHECKPOINT")); err != nil {
+				return err
+			}
+		}
+		if _, err := c.ExecContext(ctx, "BEGIN"); err != nil {
+			return err
+		}
+	} else if deleted > 0 {
+		if err := execAll(ctx, c, deleteDocs(inDel)); err != nil {
 			return err
 		}
 	}
@@ -562,6 +579,15 @@ FROM win w ANTI JOIN keep k USING (event_uid)`,
 		return err
 	}
 	return execAll(ctx, c, []string{"DROP TABLE del", "DROP TABLE mv", "DROP TABLE ins", "DROP TABLE s"})
+}
+
+func deleteDocs(in string) []string {
+	stmts := []string{
+		`UPDATE corpus SET docs = docs - (SELECT count(*) FILTER (WHERE doc_len > 0) FROM del WHERE ` + in + `),
+  total_len = total_len - (SELECT coalesce(sum(doc_len), 0) FROM del WHERE ` + in + `)`,
+	}
+	stmts = append(stmts, deletePostings(in)...)
+	return append(stmts, "DELETE FROM events WHERE "+in)
 }
 
 func insertChunk(ctx context.Context, c *sql.Conn, flagsSQL string, from, to, end int64) error {
