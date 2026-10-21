@@ -193,18 +193,25 @@ func (st *Store) lsRecs() ([]lsRec, error) {
 	return recs, nil
 }
 
-func (st *Store) lsSelectPage(a *lsArgs, cursor *lsCursor) ([]lsItem, error) {
-	recs, err := st.lsRecs()
-	if err != nil {
-		return nil, err
+func (db *DB) lsSelectPage(a *lsArgs, cursor *lsCursor) ([]lsItem, error) {
+	var recs []lsRec
+	var infos []sessInfo
+	for _, st := range db.parts {
+		pr, err := st.lsRecs()
+		if err != nil {
+			return nil, err
+		}
+		recs = append(recs, pr...)
+		for i := 0; i < st.nSessions; i++ {
+			infos = append(infos, st.session(i))
+		}
 	}
 	type cand struct {
 		i    int
 		info sessInfo
 	}
 	var cands []cand
-	for i := 0; i < st.nSessions; i++ {
-		s := st.session(i)
+	for i, s := range infos {
 		r := recs[i]
 		if duckTrim(s.id) == "" || s.last < a.StartUnixMs || s.first >= a.EndUnixMs {
 			continue

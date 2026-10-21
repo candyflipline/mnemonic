@@ -134,7 +134,7 @@ func (a canonicalOpenArgs) requestShape() map[string]any {
 	return map[string]any{"id": a.target.String()}
 }
 
-func (openTool) Call(st *Store, raw json.RawMessage) (any, string, error) {
+func (openTool) Call(db *DB, raw json.RawMessage) (any, string, error) {
 	args, err := parseOpenArgs(raw)
 	if err != nil {
 		return nil, "", err
@@ -143,16 +143,16 @@ func (openTool) Call(st *Store, raw json.RawMessage) (any, string, error) {
 
 	switch args.target.kind {
 	case kindSession:
-		return openSessionFlow(st, request, args)
+		return openSessionFlow(db, request, args)
 	case kindTurn:
-		return openTurnFlow(st, request, args)
+		return openTurnFlow(db, request, args)
 	default:
-		return openEventFlow(st, request, args)
+		return openEventFlow(db, request, args)
 	}
 }
 
-func openSessionFlow(st *Store, request map[string]any, args canonicalOpenArgs) (any, string, error) {
-	scan, err := st.loadSessionScan(args.target.session, scanOpts{})
+func openSessionFlow(db *DB, request map[string]any, args canonicalOpenArgs) (any, string, error) {
+	scan, err := db.loadSessionScan(args.target.session, scanOpts{})
 	if err != nil {
 		return nil, "", err
 	}
@@ -204,8 +204,8 @@ func openSessionFlow(st *Store, request map[string]any, args canonicalOpenArgs) 
 	return data, openResultText(request, data), nil
 }
 
-func openTurnFlow(st *Store, request map[string]any, args canonicalOpenArgs) (any, string, error) {
-	scan, err := st.loadSessionScan(args.target.session, scanOpts{turn: &args.target.turnSeq})
+func openTurnFlow(db *DB, request map[string]any, args canonicalOpenArgs) (any, string, error) {
+	scan, err := db.loadSessionScan(args.target.session, scanOpts{turn: &args.target.turnSeq})
 	if err != nil {
 		return nil, "", err
 	}
@@ -260,16 +260,16 @@ func openTurnFlow(st *Store, request map[string]any, args canonicalOpenArgs) (an
 	return data, openResultText(request, data), nil
 }
 
-func openEventFlow(st *Store, request map[string]any, args canonicalOpenArgs) (any, string, error) {
+func openEventFlow(db *DB, request map[string]any, args canonicalOpenArgs) (any, string, error) {
 	uid := args.target.eventUID
-	sessionID, ok, err := st.sessionOfUID(uid)
+	sessionID, ok, err := db.sessionOfUID(uid)
 	if err != nil {
 		return nil, "", err
 	}
 	if !ok {
 		return nil, "", argErrorf("event not found")
 	}
-	scan, err := st.loadSessionScan(sessionID, scanOpts{targetUID: uid})
+	scan, err := db.loadSessionScan(sessionID, scanOpts{targetUID: uid})
 	if err != nil {
 		return nil, "", err
 	}

@@ -16,7 +16,7 @@ const (
 	faScanCap         = 2000
 )
 
-func (fileAttention) Call(st *Store, args json.RawMessage) (any, string, error) {
+func (fileAttention) Call(db *DB, args json.RawMessage) (any, string, error) {
 	a, err := faParseArgs(args)
 	if err != nil {
 		return nil, "", err
@@ -65,7 +65,7 @@ func (fileAttention) Call(st *Store, args json.RawMessage) (any, string, error) 
 		MutationsOnly:   a.MutationsOnly,
 		MaxRows:         faScanCap,
 	}
-	touches, err := st.faTouches(q)
+	touches, err := db.faTouches(q)
 	if err != nil {
 		return nil, "", err
 	}

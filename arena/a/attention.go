@@ -102,7 +102,7 @@ func (st *Store) touchOf(d int, r *Row) faTouch {
 	}
 }
 
-func (st *Store) faTouches(q faQuery) ([]faTouch, error) {
+func (db *DB) faTouches(q faQuery) ([]faTouch, error) {
 	if q.Rel == "" {
 		return nil, argErrorf("file_attention requires a non-empty path tail")
 	}
@@ -110,13 +110,17 @@ func (st *Store) faTouches(q faQuery) ([]faTouch, error) {
 		return []faTouch{}, nil
 	}
 	limitPlus := q.MaxRows + 1
-	exact, err := st.faExactTouches(q)
-	if err != nil {
-		return nil, err
-	}
-	suffix, err := st.faSuffixTouches(q)
-	if err != nil {
-		return nil, err
+	var exact, suffix []faTouch
+	for _, st := range db.parts {
+		e, err := st.faExactTouches(q)
+		if err != nil {
+			return nil, err
+		}
+		s, err := st.faSuffixTouches(q)
+		if err != nil {
+			return nil, err
+		}
+		exact, suffix = append(exact, e...), append(suffix, s...)
 	}
 	sortTouches(exact)
 	if len(exact) > limitPlus {
@@ -147,7 +151,7 @@ func (st *Store) faExactTouches(q faQuery) ([]faTouch, error) {
 			}
 			continue
 		}
-		r, err := st.row(d)
+		r, _, err := st.hot(d)
 		if err != nil {
 			return nil, err
 		}
@@ -263,7 +267,7 @@ func (st *Store) faSuffixTouches(q faQuery) ([]faTouch, error) {
 			continue
 		}
 		d := int(binary.LittleEndian.Uint32(e))
-		r, err := st.row(d)
+		r, _, err := st.hot(d)
 		if err != nil {
 			return nil, err
 		}

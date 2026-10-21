@@ -4,22 +4,24 @@ package main
 
 import (
 	"bufio"
-	"crypto/sha256"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 )
 
 type Tool interface {
-	Call(st *Store, args json.RawMessage) (any, string, error)
+	Call(db *DB, args json.RawMessage) (any, string, error)
 }
 
 type ArgError struct{ Msg string }
@@ -95,28 +97,103 @@ func ingest(root, store string) error {
 		}
 		srcs = append(srcs, row)
 	}
-	sb, _ := json.Marshal(srcs)
-	fp := fingerprint(cks) + fmt.Sprintf("%x", sha256.Sum256(sb))
-	if cur, err := currentMeta(store); err == nil && cur.Fingerprint == fp {
-		return nil
-	}
-	if err := buildIndex(store, cks, fp, sb); err != nil {
+	parts := planParts(cks)
+	ids := make([]string, 0, len(parts))
+	if err := os.MkdirAll(filepath.Join(store, "parts"), 0o755); err != nil {
 		return err
 	}
+	for _, members := range parts {
+		id := fingerprint(members)
+		if _, err := os.Stat(partDir(store, id)); err != nil {
+			if err := buildIndex(store, members, id, partDir(store, id)); err != nil {
+				return err
+			}
+		}
+		ids = append(ids, id)
+	}
+	mb, _ := json.Marshal(manifestFile{Parts: ids, Sources: srcs})
+	if cur, err := os.ReadFile(filepath.Join(store, "CURRENT")); err == nil && bytes.Equal(cur, mb) {
+		return nil
+	}
+	if err := writeFileAtomic(filepath.Join(store, "CURRENT"), mb); err != nil {
+		return err
+	}
+	gcParts(store, ids)
 	return gcLogs(store, cks)
 }
 
-func currentMeta(store string) (indexMeta, error) {
-	var m indexMeta
-	cur, err := os.ReadFile(filepath.Join(store, "CURRENT"))
-	if err != nil {
-		return m, err
+// planParts groups sources that share a session into one component and
+// components into partShards parts by a hash of their least session id, so a
+// session and every event version that can compete for its uids live in one
+// part, and one source changing rebuilds only its part.
+func planParts(cks []ckpt) [][]ckpt {
+	parent := make([]int, len(cks))
+	for i := range parent {
+		parent[i] = i
 	}
-	b, err := os.ReadFile(filepath.Join(store, strings.TrimSpace(string(cur)), "meta.json"))
-	if err != nil {
-		return m, err
+	var find func(int) int
+	find = func(i int) int {
+		for parent[i] != i {
+			parent[i] = parent[parent[i]]
+			i = parent[i]
+		}
+		return i
 	}
-	return m, json.Unmarshal(b, &m)
+	owner := map[string]int{}
+	for i, c := range cks {
+		for _, s := range c.Sessions {
+			if j, ok := owner[s]; ok {
+				parent[find(i)] = find(j)
+			} else {
+				owner[s] = i
+			}
+		}
+	}
+	least := map[int]string{}
+	for i, c := range cks {
+		r := find(i)
+		k := c.Key
+		if len(c.Sessions) > 0 {
+			k = c.Sessions[0]
+		}
+		if cur, ok := least[r]; !ok || k < cur {
+			least[r] = k
+		}
+	}
+	shard := map[uint32][]ckpt{}
+	for i, c := range cks {
+		h := fnv.New32a()
+		h.Write([]byte(least[find(i)]))
+		s := h.Sum32() % partShards
+		shard[s] = append(shard[s], c)
+	}
+	keys := make([]uint32, 0, len(shard))
+	for k := range shard {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	out := make([][]ckpt, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, shard[k])
+	}
+	return out
+}
+
+const partShards = 256
+
+// gcParts removes part dirs the manifest does not name, and any half-built
+// part a killed build left behind.
+func gcParts(store string, keep []string) {
+	want := map[string]bool{}
+	for _, id := range keep {
+		want[id] = true
+	}
+	ents, _ := os.ReadDir(filepath.Join(store, "parts"))
+	for _, e := range ents {
+		if !want[e.Name()] {
+			os.RemoveAll(filepath.Join(store, "parts", e.Name()))
+		}
+	}
 }
 
 // gcLogs removes log generations no checkpoint names.
@@ -154,7 +231,7 @@ type reply struct {
 }
 
 func batch(root, store string) error {
-	st, err := openStore(store)
+	db, err := openDB(store)
 	if err != nil {
 		return err
 	}
@@ -172,7 +249,7 @@ func batch(root, store string) error {
 			} else {
 				rep.ID = c.ID
 				start := time.Now()
-				data, text, cerr := dispatch(st, c)
+				data, text, cerr := dispatch(db, c)
 				rep.Us = time.Since(start).Microseconds()
 				rep.Data, rep.Text = data, text
 				if cerr != nil {
@@ -195,7 +272,7 @@ func batch(root, store string) error {
 	}
 }
 
-func dispatch(st *Store, c call) (data any, text string, err error) {
+func dispatch(db *DB, c call) (data any, text string, err error) {
 	defer func() {
 		if p := recover(); p != nil {
 			data, text, err = nil, "", fmt.Errorf("panic: %v", p)
@@ -209,7 +286,7 @@ func dispatch(st *Store, c call) (data any, text string, err error) {
 	if len(args) == 0 {
 		args = json.RawMessage("{}")
 	}
-	return t.Call(st, args)
+	return t.Call(db, args)
 }
 
 func lsObjectFields(raw json.RawMessage, allowed ...string) (map[string]json.RawMessage, error) {

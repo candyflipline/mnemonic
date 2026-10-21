@@ -31,12 +31,12 @@ const (
 
 var lsModes = map[string]bool{"web_search": true, "mcp_internal": true, "tool_calling": true, "chat": true}
 
-func (listSessions) Call(st *Store, args json.RawMessage) (any, string, error) {
+func (listSessions) Call(db *DB, args json.RawMessage) (any, string, error) {
 	a, err := lsParseArgs(args)
 	if err != nil {
 		return nil, "", err
 	}
-	page, err := lsQueryPage(st, a)
+	page, err := lsQueryPage(db, a)
 	if err != nil {
 		return nil, "", err
 	}
@@ -254,7 +254,7 @@ func lsDecodeCursor(token string) (*lsCursor, error) {
 	return &c, nil
 }
 
-func lsQueryPage(st *Store, a *lsArgs) (*lsPage, error) {
+func lsQueryPage(db *DB, a *lsArgs) (*lsPage, error) {
 	var cursor *lsCursor
 	if a.Cursor != "" {
 		c, err := lsDecodeCursor(a.Cursor)
@@ -269,7 +269,7 @@ func lsQueryPage(st *Store, a *lsArgs) (*lsPage, error) {
 		}
 		cursor = c
 	}
-	items, err := st.lsSelectPage(a, cursor)
+	items, err := db.lsSelectPage(a, cursor)
 	if err != nil {
 		return nil, err
 	}

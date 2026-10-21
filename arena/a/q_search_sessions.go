@@ -119,7 +119,7 @@ func derefOrNil(s *string) any {
 	return *s
 }
 
-func (searchSessionsTool) Call(st *Store, raw json.RawMessage) (any, string, error) {
+func (searchSessionsTool) Call(db *DB, raw json.RawMessage) (any, string, error) {
 	args, err := parseSearchSessionsArgs(raw)
 	if err != nil {
 		return nil, "", err
@@ -139,7 +139,7 @@ func (searchSessionsTool) Call(st *Store, raw json.RawMessage) (any, string, err
 			q.turnSeq, q.turnOK = args.withinID.turnSeq, true
 		}
 	}
-	result, err := st.search(q)
+	result, err := db.search(q)
 	if err != nil {
 		return nil, "", err
 	}

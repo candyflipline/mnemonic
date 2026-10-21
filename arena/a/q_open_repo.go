@@ -198,7 +198,11 @@ type scanOpts struct {
 	targetUID string
 }
 
-func (st *Store) loadSessionScan(sessionID string, opts scanOpts) (*sessionScan, error) {
+func (db *DB) loadSessionScan(sessionID string, opts scanOpts) (*sessionScan, error) {
+	st, ok := db.part(sessionID)
+	if !ok {
+		return nil, nil
+	}
 	lo, hi, ok := st.sessionRange(sessionID)
 	if !ok {
 		return nil, nil

@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -77,7 +76,7 @@ func loadSourceRows(store string, si int, c ckpt) ([]built, error) {
 	return out, nil
 }
 
-func buildIndex(store string, cks []ckpt, fp string, sources []byte) error {
+func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 	sort.Slice(cks, func(i, j int) bool { return cks[i].Key < cks[j].Key })
 	type winner struct {
 		b    built
@@ -190,7 +189,7 @@ func buildIndex(store string, cks []ckpt, fp string, sources []byte) error {
 		delete(bySession, sid)
 	}
 
-	dir := filepath.Join(store, "index.tmp")
+	dir := partDir + ".tmp"
 	os.RemoveAll(dir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -206,8 +205,12 @@ func buildIndex(store string, cks []ckpt, fp string, sources []byte) error {
 	var faBlob []byte
 	var faOffs []uint32
 	tfs := map[string]uint32{}
+	var hot, hotOff []byte
 	for d, b := range docs {
 		r := b.row
+		hotOff = binary.LittleEndian.AppendUint64(hotOff, uint64(len(hot)))
+		hot = hotRow(*r).append(hot)
+		hotOff = binary.LittleEndian.AppendUint64(hotOff, textHash(r.Text))
 		clear(tfs)
 		dl := tokenize(r.Text, func(t string) { tfs[t]++ })
 		if dl > 0 {
@@ -243,12 +246,15 @@ func buildIndex(store string, cks []ckpt, fp string, sources []byte) error {
 	}
 	faOffs = append(faOffs, uint32(len(faBlob)))
 	docs = nil
+	hotOff = binary.LittleEndian.AppendUint64(hotOff, uint64(len(hot)))
+	for name, b := range map[string][]byte{"hot": hot, "hot.off": hotOff} {
+		if err := os.WriteFile(filepath.Join(dir, name), b, 0o644); err != nil {
+			return err
+		}
+	}
 
 	if heavy.err != nil {
 		return heavy.err
-	}
-	if err := os.WriteFile(filepath.Join(dir, "sources.json"), sources, 0o644); err != nil {
-		return err
 	}
 	if err := writeLs(dir, lsRecs); err != nil {
 		return err
@@ -373,7 +379,7 @@ func buildIndex(store string, cks []ckpt, fp string, sources []byte) error {
 	if err := os.WriteFile(filepath.Join(dir, "meta.json"), mb, 0o644); err != nil {
 		return err
 	}
-	return commitIndex(store, dir)
+	return commitPart(dir, partDir)
 }
 
 type faEntry struct {
@@ -383,15 +389,15 @@ type faEntry struct {
 
 const docWidth = 40
 
-// commitIndex fsyncs the new index dir, renames it to index.<n> and points
-// CURRENT at it by rename; the previous index is removed after.
-func commitIndex(store, dir string) error {
-	ents, err := os.ReadDir(dir)
+// commitPart fsyncs every file of the part built in tmp, then renames it to
+// dir. A part dir that exists is complete; the manifest names it after.
+func commitPart(tmp, dir string) error {
+	ents, err := os.ReadDir(tmp)
 	if err != nil {
 		return err
 	}
 	for _, e := range ents {
-		f, err := os.Open(filepath.Join(dir, e.Name()))
+		f, err := os.Open(filepath.Join(tmp, e.Name()))
 		if err != nil {
 			return err
 		}
@@ -401,23 +407,7 @@ func commitIndex(store, dir string) error {
 			return err
 		}
 	}
-	cur, _ := os.ReadFile(filepath.Join(store, "CURRENT"))
-	n := 0
-	if v, err := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(string(cur)), "index.")); err == nil {
-		n = v + 1
-	}
-	name := "index." + strconv.Itoa(n)
-	os.RemoveAll(filepath.Join(store, name))
-	if err := os.Rename(dir, filepath.Join(store, name)); err != nil {
-		return err
-	}
-	if err := writeFileAtomic(filepath.Join(store, "CURRENT"), []byte(name+"\n")); err != nil {
-		return err
-	}
-	if old := strings.TrimSpace(string(cur)); old != "" && old != name {
-		os.RemoveAll(filepath.Join(store, old))
-	}
-	return nil
+	return os.Rename(tmp, dir)
 }
 
 type dict struct {
@@ -577,4 +567,19 @@ func (h *heavyReader) close() {
 			f.Close()
 		}
 	}
+}
+
+// hotRow is the part of r search and file_attention hydrate, kept
+// uncompressed in the index so a hit reads one record and no log frame:
+// everything but text_content for tool requests, and only the hit fields
+// for every other row.
+func hotRow(r Row) *Row {
+	r.Text = ""
+	if r.ToolPhase != "request" {
+		r.SourceFile, r.ItemID, r.ToolCallID, r.EndpointKind = "", "", "", ""
+		r.ProjectID, r.RepoRelPath, r.WorktreeRoot, r.Cwd = "", "", "", ""
+		r.Buckets, r.Native = "", ""
+		r.TioInput, r.TioInPrev, r.TioOutPrev, r.TioProj, r.TioRel, r.TioWT = "", "", "", "", "", ""
+	}
+	return &r
 }

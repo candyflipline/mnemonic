@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"syscall"
 )
 
@@ -20,6 +19,7 @@ type Store struct {
 	turns, uids               []byte
 	terms, termsOff, postings []byte
 	faExact, faTio, faBlob    []byte
+	hotB, hotOff              []byte
 	light, heavy              []*os.File
 	cache                     map[frameKey][]*Row
 	cacheOrder                []frameKey
@@ -52,12 +52,7 @@ func mmapFile(path string) ([]byte, error) {
 	return syscall.Mmap(int(f.Fd()), 0, int(fi.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
 }
 
-func openStore(store string) (*Store, error) {
-	cur, err := os.ReadFile(filepath.Join(store, "CURRENT"))
-	if err != nil {
-		return nil, err
-	}
-	dir := filepath.Join(store, strings.TrimSpace(string(cur)))
+func openPart(store, dir string) (*Store, error) {
 	st := &Store{dir: dir, cache: map[frameKey][]*Row{}, hcache: map[frameKey][][]byte{}}
 	mb, err := os.ReadFile(filepath.Join(dir, "meta.json"))
 	if err != nil {
@@ -68,7 +63,8 @@ func openStore(store string) (*Store, error) {
 	}
 	for name, dst := range map[string]*[]byte{"docs": &st.docs, "sessions": &st.sessions, "sessions.str": &st.sessStr,
 		"turns": &st.turns, "uids": &st.uids, "terms": &st.terms, "terms.off": &st.termsOff, "postings": &st.postings,
-		"fa.exact": &st.faExact, "fa.tio": &st.faTio, "fa.blob": &st.faBlob} {
+		"fa.exact": &st.faExact, "fa.tio": &st.faTio, "fa.blob": &st.faBlob,
+		"hot": &st.hotB, "hot.off": &st.hotOff} {
 		b, err := mmapFile(filepath.Join(dir, name))
 		if err != nil {
 			return nil, err
@@ -325,4 +321,17 @@ func (st *Store) sessionOfUID(uid string) (string, bool, error) {
 		}
 	}
 	return "", false, nil
+}
+
+// hot decodes doc d's hot record (see hotRow) and returns it with the hash of
+// its text_content.
+func (st *Store) hot(d int) (*Row, uint64, error) {
+	lo := binary.LittleEndian.Uint64(st.hotOff[d*16:])
+	th := binary.LittleEndian.Uint64(st.hotOff[d*16+8:])
+	hi := binary.LittleEndian.Uint64(st.hotOff[(d+1)*16:])
+	r := new(Row)
+	if _, err := r.decode(st.hotB[lo:hi]); err != nil {
+		return nil, 0, err
+	}
+	return r, th, nil
 }

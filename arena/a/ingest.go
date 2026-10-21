@@ -45,6 +45,7 @@ type ckpt struct {
 	Path       string          `json:"path"`
 	Author     string          `json:"author"`
 	Machine    string          `json:"machine"`
+	Sessions   []string        `json:"sessions"`
 }
 
 const window = 64 << 10
@@ -215,9 +216,14 @@ func ingestSource(root, store string, s source) (bool, error) {
 	lw := &frameWriter{f: lightF, off: from.LightLen, target: lightFrame, enc: encoder}
 	hw := &frameWriter{f: heavyF, off: from.HeavyLen, target: heavyFrame, enc: heavyEncoder}
 	rows := from.Rows
+	sessions := map[string]bool{}
+	for _, s := range from.Sessions {
+		sessions[s] = true
+	}
 	state, err := parser.Parse(zr, normalize.SourceMeta{SourceName: s.src.SourceName, Harness: s.src.Harness, SourceFile: s.src.Path},
 		from.State, func(ev *schema.Event) error {
 			r := rowFrom(ev)
+			sessions[r.Session] = true
 			var heavy []byte
 			heavy = appendStr(heavy, ev.PayloadJSON)
 			heavy = appendStr(heavy, ev.TokenUsageJSON)
@@ -253,6 +259,10 @@ func ingestSource(root, store string, s source) (bool, error) {
 	}
 	next.ZstSize, next.WindowSHA, next.State = end, sum, state
 	next.LightLen, next.HeavyLen, next.Rows = lw.off, hw.off, rows
+	for s := range sessions {
+		next.Sessions = append(next.Sessions, s)
+	}
+	sort.Strings(next.Sessions)
 	b, _ := json.Marshal(next)
 	if err := writeFileAtomic(ckptPath(store, key), b); err != nil {
 		return false, err

@@ -77,93 +77,62 @@ func textHash(s string) uint64 {
 	return h.Sum64()
 }
 
-func (st *Store) search(q searchQuery) (*searchResult, error) {
+func (db *DB) search(q searchQuery) (*searchResult, error) {
 	terms := tokenizeQuery(q.query, bm25MaxQueryTerms)
 	if len(terms) == 0 {
 		return nil, argErrorf("query has no searchable terms (tokens shorter than 2 characters are excluded)")
 	}
 	limit := q.nHits + 1
 	res := &searchResult{scopeExists: true}
-	lo, hi := 0, st.meta.Docs
+	parts := db.parts
 	if q.sessionOK {
-		var ok bool
-		lo, hi, ok = st.sessionRange(q.sessionID)
-		if !ok {
-			lo, hi = 0, 0
-		}
-		if q.turnOK {
-			found := false
-			for d := lo; d < hi; d++ {
-				if st.turnSeq(d) == q.turnSeq {
-					found = true
-					break
-				}
-			}
-			res.scopeExists = found
-		} else {
-			res.scopeExists = hi > lo
+		st, ok := db.part(q.sessionID)
+		parts = nil
+		res.scopeExists = false
+		if ok {
+			parts = []*Store{st}
 		}
 	}
-	mask := uint16(eventTypeMask(q.eventTypes))
-	pass := func(d int) bool {
-		if d < lo || d >= hi {
-			return false
-		}
-		f := st.flags(d)
-		if f&flagSearchable == 0 || (len(q.eventTypes) > 0 && f&mask == 0) {
-			return false
-		}
-		if q.turnOK && st.turnSeq(d) != q.turnSeq {
-			return false
-		}
-		if q.harness != nil && st.harnessOf(d) != *q.harness {
-			return false
-		}
-		if q.sourceName != nil && st.sourceNameOf(d) != *q.sourceName {
-			return false
-		}
-		return true
-	}
-
 	sorted := slices.Clone(terms)
 	slices.Sort(sorted)
-	docs := float64(st.meta.ScoredDocs)
+	df := make([]float64, len(sorted))
+	for _, st := range db.parts {
+		for i, t := range sorted {
+			if p := st.postingsOf(t); p != nil {
+				n, _ := binary.Uvarint(p)
+				df[i] += float64(n)
+			}
+		}
+	}
+	docs := float64(db.scoredDocs)
 	avg := 0.0
-	if st.meta.ScoredDocs > 0 {
-		avg = float64(st.meta.TotalLen) / float64(st.meta.ScoredDocs)
+	if db.scoredDocs > 0 {
+		avg = float64(db.totalLen) / float64(db.scoredDocs)
+	}
+	idf := make([]float64, len(sorted))
+	for i := range sorted {
+		idf[i] = math.Log(1.0 + ((math.Max(docs, df[i]) - df[i] + 0.5) / (df[i] + 0.5)))
 	}
 	norm := math.Max(avg, 1.0)
-	acc := map[int]float64{}
-	for _, t := range sorted {
-		p := st.postingsOf(t)
-		if p == nil {
-			continue
-		}
-		n, k := binary.Uvarint(p)
-		p = p[k:]
-		df := float64(n)
-		idf := math.Log(1.0 + ((math.Max(docs, df) - df + 0.5) / (df + 0.5)))
-		d := 0
-		for i := uint64(0); i < n; i++ {
-			gap, k1 := binary.Uvarint(p)
-			tf, k2 := binary.Uvarint(p[k1:])
-			p = p[k1+k2:]
-			d += int(gap)
-			if !pass(d) {
-				continue
-			}
-			tff := float64(tf)
-			dl := float64(st.docLen(d))
-			x := idf * ((tff * 1.2) / (tff + 1.2*(0.25+0.75*(dl/norm))))
-			acc[d] += x
+	type hit struct {
+		st    *Store
+		d     int
+		score float64
+	}
+	var hits []hit
+	for _, st := range parts {
+		acc, exists := st.score(q, sorted, idf, norm)
+		res.scopeExists = res.scopeExists || exists
+		for d, s := range acc {
+			hits = append(hits, hit{st, d, s})
 		}
 	}
-	if len(acc) == 0 {
+	if len(hits) == 0 {
 		return res, nil
 	}
-	scores := make([]float64, 0, len(acc))
-	for _, s := range acc {
-		scores = append(scores, s)
+	scores := make([]float64, len(hits))
+	for i, h := range hits {
+		scores[i] = h.score
 	}
 	cut := 0.0
 	if len(scores) > limit {
@@ -173,38 +142,17 @@ func (st *Store) search(q searchQuery) (*searchResult, error) {
 		cut = slices.Min(scores)
 	}
 	var rows []*mcpRow
-	for d, s := range acc {
-		if s < cut {
+	for _, h := range hits {
+		if h.score < cut {
 			continue
 		}
-		r, err := st.row(d)
+		x, ok, err := h.st.hitRow(h.d, h.score)
 		if err != nil {
 			return nil, err
 		}
-		si := st.sessionOf(d)
-		sess := st.session(si)
-		x := &mcpRow{eventUID: r.UID, sessionID: r.Session, doc: int64(d), rawScore: s, eventTsMs: r.TsMs, eventUnixMs: timeMs(r)}
-		x.sourceName, x.harness, x.inferenceProvider = r.SourceName, r.Harness, r.InfProv
-		x.eventClass, x.payloadType, x.actorRole, x.phase = r.EventKind, r.PayloadType, r.ActorKind, r.Phase
-		x.sourceRef, x.textContent, x.textHash = r.SourceRef, r.TextPreview, textHash(r.Text)
-		x.textPreview = truncateRunes(r.TextPreview, previewChars)
-		x.eventOrder = int64(d - sess.start + 1)
-		x.turnSeq = st.turnSeq(d)
-		x.eventOrdinal = st.ordinal(d)
-		t, ok := st.turn(si, x.turnSeq)
-		if !ok {
-			continue
+		if ok {
+			rows = append(rows, x)
 		}
-		x.turnEventCount, x.turnCompleted = t.count, t.completed
-		if t.terminal >= 0 {
-			tr, err := st.row(t.terminal)
-			if err != nil {
-				return nil, err
-			}
-			x.turnTerminalUID = tr.UID
-		}
-		x.sessionStartedMs, x.sessionUpdatedMs, x.sessionCompleted = sess.first, sess.last, sess.completed
-		rows = append(rows, x)
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]
@@ -227,4 +175,104 @@ func (st *Store) search(q searchQuery) (*searchResult, error) {
 	}
 	res.hits = mapMcpRowsToHits(rows)
 	return res, nil
+}
+
+// score sums BM25 over this part's postings for the docs q's filters and
+// scope pass, and reports whether q's session or turn scope exists here.
+func (st *Store) score(q searchQuery, terms []string, idf []float64, norm float64) (map[int]float64, bool) {
+	exists := true
+	lo, hi := 0, st.meta.Docs
+	if q.sessionOK {
+		var ok bool
+		lo, hi, ok = st.sessionRange(q.sessionID)
+		if !ok {
+			lo, hi = 0, 0
+		}
+		if q.turnOK {
+			found := false
+			for d := lo; d < hi; d++ {
+				if st.turnSeq(d) == q.turnSeq {
+					found = true
+					break
+				}
+			}
+			exists = found
+		} else {
+			exists = hi > lo
+		}
+	}
+	mask := uint16(eventTypeMask(q.eventTypes))
+	pass := func(d int) bool {
+		if d < lo || d >= hi {
+			return false
+		}
+		f := st.flags(d)
+		if f&flagSearchable == 0 || (len(q.eventTypes) > 0 && f&mask == 0) {
+			return false
+		}
+		if q.turnOK && st.turnSeq(d) != q.turnSeq {
+			return false
+		}
+		if q.harness != nil && st.harnessOf(d) != *q.harness {
+			return false
+		}
+		if q.sourceName != nil && st.sourceNameOf(d) != *q.sourceName {
+			return false
+		}
+		return true
+	}
+	acc := map[int]float64{}
+	for i, t := range terms {
+		p := st.postingsOf(t)
+		if p == nil {
+			continue
+		}
+		n, k := binary.Uvarint(p)
+		p = p[k:]
+		d := 0
+		for j := uint64(0); j < n; j++ {
+			gap, k1 := binary.Uvarint(p)
+			tf, k2 := binary.Uvarint(p[k1:])
+			p = p[k1+k2:]
+			d += int(gap)
+			if !pass(d) {
+				continue
+			}
+			tff := float64(tf)
+			dl := float64(st.docLen(d))
+			acc[d] += idf[i] * ((tff * 1.2) / (tff + 1.2*(0.25+0.75*(dl/norm))))
+		}
+	}
+	return acc, exists
+}
+
+func (st *Store) hitRow(d int, s float64) (*mcpRow, bool, error) {
+	r, th, err := st.hot(d)
+	if err != nil {
+		return nil, false, err
+	}
+	si := st.sessionOf(d)
+	sess := st.session(si)
+	x := &mcpRow{eventUID: r.UID, sessionID: r.Session, doc: int64(d), rawScore: s, eventTsMs: r.TsMs, eventUnixMs: timeMs(r)}
+	x.sourceName, x.harness, x.inferenceProvider = r.SourceName, r.Harness, r.InfProv
+	x.eventClass, x.payloadType, x.actorRole, x.phase = r.EventKind, r.PayloadType, r.ActorKind, r.Phase
+	x.sourceRef, x.textContent, x.textHash = r.SourceRef, r.TextPreview, th
+	x.textPreview = truncateRunes(r.TextPreview, previewChars)
+	x.eventOrder = int64(d - sess.start + 1)
+	x.turnSeq = st.turnSeq(d)
+	x.eventOrdinal = st.ordinal(d)
+	t, ok := st.turn(si, x.turnSeq)
+	if !ok {
+		return nil, false, nil
+	}
+	x.turnEventCount, x.turnCompleted = t.count, t.completed
+	if t.terminal >= 0 {
+		tr, _, err := st.hot(t.terminal)
+		if err != nil {
+			return nil, false, err
+		}
+		x.turnTerminalUID = tr.UID
+	}
+	x.sessionStartedMs, x.sessionUpdatedMs, x.sessionCompleted = sess.first, sess.last, sess.completed
+	return x, true, nil
 }

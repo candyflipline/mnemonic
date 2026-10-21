@@ -2,8 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -11,11 +9,11 @@ import (
 
 type getIngestStatus struct{}
 
-func (getIngestStatus) Call(st *Store, args json.RawMessage) (any, string, error) {
+func (getIngestStatus) Call(db *DB, args json.RawMessage) (any, string, error) {
 	if !stEmptyArgs(args) {
 		return nil, "", argErrorf("get_ingest_status expects an empty JSON object")
 	}
-	read, err := stReadSources(st)
+	read, err := stReadSources(db)
 	if err != nil {
 		return nil, "", err
 	}
@@ -53,15 +51,8 @@ type stSource struct {
 	Events    int64  `json:"events"`
 }
 
-func stReadSources(st *Store) (stStatusRead, error) {
-	b, err := os.ReadFile(filepath.Join(st.dir, "sources.json"))
-	if err != nil {
-		return stStatusRead{}, err
-	}
-	var srcs []stSource
-	if err := json.Unmarshal(b, &srcs); err != nil {
-		return stStatusRead{}, err
-	}
+func stReadSources(db *DB) (stStatusRead, error) {
+	srcs := db.sources
 	groups := []stGroupRow{}
 	agg := map[[2]string]stGroupRow{}
 	for _, s := range srcs {
