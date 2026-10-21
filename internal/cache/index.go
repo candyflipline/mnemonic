@@ -18,7 +18,7 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-const indexVersion = 6
+const indexVersion = 7
 
 const (
 	batchRows   = 500_000
@@ -124,14 +124,13 @@ func (ix *Index) DB() *sql.DB { return ix.db }
 func (ix *Index) Close() error { return ix.db.Close() }
 
 func indexDDL() []string {
-	return []string{
+	return append([]string{
 		"CREATE TABLE meta (version INTEGER NOT NULL, flags_sql VARCHAR NOT NULL)",
 		"CREATE TABLE corpus (docs UBIGINT NOT NULL, total_len UBIGINT NOT NULL, next_doc UINTEGER NOT NULL)",
 		"CREATE TABLE lake_files (path VARCHAR NOT NULL, size UBIGINT NOT NULL, mtime_ns BIGINT NOT NULL, rows UBIGINT NOT NULL)",
 		`CREATE TABLE lake_rows (lake_file VARCHAR NOT NULL, lake_row UBIGINT NOT NULL, event_uid VARCHAR,
   event_version UBIGINT, ingested_at TIMESTAMP, row_hash UBIGINT NOT NULL, uid_key UBIGINT NOT NULL)`,
 		eventsDDL(),
-		"CREATE TABLE postings (term VARCHAR NOT NULL, doc UINTEGER NOT NULL, tf USMALLINT NOT NULL, doc_len UINTEGER NOT NULL, flags USMALLINT NOT NULL)",
 		`CREATE TABLE turns (session_id VARCHAR, turn_seq UINTEGER, event_count BIGINT NOT NULL,
   completed INTEGER NOT NULL, terminal_uid VARCHAR)`,
 		`CREATE TABLE sessions (session_id VARCHAR, first_event_time TIMESTAMP, last_event_time TIMESTAMP,
@@ -139,7 +138,7 @@ func indexDDL() []string {
   user_messages UBIGINT, assistant_messages UBIGINT, completed INTEGER NOT NULL)`,
 		sourcesDDL,
 		indexTraceDDL,
-	}
+	}, postingsDDL()...)
 }
 
 const indexTraceDDL = `
@@ -193,6 +192,9 @@ func (ix *Index) Converge(ctx context.Context) (ConvergeStats, error) {
 	}
 	st, errs := ix.apply(ctx, c, changes)
 	if err := syncManifests(ctx, c, ix.dataDir); err != nil {
+		errs = append(errs, err)
+	}
+	if err := compactPostings(ctx, c); err != nil {
 		errs = append(errs, err)
 	}
 	return st, errors.Join(errs...)
@@ -463,12 +465,11 @@ FROM win w ANTI JOIN keep k USING (event_uid)`,
 	}
 	st.Deleted = deleted
 	if deleted > 0 {
-		if err := execAll(ctx, c, []string{
+		stmts := append([]string{
 			`UPDATE corpus SET docs = docs - (SELECT count(*) FILTER (WHERE doc_len > 0) FROM del),
   total_len = total_len - (SELECT coalesce(sum(doc_len), 0) FROM del)`,
-			"DELETE FROM postings WHERE " + inDel,
-			"DELETE FROM events WHERE " + inDel,
-		}); err != nil {
+		}, deletePostings(inDel)...)
+		if err := execAll(ctx, c, append(stmts, "DELETE FROM events WHERE "+inDel)); err != nil {
 			return err
 		}
 	}
@@ -525,8 +526,8 @@ JOIN insc i ON i.lake_file = r.filename AND i.lake_row = r.file_row_number`,
 	stmts = append(stmts,
 		"BEGIN",
 		insertEventsSQL(src),
-		`INSERT INTO postings SELECT term, doc, cast(least(tf, 65535) AS USMALLINT), doc_len, flags FROM (
-  SELECT doc, doc_len, flags, unnest(map_keys(h)) AS term, unnest(map_values(h)) AS tf FROM tok WHERE doc_len > 0) ORDER BY term`,
+		`INSERT INTO postings_delta SELECT `+postingBucketSQL+`, term, doc, cast(least(tf, 65535) AS USMALLINT), doc_len, flags FROM (
+  SELECT doc, doc_len, flags, unnest(map_keys(h)) AS term, unnest(map_values(h)) AS tf FROM tok WHERE doc_len > 0) ORDER BY 1, term`,
 		`UPDATE corpus SET docs = docs + (SELECT count(*) FILTER (WHERE doc_len > 0) FROM w),
   total_len = total_len + (SELECT coalesce(sum(doc_len), 0) FROM w),
   next_doc = next_doc + (SELECT count(*) FROM w)`)

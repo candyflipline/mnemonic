@@ -2,10 +2,12 @@ package cache
 
 import (
 	"context"
+	"crypto/md5"
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/candyflipline/mnemonic/internal/schema"
@@ -176,3 +178,59 @@ const sourcesDDL = `CREATE TABLE sources (
 )`
 
 var lakeFileRe = regexp.MustCompile(`author=([^/]*)/machine=([^/]*)/harness=([^/]*)/([0-9a-f]+)(?:\.tail)?\.parquet$`)
+
+const (
+	postingBucketBits = 8
+	postingBuckets    = 1 << postingBucketBits
+	postingRangeSize  = 16
+	compactRows       = 50_000
+)
+
+const postingColumns = "term VARCHAR NOT NULL, doc UINTEGER NOT NULL, tf USMALLINT NOT NULL, doc_len UINTEGER NOT NULL, flags USMALLINT NOT NULL"
+
+func PostingTable(term string) string {
+	h := md5.Sum([]byte(term))
+	return postingTableName((int(h[0])<<8 | int(h[1])) >> (16 - postingBucketBits))
+}
+
+func postingTableName(bucket int) string { return "postings_" + strconv.Itoa(bucket) }
+
+var postingBucketSQL = fmt.Sprintf("cast(('0x' || md5(term)[1:4]) AS INTEGER) >> %d", 16-postingBucketBits)
+
+func postingsDDL() []string {
+	stmts := []string{"CREATE TABLE postings_delta (bucket USMALLINT NOT NULL, " + postingColumns + ")"}
+	all := []string{"SELECT term, doc, tf, doc_len, flags FROM postings_delta"}
+	for b := range postingBuckets {
+		stmts = append(stmts, "CREATE TABLE "+postingTableName(b)+" ("+postingColumns+")")
+		all = append(all, "SELECT * FROM "+postingTableName(b))
+	}
+	return append(stmts, "CREATE VIEW postings AS "+strings.Join(all, " UNION ALL "))
+}
+
+func deletePostings(where string) []string {
+	stmts := []string{"DELETE FROM postings_delta WHERE " + where}
+	for b := range postingBuckets {
+		stmts = append(stmts, "DELETE FROM "+postingTableName(b)+" WHERE "+where)
+	}
+	return stmts
+}
+
+func compactPostings(ctx context.Context, c *sql.Conn) error {
+	var n int64
+	if err := c.QueryRowContext(ctx, "SELECT count(*) FROM postings_delta").Scan(&n); err != nil || n < compactRows {
+		return err
+	}
+	for lo := 0; lo < postingBuckets; lo += postingRangeSize {
+		stmts := []string{"BEGIN"}
+		for b := lo; b < lo+postingRangeSize; b++ {
+			stmts = append(stmts, "INSERT INTO "+postingTableName(b)+
+				" SELECT term, doc, tf, doc_len, flags FROM postings_delta WHERE bucket = "+strconv.Itoa(b))
+		}
+		stmts = append(stmts, fmt.Sprintf("DELETE FROM postings_delta WHERE bucket >= %d AND bucket < %d", lo, lo+postingRangeSize), "COMMIT")
+		if err := execAll(ctx, c, stmts); err != nil {
+			c.ExecContext(context.Background(), "ROLLBACK")
+			return err
+		}
+	}
+	return nil
+}
