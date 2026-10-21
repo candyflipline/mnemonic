@@ -20,13 +20,18 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-type heavyValue struct{ Text, Payload, Tokens string }
+type heavyValue struct {
+	Text, Payload, Tokens string
+	Buckets               map[string]uint64
+	Native                map[string]float64
+}
 type heavyBlock struct {
 	values []heavyValue
 	bytes  int
 }
 type segment struct {
 	path     string
+	file     *os.File
 	terms    []termEntry
 	postings []byte
 	mapping  []uint32
@@ -93,7 +98,7 @@ func (w *segmentWriter) abort() {
 	os.RemoveAll(w.path)
 }
 func (w *segmentWriter) emit(ev *schema.Event) error {
-	e := &event{Event: *ev}
+	e := packEvent(ev)
 	var payload struct {
 		Emission uint32  `json:"moraine_emission_index"`
 		IO       *toolIO `json:"moraine_tool_io"`
@@ -122,11 +127,9 @@ func (w *segmentWriter) emit(ev *schema.Event) error {
 	}
 	w.count++
 	w.records = append(w.records, e)
-	w.values = append(w.values, heavyValue{ev.TextContent, ev.PayloadJSON, ev.TokenUsageJSON})
+	w.values = append(w.values, heavyValue{ev.TextContent, ev.PayloadJSON, ev.TokenUsageJSON, ev.TokenUsageBuckets, ev.TokenUsageNativeUnits})
 	w.bytes += len(ev.TextContent) + len(ev.PayloadJSON) + len(ev.TokenUsageJSON)
-	e.TextContent = ""
-	e.PayloadJSON = ""
-	e.TokenUsageJSON = ""
+
 	if ev.EventKind == "session_meta" || ev.SourceName == "omp" && (payloadString(ev.PayloadJSON, "type") == "title" || payloadString(ev.PayloadJSON, "type") == "title_change") {
 		e.PayloadJSON = ev.PayloadJSON
 	}
@@ -343,23 +346,16 @@ func (db *Store) heavyFor(e *event) (heavyValue, error) {
 	if block, ok := db.heavyCache[key]; ok {
 		return block.values[e.HeavyIndex], nil
 	}
-	f, err := os.Open(filepath.Join(e.segment.path, "heavy"))
-	if err != nil {
-		return heavyValue{}, err
-	}
-	defer f.Close()
-	if _, err = f.Seek(int64(e.HeavyOffset), io.SeekStart); err != nil {
-		return heavyValue{}, err
-	}
+	reader := io.NewSectionReader(e.segment.file, int64(e.HeavyOffset), 1<<40)
 	var size uint32
-	if err = binary.Read(f, binary.LittleEndian, &size); err != nil {
+	if err := binary.Read(reader, binary.LittleEndian, &size); err != nil {
 		return heavyValue{}, err
 	}
 	if size > 256<<20 {
 		return heavyValue{}, fmt.Errorf("invalid heavy block size")
 	}
 	b := make([]byte, size)
-	if _, err = io.ReadFull(f, b); err != nil {
+	if _, err := io.ReadFull(reader, b); err != nil {
 		return heavyValue{}, err
 	}
 	plain, err := db.decoder.DecodeAll(b, nil)

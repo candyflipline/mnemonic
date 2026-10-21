@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"slices"
 	"sort"
@@ -43,10 +44,16 @@ func searchMcpEvents(_ context.Context, db *Store, q searchQuery) (*searchResult
 			mask |= 1 << i
 		}
 	}
-	scores := map[uint32]float64{}
+	db.scoreEpoch++
+	if db.scoreEpoch == 0 {
+		clear(db.scoreStamps)
+		db.scoreEpoch = 1
+	}
+	epoch := db.scoreEpoch
+	db.scoreTouched = db.scoreTouched[:0]
 	avg := math.Max(1, float64(db.totalLength)/math.Max(1, float64(db.docs)))
 	for _, t := range terms {
-		var all []posting
+		all := db.postingScratch[:0]
 		for _, sg := range db.segments {
 			sg.each(sg.lookup(t), func(doc, tf uint32) { all = append(all, posting{doc, tf}) })
 		}
@@ -62,16 +69,25 @@ func searchMcpEvents(_ context.Context, db *Store, q searchQuery) (*searchResult
 			}
 			tf := float64(p.TF)
 			v := idf * ((tf * 1.2) / (tf + 1.2*(1-0.75+0.75*(float64(e.Length)/avg))))
-			scores[p.Doc] += v
+			if db.scoreStamps[p.Doc] != epoch {
+				db.scoreStamps[p.Doc] = epoch
+				db.scoreValues[p.Doc] = 0
+				db.scoreTouched = append(db.scoreTouched, p.Doc)
+			}
+			db.scoreValues[p.Doc] += v
 		}
-
+		db.postingScratch = all
 	}
-	rows := make([]*mcpRow, 0, len(scores))
-	for doc, score := range scores {
-		e := db.events[doc]
+	top := scoreTop{limit: q.nHits + 1}
+	for _, doc := range db.scoreTouched {
+		top.offer(scoredEvent{db.events[doc], db.scoreValues[doc]})
+	}
+	rows := make([]*mcpRow, 0, len(top.h))
+	for _, candidate := range top.h {
+		e, score := candidate.e, candidate.score
 		ts := db.turns[turnKey{e.SessionID, e.Turn}]
 		ss := db.stats[e.SessionID]
-		rows = append(rows, &mcpRow{eventUID: e.EventUID, sessionID: e.SessionID, doc: int64(doc), rawScore: score, eventTsMs: e.Timestamp, eventUnixMs: e.Time, mcpDetail: mcpDetail{sourceName: e.SourceName, harness: e.Harness, inferenceProvider: e.InferenceProvider, eventClass: e.EventKind, payloadType: e.PayloadType, actorRole: e.ActorKind, phase: firstNonEmpty(e.ToolPhase, e.OpStatus), sourceRef: e.SourceRef, textPreview: truncateRunes(e.TextPreview, previewChars), textContent: e.TextPreview, textHash: e.TextHash, eventOrder: int64(e.Order), turnSeq: e.Turn, eventOrdinal: e.Ordinal, turnEventCount: ts.Count, turnCompleted: ts.Complete, turnTerminalUID: ts.Terminal, sessionStartedMs: ss.Start, sessionUpdatedMs: ss.End, sessionCompleted: ss.Complete}})
+		rows = append(rows, &mcpRow{eventUID: e.EventUID, sessionID: e.SessionID, rawScore: score, eventTsMs: e.Timestamp, eventUnixMs: e.Time, mcpDetail: mcpDetail{sourceName: e.SourceName, harness: e.Harness, inferenceProvider: e.InferenceProvider, eventClass: e.EventKind, payloadType: e.PayloadType, actorRole: e.ActorKind, phase: firstNonEmpty(e.ToolPhase, e.OpStatus), sourceRef: fmt.Sprintf("%s:%d:%d", e.SourceFile, e.SourceGeneration, e.SourceLineNo), textPreview: truncateRunes(e.TextPreview, previewChars), textContent: e.TextPreview, textHash: e.TextHash, eventOrder: int64(e.Order), turnSeq: e.Turn, eventOrdinal: e.Ordinal, turnEventCount: ts.Count, turnCompleted: ts.Complete, turnTerminalUID: ts.Terminal, sessionStartedMs: ss.Start, sessionUpdatedMs: ss.End, sessionCompleted: ss.Complete}})
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]
@@ -94,4 +110,58 @@ func searchMcpEvents(_ context.Context, db *Store, q searchQuery) (*searchResult
 	}
 	res.hits = mapMcpRowsToHits(rows)
 	return res, nil
+}
+
+// Keep exactly the hydrated pre-deduplication top k. The SQL candidate stage
+// retains cutoff ties, then sorts by this total order before taking k.
+type scoredEvent struct {
+	e     *event
+	score float64
+}
+type scoreTop struct {
+	h     []scoredEvent
+	limit int
+}
+
+func scoreBetter(a, b scoredEvent) bool {
+	if a.score != b.score {
+		return a.score > b.score
+	}
+	if a.e.Timestamp != b.e.Timestamp {
+		return a.e.Timestamp > b.e.Timestamp
+	}
+	return a.e.EventUID < b.e.EventUID
+}
+func (t *scoreTop) offer(v scoredEvent) {
+	if len(t.h) < t.limit {
+		t.h = append(t.h, v)
+		i := len(t.h) - 1
+		for i > 0 {
+			p := (i - 1) / 2
+			if !scoreBetter(t.h[p], t.h[i]) {
+				break
+			}
+			t.h[p], t.h[i] = t.h[i], t.h[p]
+			i = p
+		}
+		return
+	}
+	if !scoreBetter(v, t.h[0]) {
+		return
+	}
+	t.h[0] = v
+	for i := 0; ; {
+		c := 2*i + 1
+		if c >= len(t.h) {
+			break
+		}
+		if c+1 < len(t.h) && scoreBetter(t.h[c], t.h[c+1]) {
+			c++
+		}
+		if !scoreBetter(t.h[i], t.h[c]) {
+			break
+		}
+		t.h[i], t.h[c] = t.h[c], t.h[i]
+		i = c
+	}
 }

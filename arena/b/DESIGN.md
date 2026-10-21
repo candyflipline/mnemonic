@@ -32,8 +32,10 @@ version are deliberately not a proposed public storage contract.
   Terms accumulate in lexical order with the exact current BM25 formula. All
   matching documents are scored; the two existing sort stages, pre-dedupe limit,
   duplicate equivalence, score normalization, and prose are retained.
-- `file_attention`: request metadata, extracted tool-I/O provenance, and the
-  existing exact/suffix/shell predicates in Go. Exact matches take precedence
+- `file_attention`: a reversed path/command-token dictionary narrows request
+  metadata before the existing exact/suffix/shell predicates run in Go. Raw
+  array captures, malformed input, and delimiter-bearing shell tails retain
+  conservative candidate fallbacks. Exact matches take precedence
   before deduplication. Roots and project scope retain the original closed scope.
 - `open`: UID lookup, ordered session vectors, turn coordinates, and bounded
   heavy-frame reads. The existing navigation, content, cursor, and prose logic
@@ -54,8 +56,10 @@ segment or advance its parser checkpoint independently. A rerun resumes from the
 last published checkpoint and reclaims unreachable segment files. Raw is never
 modified. Repeated ingest with unchanged input leaves the manifest unchanged.
 
-The query process loads a published manifest snapshot. New raw becomes queryable
-once `ingest` publishes its source interval. There is no raw-tail query merge or
+A store-local advisory lock serializes ingest writers. Queries pin heavy-file
+descriptors, so source replacement can reclaim names without breaking readers.
+The warm query process checks the atomic manifest before each call and reloads
+a changed snapshot. New raw becomes queryable after `ingest` publishes it. There is no raw-tail query merge or
 background ingest daemon in this CLI prototype. A production server should wake
 ingest on the existing raw PUT signal and apply a short bounded debounce.
 
@@ -87,7 +91,7 @@ Replace resident gob event objects with packed columns and interned integer IDs;
 use immutable mmap-backed posting/metadata files and a bounded page budget.
 Compact source intervals into tiered segments, with source-generation tombstones
 and live df/length accounting. Add block impacts and measured exact MAXSCORE when
-long posting lists justify it. Persist session/turn rollups and reversed path
-indexes. Store heavy locators into seekable raw frames to eliminate the duplicated
+long posting lists justify it. Persist session/turn rollups and the reversed path
+index (currently built from metadata at startup). Store heavy locators into seekable raw frames to eliminate the duplicated
 payload copy. The CLI's per-source publication protocol can remain the recovery
 boundary; query generations need pinning while readers finish.

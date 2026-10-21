@@ -14,16 +14,16 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/candyflipline/mnemonic/internal/normalize"
 	_ "github.com/candyflipline/mnemonic/internal/normalize/all"
-	"github.com/candyflipline/mnemonic/internal/schema"
 	"github.com/candyflipline/mnemonic/internal/wire"
 	"github.com/klauspost/compress/zstd"
 )
 
-const storeVersion = 2
+const storeVersion = 3
 
 // CONTRACT-NOTES requires a deterministic stamp after all real records.
 // It affects ordering; oracle wall-clock values at these positions are masked.
@@ -47,7 +47,7 @@ type event struct {
 	HeavyOffset uint64
 	HeavyIndex  uint32
 	segment     *segment
-	schema.Event
+	Columns
 	Time, Timestamp int64
 	Emission        uint32
 	Order           uint64
@@ -76,6 +76,8 @@ type sessionStats struct {
 }
 type Store struct {
 	manifest          Manifest
+	directory         string
+	stamp             manifestStamp
 	events            []*event
 	byUID             map[string]*event
 	sessions          map[string][]*event
@@ -87,6 +89,14 @@ type Store struct {
 	heavyCache        map[heavyKey]heavyBlock
 	heavyOrder        []heavyKey
 	heavyBytes        int
+	paths             []pathEntry
+	pathFallback      []uint32
+	shellDocs         []uint32
+	scoreValues       []float64
+	scoreStamps       []uint32
+	scoreEpoch        uint32
+	scoreTouched      []uint32
+	postingScratch    []posting
 }
 type turnKey struct {
 	sessionID string
@@ -150,11 +160,21 @@ func ingest(root, dir string) error {
 	if e := os.MkdirAll(dir, 0700); e != nil {
 		return e
 	}
+	lock, e := os.OpenFile(filepath.Join(dir, "LOCK"), os.O_CREATE|os.O_RDWR, 0600)
+	if e != nil {
+		return e
+	}
+	defer lock.Close()
+	if e = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); e != nil {
+		return e
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	m, e := readManifest(dir)
 	if e != nil {
 		return e
 	}
-	if m.Version != storeVersion || m.Parser != normalize.Version {
+	changedFormat := m.Version != storeVersion || m.Parser != normalize.Version
+	if changedFormat {
 		m = Manifest{Version: storeVersion, Parser: normalize.Version, Sources: map[string]Checkpoint{}}
 	}
 	paths, e := filepath.Glob(filepath.Join(root, "raw", "author=*", "machine=*", "harness=*", "*.json"))
@@ -162,7 +182,7 @@ func ingest(root, dir string) error {
 		return e
 	}
 	seen := map[string]bool{}
-	dirty := false
+	dirty := changedFormat
 	for _, p := range paths {
 		rel, e := filepath.Rel(filepath.Join(root, "raw"), p)
 		if e != nil {
@@ -173,10 +193,14 @@ func ingest(root, dir string) error {
 		if e != nil {
 			return e
 		}
-		var src wire.Source
-		if e = json.Unmarshal(b, &src); e != nil {
+		var disk struct {
+			wire.Source
+			ZstSize *int64 `json:"zst_size"`
+		}
+		if e = json.Unmarshal(b, &disk); e != nil {
 			return e
 		}
+		src := disk.Source
 		f, e := os.Open(strings.TrimSuffix(p, ".json") + ".jsonl.zst")
 		if e != nil {
 			return e
@@ -186,8 +210,16 @@ func ingest(root, dir string) error {
 			f.Close()
 			return e
 		}
-		cp := m.Sources[rel]
-		resume := cp.Compressed > 0 && cp.Compressed <= fi.Size() && cp.Source.HeadHash == src.HeadHash && cp.Source.Path == src.Path && cp.Source.Harness == src.Harness && cp.Source.SourceName == src.SourceName
+		end := fi.Size()
+		if disk.ZstSize != nil {
+			end = *disk.ZstSize
+		}
+		if end < 0 || end > fi.Size() || src.Size < 0 {
+			f.Close()
+			return fmt.Errorf("invalid committed raw size")
+		}
+		cp, exists := m.Sources[rel]
+		resume := exists && cp.Compressed <= end && cp.Source.HeadHash == src.HeadHash && cp.Source.Path == src.Path && cp.Source.Harness == src.Harness && cp.Source.SourceName == src.SourceName
 		if resume {
 			h, err := windowHash(f, cp.Compressed)
 			if err != nil {
@@ -199,7 +231,7 @@ func ingest(root, dir string) error {
 		if !resume {
 			cp = Checkpoint{}
 		}
-		if resume && cp.Compressed == fi.Size() {
+		if resume && cp.Compressed == end {
 			f.Close()
 			if cp.Source != src {
 				cp.Source = src
@@ -213,7 +245,7 @@ func ingest(root, dir string) error {
 			f.Close()
 			return fmt.Errorf("unsupported harness %q", src.Harness)
 		}
-		zr, e := zstd.NewReader(io.NewSectionReader(f, cp.Compressed, fi.Size()-cp.Compressed), zstd.WithDecoderConcurrency(1))
+		zr, e := zstd.NewReader(io.NewSectionReader(f, cp.Compressed, end-cp.Compressed), zstd.WithDecoderConcurrency(1))
 		if e != nil {
 			f.Close()
 			return e
@@ -226,12 +258,15 @@ func ingest(root, dir string) error {
 		}
 		state, parseErr := parser.Parse(zr, normalize.SourceMeta{SourceName: src.SourceName, Harness: src.Harness, SourceFile: src.Path}, cp.State, writer.emit)
 		zr.Close()
+		if parseErr == nil && state.Offset != uint64(src.Size) {
+			parseErr = fmt.Errorf("raw size does not match committed manifest")
+		}
 		if parseErr != nil {
 			f.Close()
 			writer.abort()
 			return parseErr
 		}
-		hash, e := windowHash(f, fi.Size())
+		hash, e := windowHash(f, end)
 		f.Close()
 		if e != nil {
 			writer.abort()
@@ -247,7 +282,7 @@ func ingest(root, dir string) error {
 		cp.Machine = strings.TrimPrefix(parts[1], "machine=")
 		cp.Source = src
 		cp.State = state
-		cp.Compressed = fi.Size()
+		cp.Compressed = end
 		cp.Window = hash
 		cp.Events += count
 		cp.Segments = append(cp.Segments, name)
@@ -298,7 +333,45 @@ func parseTime(s string, fallback int64) int64 {
 	}
 	return fallback
 }
+
+type manifestStamp struct {
+	modified int64
+	size     int64
+}
+
+func stampManifest(dir string) manifestStamp {
+	f, e := os.Stat(filepath.Join(dir, "manifest.json"))
+	if e != nil {
+		return manifestStamp{}
+	}
+	return manifestStamp{f.ModTime().UnixNano(), f.Size()}
+}
+func (db *Store) Close() {
+	if db == nil {
+		return
+	}
+	for _, sg := range db.segments {
+		if sg.file != nil {
+			sg.file.Close()
+		}
+	}
+	db.decoder.Close()
+}
 func loadStore(dir string) (*Store, error) {
+	for attempt := 0; ; attempt++ {
+		before := stampManifest(dir)
+		db, e := loadSnapshot(dir)
+		if e == nil {
+			db.directory = dir
+			db.stamp = before
+			return db, nil
+		}
+		if attempt >= 3 || before == stampManifest(dir) {
+			return nil, e
+		}
+	}
+}
+func loadSnapshot(dir string) (_ *Store, loadErr error) {
 	m, e := readManifest(dir)
 	if e != nil {
 		return nil, e
@@ -311,6 +384,11 @@ func loadStore(dir string) (*Store, error) {
 		return nil, e
 	}
 	db := &Store{manifest: m, byUID: map[string]*event{}, sessions: map[string][]*event{}, turns: map[turnKey]turnStats{}, stats: map[string]sessionStats{}, decoder: decoder, heavyCache: map[heavyKey]heavyBlock{}}
+	defer func() {
+		if loadErr != nil {
+			db.Close()
+		}
+	}()
 	keys := make([]string, 0, len(m.Sources))
 	for k := range m.Sources {
 		keys = append(keys, k)
@@ -350,8 +428,6 @@ func loadStore(dir string) (*Store, error) {
 					return nil, e
 				}
 				ev.segment = sg
-				ev.Time = parseTime(ev.RecordTS, fallbackEventMillis)
-				ev.Timestamp = parseTime(ev.EventTS, 0)
 				for _, p := range []*string{&ev.SessionID, &ev.SourceName, &ev.Harness, &ev.InferenceProvider, &ev.SourceFile, &ev.EventKind, &ev.ActorKind, &ev.PayloadType, &ev.OpStatus, &ev.ToolName, &ev.Cwd, &ev.ProjectID, &ev.WorktreeRoot, &ev.EndpointKind} {
 					*p = intern(*p)
 				}
@@ -363,6 +439,10 @@ func loadStore(dir string) (*Store, error) {
 			zr.Close()
 			f.Close()
 			sg.terms, sg.postings, e = loadTerms(filepath.Join(sg.path, "terms"))
+			if e != nil {
+				return nil, e
+			}
+			sg.file, e = os.Open(filepath.Join(sg.path, "heavy"))
 			if e != nil {
 				return nil, e
 			}
@@ -426,6 +506,9 @@ func loadStore(dir string) (*Store, error) {
 		}
 		sg.pending = nil
 	}
+	db.buildPaths()
+	db.scoreValues = make([]float64, len(db.events))
+	db.scoreStamps = make([]uint32, len(db.events))
 	return db, nil
 }
 func eventLess(a, b *event) bool {
@@ -450,7 +533,7 @@ func eventLess(a, b *event) bool {
 	return a.EventUID < b.EventUID
 }
 func (db *Store) nav(e *event) navRow {
-	return navRow{sessionID: e.SessionID, eventUID: e.EventUID, eventTime: formatRFC3339UTCMillis(e.Time), eventUnixMs: e.Time, sourceFile: e.SourceFile, sourceRef: e.SourceRef, eventClass: e.EventKind, actorRole: e.ActorKind, payloadType: e.PayloadType, callID: e.ToolCallID, name: e.ToolName, phase: firstNonEmpty(e.ToolPhase, e.OpStatus), itemID: e.ItemID, sourceName: e.SourceName, harness: e.Harness, inferenceProvider: e.InferenceProvider, textContent: e.TextPreview, payloadJSON: e.PayloadJSON, tokenUsageJSON: e.TokenUsageJSON, tokenUsageBuckets: e.TokenUsageBuckets, tokenUsageNative: e.TokenUsageNativeUnits, endpointKind: e.EndpointKind, eventOrder: e.Order, turnSeq: e.Turn, eventOrdinal: e.Ordinal}
+	return navRow{sessionID: e.SessionID, eventUID: e.EventUID, eventTime: formatRFC3339UTCMillis(e.Time), eventUnixMs: e.Time, sourceFile: e.SourceFile, eventClass: e.EventKind, actorRole: e.ActorKind, payloadType: e.PayloadType, callID: e.ToolCallID, name: e.ToolName, phase: firstNonEmpty(e.ToolPhase, e.OpStatus), itemID: e.ItemID, sourceName: e.SourceName, harness: e.Harness, inferenceProvider: e.InferenceProvider, textContent: e.TextPreview, payloadJSON: e.PayloadJSON, endpointKind: e.EndpointKind, eventOrder: e.Order, turnSeq: e.Turn, eventOrdinal: e.Ordinal}
 }
 func hydrateKept(_ context.Context, db *Store, sc *sessionScan) error {
 	var rows []*navRow
@@ -480,6 +563,8 @@ func hydrateKept(_ context.Context, db *Store, sc *sessionScan) error {
 		r.textContent = h.Text
 		r.payloadJSON = h.Payload
 		r.tokenUsageJSON = h.Tokens
+		r.tokenUsageBuckets = h.Buckets
+		r.tokenUsageNative = h.Native
 	}
 	return nil
 }

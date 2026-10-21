@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -17,6 +18,43 @@ import (
 // One integration table covers real parser state, published queries, append,
 // idempotence, failed publication, and recovery without the private sample.
 func TestStore(t *testing.T) {
+	t.Run("path_index_recall", func(t *testing.T) {
+		db := &Store{}
+		for i, input := range []string{
+			`{"path":"/work/src/a.go"}`,
+			`{"files":{"file_path":"/work/src/a.go"}}`,
+			`{"file_path":["/work/src/a.go","/work/other.go"]}`,
+			`{"file_path":["/work/x]src/a.go"]}`,
+			`{"command":"cat /work/src/a.go; cat src/a.go; echo x=/work/src/a.go"}`,
+			`{"cmd":"cat /work/foo(bar/a.go; cat /work/space name.go"}`,
+			`{"path":"/work/src/\u0061.go"}`,
+			`{"path":"/work/src/a.go",broken}`,
+		} {
+			db.events = append(db.events, &event{Columns: Columns{EventUID: fmt.Sprint(i), SessionID: "s", ToolPhase: "request", ToolName: "Read"}, IO: &toolIO{Input: input}, Time: 1, Turn: 1})
+		}
+		db.buildPaths()
+		for _, rel := range []string{"a.go", "src/a.go", "x]src/a.go", "other.go", "foo(bar/a.go", "space name.go", "/work/src/a.go", "missing.go"} {
+			q := faQuery{Rel: rel, MaxRows: 100}
+			indexed, err := faTouches(context.Background(), db, q)
+			if err != nil {
+				t.Fatal(err)
+			}
+			paths := db.paths
+			db.paths = nil
+			scan, err := faTouches(context.Background(), db, q)
+			db.paths = paths
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(indexed, scan) {
+				t.Fatalf("index missed a path for %q", rel)
+			}
+			if rel == "src/a.go" && len(indexed) != 5 {
+				t.Fatalf("literal touch count = %d, want 5", len(indexed))
+			}
+		}
+	})
+
 	for _, tc := range []struct {
 		name, harness, file, path, sid string
 		events                         int
@@ -50,7 +88,10 @@ func TestStore(t *testing.T) {
 			save := func(b []byte, size int) {
 				t.Helper()
 				src.Size = int64(size)
-				m, _ := json.Marshal(src)
+				m, _ := json.Marshal(struct {
+					wire.Source
+					ZstSize int64 `json:"zst_size"`
+				}{src, int64(len(b))})
 				if err := os.WriteFile(filepath.Join(base, "fixture.json"), m, 0600); err != nil {
 					t.Fatal(err)
 				}
@@ -66,6 +107,24 @@ func TestStore(t *testing.T) {
 			cp := before.Sources["author=test/machine=m1/harness="+tc.harness+"/fixture.json"]
 			if cp.State.Offset != uint64(cut) || cp.Compressed != int64(len(head)) || len(cp.Segments) != 1 {
 				t.Fatal("first checkpoint mismatch")
+			}
+			// Bytes beyond the manifest's committed zstd boundary are ignored.
+			rawPath := filepath.Join(base, "fixture.jsonl.zst")
+			f, err := os.OpenFile(rawPath, os.O_APPEND|os.O_WRONLY, 0600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = f.Write(tail[:len(tail)/2]); err != nil {
+				t.Fatal(err)
+			}
+			f.Close()
+			beforeBytes, _ := os.ReadFile(filepath.Join(dir, "manifest.json"))
+			if err = ingest(root, dir); err != nil {
+				t.Fatal(err)
+			}
+			afterBytes, _ := os.ReadFile(filepath.Join(dir, "manifest.json"))
+			if !bytes.Equal(beforeBytes, afterBytes) {
+				t.Fatal("uncommitted tail changed checkpoint")
 			}
 			save(append(append([]byte{}, head...), tail...), len(raw))
 			if err = ingest(root, dir); err != nil {
@@ -91,10 +150,12 @@ func TestStore(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			defer db.Close()
 			full, err := loadStore(clean)
 			if err != nil {
 				t.Fatal(err)
 			}
+			defer full.Close()
 			// Literal values come from the checked-in public parser golden, not private data.
 			if len(db.events) != tc.events || len(db.sessions) != 1 {
 				t.Fatalf("events=%d sessions=%d", len(db.events), len(db.sessions))
@@ -127,6 +188,29 @@ func TestStore(t *testing.T) {
 					t.Fatal("expected cargo test hits")
 				}
 			}
+			// Old readers pin heavy file descriptors across a source replacement.
+			save(head, cut)
+			if err = ingest(root, dir); err != nil {
+				t.Fatal(err)
+			}
+			clear(db.heavyCache)
+			db.heavyOrder = nil
+			db.heavyBytes = 0
+			opened, _, err := openTool{}.Call(context.Background(), db, json.RawMessage(`{"id":"`+formatSessionID(tc.sid)+`","limit":2}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if opened.(map[string]any)["session"].(map[string]any)["event_count"] != uint64(tc.events) {
+				t.Fatal("pinned snapshot changed")
+			}
+			if stampManifest(dir) == db.stamp {
+				t.Fatal("source replacement did not change snapshot stamp")
+			}
+			save(append(append([]byte{}, head...), tail...), len(raw))
+			if err = ingest(root, dir); err != nil {
+				t.Fatal(err)
+			}
+			b, _ = os.ReadFile(filepath.Join(dir, "manifest.json"))
 			// Simulate a killed writer's unreferenced file, then verify reclamation.
 			if err = os.WriteFile(filepath.Join(dir, ".segment-orphan"), []byte("incomplete"), 0600); err != nil {
 				t.Fatal(err)

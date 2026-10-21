@@ -40,6 +40,7 @@ func run() error {
 	if e != nil {
 		return e
 	}
+	defer func() { db.Close() }()
 	debug.FreeOSMemory()
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 4096), 8<<20)
@@ -55,6 +56,15 @@ func run() error {
 			return e
 		}
 		start := time.Now()
+		if stampManifest(*dir) != db.stamp {
+			fresh, err := loadStore(*dir)
+			if err != nil {
+				return err
+			}
+			old := db
+			db = fresh
+			old.Close()
+		}
 		var data any
 		var text, errText string
 		if t, ok := Lookup(call.Tool); ok {

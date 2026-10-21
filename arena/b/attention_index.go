@@ -28,7 +28,7 @@ func faTouches(_ context.Context, db *Store, q faQuery) ([]faTouch, error) {
 	provenance := regexp.MustCompile(`"(?:` + keys + `|command|cmd)"[[:space:]]*:`)
 	runs := faLiteralRun.FindAllString(rel, -1)
 	var exact, suffix []faTouch
-	for _, e := range db.events {
+	for _, e := range db.attentionCandidates(rel) {
 		tool := strings.ToLower(e.ToolName)
 		if e.ToolPhase != "request" || tool == "file_attention" || strings.HasSuffix(tool, "_file_attention") {
 			continue
