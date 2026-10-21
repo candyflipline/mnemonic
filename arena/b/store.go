@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/gob"
 	"encoding/hex"
 	"encoding/json"
@@ -24,7 +23,11 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-const storeVersion = 1
+const storeVersion = 2
+
+// CONTRACT-NOTES requires a deterministic stamp after all real records.
+// It affects ordering; oracle wall-clock values at these positions are masked.
+const fallbackEventMillis int64 = 253402300799999 // 9999-12-31T23:59:59.999Z
 
 type Checkpoint struct {
 	Source          wire.Source
@@ -40,7 +43,10 @@ type Manifest struct {
 	Sources         map[string]Checkpoint
 }
 type event struct {
-	TextHash uint64
+	TextHash    uint64
+	HeavyOffset uint64
+	HeavyIndex  uint32
+	segment     *segment
 	schema.Event
 	Time, Timestamp int64
 	Emission        uint32
@@ -75,8 +81,12 @@ type Store struct {
 	sessions          map[string][]*event
 	turns             map[turnKey]turnStats
 	stats             map[string]sessionStats
-	postings          map[string][]posting
+	segments          []*segment
 	docs, totalLength uint64
+	decoder           *zstd.Decoder
+	heavyCache        map[heavyKey]heavyBlock
+	heavyOrder        []heavyKey
+	heavyBytes        int
 }
 type turnKey struct {
 	sessionID string
@@ -208,58 +218,30 @@ func ingest(root, dir string) error {
 			f.Close()
 			return e
 		}
-		seg, e := os.CreateTemp(dir, ".segment-")
+		writer, e := newSegmentWriter(dir)
 		if e != nil {
 			zr.Close()
 			f.Close()
 			return e
 		}
-		tmp := seg.Name()
-		zw, e := zstd.NewWriter(seg, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(1))
-		if e != nil {
-			seg.Close()
-			zr.Close()
-			f.Close()
-			return e
-		}
-		enc := gob.NewEncoder(zw)
-		var count uint64
-		state, parseErr := parser.Parse(zr, normalize.SourceMeta{SourceName: src.SourceName, Harness: src.Harness, SourceFile: src.Path}, cp.State, func(ev *schema.Event) error {
-			// Semantic UIDs are stable. Version is ingestion-time only and never exposed.
-			count++
-			return enc.Encode(ev)
-		})
+		state, parseErr := parser.Parse(zr, normalize.SourceMeta{SourceName: src.SourceName, Harness: src.Harness, SourceFile: src.Path}, cp.State, writer.emit)
 		zr.Close()
-		closeErr := zw.Close()
-		if parseErr == nil {
-			parseErr = closeErr
-		}
-		if parseErr == nil {
-			parseErr = seg.Sync()
-		}
-		closeErr = seg.Close()
-		if parseErr == nil {
-			parseErr = closeErr
-		}
 		if parseErr != nil {
 			f.Close()
-			os.Remove(tmp)
+			writer.abort()
 			return parseErr
 		}
 		hash, e := windowHash(f, fi.Size())
 		f.Close()
 		if e != nil {
-			os.Remove(tmp)
+			writer.abort()
 			return e
 		}
-		// The random immutable filename is durable before the manifest references it.
-		name := strings.TrimPrefix(filepath.Base(tmp), ".") + ".zst"
-		if e = os.Rename(tmp, filepath.Join(dir, name)); e != nil {
+		name, e := writer.finish()
+		if e != nil {
 			return e
 		}
-		if e = syncDir(dir); e != nil {
-			return e
-		}
+		count := uint64(writer.count)
 		parts := strings.Split(filepath.ToSlash(rel), "/")
 		cp.Author = strings.TrimPrefix(parts[0], "author=")
 		cp.Machine = strings.TrimPrefix(parts[1], "machine=")
@@ -300,7 +282,7 @@ func ingest(root, dir string) error {
 	for _, ent := range entries {
 		n := ent.Name()
 		if !live[n] && (strings.HasPrefix(n, "segment-") || strings.HasPrefix(n, ".segment-") || strings.HasPrefix(n, ".manifest-")) {
-			if e = os.Remove(filepath.Join(dir, n)); e != nil {
+			if e = os.RemoveAll(filepath.Join(dir, n)); e != nil {
 				return e
 			}
 		}
@@ -321,16 +303,32 @@ func loadStore(dir string) (*Store, error) {
 	if e != nil {
 		return nil, e
 	}
-	db := &Store{manifest: m, byUID: map[string]*event{}, sessions: map[string][]*event{}, postings: map[string][]posting{}, turns: map[turnKey]turnStats{}, stats: map[string]sessionStats{}}
+	if m.Version != storeVersion || m.Parser != normalize.Version {
+		return nil, fmt.Errorf("store needs ingest with current parser")
+	}
+	decoder, e := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1))
+	if e != nil {
+		return nil, e
+	}
+	db := &Store{manifest: m, byUID: map[string]*event{}, sessions: map[string][]*event{}, turns: map[turnKey]turnStats{}, stats: map[string]sessionStats{}, decoder: decoder, heavyCache: map[heavyKey]heavyBlock{}}
 	keys := make([]string, 0, len(m.Sources))
 	for k := range m.Sources {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
+	interned := map[string]string{}
+	intern := func(s string) string {
+		if v, ok := interned[s]; ok {
+			return v
+		}
+		interned[s] = s
+		return s
+	}
 	for _, k := range keys {
 		cp := m.Sources[k]
 		for _, name := range cp.Segments {
-			f, e := os.Open(filepath.Join(dir, name))
+			sg := &segment{path: filepath.Join(dir, name)}
+			f, e := os.Open(filepath.Join(sg.path, "meta.zst"))
 			if e != nil {
 				return nil, e
 			}
@@ -342,7 +340,7 @@ func loadStore(dir string) (*Store, error) {
 			dec := gob.NewDecoder(bufio.NewReader(zr))
 			for {
 				ev := new(event)
-				e = dec.Decode(&ev.Event)
+				e = dec.Decode(ev)
 				if e == io.EOF {
 					break
 				}
@@ -351,24 +349,24 @@ func loadStore(dir string) (*Store, error) {
 					f.Close()
 					return nil, e
 				}
-				ev.Time = parseTime(ev.RecordTS, cp.Source.UpdatedMs)
+				ev.segment = sg
+				ev.Time = parseTime(ev.RecordTS, fallbackEventMillis)
 				ev.Timestamp = parseTime(ev.EventTS, 0)
-				var payload struct {
-					Emission uint32  `json:"moraine_emission_index"`
-					IO       *toolIO `json:"moraine_tool_io"`
+				for _, p := range []*string{&ev.SessionID, &ev.SourceName, &ev.Harness, &ev.InferenceProvider, &ev.SourceFile, &ev.EventKind, &ev.ActorKind, &ev.PayloadType, &ev.OpStatus, &ev.ToolName, &ev.Cwd, &ev.ProjectID, &ev.WorktreeRoot, &ev.EndpointKind} {
+					*p = intern(*p)
 				}
-				_ = json.Unmarshal([]byte(ev.PayloadJSON), &payload)
-				ev.Emission = payload.Emission
-				if ev.ToolPhase == "request" {
-					ev.IO = payload.IO
-				}
-				// Within a source the latest occurrence wins, including equal versions.
+				sg.pending = append(sg.pending, ev)
 				if prev := db.byUID[ev.EventUID]; prev == nil || prev.EventVersion <= ev.EventVersion {
 					db.byUID[ev.EventUID] = ev
 				}
 			}
 			zr.Close()
 			f.Close()
+			sg.terms, sg.postings, e = loadTerms(filepath.Join(sg.path, "terms"))
+			if e != nil {
+				return nil, e
+			}
+			db.segments = append(db.segments, sg)
 		}
 	}
 	for _, ev := range db.byUID {
@@ -409,25 +407,24 @@ func loadStore(dir string) (*Store, error) {
 		db.events = append(db.events, es...)
 	}
 	sort.Slice(db.events, func(i, j int) bool { return db.events[i].EventUID < db.events[j].EventUID })
+	global := make(map[*event]uint32, len(db.events))
 	for i, ev := range db.events {
-		h := sha256.Sum256([]byte(ev.TextContent))
-		ev.TextHash = binary.LittleEndian.Uint64(h[:8])
-		ev.Flags = searchFlags(ev)
-		freq := map[string]uint32{}
-		// SQL lower() happens before ASCII token extraction.
-		for _, t := range tokenRe.FindAllString(strings.ToLower(ev.TextContent), -1) {
-			if len(t) >= 2 && len(t) <= 64 {
-				freq[t]++
-				ev.Length++
-			}
-		}
+		global[ev] = uint32(i)
 		if ev.Length > 0 {
 			db.docs++
 			db.totalLength += uint64(ev.Length)
 		}
-		for t, tf := range freq {
-			db.postings[t] = append(db.postings[t], posting{uint32(i), tf})
+	}
+	for _, sg := range db.segments {
+		sg.mapping = make([]uint32, len(sg.pending))
+		for i, ev := range sg.pending {
+			if id, ok := global[ev]; ok {
+				sg.mapping[i] = id
+			} else {
+				sg.mapping[i] = ^uint32(0)
+			}
 		}
+		sg.pending = nil
 	}
 	return db, nil
 }
@@ -453,6 +450,36 @@ func eventLess(a, b *event) bool {
 	return a.EventUID < b.EventUID
 }
 func (db *Store) nav(e *event) navRow {
-	return navRow{sessionID: e.SessionID, eventUID: e.EventUID, eventTime: formatRFC3339UTCMillis(e.Time), eventUnixMs: e.Time, sourceFile: e.SourceFile, sourceRef: e.SourceRef, eventClass: e.EventKind, actorRole: e.ActorKind, payloadType: e.PayloadType, callID: e.ToolCallID, name: e.ToolName, phase: firstNonEmpty(e.ToolPhase, e.OpStatus), itemID: e.ItemID, sourceName: e.SourceName, harness: e.Harness, inferenceProvider: e.InferenceProvider, textContent: e.TextContent, payloadJSON: e.PayloadJSON, tokenUsageJSON: e.TokenUsageJSON, tokenUsageBuckets: e.TokenUsageBuckets, tokenUsageNative: e.TokenUsageNativeUnits, endpointKind: e.EndpointKind, eventOrder: e.Order, turnSeq: e.Turn, eventOrdinal: e.Ordinal}
+	return navRow{sessionID: e.SessionID, eventUID: e.EventUID, eventTime: formatRFC3339UTCMillis(e.Time), eventUnixMs: e.Time, sourceFile: e.SourceFile, sourceRef: e.SourceRef, eventClass: e.EventKind, actorRole: e.ActorKind, payloadType: e.PayloadType, callID: e.ToolCallID, name: e.ToolName, phase: firstNonEmpty(e.ToolPhase, e.OpStatus), itemID: e.ItemID, sourceName: e.SourceName, harness: e.Harness, inferenceProvider: e.InferenceProvider, textContent: e.TextPreview, payloadJSON: e.PayloadJSON, tokenUsageJSON: e.TokenUsageJSON, tokenUsageBuckets: e.TokenUsageBuckets, tokenUsageNative: e.TokenUsageNativeUnits, endpointKind: e.EndpointKind, eventOrder: e.Order, turnSeq: e.Turn, eventOrdinal: e.Ordinal}
 }
-func hydrateKept(_ context.Context, _ *Store, _ *sessionScan) error { return nil }
+func hydrateKept(_ context.Context, db *Store, sc *sessionScan) error {
+	var rows []*navRow
+	if sc.target != nil {
+		rows = append(rows, sc.target)
+	}
+	for _, t := range sc.turns {
+		for _, r := range []*navRow{t.userInput, t.finalResponse} {
+			if r != nil {
+				rows = append(rows, r)
+			}
+		}
+		rows = append(rows, t.selected...)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		a, b := db.byUID[rows[i].eventUID], db.byUID[rows[j].eventUID]
+		if a.segment.path != b.segment.path {
+			return a.segment.path < b.segment.path
+		}
+		return a.HeavyOffset < b.HeavyOffset
+	})
+	for _, r := range rows {
+		h, e := db.heavyFor(db.byUID[r.eventUID])
+		if e != nil {
+			return e
+		}
+		r.textContent = h.Text
+		r.payloadJSON = h.Payload
+		r.tokenUsageJSON = h.Tokens
+	}
+	return nil
+}

@@ -46,10 +46,13 @@ func searchMcpEvents(_ context.Context, db *Store, q searchQuery) (*searchResult
 	scores := map[uint32]float64{}
 	avg := math.Max(1, float64(db.totalLength)/math.Max(1, float64(db.docs)))
 	for _, t := range terms {
-		ps := db.postings[t]
-		df := float64(len(ps))
+		var all []posting
+		for _, sg := range db.segments {
+			sg.each(sg.lookup(t), func(doc, tf uint32) { all = append(all, posting{doc, tf}) })
+		}
+		df := float64(len(all))
 		idf := math.Log(1 + (math.Max(float64(db.docs), df)-df+0.5)/(df+0.5))
-		for _, p := range ps {
+		for _, p := range all {
 			e := db.events[p.Doc]
 			if e.Flags&(1<<8) == 0 || len(q.eventTypes) > 0 && e.Flags&mask == 0 {
 				continue
@@ -61,6 +64,7 @@ func searchMcpEvents(_ context.Context, db *Store, q searchQuery) (*searchResult
 			v := idf * ((tf * 1.2) / (tf + 1.2*(1-0.75+0.75*(float64(e.Length)/avg))))
 			scores[p.Doc] += v
 		}
+
 	}
 	rows := make([]*mcpRow, 0, len(scores))
 	for doc, score := range scores {
