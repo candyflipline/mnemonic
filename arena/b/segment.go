@@ -43,6 +43,7 @@ type termEntry struct {
 }
 type segmentWriter struct {
 	path        string
+	codecs      *segmentCodecs
 	meta, heavy *os.File
 	zw          *zstd.Encoder
 	enc         *gob.Encoder
@@ -54,14 +55,39 @@ type segmentWriter struct {
 	terms       map[string][]posting
 }
 
-func newSegmentWriter(dir string) (*segmentWriter, error) {
+type segmentCodecs struct {
+	meta, block *zstd.Encoder
+	plain       bytes.Buffer
+	compressed  []byte
+}
+
+func newSegmentCodecs() (*segmentCodecs, error) {
+	meta, e := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithEncoderLevel(zstd.SpeedDefault))
+	if e != nil {
+		return nil, e
+	}
+	block, e := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithEncoderLevel(zstd.SpeedDefault))
+	if e != nil {
+		meta.Close()
+		return nil, e
+	}
+	return &segmentCodecs{meta: meta, block: block}, nil
+}
+func (c *segmentCodecs) close() {
+	if c != nil {
+		c.meta.Close()
+		c.block.Close()
+	}
+}
+func newSegmentWriter(dir string, codecs *segmentCodecs) (*segmentWriter, error) {
 	path, e := os.MkdirTemp(dir, ".segment-")
 	if e != nil {
 		return nil, e
 	}
-	w := &segmentWriter{path: path, terms: map[string][]posting{}}
+	w := &segmentWriter{path: path, terms: map[string][]posting{}, codecs: codecs}
 	w.meta, e = os.Create(filepath.Join(path, "meta.zst"))
 	if e != nil {
+		w.abort()
 		return nil, e
 	}
 	w.heavy, e = os.Create(filepath.Join(path, "heavy"))
@@ -69,17 +95,9 @@ func newSegmentWriter(dir string) (*segmentWriter, error) {
 		w.abort()
 		return nil, e
 	}
-	w.zw, e = zstd.NewWriter(w.meta, zstd.WithEncoderConcurrency(1), zstd.WithEncoderLevel(zstd.SpeedDefault))
-	if e != nil {
-		w.abort()
-		return nil, e
-	}
+	w.zw, w.codec = codecs.meta, codecs.block
+	w.zw.Reset(w.meta)
 	w.enc = gob.NewEncoder(w.zw)
-	w.codec, e = zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithEncoderLevel(zstd.SpeedDefault))
-	if e != nil {
-		w.abort()
-		return nil, e
-	}
 	return w, nil
 }
 func (w *segmentWriter) abort() {
@@ -142,11 +160,13 @@ func (w *segmentWriter) flush() error {
 	if len(w.records) == 0 {
 		return nil
 	}
-	var plain bytes.Buffer
-	if e := gob.NewEncoder(&plain).Encode(w.values); e != nil {
+	plain := &w.codecs.plain
+	plain.Reset()
+	if e := gob.NewEncoder(plain).Encode(w.values); e != nil {
 		return e
 	}
-	compressed := w.codec.EncodeAll(plain.Bytes(), nil)
+	compressed := w.codec.EncodeAll(plain.Bytes(), w.codecs.compressed[:0])
+	w.codecs.compressed = compressed
 	offset, e := w.heavy.Seek(0, io.SeekCurrent)
 	if e != nil {
 		return e
@@ -269,6 +289,22 @@ func (w *segmentWriter) finish() (string, error) {
 	}
 	return name, syncDir(filepath.Dir(w.path))
 }
+
+// Keep front coding in memory too. Only every sixteenth term is materialized
+// as a fence key. Lookup decodes at most sixteen <=64-byte ASCII tokens on stack.
+const termFence = 16
+
+func readUAt(raw []byte, pos *int) (uint64, error) {
+	if *pos >= len(raw) {
+		return 0, io.ErrUnexpectedEOF
+	}
+	v, n := binary.Uvarint(raw[*pos:])
+	if n <= 0 {
+		return 0, fmt.Errorf("invalid index varint")
+	}
+	*pos += n
+	return v, nil
+}
 func loadTerms(path string) ([]termEntry, []byte, error) {
 	raw, e := os.ReadFile(path)
 	if e != nil {
@@ -277,49 +313,69 @@ func loadTerms(path string) ([]termEntry, []byte, error) {
 	if len(raw) < 8 || string(raw[:8]) != "MNTERM02" {
 		return nil, nil, fmt.Errorf("invalid term index")
 	}
-	r := bytes.NewReader(raw[8:])
-	n, e := binary.ReadUvarint(r)
+	pos := 8
+	n, e := readUAt(raw, &pos)
 	if e != nil || n > uint64(len(raw)) {
 		return nil, nil, fmt.Errorf("invalid term count")
 	}
-	terms := make([]termEntry, 0, n)
-	var postings []byte
-	prev := ""
+	fences := make([]termEntry, 0, (n+termFence-1)/termFence)
+	var previous [64]byte
+	previousLen := 0
 	for i := uint64(0); i < n; i++ {
-		prefix, e := binary.ReadUvarint(r)
-		if e != nil || prefix > uint64(len(prev)) {
+		start := pos
+		prefix, e := readUAt(raw, &pos)
+		if e != nil || prefix > uint64(previousLen) {
 			return nil, nil, fmt.Errorf("invalid term prefix")
 		}
-		size, e := binary.ReadUvarint(r)
-		if e != nil || size > uint64(r.Len()) {
-			return nil, nil, fmt.Errorf("invalid term length")
+		size, e := readUAt(raw, &pos)
+		if e != nil || prefix+size > 64 || size > uint64(len(raw)-pos) {
+			return nil, nil, fmt.Errorf("invalid term suffix")
 		}
-		suffix := make([]byte, int(size))
-		if _, e = io.ReadFull(r, suffix); e != nil {
-			return nil, nil, e
+		copy(previous[prefix:], raw[pos:pos+int(size)])
+		previousLen = int(prefix + size)
+		pos += int(size)
+		if i%termFence == 0 {
+			fences = append(fences, termEntry{string(previous[:previousLen]), uint32(start), uint32(min(uint64(termFence), n-i))})
 		}
-		t := prev[:prefix] + string(suffix)
-		count, e := binary.ReadUvarint(r)
-		if e != nil || count > uint64(r.Len()) {
+		count, e := readUAt(raw, &pos)
+		if e != nil || count > uint64(len(raw)-pos) {
 			return nil, nil, fmt.Errorf("invalid posting length")
 		}
-		offset := len(postings)
-		postings = append(postings, make([]byte, int(count))...)
-		if _, e = io.ReadFull(r, postings[offset:]); e != nil {
-			return nil, nil, e
-		}
-		terms = append(terms, termEntry{t, uint32(offset), uint32(count)})
-		prev = t
+		pos += int(count)
 	}
-	return terms, postings, nil
+	if pos != len(raw) {
+		return nil, nil, fmt.Errorf("trailing term index bytes")
+	}
+	return fences, raw, nil
 }
 func (s *segment) lookup(term string) []byte {
-	i := sort.Search(len(s.terms), func(i int) bool { return s.terms[i].term >= term })
-	if i == len(s.terms) || s.terms[i].term != term {
+	i := sort.Search(len(s.terms), func(i int) bool { return s.terms[i].term > term }) - 1
+	if i < 0 {
 		return nil
 	}
-	t := s.terms[i]
-	return s.postings[t.offset : t.offset+t.size]
+	fence := s.terms[i]
+	pos := int(fence.offset)
+	var decoded [64]byte
+	length := copy(decoded[:], fence.term)
+	for j := uint32(0); j < fence.size; j++ {
+		prefix, _ := readUAt(s.postings, &pos)
+		size, _ := readUAt(s.postings, &pos)
+		if j != 0 {
+			copy(decoded[prefix:], s.postings[pos:pos+int(size)])
+			length = int(prefix + size)
+		}
+		pos += int(size)
+		count, _ := readUAt(s.postings, &pos)
+		cmp := bytes.Compare(decoded[:length], []byte(term))
+		if cmp == 0 {
+			return s.postings[pos : pos+int(count)]
+		}
+		if cmp > 0 {
+			return nil
+		}
+		pos += int(count)
+	}
+	return nil
 }
 func (s *segment) each(raw []byte, fn func(uint32, uint32)) {
 	var doc uint32

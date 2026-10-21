@@ -181,6 +181,8 @@ func ingest(root, dir string) error {
 	if e != nil {
 		return e
 	}
+	var codecs *segmentCodecs
+	defer func() { codecs.close() }()
 	seen := map[string]bool{}
 	dirty := changedFormat
 	for _, p := range paths {
@@ -250,7 +252,15 @@ func ingest(root, dir string) error {
 			f.Close()
 			return e
 		}
-		writer, e := newSegmentWriter(dir)
+		if codecs == nil {
+			codecs, e = newSegmentCodecs()
+			if e != nil {
+				zr.Close()
+				f.Close()
+				return e
+			}
+		}
+		writer, e := newSegmentWriter(dir, codecs)
 		if e != nil {
 			zr.Close()
 			f.Close()

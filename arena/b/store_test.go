@@ -18,6 +18,54 @@ import (
 // One integration table covers real parser state, published queries, append,
 // idempotence, failed publication, and recovery without the private sample.
 func TestStore(t *testing.T) {
+	t.Run("dictionary_fences", func(t *testing.T) {
+		dir := t.TempDir()
+		codecs, err := newSegmentCodecs()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer codecs.close()
+		w, err := newSegmentWriter(dir, codecs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 65; i++ {
+			w.terms[fmt.Sprintf("prefix%02d", i)] = []posting{{uint32(i), 3}}
+		}
+		name, err := w.finish()
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys, raw, err := loadTerms(filepath.Join(dir, name, "terms"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(keys) != 5 {
+			t.Fatalf("fences=%d, want 5", len(keys))
+		}
+		sg := &segment{terms: keys, postings: raw, mapping: make([]uint32, 65)}
+		for i := range sg.mapping {
+			sg.mapping[i] = uint32(i)
+		}
+		for i := 0; i < 65; i++ {
+			count := 0
+			sg.each(sg.lookup(fmt.Sprintf("prefix%02d", i)), func(doc, tf uint32) {
+				count++
+				if doc != uint32(i) || tf != 3 {
+					t.Fatal("wrong posting")
+				}
+			})
+			if count != 1 {
+				t.Fatalf("term %d count=%d", i, count)
+			}
+		}
+		for _, term := range []string{"", "prefix00x", "prefix65", "zzz"} {
+			if sg.lookup(term) != nil {
+				t.Fatal("absent term matched")
+			}
+		}
+	})
+
 	t.Run("path_index_recall", func(t *testing.T) {
 		db := &Store{}
 		for i, input := range []string{
