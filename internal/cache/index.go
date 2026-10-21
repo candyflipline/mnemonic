@@ -496,7 +496,7 @@ FROM win w ANTI JOIN keep k USING (event_uid)`,
 		}
 	}
 	for a := firstDoc; a < end; a += chunkRows {
-		if err := insertChunk(ctx, c, flagsSQL, a, min(a+chunkRows, end), a+chunkRows >= end); err != nil {
+		if err := insertChunk(ctx, c, flagsSQL, a, min(a+chunkRows, end), end); err != nil {
 			return err
 		}
 	}
@@ -537,7 +537,7 @@ FROM win w ANTI JOIN keep k USING (event_uid)`,
 	return execAll(ctx, c, []string{"DROP TABLE del", "DROP TABLE mv", "DROP TABLE ins", "DROP TABLE s"})
 }
 
-func insertChunk(ctx context.Context, c *sql.Conn, flagsSQL string, from, to int64, last bool) error {
+func insertChunk(ctx context.Context, c *sql.Conn, flagsSQL string, from, to, end int64) error {
 	if _, err := c.ExecContext(ctx, fmt.Sprintf(
 		"CREATE OR REPLACE TEMP TABLE insc AS SELECT * FROM ins WHERE doc >= %d AND doc < %d", from, to)); err != nil {
 		return err
@@ -572,8 +572,8 @@ JOIN insc i ON i.lake_file = r.filename AND i.lake_row = r.file_row_number`,
   SELECT doc, doc_len, flags, unnest(map_keys(h)) AS term, unnest(map_values(h)) AS tf FROM tok WHERE doc_len > 0) ORDER BY 1, term`,
 		`UPDATE corpus SET docs = docs + (SELECT count(*) FILTER (WHERE doc_len > 0) FROM w),
   total_len = total_len + (SELECT coalesce(sum(doc_len), 0) FROM w),
-  next_doc = next_doc + (SELECT count(*) FROM w)`)
-	if !last {
+  next_doc = `+strconv.FormatInt(end, 10))
+	if to < end {
 		stmts = append(stmts, "COMMIT")
 	}
 	return execAll(ctx, c, append(stmts, "DROP TABLE pe", "DROP TABLE pt", "DROP TABLE pm", "DROP TABLE w", "DROP TABLE tok", "DROP TABLE insc"))
