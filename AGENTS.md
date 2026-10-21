@@ -3,7 +3,7 @@
 Collects agent session traces (Claude Code, Codex, Cursor, ...) from every machine, keeps them on one server, and serves them to agents over MCP from DuckDB. Replaced a ClickHouse-backed predecessor (see NOTICE), for personal and team use.
 
 ## Shape
-- `mnemonic push --watch` on each machine (resident under launchd or systemd, polls every 60 s) sends **redacted raw lines** to the server. It is pure Go, built with `CGO_ENABLED=0`, and has no parser or DuckDB in it.
+- `mnemonic push --watch` on each machine (resident under launchd or systemd, wakes on kernel file events and uploads within 60 s) sends **redacted raw lines** to the server. It is pure Go, built with `CGO_ENABLED=0`, and has no parser or DuckDB in it.
 - `mnemonic serve` on the server:
   - accepts pushes (`/v1/*`);
   - re-parses whole raw files into `events` parquet (`internal/lake`);

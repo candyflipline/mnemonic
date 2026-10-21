@@ -12,7 +12,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 
@@ -27,10 +29,10 @@ type identityRedactor struct{}
 
 func (identityRedactor) Line(line []byte) []byte { return line }
 
-type countingRedactor struct{ n int64 }
+type countingRedactor struct{ n atomic.Int64 }
 
 func (c *countingRedactor) Line(line []byte) []byte {
-	c.n += int64(len(line))
+	c.n.Add(int64(len(line)))
 	return line
 }
 
@@ -407,8 +409,8 @@ func TestUnchangedFileBackfillsRawEndThenSkips(t *testing.T) {
 	if want := (Stats{Scanned: 1, Unchanged: 1}); st != want {
 		t.Fatalf("stats = %+v, want %+v", st, want)
 	}
-	if red.n != 0 {
-		t.Fatalf("Line saw %d bytes on the skip pass, want 0", red.n)
+	if n := red.n.Load(); n != 0 {
+		t.Fatalf("Line saw %d bytes on the skip pass, want 0", n)
 	}
 }
 
@@ -430,8 +432,8 @@ func TestAppendTailRedactsOnlyNewBytes(t *testing.T) {
 	if want := (Stats{Scanned: 1, Appended: 1, Bytes: 16}); st != want {
 		t.Fatalf("stats = %+v, want %+v", st, want)
 	}
-	if red.n != 9+7+7 {
-		t.Fatalf("Line saw %d bytes, want %d", red.n, 9+7+7)
+	if n := red.n.Load(); n != 9+7+7 {
+		t.Fatalf("Line saw %d bytes, want %d", n, 9+7+7)
 	}
 	if got := storedRaw(t, rs.dataDir, p); got != body {
 		t.Fatalf("store holds %q, want %q", got, body)
@@ -526,15 +528,31 @@ func TestConflictWithForeignBytesResendsWhole(t *testing.T) {
 
 type countingTransport struct {
 	base http.RoundTripper
+	mu   sync.Mutex
 	reqs []string
 }
 
 func (c *countingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	c.mu.Lock()
 	c.reqs = append(c.reqs, r.Method)
+	c.mu.Unlock()
 	return c.base.RoundTrip(r)
 }
 
-func TestWatchTicksSendOnlyWhatChanged(t *testing.T) {
+func (c *countingTransport) since(n int) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return strings.Join(c.reqs[n:], " ")
+}
+
+type lineWriter chan string
+
+func (l lineWriter) Write(p []byte) (int, error) {
+	l <- strings.TrimSuffix(string(p), "\n")
+	return len(p), nil
+}
+
+func TestWatchSendsOnlyWhatFileEventsName(t *testing.T) {
 	dir := t.TempDir()
 	body := "head line\n" + strings.Repeat("filler line\n", 99)
 	p := writeFile(t, dir, "a.jsonl", body)
@@ -542,45 +560,62 @@ func TestWatchTicksSendOnlyWhatChanged(t *testing.T) {
 	tr := &countingTransport{base: rs.srv.Client().Transport}
 	red := &countingRedactor{}
 	w := newWatcher(testConfig(rs.srv.URL, dir), red, &http.Client{Transport: tr})
-	tick := func() Stats {
+	w.window = time.Millisecond
+	lines := make(lineWriter, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.run(ctx, lines) }()
+	stop := sync.OnceValue(func() error {
+		cancel()
+		return <-done
+	})
+	t.Cleanup(func() { stop() })
+	next := func(want string) {
 		t.Helper()
-		tr.reqs, red.n = nil, 0
-		st, err := w.tick(context.Background())
-		if err != nil {
-			t.Fatalf("tick: %v", err)
+		select {
+		case got := <-lines:
+			if got != want {
+				t.Fatalf("watch printed %q, want %q", got, want)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("watch printed nothing in 10 s, want %q", want)
 		}
-		return st
 	}
 
-	if st := tick(); st != (Stats{Scanned: 1, Replaced: 1, Bytes: 1198}) {
-		t.Fatalf("tick 1 stats = %+v", st)
+	next("scanned 1, appended 0, replaced 1, unchanged 0, failed 0, sent 1198 bytes")
+	if got := tr.since(0); got != "GET PUT" {
+		t.Fatalf("reconcile requests = %q, want %q", got, "GET PUT")
 	}
-	if got := strings.Join(tr.reqs, " "); got != "GET PUT" {
-		t.Fatalf("tick 1 requests = %q, want %q", got, "GET PUT")
+	redacted := red.n.Load()
+
+	time.Sleep(20 * w.window)
+	if got, n := tr.since(2), red.n.Load()-redacted; got != "" || n != 0 {
+		t.Fatalf("idle: requests %q, redacted %d bytes; want none and 0", got, n)
 	}
 
-	if st := tick(); st != (Stats{}) || len(tr.reqs) != 0 || red.n != 0 {
-		t.Fatalf("idle tick: stats %+v, requests %q, redacted %d bytes; want zero, none, 0", st, tr.reqs, red.n)
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	body += "new one\nnew two\n"
-	writeFile(t, dir, "a.jsonl", body)
-	if st := tick(); st != (Stats{Scanned: 1, Appended: 1, Bytes: 16}) {
-		t.Fatalf("tick 3 stats = %+v", st)
+	if _, err := f.WriteString("new one\nnew two\n"); err != nil {
+		t.Fatal(err)
 	}
-	if got := strings.Join(tr.reqs, " "); got != "PUT" {
-		t.Fatalf("tick 3 requests = %q, want %q", got, "PUT")
-	}
-	if got := storedRaw(t, rs.dataDir, p); got != body {
-		t.Fatalf("store holds %q, want %q", got, body)
-	}
-	if h := w.held[wire.SrcID(p)]; h.Size != 1214 || h.RawEnd != 1214 {
-		t.Fatalf("held Size = %d RawEnd = %d, want 1214 and 1214", h.Size, h.RawEnd)
+	f.Close()
+	next("scanned 1, appended 1, replaced 0, unchanged 0, failed 0, sent 16 bytes")
+	if got, n := tr.since(2), red.n.Load()-redacted; got != "PUT" || n != 9+7+7 {
+		t.Fatalf("append: requests %q, redacted %d bytes; want %q and %d", got, n, "PUT", 9+7+7)
 	}
 
 	q := writeFile(t, dir, filepath.Join("sub", "b.jsonl"), "beta\n")
-	if st := tick(); st != (Stats{Scanned: 1, Replaced: 1, Bytes: 5}) {
-		t.Fatalf("tick 4 stats = %+v", st)
+	next("scanned 1, appended 0, replaced 1, unchanged 0, failed 0, sent 5 bytes")
+	if err := stop(); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := storedRaw(t, rs.dataDir, p); got != body+"new one\nnew two\n" {
+		t.Fatalf("store holds %q, want %q", got, body+"new one\nnew two\n")
+	}
+	if h := w.held[wire.SrcID(p)]; h.Size != 1214 || h.RawEnd != 1214 {
+		t.Fatalf("held Size = %d RawEnd = %d, want 1214 and 1214", h.Size, h.RawEnd)
 	}
 	if got := storedRaw(t, rs.dataDir, q); got != "beta\n" {
 		t.Fatalf("store holds %q for the new file, want %q", got, "beta\n")

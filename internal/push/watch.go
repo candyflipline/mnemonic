@@ -18,9 +18,12 @@ import (
 )
 
 const (
-	tickEvery      = time.Minute
-	reconcileEvery = time.Hour
+	uploadWindow   = time.Minute
+	retryEvery     = time.Minute
+	reconcileEvery = 6 * time.Hour
 )
+
+const lostEvents = ""
 
 type stamp struct{ size, mtimeNs int64 }
 
@@ -35,43 +38,28 @@ type watchGlob struct {
 }
 
 type watcher struct {
-	cfg        config.Client
-	red        Redactor
-	hc         *http.Client
-	globs      []watchGlob
-	held       map[string]*wire.Source
-	files      map[string]*watched
-	dirs       map[string]int64
-	reconciled time.Time
-	stale      bool
+	cfg      config.Client
+	red      Redactor
+	hc       *http.Client
+	globs    []watchGlob
+	window   time.Duration
+	note     *notifier
+	held     map[string]*wire.Source
+	files    map[string]*watched
+	dirs     map[string]bool
+	stale    bool
+	watchErr error
 }
 
-// Watch runs until ctx ends, polling every minute and printing a stats line
-// for each tick that sent or failed something.
+// Watch runs until ctx ends. The first file event after a quiet spell opens
+// an upload window; at its end only the paths written in it are sent, and a
+// stats line is printed when something was sent or failed.
 func Watch(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client, out io.Writer) error {
-	w := newWatcher(cfg, red, hc)
-	t := time.NewTicker(tickEvery)
-	defer t.Stop()
-	for {
-		st, err := w.tick(ctx)
-		switch {
-		case ctx.Err() != nil:
-			return nil
-		case err != nil:
-			fmt.Fprintln(out, "push:", err)
-		case st.Appended+st.Replaced+st.Failed > 0:
-			fmt.Fprintln(out, st)
-		}
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-t.C:
-		}
-	}
+	return newWatcher(cfg, red, hc).run(ctx, out)
 }
 
 func newWatcher(cfg config.Client, red Redactor, hc *http.Client) *watcher {
-	w := &watcher{cfg: cfg, red: red, hc: hc, stale: true}
+	w := &watcher{cfg: cfg, red: red, hc: hc, window: uploadWindow, stale: true}
 	for _, src := range cfg.Sources {
 		glob, err := filepath.Abs(src.Glob)
 		if err != nil {
@@ -83,30 +71,64 @@ func newWatcher(cfg config.Client, red Redactor, hc *http.Client) *watcher {
 	return w
 }
 
-func (w *watcher) tick(ctx context.Context) (Stats, error) {
-	if w.stale || time.Since(w.reconciled) >= reconcileEvery {
-		return w.reconcile(ctx)
+func (w *watcher) run(ctx context.Context, out io.Writer) error {
+	n, err := newNotifier()
+	if err != nil {
+		return err
 	}
-	var changed []string
-	for dir, mtime := range w.dirs {
-		info, err := os.Stat(dir)
-		if err != nil {
-			delete(w.dirs, dir)
+	defer n.close()
+	w.note = n
+	periodic := time.NewTimer(0)
+	defer periodic.Stop()
+	dirty := make(map[string]bool)
+	var window, retry <-chan time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case p := <-n.changed:
+			if p == lostEvents {
+				w.stale = true
+			} else {
+				dirty[p] = true
+			}
+			if window == nil {
+				window = time.After(w.window)
+			}
 			continue
+		case <-window:
+		case <-retry:
+			retry = nil
+		case <-periodic.C:
+			w.stale = true
 		}
-		if info.ModTime().UnixNano() != mtime {
-			changed = append(changed, dir)
+		window = nil
+		var st Stats
+		var err error
+		if w.stale {
+			st, err = w.reconcile(ctx)
+			periodic.Reset(reconcileEvery)
+		} else {
+			st = w.flush(ctx, dirty)
+		}
+		clear(dirty)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err != nil {
+			fmt.Fprintln(out, "push:", err)
+		}
+		if w.watchErr != nil {
+			fmt.Fprintln(out, "push:", w.watchErr)
+			w.watchErr = nil
+		}
+		if st.Appended+st.Replaced+st.Failed > 0 {
+			fmt.Fprintln(out, st)
+		}
+		if w.stale && retry == nil {
+			retry = time.After(retryEvery)
 		}
 	}
-	for _, g := range w.globs {
-		if _, ok := w.dirs[g.base]; !ok {
-			changed = append(changed, g.base)
-		}
-	}
-	for _, dir := range changed {
-		w.list(dir)
-	}
-	return w.syncChanged(ctx), nil
 }
 
 func (w *watcher) reconcile(ctx context.Context) (Stats, error) {
@@ -115,39 +137,77 @@ func (w *watcher) reconcile(ctx context.Context) (Stats, error) {
 		w.stale = true
 		return Stats{}, err
 	}
+	oldFiles, oldDirs := w.files, w.dirs
 	w.held = held
 	w.files = make(map[string]*watched)
-	w.dirs = make(map[string]int64)
+	w.dirs = make(map[string]bool)
+	w.stale = false
 	for _, f := range scan(w.cfg.Sources) {
 		w.files[f.path] = &watched{fileRef: f}
 	}
 	for _, g := range w.globs {
-		w.list(g.base)
+		w.list(g.base, nil)
 	}
-	w.reconciled, w.stale = time.Now(), false
-	return w.syncChanged(ctx), nil
+	for p := range oldFiles {
+		if w.files[p] == nil {
+			w.note.forget(p)
+		}
+	}
+	for p := range oldDirs {
+		if !w.dirs[p] {
+			w.note.forget(p)
+		}
+	}
+	paths := make([]string, 0, len(w.files))
+	for p := range w.files {
+		paths = append(paths, p)
+	}
+	return w.sync(ctx, paths), nil
 }
 
-// list reads one directory level, adding new matching files and listing new
-// subdirectories. The stamp is taken before the read, so a change during the
-// read shows as a new mtime next tick.
-func (w *watcher) list(dir string) {
+// flush lists the dirty directories and any glob base not seen yet, then
+// syncs the dirty files and the files those listings found.
+func (w *watcher) flush(ctx context.Context, dirty map[string]bool) Stats {
+	var paths []string
+	for p := range dirty {
+		if w.dirs[p] {
+			paths = w.list(p, paths)
+		}
+	}
+	for _, g := range w.globs {
+		if !w.dirs[g.base] {
+			paths = w.list(g.base, paths)
+		}
+	}
+	for p := range dirty {
+		if !w.dirs[p] {
+			paths = append(paths, p)
+		}
+	}
+	return w.sync(ctx, paths)
+}
+
+// list watches dir, then reads it, adding new matching files and listing new
+// subdirectories, and returns added with the new files appended. Watching
+// before reading means an entry added after the read raises an event.
+func (w *watcher) list(dir string, added []string) []string {
 	info, err := os.Stat(dir)
 	if err != nil || !info.IsDir() {
 		delete(w.dirs, dir)
-		return
+		w.note.forget(dir)
+		return added
 	}
+	w.watch(dir, true)
+	w.dirs[dir] = true
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		w.dirs[dir] = 0
-		return
+		return added
 	}
-	w.dirs[dir] = info.ModTime().UnixNano()
 	for _, e := range entries {
 		path := filepath.Join(dir, e.Name())
 		if e.IsDir() {
-			if _, ok := w.dirs[path]; !ok {
-				w.list(path)
+			if !w.dirs[path] {
+				added = w.list(path, added)
 			}
 			continue
 		}
@@ -162,6 +222,19 @@ func (w *watcher) list(dir string) {
 			continue
 		}
 		w.files[path] = &watched{fileRef: fileRef{path: path, harness: g.src.Harness, sourceName: g.src.SourceName}}
+		added = append(added, path)
+	}
+	return added
+}
+
+func (w *watcher) watch(path string, dir bool) {
+	err := w.note.watch(path, dir)
+	if err == nil || errors.Is(err, fs.ErrNotExist) {
+		return
+	}
+	w.stale = true
+	if w.watchErr == nil {
+		w.watchErr = err
 	}
 }
 
@@ -174,14 +247,21 @@ func (w *watcher) classify(path string) (watchGlob, bool) {
 	return watchGlob{}, false
 }
 
-// syncChanged sends every file whose (size, mtime) differs from its stamp at
-// its last completed sync. A 409 or an error makes the next tick reconcile.
-func (w *watcher) syncChanged(ctx context.Context) Stats {
+// sync watches each known path, then sends it when its (size, mtime) differs
+// from its stamp at its last completed sync. A 409 or an error makes the next
+// wake reconcile.
+func (w *watcher) sync(ctx context.Context, paths []string) Stats {
 	var st Stats
-	for path, f := range w.files {
+	for _, path := range paths {
+		f := w.files[path]
+		if f == nil {
+			continue
+		}
+		w.watch(path, false)
 		info, err := os.Stat(path)
 		if errors.Is(err, fs.ErrNotExist) {
 			delete(w.files, path)
+			w.note.forget(path)
 			continue
 		}
 		if err != nil || !info.Mode().IsRegular() {
