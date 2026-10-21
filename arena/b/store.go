@@ -79,24 +79,22 @@ type Store struct {
 	directory         string
 	stamp             manifestStamp
 	events            []*event
-	byUID             map[string]*event
+	arena             mappedArena
 	sessions          map[string][]*event
-	turns             map[turnKey]turnStats
-	stats             map[string]sessionStats
+	turns             []turnRecord
+	stats             map[string]*sessionStats
 	segments          []*segment
 	docs, totalLength uint64
 	decoder           *zstd.Decoder
 	heavyCache        map[heavyKey]heavyBlock
 	heavyOrder        []heavyKey
 	heavyBytes        int
-	paths             []pathEntry
-	pathFallback      []uint32
-	shellDocs         []uint32
-	scoreValues       []float64
-	scoreStamps       []uint32
-	scoreEpoch        uint32
-	scoreTouched      []uint32
-	postingScratch    []posting
+	pathIndex
+	scoreValues    []float64
+	scoreStamps    []uint32
+	scoreEpoch     uint32
+	scoreTouched   []uint32
+	postingScratch []posting
 }
 type turnKey struct {
 	sessionID string
@@ -361,11 +359,17 @@ func (db *Store) Close() {
 		return
 	}
 	for _, sg := range db.segments {
+		if sg.postings != nil {
+			syscall.Munmap(sg.postings)
+		}
 		if sg.file != nil {
 			sg.file.Close()
 		}
 	}
-	db.decoder.Close()
+	if db.decoder != nil {
+		db.decoder.Close()
+	}
+	db.arena.close()
 }
 func loadStore(dir string) (*Store, error) {
 	for attempt := 0; ; attempt++ {
@@ -393,80 +397,119 @@ func loadSnapshot(dir string) (_ *Store, loadErr error) {
 	if e != nil {
 		return nil, e
 	}
-	db := &Store{manifest: m, byUID: map[string]*event{}, sessions: map[string][]*event{}, turns: map[turnKey]turnStats{}, stats: map[string]sessionStats{}, decoder: decoder, heavyCache: map[heavyKey]heavyBlock{}}
+	db := &Store{manifest: m, sessions: map[string][]*event{}, stats: map[string]*sessionStats{}, decoder: decoder, heavyCache: map[heavyKey]heavyBlock{}, arena: mappedArena{dir: dir}}
 	defer func() {
 		if loadErr != nil {
 			db.Close()
 		}
 	}()
 	keys := make([]string, 0, len(m.Sources))
-	for k := range m.Sources {
+	capacity := uint64(0)
+	for k, cp := range m.Sources {
 		keys = append(keys, k)
+		capacity += cp.Events
 	}
 	sort.Strings(keys)
-	interned := map[string]string{}
-	intern := func(s string) string {
-		if v, ok := interned[s]; ok {
-			return v
-		}
-		interned[s] = s
-		return s
-	}
+	all := mappedSlice[*event](&db.arena, int(capacity))
+	count := 0
 	for _, k := range keys {
-		cp := m.Sources[k]
-		for _, name := range cp.Segments {
+		for _, name := range m.Sources[k].Segments {
 			sg := &segment{path: filepath.Join(dir, name)}
-			f, e := os.Open(filepath.Join(sg.path, "meta.zst"))
-			if e != nil {
-				return nil, e
+			db.segments = append(db.segments, sg)
+			f, err := os.Open(filepath.Join(sg.path, "meta.zst"))
+			if err != nil {
+				return nil, err
 			}
-			zr, e := zstd.NewReader(f, zstd.WithDecoderConcurrency(1))
-			if e != nil {
+			zr, err := zstd.NewReader(f, zstd.WithDecoderConcurrency(1))
+			if err != nil {
 				f.Close()
-				return nil, e
+				return nil, err
 			}
 			dec := gob.NewDecoder(bufio.NewReader(zr))
+			start := count
+			intern := map[string]string{}
 			for {
-				ev := new(event)
-				e = dec.Decode(ev)
-				if e == io.EOF {
+				var ev event
+				err = dec.Decode(&ev)
+				if err == io.EOF {
 					break
 				}
-				if e != nil {
+				if err != nil {
 					zr.Close()
 					f.Close()
-					return nil, e
+					return nil, err
+				}
+				if count >= len(all) {
+					zr.Close()
+					f.Close()
+					return nil, fmt.Errorf("metadata exceeds manifest event count")
 				}
 				ev.segment = sg
-				for _, p := range []*string{&ev.SessionID, &ev.SourceName, &ev.Harness, &ev.InferenceProvider, &ev.SourceFile, &ev.EventKind, &ev.ActorKind, &ev.PayloadType, &ev.OpStatus, &ev.ToolName, &ev.Cwd, &ev.ProjectID, &ev.WorktreeRoot, &ev.EndpointKind} {
-					*p = intern(*p)
-				}
-				sg.pending = append(sg.pending, ev)
-				if prev := db.byUID[ev.EventUID]; prev == nil || prev.EventVersion <= ev.EventVersion {
-					db.byUID[ev.EventUID] = ev
-				}
+				all[count] = db.arena.event(&ev, intern)
+				count++
 			}
 			zr.Close()
 			f.Close()
-			sg.terms, sg.postings, e = loadTerms(filepath.Join(sg.path, "terms"))
-			if e != nil {
-				return nil, e
+			sg.pending = freezeSlice(&db.arena, all[start:count])
+			sg.terms, sg.postings, err = loadTerms(filepath.Join(sg.path, "terms"))
+			if err != nil {
+				return nil, err
 			}
-			sg.file, e = os.Open(filepath.Join(sg.path, "heavy"))
-			if e != nil {
-				return nil, e
+			sg.terms = freezeSlice(&db.arena, sg.terms)
+			for i := range sg.terms {
+				sg.terms[i].term = db.arena.text(sg.terms[i].term)
 			}
-			db.segments = append(db.segments, sg)
+			sg.file, err = os.Open(filepath.Join(sg.path, "heavy"))
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
-	for _, ev := range db.byUID {
-		db.sessions[ev.SessionID] = append(db.sessions[ev.SessionID], ev)
+	all = all[:count]
+	// Sort stable source order only for equal-version winners, then compact in
+	// place. No resident UID hash table or per-event heap allocation is needed.
+	sort.SliceStable(all, func(i, j int) bool {
+		a, b := all[i], all[j]
+		if a.EventUID != b.EventUID {
+			return a.EventUID < b.EventUID
+		}
+		return a.EventVersion < b.EventVersion
+	})
+	live := 0
+	for i := 0; i < len(all); {
+		j := i + 1
+		for j < len(all) && all[j].EventUID == all[i].EventUID {
+			j++
+		}
+		all[live] = all[j-1]
+		live++
+		i = j
 	}
-	for sid, es := range db.sessions {
-		sort.Slice(es, func(i, j int) bool { return eventLess(es[i], es[j]) })
+	db.events = all[:live]
+	ordered := freezeSlice(&db.arena, db.events)
+	sort.Slice(ordered, func(i, j int) bool {
+		a, b := ordered[i], ordered[j]
+		if a.SessionID != b.SessionID {
+			return a.SessionID < b.SessionID
+		}
+		return eventLess(a, b)
+	})
+	turnRecords := mappedSlice[turnRecord](&db.arena, live)
+	turnCount := 0
+	for start := 0; start < len(ordered); {
+		end := start + 1
+		sid := ordered[start].SessionID
+		for end < len(ordered) && ordered[end].SessionID == sid {
+			end++
+		}
+		es := ordered[start:end]
+		db.sessions[sid] = es
 		users := uint32(0)
 		ord := map[uint32]uint32{}
-		ss := sessionStats{Start: es[0].Time, End: es[len(es)-1].Time}
+		ts := map[uint32]turnStats{}
+		ss := &mappedSlice[sessionStats](&db.arena, 1)[0]
+		ss.Start = es[0].Time
+		ss.End = es[len(es)-1].Time
 		for i, ev := range es {
 			ev.Order = uint64(i + 1)
 			if ev.ActorKind == "user" && ev.EventKind == "message" {
@@ -478,47 +521,51 @@ func loadSnapshot(dir string) (_ *Store, loadErr error) {
 			}
 			ord[ev.Turn]++
 			ev.Ordinal = ord[ev.Turn]
-			tk := turnKey{sid, ev.Turn}
-			ts := db.turns[tk]
-			ts.Count++
+			t := ts[ev.Turn]
+			t.Count++
 			if ev.PayloadType == "task_complete" {
-				ts.Complete = true
+				t.Complete = true
 				ss.Complete = true
 			}
 			if ev.PayloadType == "task_complete" || ev.PayloadType == "turn_aborted" {
-				ts.Terminal = ev.EventUID
+				t.Terminal = ev.EventUID
 			}
-			db.turns[tk] = ts
+			ts[ev.Turn] = t
+		}
+		for seq, t := range ts {
+			turnRecords[turnCount] = turnRecord{turnKey{sid, seq}, t}
+			turnCount++
 		}
 		db.stats[sid] = ss
+		start = end
 	}
-	// Document IDs are canonical and deterministic independently of map iteration.
-	for _, es := range db.sessions {
-		db.events = append(db.events, es...)
-	}
-	sort.Slice(db.events, func(i, j int) bool { return db.events[i].EventUID < db.events[j].EventUID })
-	global := make(map[*event]uint32, len(db.events))
-	for i, ev := range db.events {
-		global[ev] = uint32(i)
+	db.turns = turnRecords[:turnCount]
+	sort.Slice(db.turns, func(i, j int) bool {
+		a, b := db.turns[i].key, db.turns[j].key
+		return a.sessionID < b.sessionID || a.sessionID == b.sessionID && a.turnSeq < b.turnSeq
+	})
+	for _, ev := range db.events {
 		if ev.Length > 0 {
 			db.docs++
 			db.totalLength += uint64(ev.Length)
 		}
 	}
 	for _, sg := range db.segments {
-		sg.mapping = make([]uint32, len(sg.pending))
+		sg.mapping = mappedSlice[uint32](&db.arena, len(sg.pending))
 		for i, ev := range sg.pending {
-			if id, ok := global[ev]; ok {
-				sg.mapping[i] = id
+			j := sort.Search(len(db.events), func(j int) bool { return db.events[j].EventUID >= ev.EventUID })
+			if j < len(db.events) && db.events[j] == ev {
+				sg.mapping[i] = uint32(j)
 			} else {
 				sg.mapping[i] = ^uint32(0)
 			}
 		}
-		sg.pending = nil
 	}
 	db.buildPaths()
-	db.scoreValues = make([]float64, len(db.events))
-	db.scoreStamps = make([]uint32, len(db.events))
+	db.scoreValues = mappedSlice[float64](&db.arena, len(db.events))
+	db.scoreStamps = mappedSlice[uint32](&db.arena, len(db.events))
+	db.scoreTouched = mappedSlice[uint32](&db.arena, len(db.events))[:0]
+	db.postingScratch = mappedSlice[posting](&db.arena, len(db.events))[:0]
 	return db, nil
 }
 func eventLess(a, b *event) bool {
@@ -559,14 +606,14 @@ func hydrateKept(_ context.Context, db *Store, sc *sessionScan) error {
 		rows = append(rows, t.selected...)
 	}
 	sort.Slice(rows, func(i, j int) bool {
-		a, b := db.byUID[rows[i].eventUID], db.byUID[rows[j].eventUID]
+		a, b := db.eventByUID(rows[i].eventUID), db.eventByUID(rows[j].eventUID)
 		if a.segment.path != b.segment.path {
 			return a.segment.path < b.segment.path
 		}
 		return a.HeavyOffset < b.HeavyOffset
 	})
 	for _, r := range rows {
-		h, e := db.heavyFor(db.byUID[r.eventUID])
+		h, e := db.heavyFor(db.eventByUID(r.eventUID))
 		if e != nil {
 			return e
 		}

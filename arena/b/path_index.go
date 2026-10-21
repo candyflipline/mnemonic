@@ -7,6 +7,11 @@ import (
 	"strings"
 )
 
+type pathIndex struct {
+	paths                   []pathEntry
+	pathFallback, shellDocs []uint32
+}
+
 type pathEntry struct {
 	reversed string
 	docs     []uint32
@@ -36,6 +41,19 @@ func jsonStringField(obj map[string]json.RawMessage, k string) string {
 	return string(r)
 }
 func (db *Store) buildPaths() {
+	if len(db.segments) == 0 {
+		db.buildOnePathIndex()
+		return
+	}
+	for _, sg := range db.segments {
+		tmp := Store{events: sg.pending}
+		tmp.buildOnePathIndex()
+		freezePaths(&db.arena, &tmp.pathIndex)
+		sg.pathIndex = tmp.pathIndex
+		sg.pending = nil
+	}
+}
+func (db *Store) buildOnePathIndex() {
 	paths := map[string][]uint32{}
 	for doc, e := range db.events {
 		if e.ToolPhase != "request" {
@@ -103,33 +121,48 @@ func (db *Store) buildPaths() {
 	sort.Slice(db.paths, func(i, j int) bool { return db.paths[i].reversed < db.paths[j].reversed })
 }
 func (db *Store) attentionCandidates(rel string) []*event {
-	if db.paths == nil {
+	if len(db.segments) == 0 && db.paths == nil {
 		return db.events
 	}
 	rev := reverseBytes(rel)
-	i := sort.Search(len(db.paths), func(i int) bool { return db.paths[i].reversed >= rev })
 	seen := map[uint32]bool{}
 	out := make([]*event, 0)
 	add := func(doc uint32) {
-		if !seen[doc] {
+		if doc != ^uint32(0) && !seen[doc] {
 			seen[doc] = true
 			out = append(out, db.events[doc])
 		}
 	}
-	if strings.ContainsAny(rel, " \t\r\n\v\f'\"`,;|&<>)]") {
-		for _, doc := range db.shellDocs {
+	scan := func(p *pathIndex, mapping []uint32) {
+		emit := func(doc uint32) {
+			if mapping != nil {
+				doc = mapping[doc]
+			}
 			add(doc)
 		}
-	}
-	for _, doc := range db.pathFallback {
-		add(doc)
-	}
-	for ; i < len(db.paths) && strings.HasPrefix(db.paths[i].reversed, rev); i++ {
-		p := db.paths[i]
-		if len(p.reversed) == len(rev) || p.reversed[len(rev)] == '/' {
-			for _, doc := range p.docs {
-				add(doc)
+		if strings.ContainsAny(rel, " \t\r\n\v\f'\"`,;|&<>)]") {
+			for _, doc := range p.shellDocs {
+				emit(doc)
 			}
+		}
+		for _, doc := range p.pathFallback {
+			emit(doc)
+		}
+		i := sort.Search(len(p.paths), func(i int) bool { return p.paths[i].reversed >= rev })
+		for ; i < len(p.paths) && strings.HasPrefix(p.paths[i].reversed, rev); i++ {
+			entry := p.paths[i]
+			if len(entry.reversed) == len(rev) || entry.reversed[len(rev)] == '/' {
+				for _, doc := range entry.docs {
+					emit(doc)
+				}
+			}
+		}
+	}
+	if len(db.segments) == 0 {
+		scan(&db.pathIndex, nil)
+	} else {
+		for _, sg := range db.segments {
+			scan(&sg.pathIndex, sg.mapping)
 		}
 	}
 	return out

@@ -30,6 +30,7 @@ type heavyBlock struct {
 	bytes  int
 }
 type segment struct {
+	pathIndex
 	path     string
 	file     *os.File
 	terms    []termEntry
@@ -306,7 +307,7 @@ func readUAt(raw []byte, pos *int) (uint64, error) {
 	return v, nil
 }
 func loadTerms(path string) ([]termEntry, []byte, error) {
-	raw, e := os.ReadFile(path)
+	raw, e := mapRead(path)
 	if e != nil {
 		return nil, nil, e
 	}

@@ -265,7 +265,7 @@ func openTurnFlow(ctx context.Context, db *Store, request map[string]any, args c
 
 func openEventFlow(ctx context.Context, db *Store, request map[string]any, args canonicalOpenArgs) (any, string, error) {
 	uid := args.target.eventUID
-	e := db.byUID[uid]
+	e := db.eventByUID(uid)
 	if e == nil {
 		return nil, "", argErrorf("event not found")
 	}

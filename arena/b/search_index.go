@@ -35,7 +35,7 @@ func searchMcpEvents(_ context.Context, db *Store, q searchQuery) (*searchResult
 		es := db.sessions[q.sessionID]
 		res.scopeExists = len(es) > 0
 		if q.turnOK {
-			_, res.scopeExists = db.turns[turnKey{q.sessionID, q.turnSeq}]
+			_, res.scopeExists = db.turn(q.sessionID, q.turnSeq)
 		}
 	}
 	var mask uint16
@@ -85,7 +85,7 @@ func searchMcpEvents(_ context.Context, db *Store, q searchQuery) (*searchResult
 	rows := make([]*mcpRow, 0, len(top.h))
 	for _, candidate := range top.h {
 		e, score := candidate.e, candidate.score
-		ts := db.turns[turnKey{e.SessionID, e.Turn}]
+		ts, _ := db.turn(e.SessionID, e.Turn)
 		ss := db.stats[e.SessionID]
 		rows = append(rows, &mcpRow{eventUID: e.EventUID, sessionID: e.SessionID, rawScore: score, eventTsMs: e.Timestamp, eventUnixMs: e.Time, mcpDetail: mcpDetail{sourceName: e.SourceName, harness: e.Harness, inferenceProvider: e.InferenceProvider, eventClass: e.EventKind, payloadType: e.PayloadType, actorRole: e.ActorKind, phase: firstNonEmpty(e.ToolPhase, e.OpStatus), sourceRef: fmt.Sprintf("%s:%d:%d", e.SourceFile, e.SourceGeneration, e.SourceLineNo), textPreview: truncateRunes(e.TextPreview, previewChars), textContent: e.TextPreview, textHash: e.TextHash, eventOrder: int64(e.Order), turnSeq: e.Turn, eventOrdinal: e.Ordinal, turnEventCount: ts.Count, turnCompleted: ts.Complete, turnTerminalUID: ts.Terminal, sessionStartedMs: ss.Start, sessionUpdatedMs: ss.End, sessionCompleted: ss.Complete}})
 	}
