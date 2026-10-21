@@ -111,12 +111,13 @@ func (db *DB) faTouches(q faQuery) ([]faTouch, error) {
 	}
 	limitPlus := q.MaxRows + 1
 	var exact, suffix []faTouch
+	var compiled *faRegexps
 	for _, st := range db.parts {
 		e, err := st.faExactTouches(q)
 		if err != nil {
 			return nil, err
 		}
-		s, err := st.faSuffixTouches(q)
+		s, err := st.faSuffixTouches(q, &compiled)
 		if err != nil {
 			return nil, err
 		}
@@ -225,7 +226,7 @@ func jstr(m map[string]json.RawMessage, key string) string {
 	return jsonExtractString(v)
 }
 
-func (st *Store) faSuffixTouches(q faQuery) ([]faTouch, error) {
+func (st *Store) faSuffixTouches(q faQuery, compiled **faRegexps) ([]faTouch, error) {
 	rel := q.Rel
 	runs := []string{}
 	for _, run := range faLiteralRun.FindAllString(rel, -1) {
@@ -238,7 +239,7 @@ func (st *Store) faSuffixTouches(q faQuery) ([]faTouch, error) {
 	for i, r := range runs {
 		needles[i] = []byte(r)
 	}
-	var res *faRegexps
+	res := *compiled
 	var roots []string
 	if q.ProjectScope {
 		for _, r := range q.NormalizedRoots {
@@ -277,6 +278,7 @@ func (st *Store) faSuffixTouches(q faQuery) ([]faTouch, error) {
 		if res == nil {
 			c := faCompile(rel)
 			res = &c
+			*compiled = res
 		}
 		in := r.TioInput
 		fields, valid := jsonFields(in)
