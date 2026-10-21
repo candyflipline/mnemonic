@@ -229,18 +229,19 @@ func hydrateMcpCandidates(ctx context.Context, db *sql.DB, rows []*mcpRow, limit
 		byDoc[r.doc] = r
 		docs[i] = strconv.FormatInt(r.doc, 10)
 	}
-	rs, err := db.QueryContext(ctx, `SELECT e.doc, e.event_uid, e.session_id,
-  coalesce(epoch_ms(e.event_ts), 0), epoch_ms(e.event_time),
-  e.event_order, e.turn_seq, e.event_ordinal,
-  e.event_kind, e.payload_type, e.actor_kind, e.tool_name, coalesce(nullif(e.tool_phase, ''), e.op_status),
-  e.tool_call_id, e.item_id, e.source_ref, e.text_preview, e.text_hash,
-  e.source_name, e.harness, e.inference_provider, e.endpoint_kind, e.model,
-  t.event_count, t.completed, t.terminal_uid,
+	rs, err := db.QueryContext(ctx, `WITH e AS MATERIALIZED (
+  SELECT doc, event_uid, session_id,
+    coalesce(epoch_ms(event_ts), 0) AS ts_ms, epoch_ms(event_time) AS time_ms,
+    event_order, turn_seq, event_ordinal,
+    event_kind, payload_type, actor_kind, tool_name, coalesce(nullif(tool_phase, ''), op_status) AS phase,
+    tool_call_id, item_id, source_ref, text_preview, text_hash,
+    source_name, harness, inference_provider, endpoint_kind, model
+  FROM events WHERE rowid IN (SELECT rowid FROM events WHERE doc IN (`+strings.Join(docs, ", ")+`)))
+SELECT e.*, t.event_count, t.completed, t.terminal_uid,
   epoch_ms(se.first_event_time), epoch_ms(se.last_event_time), se.completed
-FROM events e
+FROM e
 JOIN turns t ON t.session_id = e.session_id AND t.turn_seq = e.turn_seq
-JOIN sessions se ON se.session_id = e.session_id
-WHERE e.doc IN (`+strings.Join(docs, ", ")+`)`)
+JOIN sessions se ON se.session_id = e.session_id`)
 	if err != nil {
 		return nil, err
 	}
