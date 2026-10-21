@@ -261,7 +261,6 @@ func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTo
 	normalizedRootCondition := "(ti.project_id != '' AND ti.repo_rel_path = " + relQ + " AND " + faSinglePath("ti.worktree_root") + ")"
 
 	var outer []string
-	withProjectRoots := ""
 	verifiedColumn := ""
 	legacyRoot := "legacy_candidate_root"
 	if q.ProjectScope {
@@ -278,8 +277,7 @@ func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTo
 			quoted[i] = sqlQuote(root)
 		}
 		rootsLiteral := "[" + strings.Join(quoted, ", ") + "]"
-		withProjectRoots = rootsLiteral + " AS project_roots,\n"
-		verifiedColumn = ",\n  coalesce(list_filter(" + rootsLiteral + ", lambda r: legacy_candidate_root = r)[1], '') AS verified_project_root"
+		verifiedColumn = "    coalesce(list_filter(" + rootsLiteral + ", lambda r: legacy_candidate_root = r)[1], '') AS verified_project_root,\n"
 		eventRootExpr := "coalesce(ti.event_worktree_root, '')"
 		legacyToolScope := "(ti.project_id != '' AND NOT starts_with(ti.project_id, 'git:') AND " +
 			faSinglePath("ti.worktree_root") + " AND list_contains(" + rootsLiteral + ", ti.worktree_root))"
@@ -301,7 +299,7 @@ func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTo
 		"  WHEN legacy_candidate_root != '' THEN " + legacyRoot + "\n" +
 		"  ELSE '' END"
 
-	qry := "WITH " + withProjectRoots + "matched AS (\n" +
+	qry := "WITH matched AS (\n" +
 		"  SELECT * FROM (" + toolEvents + ") AS ti\n" +
 		"  WHERE " + strings.Join(inner, "\n    AND ") + "\n" +
 		"),\n" +
@@ -323,9 +321,9 @@ func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTo
 		"  FROM paths2 ti\n" +
 		"),\n" +
 		"scoped AS MATERIALIZED (\n" +
-		"  SELECT ti.*,\n" +
+		"  SELECT ti.*,\n" + verifiedColumn +
 		"    if(matched_path != '', 'path_suffix', 'shell_path') AS match_kind,\n" +
-		"    " + worktreeRootExpr + " AS worktree_root_final" + verifiedColumn + "\n" +
+		"    " + worktreeRootExpr + " AS worktree_root_final\n" +
 		"  FROM annotated ti\n" +
 		"),\n" + faNav("scoped") + "\n" +
 		"SELECT\n" +

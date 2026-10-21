@@ -158,6 +158,25 @@ func TestFixtureFileAttentionMutationsOnly(t *testing.T) {
 	}
 }
 
+func TestFixtureFileAttentionProjectScopeVerifiesLegacyRoot(t *testing.T) {
+	db := fixtureDB(t)
+	touches, err := faTouches(context.Background(), db, faQuery{
+		Rel: "Cargo.toml", NormalizedPID: "dir:fixture", NormalizedRoots: []string{"/work/claude-demo"},
+		DeriveLegacy: true, ProjectScope: true, MaxRows: faScanCap,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(touches) != 1 {
+		t.Fatalf("touches = %#v", touches)
+	}
+	got := touches[0]
+	if got.SessionID != "7c666c01-d38e-4658-8650-854ffb5b626e" || got.WorktreeRoot != "/work/claude-demo" ||
+		got.MatchedPath != "Cargo.toml" || got.MatchKind != "path_suffix" {
+		t.Fatalf("touch = %#v", got)
+	}
+}
+
 func TestFixtureFileAttentionShellCommand(t *testing.T) {
 	db := fixtureDB(t)
 	raw, _ := callTool(t, db, fileAttention{}, `{"path":"npm","scope":"all"}`)
