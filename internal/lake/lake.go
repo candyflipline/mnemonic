@@ -207,7 +207,7 @@ const window = 64 << 10
 
 var zstdFrameMagic = [4]byte{0x28, 0xb5, 0x2f, 0xfd}
 
-const compactAt = 32 << 20
+const compactAt = 8 << 20
 
 // parseAndWrite parses the raw bytes the checkpoint has not seen, from its
 // State, and returns the lake file it wrote and that file's row count. A
