@@ -7,7 +7,27 @@ import (
 	"testing"
 )
 
-func TestAttentionSnapshot(t *testing.T) {
+func TestShared(t *testing.T) {
+	t.Run("payload_uid_rewrite", func(t *testing.T) {
+		for _, tc := range []struct{ name, in, want string }{
+			{"absent", `{"text":"unchanged"}`, `{"text":"unchanged"}`},
+			{"literal", `{"request_event_uid":"old"}`, `{"request_event_uid":"new"}`},
+			{"escaped", `{"request\u005fevent_uid":"old"}`, `{"request_event_uid":"new"}`},
+			{"nested", `{ "nested": {"request_event_uid":"old"}}`, `{ "nested": {"request_event_uid":"old"}}`},
+			{"value", `{"text":"request_event_uid"}`, `{"text":"request_event_uid"}`},
+			{"malformed", `{"text":`, `{"text":`},
+			{"unmapped", `{ "request_event_uid": "missing" }`, `{ "request_event_uid": "missing" }`},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ev := &EventRow{}
+				ev.Event.PayloadJSON = tc.in
+				rewritePayloadUID(ev, map[string]string{"old": "new"})
+				if ev.Event.PayloadJSON != tc.want {
+					t.Fatalf("payload=%q want=%q", ev.Event.PayloadJSON, tc.want)
+				}
+			})
+		}
+	})
 	root := t.TempDir()
 	marker := filepath.Join(root, ".git")
 	if err := os.Mkdir(marker, 0700); err != nil {

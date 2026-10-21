@@ -221,6 +221,11 @@ type occurrenceGroup struct {
 // moraine_semantic_occurrence stamped into their payload so their identities
 // diverge.
 func StampDuplicateSemanticOccurrences(events []*EventRow, folded map[string]*FoldedIdentity) {
+	// A singleton cannot contain duplicate occurrences. FinalizeIdentities will
+	// compute its semantic UID once; avoid parsing and hashing the payload twice.
+	if len(events) < 2 {
+		return
+	}
 	groups := make([]occurrenceGroup, len(events))
 	counts := make(map[occurrenceGroup]uint32, len(events))
 	for i, ev := range events {
@@ -281,6 +286,12 @@ func FinalizeIdentities(events []*EventRow, folded map[string]*FoldedIdentity) {
 }
 
 func rewritePayloadUID(ev *EventRow, uidMap map[string]string) {
+	// The ASCII key must occur literally or contain a JSON Unicode escape.
+	// Other JSON escapes cannot spell its letters/underscores. This negative
+	// filter is valid even for noncanonical JSON; escaped keys take the slow path.
+	if !strings.Contains(ev.Event.PayloadJSON, "request_event_uid") && !strings.Contains(ev.Event.PayloadJSON, `\u`) {
+		return
+	}
 	parsed, err := DecodeJSON([]byte(ev.Event.PayloadJSON))
 	if err != nil {
 		return
