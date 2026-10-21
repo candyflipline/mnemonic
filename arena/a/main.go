@@ -11,7 +11,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -56,6 +59,7 @@ func main() {
 }
 
 func ingest(root, store string) error {
+	debug.SetGCPercent(25)
 	if err := os.MkdirAll(srcDir(store), 0o755); err != nil {
 		return err
 	}
@@ -63,12 +67,27 @@ func ingest(root, store string) error {
 	if err != nil {
 		return err
 	}
+	work := make(chan source)
+	var wg sync.WaitGroup
+	for range runtime.GOMAXPROCS(0) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for s := range work {
+				if _, err := ingestSource(root, store, s); err != nil {
+					fmt.Fprintf(os.Stderr, "ingest: %s: %v\n", s.mpath, err)
+				}
+			}
+		}()
+	}
+	for _, s := range sources {
+		work <- s
+	}
+	close(work)
+	wg.Wait()
 	var cks []ckpt
 	var srcs []stSource
 	for _, s := range sources {
-		if _, err := ingestSource(root, store, s); err != nil {
-			fmt.Fprintf(os.Stderr, "ingest: %s: %v\n", s.mpath, err)
-		}
 		row := stSource{Author: s.key.Author, Machine: s.key.Machine, UpdatedMs: s.src.UpdatedMs, Size: s.src.Size}
 		if c, ok := readCkpt(store, sourceKey(s.key)); ok {
 			cks = append(cks, c)

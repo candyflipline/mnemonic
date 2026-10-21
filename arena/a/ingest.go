@@ -292,8 +292,8 @@ type frameWriter struct {
 	n      int
 }
 
-var encoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBetterCompression), zstd.WithEncoderConcurrency(1), zstd.WithLowerEncoderMem(true))
-var heavyEncoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBetterCompression), zstd.WithEncoderConcurrency(1), zstd.WithLowerEncoderMem(true))
+var encoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBetterCompression), zstd.WithEncoderConcurrency(4), zstd.WithLowerEncoderMem(true))
+var heavyEncoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBetterCompression), zstd.WithEncoderConcurrency(4), zstd.WithLowerEncoderMem(true))
 
 func (w *frameWriter) add(rec []byte) (int64, int, error) {
 	if len(w.buf) > 0 && len(w.buf)+len(rec) > w.target {
@@ -322,7 +322,7 @@ func (w *frameWriter) flush() error {
 	return nil
 }
 
-var decoder, _ = zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderLowmem(true))
+var decoder, _ = zstd.NewReader(nil, zstd.WithDecoderConcurrency(4), zstd.WithDecoderLowmem(true))
 
 // readFrame returns the records of the frame at off in r and the next offset.
 func readFrame(r io.ReaderAt, off int64, scratch []byte) ([][]byte, int64, error) {
