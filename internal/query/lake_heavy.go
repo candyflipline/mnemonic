@@ -59,7 +59,7 @@ func hydrateFromLake(ctx context.Context, db *sql.DB, rows []*navRow) error {
 		if len(missing) > 0 {
 			more, err := readHeavy(ctx, db, "SELECT event_uid, payload_json, token_usage_json FROM "+src+
 				" WHERE event_uid IN ("+strings.Join(missing, ", ")+")"+
-				" QUALIFY row_number() OVER (PARTITION BY event_uid ORDER BY event_version DESC, ingested_at DESC) = 1", want)
+				" QUALIFY row_number() OVER (PARTITION BY event_uid ORDER BY event_version DESC, ingested_at DESC, file_row_number) = 1", want)
 			if err != nil {
 				return err
 			}

@@ -8,10 +8,6 @@ import (
 	"time"
 )
 
-// lsEventTime is v_conversation_trace.event_time: TIMESTAMPTZ parsing honors
-// record_ts's trailing Z, and the session runs in UTC.
-const lsEventTime = "coalesce(try_cast(record_ts AS TIMESTAMPTZ), ingested_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'"
-
 func lsModeAggregate() string {
 	return "CASE\n" +
 		"  WHEN count(*) FILTER (WHERE payload_type = 'web_search_call'\n" +
@@ -42,7 +38,7 @@ func lsArgMinIf(arg, pred string) string {
 }
 
 func lsSelectPage(ctx context.Context, db *sql.DB, a *lsArgs, cursor *lsCursor) ([]lsItem, error) {
-	columns := []string{"session_id", "record_ts", "ingested_at"}
+	columns := []string{"session_id"}
 	aggregates := ""
 	having := []string{
 		"epoch_ms(last_event_time) >= " + strconv.FormatInt(a.StartUnixMs, 10),
@@ -79,13 +75,16 @@ func lsSelectPage(ctx context.Context, db *sql.DB, a *lsArgs, cursor *lsCursor) 
 			" AND session_id "+cmp+" "+sqlQuote(cursor.SessionID)+"))")
 	}
 
-	q := "SELECT session_id, first_event_time, last_event_time\nFROM (\n" +
-		"  SELECT session_id,\n" +
-		"    min(" + lsEventTime + ") AS first_event_time,\n" +
-		"    max(" + lsEventTime + ") AS last_event_time" + aggregates + "\n" +
-		"  FROM (SELECT " + strings.Join(columns, ", ") + " FROM events WHERE trim(session_id) <> '') AS e\n" +
-		"  GROUP BY session_id\n" +
-		") AS p\nWHERE " + strings.Join(having, "\n  AND ") +
+	from := "sessions"
+	if aggregates != "" {
+		from = "sessions JOIN (\n" +
+			"  SELECT session_id" + aggregates + "\n" +
+			"  FROM (SELECT " + strings.Join(columns, ", ") + " FROM events WHERE trim(session_id) <> '') AS e\n" +
+			"  GROUP BY session_id\n" +
+			") AS p USING (session_id)"
+	}
+	q := "SELECT session_id, first_event_time, last_event_time\nFROM " + from +
+		"\nWHERE trim(session_id) <> ''\n  AND " + strings.Join(having, "\n  AND ") +
 		"\nORDER BY last_event_time " + dirSQL(a.Sort) + ", session_id " + dirSQL(a.Sort) +
 		"\nLIMIT " + strconv.Itoa(a.Limit+1)
 
