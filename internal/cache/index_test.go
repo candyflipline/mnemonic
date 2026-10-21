@@ -283,3 +283,32 @@ func TestConvergeHoldsUnreadableParquet(t *testing.T) {
 		t.Fatalf("reconcile: err %v", err)
 	}
 }
+
+func TestNewPooledConnKeepsThreads(t *testing.T) {
+	ctx := context.Background()
+	ix, err := Open(t.TempDir(), Options{MemoryLimit: "1GB", FlagsSQL: "0::USMALLINT"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ix.Close()
+	pinned, err := ix.DB().Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pinned.Close()
+	if _, err := pinned.ExecContext(ctx, "SET threads = "+convergeThreads); err != nil {
+		t.Fatal(err)
+	}
+	grown, err := ix.DB().Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grown.Close()
+	var got string
+	if err := pinned.QueryRowContext(ctx, "SELECT current_setting('threads')").Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != convergeThreads {
+		t.Fatalf("threads %s after the pool grew, want %s", got, convergeThreads)
+	}
+}

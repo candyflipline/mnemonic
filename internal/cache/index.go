@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -81,14 +82,14 @@ func Open(dataDir string, o Options) (*Index, error) {
 		return nil, err
 	}
 	path := IndexPath(dataDir)
-	setup := []string{
-		"SET threads = " + queryThreads,
-		"SET preserve_insertion_order = false",
-		"SET memory_limit = " + sqlStr(o.MemoryLimit),
-		"SET temp_directory = " + sqlStr(spill),
+	config := url.Values{
+		"threads":                  {queryThreads},
+		"preserve_insertion_order": {"false"},
+		"memory_limit":             {o.MemoryLimit},
+		"temp_directory":           {spill},
 	}
 	if _, err := os.Stat(path); err == nil {
-		db, err := openCurrent(path, o.FlagsSQL, setup)
+		db, err := openCurrent(path+"?"+config.Encode(), o.FlagsSQL)
 		if err != nil {
 			return nil, err
 		}
@@ -114,7 +115,8 @@ func Open(dataDir string, o Options) (*Index, error) {
 	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
-	db, err := newDB(path+"?storage_compatibility_version=latest", setup...)
+	config.Set("storage_compatibility_version", "latest")
+	db, err := newDB(path + "?" + config.Encode())
 	if err != nil {
 		return nil, err
 	}
@@ -137,8 +139,8 @@ func Open(dataDir string, o Options) (*Index, error) {
 	return &Index{db: db, dataDir: dataDir, flags: o.FlagsSQL, failed: map[string]lakeFile{}}, nil
 }
 
-func openCurrent(path, flagsSQL string, setup []string) (*sql.DB, error) {
-	db, err := newDB(path, setup...)
+func openCurrent(dsn, flagsSQL string) (*sql.DB, error) {
+	db, err := newDB(dsn)
 	if err != nil {
 		return nil, err
 	}

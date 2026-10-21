@@ -45,17 +45,13 @@ func firstLine(s string) string {
 }
 
 // newDB opens a DuckDB database with TimeZone pinned to UTC on every pooled
-// connection: a plain SET is session-scoped, so a database/sql pool would run
+// connection: TimeZone is session-scoped, so a database/sql pool would run
 // later connections in the process's local zone, and the event_time an apply
 // derives from a zoneless record_ts would depend on the connection.
-func newDB(dsn string, setup ...string) (*sql.DB, error) {
+func newDB(dsn string) (*sql.DB, error) {
 	c, err := duckdb.NewConnector(dsn, func(execer driver.ExecerContext) error {
-		for _, s := range append([]string{`SET TimeZone='UTC'`}, setup...) {
-			if _, err := execer.ExecContext(context.Background(), s, nil); err != nil {
-				return err
-			}
-		}
-		return nil
+		_, err := execer.ExecContext(context.Background(), `SET TimeZone='UTC'`, nil)
+		return err
 	})
 	if err != nil {
 		return nil, err
