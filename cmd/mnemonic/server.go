@@ -97,9 +97,12 @@ const (
 func convergeLoop(ctx context.Context, dataDir string, ix *cache.Index, wake <-chan struct{}) {
 	pushPending := func() bool { return len(wake) > 0 }
 	ls := cycle(ctx, dataDir, ix, "boot", pushPending, lake.Sweep{})
+	reconciled := time.Now()
 	for {
 		reason := "sweep"
-		if ls.Stale == 0 || pushPending() {
+		if due := time.Until(reconciled.Add(reconcile)); due <= 0 {
+			reason = "reconcile"
+		} else if ls.Stale == 0 || pushPending() {
 			reason = "reconcile"
 			select {
 			case <-ctx.Done():
@@ -107,11 +110,14 @@ func convergeLoop(ctx context.Context, dataDir string, ix *cache.Index, wake <-c
 			case <-wake:
 				reason = "put"
 				settle(ctx, wake)
-			case <-time.After(reconcile):
+			case <-time.After(due):
 			}
 		}
 		if ctx.Err() != nil {
 			return
+		}
+		if reason == "reconcile" {
+			reconciled = time.Now()
 		}
 		ls = cycle(ctx, dataDir, ix, reason, pushPending, ls.Next)
 	}

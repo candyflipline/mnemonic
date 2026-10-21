@@ -40,10 +40,9 @@ type Stats struct {
 }
 
 // Sweep is where a parser sweep lap stands: the first idle source (by manifest
-// path) not visited yet, and the failures of the lap so far.
+// path) not visited yet.
 type Sweep struct {
-	From   string
-	Failed int
+	From string
 }
 
 type manifest struct {
@@ -64,9 +63,11 @@ type manifest struct {
 // re-parsed, one already current is passed. It stops, with Stats.Next set to
 // the first source not visited, when yield returns true or sweepBudget has
 // elapsed (after at least one visit). When it reaches the end of the list it
-// writes the marker if no source failed in the lap, and returns the zero
-// Next. A crash before the marker leaves it old, and a later lap redoes only
-// what the checkpoints still show stale.
+// writes the marker and returns the zero Next. The marker means every source
+// was tried at this version, not that every one parsed: a source that failed
+// stays on its older output and a push or the next version bump parses it
+// again, so one poison source cannot keep the lake sweeping. A crash before the marker leaves it old, and a
+// later lap redoes only what the checkpoints still show stale.
 func Run(dataDir string, yield func() bool, sweep Sweep) (Stats, error) {
 	rawDir := filepath.Join(dataDir, "raw")
 	if _, err := os.Stat(rawDir); err != nil {
@@ -151,10 +152,10 @@ func Run(dataDir string, yield func() bool, sweep Sweep) (Stats, error) {
 	if n < len(idles) {
 		st.Unchanged += len(idles) - n
 		st.Stale = len(idles) - n
-		st.Next = Sweep{From: idles[n].mpath, Failed: sweep.Failed + st.Failed}
+		st.Next = Sweep{From: idles[n].mpath}
 		return st, nil
 	}
-	if sweeping && sweep.Failed+st.Failed == 0 {
+	if sweeping {
 		if err := writeParserMarker(dataDir); err != nil {
 			return st, err
 		}

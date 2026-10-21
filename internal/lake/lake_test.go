@@ -416,3 +416,17 @@ func TestRunReparsesIdleSourceOfOlderParser(t *testing.T) {
 		t.Fatalf("further run: %+v %v, want {1 0 1 0 0 0}", st, err)
 	}
 }
+
+func TestRunWritesMarkerDespitePushedSourceThatNeverParses(t *testing.T) {
+	dataDir := t.TempDir()
+	writeSource(t, dataDir, "alice", "chris-mbp", "test-fake", "aaaaaaaaaaaaaaaa", []string{"uid-1|1|2024-01-02 03:04:05.000"})
+	writeSource(t, dataDir, "alice", "chris-mbp", "test-fake", "bbbbbbbbbbbbbbbb", []string{"not a row"})
+	for i := 0; i < 3; i++ {
+		if st, err := Run(dataDir, never, Sweep{}); err != nil || st.Failed != 1 {
+			t.Fatalf("run %d: %+v %v, want the poison source failed", i, st, err)
+		}
+	}
+	if got := readParserMarker(dataDir); got != normalize.Version {
+		t.Fatalf("marker = %d after 3 runs, want %d", got, normalize.Version)
+	}
+}
