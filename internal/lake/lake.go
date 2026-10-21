@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -177,22 +176,29 @@ func readManifest(rawDir, mpath string) (manifest, layout.Key, error) {
 }
 
 // checkpoint is where a lake file's parse stopped: the raw's compressed
-// length and its SHA-256 at that point, and the parser State there. It lives
-// in the parquet's key-value metadata, so the rows and the position they were
-// parsed to are replaced by one rename. A file parsed by another binary or
-// under another source identity, or whose raw prefix no longer hashes the
-// same (a replace), is parsed whole again.
+// length, the SHA-256 of the window bytes ending there, and the parser State
+// there. It lives in the parquet's key-value metadata, so the rows and the
+// position they were parsed to are replaced by one rename. Store changes bytes
+// below ZstSize only by a replace, which renames a new raw into place; an
+// append truncates to ZstSize and writes a new frame past it. So a raw whose
+// window still hashes the same and holds a zstd frame at ZstSize is this one
+// grown by appends. A file parsed by another binary or under another source
+// identity, or failing either check, is parsed whole again.
 type checkpoint struct {
-	Binary     string          `json:"binary"`
-	Harness    string          `json:"harness"`
-	SourceName string          `json:"source_name"`
-	SourceFile string          `json:"source_file"`
-	ZstSize    int64           `json:"zst_size"`
-	ZstSHA256  string          `json:"zst_sha256"`
-	State      normalize.State `json:"state"`
+	Binary       string          `json:"binary"`
+	Harness      string          `json:"harness"`
+	SourceName   string          `json:"source_name"`
+	SourceFile   string          `json:"source_file"`
+	ZstSize      int64           `json:"zst_size"`
+	WindowSHA256 string          `json:"window_sha256"`
+	State        normalize.State `json:"state"`
 }
 
 const checkpointKey = "mnemonic_lake"
+
+const window = 64 << 10
+
+var zstdFrameMagic = [4]byte{0x28, 0xb5, 0x2f, 0xfd}
 
 var binaryID = sync.OnceValue(func() string {
 	exe, err := os.Executable()
@@ -223,12 +229,8 @@ func parseAndWrite(db *sql.DB, dataDir string, key layout.Key, src manifest, par
 	defer raw.Close()
 	eventsPath := key.Events(dataDir)
 	next := checkpoint{Binary: binaryID(), Harness: src.Harness, SourceName: src.SourceName, SourceFile: src.Path}
-	from, h, err := resume(db, eventsPath, raw, src, next)
-	if err != nil {
-		return 0, err
-	}
-	tail := io.TeeReader(io.LimitReader(raw, src.ZstSize-from.ZstSize), h)
-	zr, err := zstd.NewReader(tail)
+	from := resume(db, eventsPath, raw, src, next)
+	zr, err := zstd.NewReader(io.NewSectionReader(raw, from.ZstSize, src.ZstSize-from.ZstSize))
 	if err != nil {
 		return 0, err
 	}
@@ -241,11 +243,12 @@ func parseAndWrite(db *sql.DB, dataDir string, key layout.Key, src manifest, par
 	if err != nil {
 		return 0, err
 	}
-	if _, err := io.Copy(io.Discard, tail); err != nil {
+	events = dedupe(events)
+	sum, err := windowSHA256(raw, src.ZstSize)
+	if err != nil {
 		return 0, err
 	}
-	events = dedupe(events)
-	next.ZstSize, next.ZstSHA256, next.State = src.ZstSize, hex.EncodeToString(h.Sum(nil)), state
+	next.ZstSize, next.WindowSHA256, next.State = src.ZstSize, sum, state
 
 	if err := os.MkdirAll(filepath.Dir(eventsPath), 0o755); err != nil {
 		return 0, err
@@ -280,25 +283,38 @@ func parseAndWrite(db *sql.DB, dataDir string, key layout.Key, src manifest, par
 	return copyParquet(db, query, eventsPath, string(cp))
 }
 
-// resume reads the parquet's checkpoint and, when it belongs to this binary
-// and source and the raw's first ZstSize bytes still hash to it, returns it
-// with raw positioned at ZstSize and h holding the hash of those bytes.
-// Otherwise it returns the zero checkpoint, raw rewound and h empty.
-func resume(db *sql.DB, eventsPath string, raw *os.File, src manifest, want checkpoint) (checkpoint, hash.Hash, error) {
-	h := sha256.New()
-	if cp, ok := readCheckpoint(db, eventsPath); ok &&
-		cp.Binary != "" && cp.Binary == want.Binary && cp.Harness == want.Harness &&
-		cp.SourceName == want.SourceName && cp.SourceFile == want.SourceFile &&
-		cp.ZstSize <= src.ZstSize {
-		if _, err := io.CopyN(h, raw, cp.ZstSize); err == nil && hex.EncodeToString(h.Sum(nil)) == cp.ZstSHA256 {
-			return cp, h, nil
-		}
-		h.Reset()
-		if _, err := raw.Seek(0, io.SeekStart); err != nil {
-			return checkpoint{}, nil, err
+// resume returns the parquet's checkpoint when it belongs to this binary and
+// source and raw still extends it: the window ending at its ZstSize hashes the
+// same, and a zstd frame starts at ZstSize unless raw ends there. Otherwise it
+// returns the zero checkpoint, a parse from the start.
+func resume(db *sql.DB, eventsPath string, raw *os.File, src manifest, want checkpoint) checkpoint {
+	cp, ok := readCheckpoint(db, eventsPath)
+	if !ok || cp.Binary == "" || cp.Binary != want.Binary || cp.Harness != want.Harness ||
+		cp.SourceName != want.SourceName || cp.SourceFile != want.SourceFile ||
+		cp.ZstSize > src.ZstSize {
+		return checkpoint{}
+	}
+	if sum, err := windowSHA256(raw, cp.ZstSize); err != nil || sum != cp.WindowSHA256 {
+		return checkpoint{}
+	}
+	if cp.ZstSize < src.ZstSize {
+		var magic [4]byte
+		if _, err := raw.ReadAt(magic[:], cp.ZstSize); err != nil || magic != zstdFrameMagic {
+			return checkpoint{}
 		}
 	}
-	return checkpoint{}, h, nil
+	return cp
+}
+
+// windowSHA256 hashes raw's window bytes ending at end, fewer when end is
+// nearer the start.
+func windowSHA256(raw *os.File, end int64) (string, error) {
+	start := max(0, end-window)
+	h := sha256.New()
+	if _, err := io.CopyN(h, io.NewSectionReader(raw, start, end-start), end-start); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func readCheckpoint(db *sql.DB, eventsPath string) (checkpoint, bool) {
