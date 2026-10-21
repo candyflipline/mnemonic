@@ -364,6 +364,9 @@ func (ix *Index) countRows(ctx context.Context, c *sql.Conn, changes []change) (
 	if err != nil {
 		n = map[string]int64{}
 		for _, p := range paths {
+			if err := ctx.Err(); err != nil {
+				return nil, append(errs, err)
+			}
 			one, err := numRows(ctx, c, []string{p})
 			if err != nil {
 				unreadable[p] = true
