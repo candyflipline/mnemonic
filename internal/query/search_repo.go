@@ -170,22 +170,33 @@ func searchMcpCandidates(ctx context.Context, db *sql.DB, q searchQuery, terms [
 		filters = append(filters, "p.doc IN (SELECT doc FROM events WHERE "+strings.Join(scope, " AND ")+")")
 	}
 
+	sorted := slices.Clone(terms)
+	slices.Sort(sorted)
+	perTerm := make([]string, len(sorted))
+	total := make([]string, len(sorted))
+	for i, t := range sorted {
+		perTerm[i] = fmt.Sprintf("sum(x) FILTER (WHERE term = %s) AS t%d", sqlQuote(t), i)
+		total[i] = fmt.Sprintf("coalesce(t%d, 0)", i)
+	}
+
 	sqlStr := `WITH p AS (SELECT term, doc, tf, doc_len, flags FROM postings WHERE term IN (` + strings.Join(quoteAll(terms), ", ") + `)),
 s AS (SELECT term, count(*) AS df FROM p GROUP BY term),
 k AS (SELECT cast(docs AS DOUBLE) AS docs,
              cast(coalesce(total_len / nullif(docs, 0), 0) AS DOUBLE) AS avg_doc_len FROM corpus),
-c AS MATERIALIZED (
-  SELECT p.doc,
-    sum(ln(1.0 + ((greatest(k.docs, cast(s.df AS DOUBLE))
+x AS (
+  SELECT p.doc, p.term,
+    ln(1.0 + ((greatest(k.docs, cast(s.df AS DOUBLE))
         - cast(s.df AS DOUBLE) + 0.5) / (cast(s.df AS DOUBLE) + 0.5)))
       * ((cast(p.tf AS DOUBLE) * 1.200000)
         / (cast(p.tf AS DOUBLE) + 1.200000 * (1.0 - 0.750000
           + 0.750000 * (cast(p.doc_len AS DOUBLE)
-            / greatest(k.avg_doc_len, 1.0))))) ORDER BY p.term) AS raw_score
+            / greatest(k.avg_doc_len, 1.0))))) AS x
   FROM p JOIN s ON s.term = p.term CROSS JOIN k
-  WHERE ` + strings.Join(filters, "\n    AND ") + `
-  GROUP BY p.doc
-  HAVING raw_score >= 0.000000)
+  WHERE ` + strings.Join(filters, "\n    AND ") + `),
+c AS MATERIALIZED (
+  SELECT doc, ` + strings.Join(total, " + ") + ` AS raw_score
+  FROM (SELECT doc, ` + strings.Join(perTerm, ", ") + ` FROM x GROUP BY doc)
+  WHERE ` + strings.Join(total, " + ") + ` >= 0.000000)
 SELECT doc, raw_score FROM c
 WHERE raw_score >= (SELECT coalesce(min(raw_score), 0) FROM (SELECT raw_score FROM c ORDER BY raw_score DESC LIMIT ` + strconv.Itoa(limit) + `))`
 
