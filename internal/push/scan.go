@@ -3,6 +3,7 @@ package push
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"io"
 	"os"
 
@@ -43,7 +44,22 @@ func redactComplete(path string, red Redactor) (*redactedLines, error) {
 	return &r, nil
 }
 
-func redactTail(path string, red Redactor, entry *wire.Source) (*redactedLines, error) {
+// rawHead is the head hash a file's raw first line redacted to, keyed on that
+// line's digest, so a file that only grew is not redacted from its start again.
+type rawHead struct {
+	sum  [sha256.Size]byte
+	hash string
+}
+
+func (h *rawHead) of(red Redactor, first []byte) string {
+	sum := sha256.Sum256(first)
+	if h.hash == "" || h.sum != sum {
+		*h = rawHead{sum: sum, hash: wire.HeadHash(redactLines(red, first, 0).body)}
+	}
+	return h.hash
+}
+
+func redactTail(path string, red Redactor, entry *wire.Source, memo *rawHead) (*redactedLines, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -63,7 +79,7 @@ func redactTail(path string, red Redactor, entry *wire.Source) (*redactedLines, 
 	if err != nil {
 		return nil, err
 	}
-	head := wire.HeadHash(redactLines(red, first, 0).body)
+	head := memo.of(red, first)
 	if head != entry.HeadHash {
 		return nil, nil
 	}

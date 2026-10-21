@@ -560,7 +560,7 @@ func TestWatchSendsOnlyWhatFileEventsName(t *testing.T) {
 	tr := &countingTransport{base: rs.srv.Client().Transport}
 	red := &countingRedactor{}
 	w := newWatcher(testConfig(rs.srv.URL, dir), red, &http.Client{Transport: tr})
-	w.window = time.Millisecond
+	w.quiet, w.within = time.Millisecond, time.Millisecond
 	lines := make(lineWriter, 8)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -588,7 +588,7 @@ func TestWatchSendsOnlyWhatFileEventsName(t *testing.T) {
 	}
 	redacted := red.n.Load()
 
-	time.Sleep(20 * w.window)
+	time.Sleep(20 * w.quiet)
 	if got, n := tr.since(2), red.n.Load()-redacted; got != "" || n != 0 {
 		t.Fatalf("idle: requests %q, redacted %d bytes; want none and 0", got, n)
 	}
