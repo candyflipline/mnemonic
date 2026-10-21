@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -31,11 +30,6 @@ func (s stubTool) Call(_ context.Context, _ *sql.DB, _ json.RawMessage) (any, st
 
 func mcpServer(t *testing.T, tools ...query.Tool) *httptest.Server {
 	t.Helper()
-	return mcpServerWithOpen(t, func() (*sql.DB, error) { return nil, nil }, tools...)
-}
-
-func mcpServerWithOpen(t *testing.T, open func() (*sql.DB, error), tools ...query.Tool) *httptest.Server {
-	t.Helper()
 	lookup := func(name string) (query.Tool, bool) {
 		for _, tool := range tools {
 			if tool.Name() == name {
@@ -44,7 +38,7 @@ func mcpServerWithOpen(t *testing.T, open func() (*sql.DB, error), tools ...quer
 		}
 		return nil, false
 	}
-	srv := httptest.NewServer(auth.Middleware(map[string]string{auth.Hash("tok"): "chris"})(Handler(open, lookup)))
+	srv := httptest.NewServer(auth.Middleware(map[string]string{auth.Hash("tok"): "chris"})(Handler(nil, lookup)))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -248,30 +242,6 @@ func TestToolsCallUnknownToolIsErrorResult(t *testing.T) {
 	}
 	if !reflect.DeepEqual(result, want) {
 		t.Errorf("result = %v, want %v", result, want)
-	}
-}
-
-func TestToolsCallCacheUnavailableIsErrorResult(t *testing.T) {
-	open := func() (*sql.DB, error) { return nil, errors.New("no cache yet") }
-	srv := mcpServerWithOpen(t, open, stubTool{name: "open"})
-	resp := postRPC(t, srv, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"open","arguments":{"id":"session:abc"}}}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status %d, want 200", resp.StatusCode)
-	}
-	payload := decode(t, resp)
-	if _, has := payload["error"]; has {
-		t.Error("cache unavailable must not be a JSON-RPC error")
-	}
-	result, _ := payload["result"].(map[string]any)
-	if result["isError"] != true {
-		t.Errorf("isError = %v, want true", result["isError"])
-	}
-	if _, has := result["structuredContent"]; has {
-		t.Error("cache unavailable result must not carry structuredContent")
-	}
-	block, _ := result["content"].([]any)[0].(map[string]any)
-	if block["text"] != "cache unavailable: no cache yet" {
-		t.Errorf("content[0].text = %v, want \"cache unavailable: no cache yet\"", block["text"])
 	}
 }
 

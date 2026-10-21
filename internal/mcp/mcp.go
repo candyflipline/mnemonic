@@ -92,9 +92,7 @@ type rpcResponse struct {
 	Error   *rpcErrorObj `json:"error,omitempty"`
 }
 
-// Handler answers /mcp with the newest cache from open. open runs once per
-// tools/call; initialize and tools/list never touch it.
-func Handler(open func() (*sql.DB, error), lookup func(name string) (query.Tool, bool)) http.Handler {
+func Handler(db *sql.DB, lookup func(name string) (query.Tool, bool)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", "POST")
@@ -177,7 +175,7 @@ func Handler(open func() (*sql.DB, error), lookup func(name string) (query.Tool,
 				w.WriteHeader(http.StatusAccepted)
 				return
 			}
-			h := handler{open: open, lookup: lookup}
+			h := handler{db: db, lookup: lookup}
 			result := h.toolsCall(r, paramsJSON)
 			switch result := result.(type) {
 			case *rpcErrorObj:
@@ -199,13 +197,13 @@ func Handler(open func() (*sql.DB, error), lookup func(name string) (query.Tool,
 }
 
 type handler struct {
-	open   func() (*sql.DB, error)
+	db     *sql.DB
 	lookup func(name string) (query.Tool, bool)
 }
 
 // toolsCall runs one tool and wraps it in the tool envelope. Only a params
 // payload that cannot decode is a JSON-RPC error; like upstream, every
-// tool-level failure — unknown name, unreachable cache — is an isError result
+// tool-level failure, such as an unknown name, is an isError result
 // so the client sees the message as tool output, not a protocol failure.
 func (h handler) toolsCall(r *http.Request, paramsJSON json.RawMessage) any {
 	var p struct {
@@ -223,12 +221,8 @@ func (h handler) toolsCall(r *http.Request, paramsJSON json.RawMessage) any {
 	if !ok {
 		return unstructuredToolError(fmt.Sprintf("unknown tool: %s", p.Name))
 	}
-	db, err := h.open()
-	if err != nil {
-		return unstructuredToolError(fmt.Sprintf("cache unavailable: %s", err))
-	}
 	start := time.Now()
-	data, text, err := tool.Call(r.Context(), db, args)
+	data, text, err := tool.Call(r.Context(), h.db, args)
 	perf := performance{ElapsedMS: time.Since(start).Milliseconds()}
 	if err != nil {
 		env := errorEnvelope{
