@@ -1,6 +1,7 @@
 package shared
 
 import (
+	"bufio"
 	"bytes"
 	"io"
 
@@ -14,21 +15,18 @@ import (
 // invalid-JSON ones that get skipped — the offset advances before any skip so
 // later lines keep their true positions. Session, model and cwd hints thread
 // from one line's outcome into the next and out through the returned State;
-// only a reader failure fails the file.
-func ParseJSONL(r io.Reader, src normalize.SourceMeta, from normalize.State, s Source) ([]schema.Event, normalize.State, error) {
-	body, err := io.ReadAll(r)
-	if err != nil {
-		return nil, from, err
-	}
-	var events []schema.Event
+// only a reader or emit failure fails the file.
+func ParseJSONL(r io.Reader, src normalize.SourceMeta, from normalize.State, s Source, emit func(*schema.Event) error) (normalize.State, error) {
+	br := bufio.NewReader(r)
 	sessionHint, modelHint, cwdHint := from.SessionHint, from.ModelHint, from.CwdHint
-	rest, offset, lineNo := body, from.Offset, from.LineNo
-	for len(rest) > 0 {
-		var raw []byte
-		if i := bytes.IndexByte(rest, '\n'); i >= 0 {
-			raw, rest = rest[:i+1], rest[i+1:]
-		} else {
-			raw, rest = rest, nil
+	offset, lineNo := from.Offset, from.LineNo
+	for {
+		raw, err := br.ReadBytes('\n')
+		if err != nil && err != io.EOF {
+			return from, err
+		}
+		if len(raw) == 0 {
+			break
 		}
 		lineNo++
 		startOffset := offset
@@ -51,11 +49,13 @@ func ParseJSONL(r io.Reader, src normalize.SourceMeta, from normalize.State, s S
 			CwdHint:      cwdHint,
 		})
 		sessionHint, modelHint, cwdHint = out.SessionHint, out.ModelHint, out.CwdHint
-		for _, row := range out.Events {
-			events = append(events, row.Event)
+		for i := range out.Events {
+			if err := emit(&out.Events[i].Event); err != nil {
+				return from, err
+			}
 		}
 	}
-	return events, normalize.State{
+	return normalize.State{
 		LineNo: lineNo, Offset: offset,
 		SessionHint: sessionHint, ModelHint: modelHint, CwdHint: cwdHint,
 	}, nil

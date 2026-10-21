@@ -1,6 +1,8 @@
 package lake
 
 import (
+	"bufio"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -10,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -209,6 +212,8 @@ var zstdFrameMagic = [4]byte{0x28, 0xb5, 0x2f, 0xfd}
 
 const compactAt = 8 << 20
 
+const rowGroupBytes = 64 << 20
+
 // parseAndWrite parses the raw bytes the checkpoint has not seen, from its
 // State, and returns the lake file it wrote and that file's row count. A
 // resumed parse rewrites only the tail, as its rows minus any event_uid the
@@ -246,28 +251,6 @@ func parseAndWrite(db *sql.DB, dataDir string, key layout.Key, src manifest, par
 		return "", 0, err
 	}
 	defer zr.Close()
-	events, state, err := parser.Parse(zr, normalize.SourceMeta{
-		SourceName: src.SourceName,
-		Harness:    src.Harness,
-		SourceFile: src.Path,
-	}, from.State)
-	if err != nil {
-		return "", 0, err
-	}
-	events = dedupe(events)
-	next.MaxVersion = from.MaxVersion
-	for i := range events {
-		if resumed {
-			events[i].EventVersion = max(events[i].EventVersion, from.MaxVersion+1)
-		}
-		next.MaxVersion = max(next.MaxVersion, events[i].EventVersion)
-	}
-	sum, err := windowSHA256(raw, src.ZstSize)
-	if err != nil {
-		return "", 0, err
-	}
-	next.ZstSize, next.WindowSHA256, next.State = src.ZstSize, sum, state
-
 	if err := os.MkdirAll(filepath.Dir(basePath), 0o755); err != nil {
 		return "", 0, err
 	}
@@ -277,18 +260,60 @@ func parseAndWrite(db *sql.DB, dataDir string, key layout.Key, src manifest, par
 	}
 	tmpName := ndjson.Name()
 	defer os.Remove(tmpName)
-	enc := json.NewEncoder(ndjson)
-	for i := range events {
-		if err := enc.Encode(&events[i]); err != nil {
-			ndjson.Close()
-			return "", 0, err
+	w := bufio.NewWriterSize(ndjson, 1<<20)
+	type seen struct{ n, version uint64 }
+	winners := map[string]seen{}
+	var losers []string
+	var row uint64
+	next.MaxVersion = from.MaxVersion
+	state, err := parser.Parse(zr, normalize.SourceMeta{
+		SourceName: src.SourceName,
+		Harness:    src.Harness,
+		SourceFile: src.Path,
+	}, from.State, func(ev *schema.Event) error {
+		if prev, ok := winners[ev.EventUID]; ok && ev.EventVersion < prev.version {
+			losers = append(losers, strconv.FormatUint(row, 10))
+		} else {
+			if ok {
+				losers = append(losers, strconv.FormatUint(prev.n, 10))
+			}
+			winners[ev.EventUID] = seen{row, ev.EventVersion}
 		}
+		if resumed {
+			ev.EventVersion = max(ev.EventVersion, from.MaxVersion+1)
+		}
+		next.MaxVersion = max(next.MaxVersion, ev.EventVersion)
+		b, err := json.Marshal(ev)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(w, `{"_n":%d,`, row)
+		w.Write(b[1:])
+		row++
+		return w.WriteByte('\n')
+	})
+	if err != nil {
+		ndjson.Close()
+		return "", 0, err
+	}
+	if err := w.Flush(); err != nil {
+		ndjson.Close()
+		return "", 0, err
 	}
 	if err := ndjson.Close(); err != nil {
 		return "", 0, err
 	}
-	fresh := fmt.Sprintf("SELECT %s FROM read_json(%s, format='newline_delimited', columns=%s)",
-		selectList(key.Author, key.Machine, ingestedAt), sqlQuote(tmpName), columnTypes())
+	sum, err := windowSHA256(raw, src.ZstSize)
+	if err != nil {
+		return "", 0, err
+	}
+	next.ZstSize, next.WindowSHA256, next.State = src.ZstSize, sum, state
+
+	fresh := fmt.Sprintf("SELECT %s FROM read_json(%s, format='newline_delimited', columns={'_n': 'UBIGINT', %s)",
+		selectList(key.Author, key.Machine, ingestedAt), sqlQuote(tmpName), strings.TrimPrefix(columnTypes(), "{"))
+	if len(losers) > 0 {
+		fresh += " WHERE _n NOT IN (" + strings.Join(losers, ", ") + ")"
+	}
 
 	out, query, drop := basePath, fresh, tailPath
 	switch {
@@ -407,26 +432,6 @@ func restampIfSuperseded(mpath, written string, parsed manifest) error {
 	return os.Chtimes(written, t, t)
 }
 
-// dedupe keeps, per event_uid, the highest event_version — the in-file
-// equivalent of ReplacingMergeTree(event_version); on equal versions the
-// later row in file order wins.
-func dedupe(events []schema.Event) []schema.Event {
-	at := make(map[string]int, len(events))
-	out := make([]schema.Event, 0, len(events))
-	for i := range events {
-		ev := &events[i]
-		if j, ok := at[ev.EventUID]; ok {
-			if ev.EventVersion >= out[j].EventVersion {
-				out[j] = *ev
-			}
-			continue
-		}
-		at[ev.EventUID] = len(out)
-		out = append(out, *ev)
-	}
-	return out
-}
-
 func liveSourceFiles(db *sql.DB, dataDir, author string) (map[string]bool, error) {
 	glob := filepath.Join(dataDir, "events", "author="+author, "machine=*", "harness=*", "*.parquet")
 	files, err := filepath.Glob(glob)
@@ -492,11 +497,20 @@ func open() (*sql.DB, error) { return sql.Open("duckdb", "?threads=1") }
 // the two, and returns the rows written.
 func copyParquet(db *sql.DB, query, outPath, kv, drop string) (int64, error) {
 	tmp := outPath + ".tmp"
-	opts := "FORMAT parquet, COMPRESSION zstd"
+	opts := fmt.Sprintf("FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE_BYTES %d", rowGroupBytes)
 	if kv != "" {
 		opts += fmt.Sprintf(", KV_METADATA {%s: %s}", checkpointKey, sqlQuote(kv))
 	}
-	res, err := db.Exec(fmt.Sprintf("COPY (%s) TO %s (%s)", query, sqlQuote(tmp), opts))
+	ctx := context.Background()
+	c, err := db.Conn(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer c.Close()
+	if _, err := c.ExecContext(ctx, "SET preserve_insertion_order = false"); err != nil {
+		return 0, err
+	}
+	res, err := c.ExecContext(ctx, fmt.Sprintf("COPY (%s) TO %s (%s)", query, sqlQuote(tmp), opts))
 	if err != nil {
 		os.Remove(tmp)
 		return 0, err

@@ -30,7 +30,7 @@ type State struct {
 
 type Parser interface {
 	Harness() string
-	Parse(r io.Reader, src SourceMeta, from State) ([]schema.Event, State, error)
+	Parse(r io.Reader, src SourceMeta, from State, emit func(*schema.Event) error) (State, error)
 }
 
 var parsers = map[string]Parser{}

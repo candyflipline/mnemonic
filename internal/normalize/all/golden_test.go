@@ -12,6 +12,7 @@ import (
 
 	"github.com/candyflipline/mnemonic/internal/normalize"
 	_ "github.com/candyflipline/mnemonic/internal/normalize/all"
+	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
 var cases = []struct {
@@ -108,7 +109,9 @@ func parse(t *testing.T, harness, sourceName, fixture, sourceFile string) []map[
 		t.Fatal(err)
 	}
 	defer f.Close()
-	events, _, err := p.Parse(f, normalize.SourceMeta{SourceName: sourceName, Harness: harness, SourceFile: sourceFile}, normalize.State{})
+	var events []schema.Event
+	_, err = p.Parse(f, normalize.SourceMeta{SourceName: sourceName, Harness: harness, SourceFile: sourceFile}, normalize.State{},
+		func(e *schema.Event) error { events = append(events, *e); return nil })
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -26,8 +26,7 @@ type fakeParser struct{}
 
 func (fakeParser) Harness() string { return "test-fake" }
 
-func (fakeParser) Parse(r io.Reader, src normalize.SourceMeta, from normalize.State) ([]schema.Event, normalize.State, error) {
-	var out []schema.Event
+func (fakeParser) Parse(r io.Reader, src normalize.SourceMeta, from normalize.State, emit func(*schema.Event) error) (normalize.State, error) {
 	sc := bufio.NewScanner(r)
 	lineNo := from.LineNo
 	for sc.Scan() {
@@ -38,13 +37,13 @@ func (fakeParser) Parse(r io.Reader, src normalize.SourceMeta, from normalize.St
 		}
 		parts := strings.Split(line, "|")
 		if len(parts) != 3 {
-			return nil, from, fmt.Errorf("test-fake: line %d: %q", lineNo, line)
+			return from, fmt.Errorf("test-fake: line %d: %q", lineNo, line)
 		}
 		version, err := strconv.ParseUint(parts[1], 10, 64)
 		if err != nil {
-			return nil, from, err
+			return from, err
 		}
-		out = append(out, schema.Event{
+		if err := emit(&schema.Event{
 			EventUID:          parts[0],
 			EventVersion:      version,
 			SessionID:         "sess",
@@ -56,9 +55,11 @@ func (fakeParser) Parse(r io.Reader, src normalize.SourceMeta, from normalize.St
 			EventTS:           parts[2],
 			ContentTypes:      []string{"text"},
 			TokenUsageBuckets: map[string]uint64{"input": 3},
-		})
+		}); err != nil {
+			return from, err
+		}
 	}
-	return out, normalize.State{LineNo: lineNo}, sc.Err()
+	return normalize.State{LineNo: lineNo}, sc.Err()
 }
 
 func init() { normalize.Register(fakeParser{}) }
