@@ -79,7 +79,7 @@ func lsSelectPage(ctx context.Context, db *sql.DB, a *lsArgs, cursor *lsCursor) 
 	if aggregates != "" {
 		from = "sessions JOIN (\n" +
 			"  SELECT session_id" + aggregates + "\n" +
-			"  FROM (SELECT " + strings.Join(columns, ", ") + " FROM events WHERE trim(session_id) <> '') AS e\n" +
+			"  FROM (SELECT " + strings.Join(columns, ", ") + " FROM events WHERE trim(session_id) <> '' AND " + published + ") AS e\n" +
 			"  GROUP BY session_id\n" +
 			") AS p USING (session_id)"
 	}
@@ -151,7 +151,7 @@ func lsSummarizePage(ctx context.Context, db *sql.DB, ids []string, sort lsSort)
 		"    SELECT session_id, event_ts, event_uid, event_kind, actor_kind, payload_type, tool_name,\n" +
 		"      source_name, source_file, source_generation, source_offset, source_line_no,\n" +
 		"      harness, turn_index, text_preview\n" +
-		"    FROM events WHERE session_id IN (" + idsSQL + ")\n" +
+		"    FROM events WHERE session_id IN (" + idsSQL + ") AND " + published + "\n" +
 		"  ) AS e\n" +
 		"  GROUP BY session_id\n" +
 		"),\n" +
@@ -251,7 +251,7 @@ func lsMetadataRollups(idsSQL string) string {
 		"  FROM (\n" +
 		"    SELECT session_id, event_ts, event_uid, event_kind, source_name, source_file,\n" +
 		"      source_generation, source_offset, source_line_no, meta_json AS payload_json\n" +
-		"    FROM events WHERE session_id IN (" + idsSQL + ")\n" +
+		"    FROM events WHERE session_id IN (" + idsSQL + ") AND " + published + "\n" +
 		"      AND (event_kind = 'session_meta' OR source_name = 'omp')\n" +
 		"  ) AS e\n" +
 		"  GROUP BY session_id\n" +

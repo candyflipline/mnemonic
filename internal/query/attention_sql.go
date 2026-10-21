@@ -91,7 +91,7 @@ func faNav(scope string) string {
 		"    cast(event_order AS UBIGINT) AS event_order,\n" +
 		"    cast(turn_seq AS UBIGINT) AS turn_seq\n" +
 		"  FROM trace\n" +
-		"  WHERE (session_id, event_uid) IN (SELECT session_id, event_uid FROM " + scope + ")\n" +
+		"  WHERE (session_id, event_uid) IN (SELECT session_id, event_uid FROM " + scope + ") AND " + published + "\n" +
 		")"
 }
 
@@ -139,7 +139,7 @@ func faExact(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTou
 	if q.ProjectScope {
 		pred = "e.project_id = " + sqlQuote(q.NormalizedPID)
 	}
-	clauses := append(faFilters("e.", q), pred+" AND e.repo_rel_path = "+sqlQuote(q.Rel))
+	clauses := append(faFilters("e.", q), pred+" AND e.repo_rel_path = "+sqlQuote(q.Rel), "e."+published)
 	single := faSinglePath("ti.worktree_root")
 
 	qry := "WITH\nmatched AS (\n" +
@@ -216,7 +216,7 @@ func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTo
 		"  e.source_name AS source_name, e.cwd AS cwd,\n" +
 		"  e.project_id AS event_project_id, e.worktree_root AS event_worktree_root\n" +
 		"FROM events e\n" +
-		"WHERE e.tool_io_input_json IS NOT NULL)"
+		"WHERE e.tool_io_input_json IS NOT NULL AND e." + published + ")"
 
 	inner := append(faFilters("", q),
 		"("+strings.Join(keyMatch, "\n        OR ")+"\n        OR "+nestedMatch+"\n        OR "+shellMatch+")")

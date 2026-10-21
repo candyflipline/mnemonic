@@ -230,3 +230,19 @@ func TestFixtureGetIngestStatus(t *testing.T) {
 		t.Fatalf("text:\n%s", text)
 	}
 }
+
+func TestFixtureListAndAttentionSkipUnpublishedRows(t *testing.T) {
+	db := fixtureDB(t)
+	if _, err := db.Exec(`INSERT INTO events SELECT * REPLACE (doc + 1000 AS doc, NULL AS event_order, NULL AS turn_seq,
+  NULL AS event_ordinal, 'ghost' AS harness, event_ts + INTERVAL 1 YEAR AS event_ts, event_uid || 'x' AS event_uid) FROM events`); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := callTool(t, db, listSessions{}, `{"start_datetime":"2020-01-01T00:00:00Z","end_datetime":"2030-01-01T00:00:00Z","limit":20,"harness":"ghost"}`)
+	if got := raw.(map[string]any)["result_count"]; got != 0 {
+		t.Fatalf("list_sessions harness=ghost result_count = %v", got)
+	}
+	raw, _ = callTool(t, db, fileAttention{}, `{"path":"Cargo.toml","scope":"all"}`)
+	if got := raw.(map[string]any)["summary"].(map[string]any)["total_touches"]; got != 2 {
+		t.Fatalf("file_attention total_touches = %v", got)
+	}
+}
