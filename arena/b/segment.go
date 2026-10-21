@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/candyflipline/mnemonic/internal/schema"
 	"github.com/klauspost/compress/zstd"
@@ -32,7 +33,7 @@ type heavyBlock struct {
 type segment struct {
 	pathIndex
 	path     string
-	file     *os.File
+	heavy    []byte
 	terms    []termEntry
 	postings []byte
 	mapping  []uint32
@@ -46,12 +47,15 @@ type segmentWriter struct {
 	path        string
 	codecs      *segmentCodecs
 	meta, heavy *os.File
+	heavyBuffer *bufio.Writer
+	heavyOffset uint64
 	zw          *zstd.Encoder
 	enc         *gob.Encoder
 	codec       *zstd.Encoder
 	records     []*event
 	values      []heavyValue
 	bytes       int
+	inputBytes  int
 	count       uint32
 	terms       map[string][]posting
 }
@@ -96,6 +100,7 @@ func newSegmentWriter(dir string, codecs *segmentCodecs) (*segmentWriter, error)
 		w.abort()
 		return nil, e
 	}
+	w.heavyBuffer = bufio.NewWriterSize(w.heavy, 64<<10)
 	w.zw, w.codec = codecs.meta, codecs.block
 	w.zw.Reset(w.meta)
 	w.enc = gob.NewEncoder(w.zw)
@@ -131,11 +136,20 @@ func (w *segmentWriter) emit(ev *schema.Event) error {
 	e.TextHash = binary.LittleEndian.Uint64(hash[:8])
 	e.Flags = searchFlags(e)
 	freq := map[string]uint32{}
-	for _, t := range tokenRe.FindAllString(strings.ToLower(ev.TextContent), -1) {
-		if len(t) >= 2 && len(t) <= 64 {
-			freq[t]++
+	text := strings.ToLower(ev.TextContent)
+	for start := 0; start < len(text); {
+		for start < len(text) && !asciiTokenByte(text[start]) {
+			start++
+		}
+		end := start
+		for end < len(text) && asciiTokenByte(text[end]) {
+			end++
+		}
+		if end-start >= 2 && end-start <= 64 {
+			freq[text[start:end]]++
 			e.Length++
 		}
+		start = end
 	}
 	for t, tf := range freq {
 		ps := w.terms[t]
@@ -148,6 +162,7 @@ func (w *segmentWriter) emit(ev *schema.Event) error {
 	w.records = append(w.records, e)
 	w.values = append(w.values, heavyValue{ev.TextContent, ev.PayloadJSON, ev.TokenUsageJSON, ev.TokenUsageBuckets, ev.TokenUsageNativeUnits})
 	w.bytes += len(ev.TextContent) + len(ev.PayloadJSON) + len(ev.TokenUsageJSON)
+	w.inputBytes += len(ev.TextContent) + len(ev.PayloadJSON) + len(ev.TokenUsageJSON)
 
 	if ev.EventKind == "session_meta" || ev.SourceName == "omp" && (payloadString(ev.PayloadJSON, "type") == "title" || payloadString(ev.PayloadJSON, "type") == "title_change") {
 		e.PayloadJSON = ev.PayloadJSON
@@ -168,20 +183,18 @@ func (w *segmentWriter) flush() error {
 	}
 	compressed := w.codec.EncodeAll(plain.Bytes(), w.codecs.compressed[:0])
 	w.codecs.compressed = compressed
-	offset, e := w.heavy.Seek(0, io.SeekCurrent)
-	if e != nil {
+	offset := w.heavyOffset
+	if e := binary.Write(w.heavyBuffer, binary.LittleEndian, uint32(len(compressed))); e != nil {
 		return e
 	}
-	if e = binary.Write(w.heavy, binary.LittleEndian, uint32(len(compressed))); e != nil {
+	if _, e := w.heavyBuffer.Write(compressed); e != nil {
 		return e
 	}
-	if _, e = w.heavy.Write(compressed); e != nil {
-		return e
-	}
+	w.heavyOffset += uint64(4 + len(compressed))
 	for i, ev := range w.records {
 		ev.HeavyOffset = uint64(offset)
 		ev.HeavyIndex = uint32(i)
-		if e = w.enc.Encode(ev); e != nil {
+		if e := w.enc.Encode(ev); e != nil {
 			return e
 		}
 	}
@@ -208,6 +221,10 @@ func (w *segmentWriter) finish() (string, error) {
 		return "", e
 	}
 	w.codec.Close()
+	if e := w.heavyBuffer.Flush(); e != nil {
+		w.abort()
+		return "", e
+	}
 	if e := w.meta.Sync(); e != nil {
 		w.abort()
 		return "", e
@@ -306,11 +323,16 @@ func readUAt(raw []byte, pos *int) (uint64, error) {
 	*pos += n
 	return v, nil
 }
-func loadTerms(path string) ([]termEntry, []byte, error) {
+func loadTerms(path string) (_ []termEntry, _ []byte, loadErr error) {
 	raw, e := mapRead(path)
 	if e != nil {
 		return nil, nil, e
 	}
+	defer func() {
+		if loadErr != nil {
+			syscall.Munmap(raw)
+		}
+	}()
 	if len(raw) < 8 || string(raw[:8]) != "MNTERM02" {
 		return nil, nil, fmt.Errorf("invalid term index")
 	}
@@ -403,18 +425,17 @@ func (db *Store) heavyFor(e *event) (heavyValue, error) {
 	if block, ok := db.heavyCache[key]; ok {
 		return block.values[e.HeavyIndex], nil
 	}
-	reader := io.NewSectionReader(e.segment.file, int64(e.HeavyOffset), 1<<40)
-	var size uint32
-	if err := binary.Read(reader, binary.LittleEndian, &size); err != nil {
-		return heavyValue{}, err
+	raw := e.segment.heavy
+	offset := e.HeavyOffset
+	if offset > uint64(len(raw)) || uint64(len(raw))-offset < 4 {
+		return heavyValue{}, fmt.Errorf("invalid heavy block offset")
 	}
-	if size > 256<<20 {
+	size := binary.LittleEndian.Uint32(raw[offset : offset+4])
+	offset += 4
+	if size > 256<<20 || uint64(size) > uint64(len(raw))-offset {
 		return heavyValue{}, fmt.Errorf("invalid heavy block size")
 	}
-	b := make([]byte, size)
-	if _, err := io.ReadFull(reader, b); err != nil {
-		return heavyValue{}, err
-	}
+	b := raw[offset : offset+uint64(size)]
 	plain, err := db.decoder.DecodeAll(b, nil)
 	if err != nil {
 		return heavyValue{}, err
@@ -445,3 +466,5 @@ type heavyKey struct {
 	segment *segment
 	offset  uint64
 }
+
+func asciiTokenByte(b byte) bool { return b >= 'a' && b <= 'z' || b >= '0' && b <= '9' || b == '_' }

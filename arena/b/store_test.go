@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 
+	"github.com/candyflipline/mnemonic/internal/schema"
 	"github.com/candyflipline/mnemonic/internal/wire"
 	"github.com/klauspost/compress/zstd"
 )
@@ -18,6 +20,61 @@ import (
 // One integration table covers real parser state, published queries, append,
 // idempotence, failed publication, and recovery without the private sample.
 func TestStore(t *testing.T) {
+	t.Run("bounded_source_segments", func(t *testing.T) {
+		dir := t.TempDir()
+		codecs, err := newSegmentCodecs()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer codecs.close()
+		w := newSourceWriter(dir, codecs, 10, 1)
+		for i := 0; i < 3; i++ {
+			ev := schema.Event{EventUID: fmt.Sprintf("uid%d", i), SessionID: "session", EventVersion: 1, RecordTS: "2026-01-01T00:00:00Z", TextContent: "alpha beta", ActorKind: "user", EventKind: "message"}
+			if err = w.emit(&ev); err != nil {
+				t.Fatal(err)
+			}
+		}
+		names, err := w.finish()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(names) != 3 || w.count != 3 || w.maxVersion != 11 {
+			t.Fatalf("segments=%d events=%d version=%d", len(names), w.count, w.maxVersion)
+		}
+		m, _ := readManifest(dir)
+		m.Sources["fixture"] = Checkpoint{Segments: names, Events: 3}
+		if err = atomicManifest(dir, m); err != nil {
+			t.Fatal(err)
+		}
+		db, err := loadStore(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		if len(db.events) != 3 || db.eventByUID("uid1").EventVersion != 11 || len(db.sessions["session"]) != 3 {
+			t.Fatal("rotated transaction lost its events")
+		}
+	})
+	t.Run("ascii_token_counts", func(t *testing.T) {
+		dir := t.TempDir()
+		codecs, err := newSegmentCodecs()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer codecs.close()
+		w, err := newSegmentWriter(dir, codecs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer w.abort()
+		ev := schema.Event{TextContent: "A ab AB a_b 12 KK café 𐐀 foo-bar " + strings.Repeat("a", 65)}
+		if err = w.emit(&ev); err != nil {
+			t.Fatal(err)
+		}
+		if w.records[0].Length != 8 || len(w.terms) != 7 || w.terms["ab"][0].TF != 2 || w.terms["kk"][0].TF != 1 {
+			t.Fatal("ASCII tokenization differs from the contract")
+		}
+	})
 	t.Run("dictionary_fences", func(t *testing.T) {
 		dir := t.TempDir()
 		codecs, err := newSegmentCodecs()
@@ -40,6 +97,7 @@ func TestStore(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer syscall.Munmap(raw)
 		if len(keys) != 5 {
 			t.Fatalf("fences=%d, want 5", len(keys))
 		}

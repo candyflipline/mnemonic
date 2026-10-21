@@ -17,8 +17,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/candyflipline/mnemonic/internal/normalize"
-	_ "github.com/candyflipline/mnemonic/internal/normalize/all"
+	"github.com/candyflipline/mnemonic/arena/b/normalize"
+	_ "github.com/candyflipline/mnemonic/arena/b/normalize/all"
+	"github.com/candyflipline/mnemonic/arena/b/normalize/shared"
 	"github.com/candyflipline/mnemonic/internal/wire"
 	"github.com/klauspost/compress/zstd"
 )
@@ -37,6 +38,7 @@ type Checkpoint struct {
 	State           normalize.State
 	Segments        []string
 	Events          uint64
+	MaxVersion      uint64
 }
 type Manifest struct {
 	Version, Parser int
@@ -155,6 +157,7 @@ func windowHash(f *os.File, end int64) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), e
 }
 func ingest(root, dir string) error {
+	shared.ResetAttentionCache()
 	if e := os.MkdirAll(dir, 0700); e != nil {
 		return e
 	}
@@ -245,7 +248,7 @@ func ingest(root, dir string) error {
 			f.Close()
 			return fmt.Errorf("unsupported harness %q", src.Harness)
 		}
-		zr, e := zstd.NewReader(io.NewSectionReader(f, cp.Compressed, end-cp.Compressed), zstd.WithDecoderConcurrency(1))
+		zr, e := zstd.NewReader(bufio.NewReaderSize(io.NewSectionReader(f, cp.Compressed, end-cp.Compressed), 256<<10), zstd.WithDecoderConcurrency(1))
 		if e != nil {
 			f.Close()
 			return e
@@ -258,12 +261,7 @@ func ingest(root, dir string) error {
 				return e
 			}
 		}
-		writer, e := newSegmentWriter(dir, codecs)
-		if e != nil {
-			zr.Close()
-			f.Close()
-			return e
-		}
+		writer := newSourceWriter(dir, codecs, cp.MaxVersion, segmentTextBudget)
 		state, parseErr := parser.Parse(zr, normalize.SourceMeta{SourceName: src.SourceName, Harness: src.Harness, SourceFile: src.Path}, cp.State, writer.emit)
 		zr.Close()
 		if parseErr == nil && state.Offset != uint64(src.Size) {
@@ -280,7 +278,7 @@ func ingest(root, dir string) error {
 			writer.abort()
 			return e
 		}
-		name, e := writer.finish()
+		names, e := writer.finish()
 		if e != nil {
 			return e
 		}
@@ -293,7 +291,8 @@ func ingest(root, dir string) error {
 		cp.Compressed = end
 		cp.Window = hash
 		cp.Events += count
-		cp.Segments = append(cp.Segments, name)
+		cp.Segments = append(cp.Segments, names...)
+		cp.MaxVersion = writer.maxVersion
 		m.Sources[rel] = cp
 		if e = atomicManifest(dir, m); e != nil {
 			return e
@@ -324,7 +323,7 @@ func ingest(root, dir string) error {
 	}
 	for _, ent := range entries {
 		n := ent.Name()
-		if !live[n] && (strings.HasPrefix(n, "segment-") || strings.HasPrefix(n, ".segment-") || strings.HasPrefix(n, ".manifest-")) {
+		if !live[n] && (strings.HasPrefix(n, "segment-") || strings.HasPrefix(n, ".segment-") || strings.HasPrefix(n, ".manifest-") || strings.HasPrefix(n, ".view-")) {
 			if e = os.RemoveAll(filepath.Join(dir, n)); e != nil {
 				return e
 			}
@@ -362,8 +361,8 @@ func (db *Store) Close() {
 		if sg.postings != nil {
 			syscall.Munmap(sg.postings)
 		}
-		if sg.file != nil {
-			sg.file.Close()
+		if sg.heavy != nil {
+			syscall.Munmap(sg.heavy)
 		}
 	}
 	if db.decoder != nil {
@@ -420,7 +419,7 @@ func loadSnapshot(dir string) (_ *Store, loadErr error) {
 			if err != nil {
 				return nil, err
 			}
-			zr, err := zstd.NewReader(f, zstd.WithDecoderConcurrency(1))
+			zr, err := zstd.NewReader(bufio.NewReaderSize(f, 64<<10), zstd.WithDecoderConcurrency(1))
 			if err != nil {
 				f.Close()
 				return nil, err
@@ -459,7 +458,7 @@ func loadSnapshot(dir string) (_ *Store, loadErr error) {
 			for i := range sg.terms {
 				sg.terms[i].term = db.arena.text(sg.terms[i].term)
 			}
-			sg.file, err = os.Open(filepath.Join(sg.path, "heavy"))
+			sg.heavy, err = mapRead(filepath.Join(sg.path, "heavy"))
 			if err != nil {
 				return nil, err
 			}
@@ -505,8 +504,6 @@ func loadSnapshot(dir string) (_ *Store, loadErr error) {
 		es := ordered[start:end]
 		db.sessions[sid] = es
 		users := uint32(0)
-		ord := map[uint32]uint32{}
-		ts := map[uint32]turnStats{}
 		ss := &mappedSlice[sessionStats](&db.arena, 1)[0]
 		ss.Start = es[0].Time
 		ss.End = es[len(es)-1].Time
@@ -519,31 +516,46 @@ func loadSnapshot(dir string) (_ *Store, loadErr error) {
 			if ev.Turn == 0 {
 				ev.Turn = max(uint32(1), users)
 			}
-			ord[ev.Turn]++
-			ev.Ordinal = ord[ev.Turn]
-			t := ts[ev.Turn]
-			t.Count++
 			if ev.PayloadType == "task_complete" {
-				t.Complete = true
 				ss.Complete = true
 			}
-			if ev.PayloadType == "task_complete" || ev.PayloadType == "turn_aborted" {
-				t.Terminal = ev.EventUID
-			}
-			ts[ev.Turn] = t
-		}
-		for seq, t := range ts {
-			turnRecords[turnCount] = turnRecord{turnKey{sid, seq}, t}
-			turnCount++
 		}
 		db.stats[sid] = ss
 		start = end
 	}
-	db.turns = turnRecords[:turnCount]
-	sort.Slice(db.turns, func(i, j int) bool {
-		a, b := db.turns[i].key, db.turns[j].key
-		return a.sessionID < b.sessionID || a.sessionID == b.sessionID && a.turnSeq < b.turnSeq
+	byTurn := freezeSlice(&db.arena, ordered)
+	sort.Slice(byTurn, func(i, j int) bool {
+		a, b := byTurn[i], byTurn[j]
+		if a.SessionID != b.SessionID {
+			return a.SessionID < b.SessionID
+		}
+		if a.Turn != b.Turn {
+			return a.Turn < b.Turn
+		}
+		return a.Order < b.Order
 	})
+	for start := 0; start < len(byTurn); {
+		end := start + 1
+		first := byTurn[start]
+		for end < len(byTurn) && byTurn[end].SessionID == first.SessionID && byTurn[end].Turn == first.Turn {
+			end++
+		}
+		ts := turnStats{Count: int64(end - start)}
+		for i := start; i < end; i++ {
+			ev := byTurn[i]
+			ev.Ordinal = uint32(i - start + 1)
+			if ev.PayloadType == "task_complete" {
+				ts.Complete = true
+			}
+			if ev.PayloadType == "task_complete" || ev.PayloadType == "turn_aborted" {
+				ts.Terminal = ev.EventUID
+			}
+		}
+		turnRecords[turnCount] = turnRecord{turnKey{first.SessionID, first.Turn}, ts}
+		turnCount++
+		start = end
+	}
+	db.turns = turnRecords[:turnCount]
 	for _, ev := range db.events {
 		if ev.Length > 0 {
 			db.docs++

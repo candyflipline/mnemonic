@@ -4,7 +4,6 @@ package main
 // persisted or exposed across processes. All pointers stored in them point to
 // other mapped memory, or to segments explicitly retained by Store.segments.
 import (
-	"fmt"
 	"os"
 	"sort"
 	"syscall"
@@ -109,7 +108,7 @@ func mapRead(path string) ([]byte, error) {
 		return nil, e
 	}
 	if st.Size() == 0 {
-		return nil, fmt.Errorf("empty mapped index")
+		return nil, nil
 	}
 	return syscall.Mmap(int(f.Fd()), 0, int(st.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
 }
