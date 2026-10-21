@@ -20,6 +20,11 @@ import (
 const indexVersion = 7
 
 const (
+	queryThreads    = "2"
+	convergeThreads = "1"
+)
+
+const (
 	batchRows   = 500_000
 	chunkRows   = 200_000
 	inlineLimit = 2048
@@ -77,7 +82,7 @@ func Open(dataDir string, o Options) (*Index, error) {
 	}
 	path := IndexPath(dataDir)
 	setup := []string{
-		"SET threads = 1",
+		"SET threads = " + queryThreads,
 		"SET preserve_insertion_order = false",
 		"SET memory_limit = " + sqlStr(o.MemoryLimit),
 		"SET temp_directory = " + sqlStr(spill),
@@ -216,12 +221,20 @@ type change struct {
 	rows int64
 }
 
-func (ix *Index) Converge(ctx context.Context, f Failed) (ConvergeStats, error) {
+func (ix *Index) Converge(ctx context.Context, f Failed) (st ConvergeStats, err error) {
 	c, err := ix.db.Conn(ctx)
 	if err != nil {
 		return ConvergeStats{}, err
 	}
 	defer c.Close()
+	if _, err := c.ExecContext(ctx, "SET threads = "+convergeThreads); err != nil {
+		return ConvergeStats{}, err
+	}
+	defer func() {
+		if _, rerr := c.ExecContext(context.Background(), "SET threads = "+queryThreads); rerr != nil {
+			err = errors.Join(err, rerr)
+		}
+	}()
 	changes, err := diffLake(ctx, c, ix.dataDir)
 	if err != nil {
 		return ConvergeStats{}, err
