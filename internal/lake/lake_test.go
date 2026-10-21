@@ -28,25 +28,27 @@ func (fakeParser) Harness() string { return "test-fake" }
 
 var raceOnParse func()
 
-func (fakeParser) Parse(r io.Reader, src normalize.SourceMeta) ([]schema.Event, error) {
+func (fakeParser) Parse(r io.Reader, src normalize.SourceMeta, from normalize.State) ([]schema.Event, normalize.State, error) {
 	if hook := raceOnParse; hook != nil {
 		raceOnParse = nil
 		hook()
 	}
 	var out []schema.Event
 	sc := bufio.NewScanner(r)
-	for lineNo := 1; sc.Scan(); lineNo++ {
+	lineNo := from.LineNo
+	for sc.Scan() {
+		lineNo++
 		line := strings.TrimSpace(sc.Text())
 		if line == "" {
 			continue
 		}
 		parts := strings.Split(line, "|")
 		if len(parts) != 3 {
-			return nil, fmt.Errorf("test-fake: line %d: %q", lineNo, line)
+			return nil, from, fmt.Errorf("test-fake: line %d: %q", lineNo, line)
 		}
 		version, err := strconv.ParseUint(parts[1], 10, 64)
 		if err != nil {
-			return nil, err
+			return nil, from, err
 		}
 		out = append(out, schema.Event{
 			EventUID:          parts[0],
@@ -56,13 +58,13 @@ func (fakeParser) Parse(r io.Reader, src normalize.SourceMeta) ([]schema.Event, 
 			SourceName:        src.SourceName,
 			Harness:           src.Harness,
 			SourceFile:        src.SourceFile,
-			SourceLineNo:      uint64(lineNo),
+			SourceLineNo:      lineNo,
 			EventTS:           parts[2],
 			ContentTypes:      []string{"text"},
 			TokenUsageBuckets: map[string]uint64{"input": 3},
 		})
 	}
-	return out, sc.Err()
+	return out, normalize.State{LineNo: lineNo}, sc.Err()
 }
 
 func init() { normalize.Register(fakeParser{}) }
@@ -379,7 +381,7 @@ func TestImportClickHouse(t *testing.T) {
 	exportPath := filepath.Join(exportDir, "events-202401.parquet")
 	query := "SELECT " + selectList("alice", "chris-mbp", "2024-01-01 00:00:00.000") +
 		" FROM read_json(" + sqlQuote(ndjson.Name()) + ", format='newline_delimited', columns=" + columnTypes() + ")"
-	if err := copyParquet(db, query, exportPath); err != nil {
+	if _, err := copyParquet(db, query, exportPath, ""); err != nil {
 		t.Fatal(err)
 	}
 

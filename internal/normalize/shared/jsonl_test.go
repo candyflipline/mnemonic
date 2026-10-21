@@ -13,10 +13,10 @@ func TestParseJSONLSkippedLineKeepsOffsets(t *testing.T) {
 not json
 {"timestamp":"2026-01-01T00:00:01.000Z","type":"system"}`
 
-	events, err := claudecode.Parser{}.Parse(strings.NewReader(input), normalize.SourceMeta{
+	events, _, err := claudecode.Parser{}.Parse(strings.NewReader(input), normalize.SourceMeta{
 		SourceName: "golden-claude-code", Harness: "claude-code",
 		SourceFile: "/fixtures/claude-code/session.jsonl",
-	})
+	}, normalize.State{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,14 +1,18 @@
 package lake
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/candyflipline/mnemonic/internal/layout"
@@ -35,8 +39,9 @@ type manifest struct {
 	ZstSize int64 `json:"zst_size"`
 }
 
-// Run re-parses every raw source whose manifest UpdatedMs is newer than its
-// parquet (or has none) with normalize.For(harness), stamps author,
+// Run parses every raw source whose manifest UpdatedMs is newer than its
+// parquet (or has none) with normalize.For(harness), from the parquet's
+// checkpoint when it still holds and from the start otherwise, stamps author,
 // machine_id and ingested_at, dedupes event_uid by highest event_version, and
 // writes events/... via DuckDB COPY (zstd) to a temp file then rename. A
 // harness without a parser counts as RawOnly. A second run rewrites 0.
@@ -171,28 +176,77 @@ func readManifest(rawDir, mpath string) (manifest, layout.Key, error) {
 	return src, key, nil
 }
 
+// checkpoint is where a lake file's parse stopped: the raw's compressed
+// length and its SHA-256 at that point, and the parser State there. It lives
+// in the parquet's key-value metadata, so the rows and the position they were
+// parsed to are replaced by one rename. A file parsed by another binary or
+// under another source identity, or whose raw prefix no longer hashes the
+// same (a replace), is parsed whole again.
+type checkpoint struct {
+	Binary     string          `json:"binary"`
+	Harness    string          `json:"harness"`
+	SourceName string          `json:"source_name"`
+	SourceFile string          `json:"source_file"`
+	ZstSize    int64           `json:"zst_size"`
+	ZstSHA256  string          `json:"zst_sha256"`
+	State      normalize.State `json:"state"`
+}
+
+const checkpointKey = "mnemonic_lake"
+
+var binaryID = sync.OnceValue(func() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	f, err := os.Open(exe)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))
+})
+
+// parseAndWrite parses the raw bytes the parquet's checkpoint has not seen,
+// from the checkpoint's State, and rewrites the parquet as its earlier rows
+// minus any event_uid the new rows supersede, plus the new rows. Without a
+// usable checkpoint it parses the whole raw.
 func parseAndWrite(db *sql.DB, dataDir string, key layout.Key, src manifest, parser normalize.Parser, ingestedAt string) (int64, error) {
 	raw, err := os.Open(key.Raw(dataDir))
 	if err != nil {
 		return 0, err
 	}
 	defer raw.Close()
-	zr, err := zstd.NewReader(io.LimitReader(raw, src.ZstSize))
+	eventsPath := key.Events(dataDir)
+	next := checkpoint{Binary: binaryID(), Harness: src.Harness, SourceName: src.SourceName, SourceFile: src.Path}
+	from, h, err := resume(db, eventsPath, raw, src, next)
+	if err != nil {
+		return 0, err
+	}
+	tail := io.TeeReader(io.LimitReader(raw, src.ZstSize-from.ZstSize), h)
+	zr, err := zstd.NewReader(tail)
 	if err != nil {
 		return 0, err
 	}
 	defer zr.Close()
-	events, err := parser.Parse(zr, normalize.SourceMeta{
+	events, state, err := parser.Parse(zr, normalize.SourceMeta{
 		SourceName: src.SourceName,
 		Harness:    src.Harness,
 		SourceFile: src.Path,
-	})
+	}, from.State)
 	if err != nil {
 		return 0, err
 	}
+	if _, err := io.Copy(io.Discard, tail); err != nil {
+		return 0, err
+	}
 	events = dedupe(events)
+	next.ZstSize, next.ZstSHA256, next.State = src.ZstSize, hex.EncodeToString(h.Sum(nil)), state
 
-	eventsPath := key.Events(dataDir)
 	if err := os.MkdirAll(filepath.Dir(eventsPath), 0o755); err != nil {
 		return 0, err
 	}
@@ -214,10 +268,51 @@ func parseAndWrite(db *sql.DB, dataDir string, key layout.Key, src manifest, par
 	}
 	query := fmt.Sprintf("SELECT %s FROM read_json(%s, format='newline_delimited', columns=%s)",
 		selectList(key.Author, key.Machine, ingestedAt), sqlQuote(tmpName), columnTypes())
-	if err := copyParquet(db, query, eventsPath); err != nil {
+	if from.ZstSize > 0 {
+		query = fmt.Sprintf("WITH fresh AS (%s) SELECT * FROM read_parquet(%s, hive_partitioning=false) "+
+			"WHERE event_uid NOT IN (SELECT event_uid FROM fresh) UNION ALL SELECT * FROM fresh",
+			query, sqlQuote(eventsPath))
+	}
+	cp, err := json.Marshal(next)
+	if err != nil {
 		return 0, err
 	}
-	return int64(len(events)), nil
+	return copyParquet(db, query, eventsPath, string(cp))
+}
+
+// resume reads the parquet's checkpoint and, when it belongs to this binary
+// and source and the raw's first ZstSize bytes still hash to it, returns it
+// with raw positioned at ZstSize and h holding the hash of those bytes.
+// Otherwise it returns the zero checkpoint, raw rewound and h empty.
+func resume(db *sql.DB, eventsPath string, raw *os.File, src manifest, want checkpoint) (checkpoint, hash.Hash, error) {
+	h := sha256.New()
+	if cp, ok := readCheckpoint(db, eventsPath); ok &&
+		cp.Binary != "" && cp.Binary == want.Binary && cp.Harness == want.Harness &&
+		cp.SourceName == want.SourceName && cp.SourceFile == want.SourceFile &&
+		cp.ZstSize <= src.ZstSize {
+		if _, err := io.CopyN(h, raw, cp.ZstSize); err == nil && hex.EncodeToString(h.Sum(nil)) == cp.ZstSHA256 {
+			return cp, h, nil
+		}
+		h.Reset()
+		if _, err := raw.Seek(0, io.SeekStart); err != nil {
+			return checkpoint{}, nil, err
+		}
+	}
+	return checkpoint{}, h, nil
+}
+
+func readCheckpoint(db *sql.DB, eventsPath string) (checkpoint, bool) {
+	var cp checkpoint
+	if _, err := os.Stat(eventsPath); err != nil {
+		return cp, false
+	}
+	var b []byte
+	err := db.QueryRow(fmt.Sprintf("SELECT value FROM parquet_kv_metadata(%s) WHERE decode(key) = %s",
+		sqlQuote(eventsPath), sqlQuote(checkpointKey))).Scan(&b)
+	if err != nil || json.Unmarshal(b, &cp) != nil {
+		return checkpoint{}, false
+	}
+	return cp, true
 }
 
 // restampIfSuperseded re-reads the manifest after the parquet rename: when a
@@ -316,25 +411,30 @@ func importHarness(db *sql.DB, export, harness, out, author string, live map[str
 	if len(live) > 0 {
 		query += " AND source_file NOT IN (SELECT source_file FROM live_files)"
 	}
-	if err := copyParquet(db, query, out); err != nil {
-		return 0, err
-	}
-	var n int64
-	if err := db.QueryRow(fmt.Sprintf("SELECT count(*) FROM read_parquet(%s)", sqlQuote(out))).Scan(&n); err != nil {
-		return 0, err
-	}
-	return n, nil
+	return copyParquet(db, query, out, "")
 }
 
-func open() (*sql.DB, error) { return sql.Open("duckdb", "") }
+func open() (*sql.DB, error) { return sql.Open("duckdb", "?threads=1") }
 
-func copyParquet(db *sql.DB, query, outPath string) error {
+// copyParquet writes query to outPath through a temp file and a rename, with
+// kv, when set, as the checkpoint metadata, and returns the rows written.
+func copyParquet(db *sql.DB, query, outPath, kv string) (int64, error) {
 	tmp := outPath + ".tmp"
-	if _, err := db.Exec(fmt.Sprintf("COPY (%s) TO %s (FORMAT parquet, COMPRESSION zstd)", query, sqlQuote(tmp))); err != nil {
-		os.Remove(tmp)
-		return err
+	opts := "FORMAT parquet, COMPRESSION zstd"
+	if kv != "" {
+		opts += fmt.Sprintf(", KV_METADATA {%s: %s}", checkpointKey, sqlQuote(kv))
 	}
-	return os.Rename(tmp, outPath)
+	res, err := db.Exec(fmt.Sprintf("COPY (%s) TO %s (%s)", query, sqlQuote(tmp), opts))
+	if err != nil {
+		os.Remove(tmp)
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		os.Remove(tmp)
+		return 0, err
+	}
+	return n, os.Rename(tmp, outPath)
 }
 
 // selectList is the lake's column order and types: every schema.EventColumns

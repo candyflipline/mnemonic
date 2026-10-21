@@ -15,8 +15,8 @@ type Parser struct{}
 
 func (Parser) Harness() string { return "claude-code" }
 
-func (Parser) Parse(r io.Reader, src normalize.SourceMeta) ([]schema.Event, error) {
-	return shared.ParseJSONL(r, src, claudeSource{})
+func (Parser) Parse(r io.Reader, src normalize.SourceMeta, from normalize.State) ([]schema.Event, normalize.State, error) {
+	return shared.ParseJSONL(r, src, from, claudeSource{})
 }
 
 func init() { normalize.Register(Parser{}) }

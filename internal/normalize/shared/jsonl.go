@@ -8,20 +8,21 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-// ParseJSONL walks one whole JSONL source: line_no is the 1-based line index
-// and source_offset the byte offset of the line start, both counted over every
-// line including the blank and invalid-JSON ones that get skipped — the offset
-// advances before any skip so later lines keep their true positions. Session,
-// model and cwd hints thread from one line's outcome into the next and die
-// with the call; only a reader failure fails the file.
-func ParseJSONL(r io.Reader, src normalize.SourceMeta, s Source) ([]schema.Event, error) {
+// ParseJSONL walks a JSONL source from the State its earlier lines ended in:
+// line_no is the 1-based line index and source_offset the byte offset of the
+// line start, both counted over every line including the blank and
+// invalid-JSON ones that get skipped — the offset advances before any skip so
+// later lines keep their true positions. Session, model and cwd hints thread
+// from one line's outcome into the next and out through the returned State;
+// only a reader failure fails the file.
+func ParseJSONL(r io.Reader, src normalize.SourceMeta, from normalize.State, s Source) ([]schema.Event, normalize.State, error) {
 	body, err := io.ReadAll(r)
 	if err != nil {
-		return nil, err
+		return nil, from, err
 	}
 	var events []schema.Event
-	var sessionHint, modelHint, cwdHint string
-	rest, offset, lineNo := body, uint64(0), uint64(0)
+	sessionHint, modelHint, cwdHint := from.SessionHint, from.ModelHint, from.CwdHint
+	rest, offset, lineNo := body, from.Offset, from.LineNo
 	for len(rest) > 0 {
 		var raw []byte
 		if i := bytes.IndexByte(rest, '\n'); i >= 0 {
@@ -54,5 +55,8 @@ func ParseJSONL(r io.Reader, src normalize.SourceMeta, s Source) ([]schema.Event
 			events = append(events, row.Event)
 		}
 	}
-	return events, nil
+	return events, normalize.State{
+		LineNo: lineNo, Offset: offset,
+		SessionHint: sessionHint, ModelHint: modelHint, CwdHint: cwdHint,
+	}, nil
 }

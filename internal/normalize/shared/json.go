@@ -89,9 +89,16 @@ func writeCompact(b *strings.Builder, v JSON) {
 // and the C0 controls. Everything else, including non-ASCII, passes through
 // as UTF-8.
 func writeJSONString(b *strings.Builder, s string) {
+	b.Grow(len(s) + 2)
 	b.WriteByte('"')
+	start := 0
 	for i := 0; i < len(s); i++ {
 		c := s[i]
+		if c >= 0x20 && c != '"' && c != '\\' {
+			continue
+		}
+		b.WriteString(s[start:i])
+		start = i + 1
 		switch {
 		case c == '"':
 			b.WriteString(`\"`)
@@ -107,15 +114,14 @@ func writeJSONString(b *strings.Builder, s string) {
 			b.WriteString(`\b`)
 		case c == '\f':
 			b.WriteString(`\f`)
-		case c < 0x20:
+		default:
 			const hex = "0123456789abcdef"
 			b.WriteString(`\u00`)
 			b.WriteByte(hex[c>>4])
 			b.WriteByte(hex[c&0xf])
-		default:
-			b.WriteByte(c)
 		}
 	}
+	b.WriteString(s[start:])
 	b.WriteByte('"')
 }
 
