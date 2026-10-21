@@ -140,7 +140,11 @@ func cycle(ctx context.Context, dataDir string, ix *cache.Index, reason string, 
 	start := time.Now()
 	ls, lerr := lake.Run(dataDir, pushPending, sweep)
 	lakeWall := time.Since(start)
-	cs, cerr := ix.Converge(ctx)
+	failed := cache.SkipFailed
+	if reason == "reconcile" {
+		failed = cache.RetryFailed
+	}
+	cs, cerr := ix.Converge(ctx, failed)
 	log.Printf("cycle %s: lake sources=%d rewrote=%d unchanged=%d raw_only=%d failed=%d stale=%d events=%d in %s err=%v; "+
 		"converge files=%d batches=%d inserted=%d deleted=%d moved=%d reordered=%d sessions=%d in %s err=%v; wall %s",
 		reason, ls.Sources, ls.Rewrote, ls.Unchanged, ls.RawOnly, ls.Failed, ls.Stale, ls.Events, lakeWall.Round(time.Millisecond), lerr,

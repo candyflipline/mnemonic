@@ -34,7 +34,7 @@ func TestConverge(t *testing.T) {
 		return s
 	}
 
-	st, err := ix.Converge(ctx)
+	st, err := ix.Converge(ctx, RetryFailed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestConverge(t *testing.T) {
 	if err := cachetest.Source(dataDir, claude, "codex"); err != nil {
 		t.Fatal(err)
 	}
-	st, err = ix.Converge(ctx)
+	st, err = ix.Converge(ctx, RetryFailed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestConverge(t *testing.T) {
 		t.Fatalf("rewrite counts: %s", got)
 	}
 
-	st, err = ix.Converge(ctx)
+	st, err = ix.Converge(ctx, RetryFailed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestConvergeKeepsOneDocPerUID(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ix.Close()
-	if _, err := ix.Converge(ctx); err != nil {
+	if _, err := ix.Converge(ctx, RetryFailed); err != nil {
 		t.Fatal(err)
 	}
 	for _, q := range []string{
@@ -93,7 +93,7 @@ func TestConvergeKeepsOneDocPerUID(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	st, err := ix.Converge(ctx)
+	st, err := ix.Converge(ctx, RetryFailed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestConvergeReparseKeepsRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ix.Close()
-	if _, err := ix.Converge(ctx); err != nil {
+	if _, err := ix.Converge(ctx, RetryFailed); err != nil {
 		t.Fatal(err)
 	}
 	path := layout.Key{Author: cachetest.Author, Machine: cachetest.Machine, Harness: "claude-code",
@@ -129,7 +129,7 @@ func TestConvergeReparseKeepsRows(t *testing.T) {
 	if err := os.Rename(path+".tmp", path); err != nil {
 		t.Fatal(err)
 	}
-	st, err := ix.Converge(ctx)
+	st, err := ix.Converge(ctx, RetryFailed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestConvergeRefreshesSourceRows(t *testing.T) {
 	var got string
 	for _, m := range [][2]int64{{10, 1000}, {99999, 2000}} {
 		write(m[0], m[1])
-		if _, err := ix.Converge(ctx); err != nil {
+		if _, err := ix.Converge(ctx, RetryFailed); err != nil {
 			t.Fatal(err)
 		}
 		if err := ix.DB().QueryRow("SELECT string_agg(size || '/' || updated_ms, ' ') FROM sources").Scan(&got); err != nil {
@@ -216,5 +216,37 @@ func TestConvergeRefreshesSourceRows(t *testing.T) {
 	}
 	if got != "99999/2000" {
 		t.Fatalf("sources: %s", got)
+	}
+}
+
+func TestConvergeHoldsFailedBatchUntilReconcile(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	if err := cachetest.Lake(dataDir, "codex", "claude_code"); err != nil {
+		t.Fatal(err)
+	}
+	ix, err := Open(dataDir, Options{MemoryLimit: "1GB", FlagsSQL: "0::USMALLINT"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ix.Close()
+	poison := layout.Key{Author: cachetest.Author, Machine: cachetest.Machine, Harness: "codex", SrcID: wire.SrcID("/poison")}.Events(dataDir)
+	if _, err := ix.DB().Exec("COPY (SELECT 1 AS x) TO " + sqlStr(poison) + " (FORMAT parquet)"); err != nil {
+		t.Fatal(err)
+	}
+	events := func() (n int) {
+		if err := ix.DB().QueryRow("SELECT count(*) FROM events").Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if _, err := ix.Converge(ctx, SkipFailed); err == nil || events() != 0 {
+		t.Fatalf("poisoned batch: err %v, %d events", err, events())
+	}
+	if st, err := ix.Converge(ctx, SkipFailed); err != nil || st.Files != 0 {
+		t.Fatalf("push after a failed batch: %+v err %v", st, err)
+	}
+	if _, err := ix.Converge(ctx, RetryFailed); err == nil || events() != 21 {
+		t.Fatalf("reconcile: err %v, %d events", err, events())
 	}
 }

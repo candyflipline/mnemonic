@@ -34,7 +34,15 @@ type Index struct {
 	db      *sql.DB
 	dataDir string
 	flags   string
+	failed  map[string]lakeFile
 }
+
+type Failed int
+
+const (
+	SkipFailed Failed = iota
+	RetryFailed
+)
 
 type ConvergeStats struct {
 	Files, Batches                      int
@@ -80,7 +88,7 @@ func Open(dataDir string, o Options) (*Index, error) {
 			return nil, err
 		}
 		if db != nil {
-			return &Index{db: db, dataDir: dataDir, flags: o.FlagsSQL}, nil
+			return &Index{db: db, dataDir: dataDir, flags: o.FlagsSQL, failed: map[string]lakeFile{}}, nil
 		}
 		old, err := filepath.Glob(path + ".*.broken*")
 		if err != nil {
@@ -121,7 +129,7 @@ func Open(dataDir string, o Options) (*Index, error) {
 		db.Close()
 		return nil, err
 	}
-	return &Index{db: db, dataDir: dataDir, flags: o.FlagsSQL}, nil
+	return &Index{db: db, dataDir: dataDir, flags: o.FlagsSQL, failed: map[string]lakeFile{}}, nil
 }
 
 func openCurrent(path, flagsSQL string, setup []string) (*sql.DB, error) {
@@ -208,7 +216,7 @@ type change struct {
 	rows int64
 }
 
-func (ix *Index) Converge(ctx context.Context) (ConvergeStats, error) {
+func (ix *Index) Converge(ctx context.Context, f Failed) (ConvergeStats, error) {
 	c, err := ix.db.Conn(ctx)
 	if err != nil {
 		return ConvergeStats{}, err
@@ -218,7 +226,23 @@ func (ix *Index) Converge(ctx context.Context) (ConvergeStats, error) {
 	if err != nil {
 		return ConvergeStats{}, err
 	}
-	st, errs := ix.apply(ctx, c, changes)
+	var fresh, held []change
+	failed := map[string]lakeFile{}
+	for _, ch := range changes {
+		if ix.failed[ch.file.path] == ch.file {
+			held = append(held, ch)
+			failed[ch.file.path] = ch.file
+		} else {
+			fresh = append(fresh, ch)
+		}
+	}
+	ix.failed = failed
+	st, errs := ix.apply(ctx, c, batches(fresh, batchRows))
+	if f == RetryFailed {
+		rst, rerrs := ix.apply(ctx, c, bySource(held))
+		st.add(rst)
+		errs = append(errs, rerrs...)
+	}
 	if err := syncManifests(ctx, c, ix.dataDir); err != nil {
 		errs = append(errs, err)
 	}
@@ -228,11 +252,18 @@ func (ix *Index) Converge(ctx context.Context) (ConvergeStats, error) {
 	return st, errors.Join(errs...)
 }
 
-func (ix *Index) apply(ctx context.Context, c *sql.Conn, changes []change) (ConvergeStats, []error) {
+func (ix *Index) apply(ctx context.Context, c *sql.Conn, bs [][]change) (ConvergeStats, []error) {
 	var st ConvergeStats
 	var errs []error
-	for _, b := range batches(changes, batchRows) {
+	for _, b := range bs {
 		bst, err := applyBatch(ctx, c, ix.flags, ix.dataDir, b)
+		for _, ch := range b {
+			if err != nil {
+				ix.failed[ch.file.path] = ch.file
+			} else {
+				delete(ix.failed, ch.file.path)
+			}
+		}
 		if err != nil {
 			errs = append(errs, fmt.Errorf("batch of %d files from %s: %w", len(b), b[0].file.path, err))
 			continue
@@ -348,6 +379,17 @@ func batches(changes []change, max int64) [][]change {
 	}
 	if len(cur) > 0 {
 		out = append(out, cur)
+	}
+	return out
+}
+
+func bySource(changes []change) [][]change {
+	var out [][]change
+	for i, ch := range changes {
+		if i == 0 || sourceOf(changes[i-1].file.path) != sourceOf(ch.file.path) {
+			out = append(out, nil)
+		}
+		out[len(out)-1] = append(out[len(out)-1], ch)
 	}
 	return out
 }
