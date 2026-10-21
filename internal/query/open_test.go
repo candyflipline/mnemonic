@@ -5,9 +5,6 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-
-	"github.com/candyflipline/mnemonic/internal/cache"
-	"github.com/candyflipline/mnemonic/internal/cache/cachetest"
 )
 
 func TestOpenArgValidation(t *testing.T) {
@@ -465,18 +462,7 @@ const (
 
 func TestOpenFixture(t *testing.T) {
 	ctx := context.Background()
-	dataDir := t.TempDir()
-	if err := cachetest.Lake(dataDir, "codex", "claude_code"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := cache.Build(dataDir); err != nil {
-		t.Fatal(err)
-	}
-	db, _, err := cache.OpenNewest(dataDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db := lakeDB(t, "codex", "claude_code")
 	tool := openTool{}
 	sessionID := formatSessionID(fixtureCodexSession)
 	turnID := formatTurnID(fixtureCodexSession, 1)

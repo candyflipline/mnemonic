@@ -6,9 +6,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/candyflipline/mnemonic/internal/cache"
-	"github.com/candyflipline/mnemonic/internal/cache/cachetest"
 )
 
 func TestParseSearchSessionsArgsCanonicalizes(t *testing.T) {
@@ -226,18 +223,7 @@ func TestFormatSearchSessionsText(t *testing.T) {
 
 func TestSearchSessionsFixture(t *testing.T) {
 	ctx := context.Background()
-	dataDir := t.TempDir()
-	if err := cachetest.Lake(dataDir, "codex", "claude_code"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := cache.Build(dataDir); err != nil {
-		t.Fatal(err)
-	}
-	db, _, err := cache.OpenNewest(dataDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db := lakeDB(t, "codex", "claude_code")
 
 	tool := searchSessionsTool{}
 
