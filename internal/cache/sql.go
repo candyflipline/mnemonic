@@ -163,4 +163,4 @@ const sourcesDDL = `CREATE TABLE sources (
     events UBIGINT NOT NULL
 )`
 
-var lakeFileRe = regexp.MustCompile(`author=([^/]*)/machine=([^/]*)/harness=([^/]*)/([0-9a-f]+)\.parquet$`)
+var lakeFileRe = regexp.MustCompile(`author=([^/]*)/machine=([^/]*)/harness=([^/]*)/([0-9a-f]+)(?:\.tail)?\.parquet$`)
