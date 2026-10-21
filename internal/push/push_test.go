@@ -622,6 +622,40 @@ func TestWatchSendsOnlyWhatFileEventsName(t *testing.T) {
 	}
 }
 
+func TestWatchReconcileSkipsLegacyEntryUnread(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFile(t, dir, "a.jsonl", "head line\n"+strings.Repeat("filler line\n", 99))
+	rs := newRealStore(t)
+	if _, err := Run(context.Background(), testConfig(rs.srv.URL, dir), identityRedactor{}, rs.srv.Client()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	resetRawEnd(t, rs.dataDir, p)
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(p, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	tr := &countingTransport{base: rs.srv.Client().Transport}
+	red := &countingRedactor{}
+	w := newWatcher(testConfig(rs.srv.URL, dir), red, &http.Client{Transport: tr})
+	n, err := newNotifier()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n.close()
+	w.note = n
+	st, err := w.reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if want := (Stats{Scanned: 1, Unchanged: 1}); st != want {
+		t.Fatalf("stats = %+v, want %+v", st, want)
+	}
+	if got, b := tr.since(0), red.n.Load(); got != "GET" || b != 0 {
+		t.Fatalf("reconcile: requests %q, redacted %d bytes; want %q and 0", got, b, "GET")
+	}
+}
+
 func TestLaunchdPlistLints(t *testing.T) {
 	plutil, err := exec.LookPath("plutil")
 	if err != nil {
