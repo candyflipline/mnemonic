@@ -228,14 +228,14 @@ func ensureArchive(dataDir, spill string, files []lakeFile) (string, error) {
 }
 
 func archiveStmts(src string) []string {
-	stmts := []string{eventsDDL("events"), docsDDL("docs"), postingsDDL("postings")}
+	stmts := []string{eventsDDL("events", ""), docsDDL("docs"), postingsDDL("postings")}
 	if src == "" {
 		return stmts
 	}
 	stmts = append(stmts,
 		"CREATE TEMP TABLE w AS SELECT filename, file_row_number, "+
 			"cast(row_number() OVER () AS UINTEGER) AS doc FROM ("+winnersSQL(src)+")",
-		insertEventsSQL("events", src),
+		insertEventsSQL("events", src, ""),
 		"DROP TABLE w")
 	return append(stmts, insertPostingsSQL("events", "docs", "postings")...)
 }
@@ -245,7 +245,7 @@ func buildCache(path, spill, archPath, dataDir string, live []lakeFile) (Stats, 
 	err := withBuildConn(path, spill, archPath, func(ctx context.Context, c *sql.Conn) error {
 		stmts := []string{
 			"CREATE TABLE archive_ref AS SELECT " + sqlStr(filepath.Base(archPath)) + " AS name",
-			eventsDDL("live_events"), docsDDL("live_docs"), postingsDDL("live_postings"),
+			eventsDDL("live_events", ""), docsDDL("live_docs"), postingsDDL("live_postings"),
 			"CREATE TABLE dropped (doc UINTEGER NOT NULL)",
 		}
 		if len(live) > 0 {
@@ -258,7 +258,7 @@ func buildCache(path, spill, archPath, dataDir string, live []lakeFile) (Stats, 
 				"INSERT INTO dropped SELECT a.doc FROM arch.events a JOIN lw ON a.event_uid = lw.event_uid",
 				`CREATE TEMP TABLE w AS SELECT filename, file_row_number,
   cast((SELECT coalesce(max(doc), 0) FROM arch.events) + row_number() OVER () AS UINTEGER) AS doc FROM lw`,
-				insertEventsSQL("live_events", src),
+				insertEventsSQL("live_events", src, ""),
 				"DROP TABLE w", "DROP TABLE lw")
 			stmts = append(stmts, insertPostingsSQL("live_events", "live_docs", "live_postings")...)
 		}
@@ -352,10 +352,14 @@ func firstLine(s string) string {
 // later connections in the process's local zone and event_time-derived views
 // would drift between queries. Views compute event_time at query time, so the
 // build and every reader must agree on the zone.
-func newDB(dsn string) (*sql.DB, error) {
+func newDB(dsn string, setup ...string) (*sql.DB, error) {
 	c, err := duckdb.NewConnector(dsn, func(execer driver.ExecerContext) error {
-		_, err := execer.ExecContext(context.Background(), `SET TimeZone='UTC'`, nil)
-		return err
+		for _, s := range append([]string{`SET TimeZone='UTC'`}, setup...) {
+			if _, err := execer.ExecContext(context.Background(), s, nil); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -383,7 +387,7 @@ func winnersSQL(src string) string {
 
 var heavyColumns = map[string]bool{"payload_json": true, "token_usage_json": true}
 
-func eventsDDL(table string) string {
+func eventsDDL(table, extra string) string {
 	var b strings.Builder
 	b.WriteString("CREATE TABLE " + table + " (doc UINTEGER NOT NULL")
 	for _, c := range schema.EventColumns {
@@ -399,7 +403,7 @@ func eventsDDL(table string) string {
   lake_file VARCHAR, lake_row UBIGINT, emission_index UINTEGER,
   tool_io_input_json VARCHAR USING COMPRESSION zstd, tool_io_input_preview VARCHAR,
   tool_io_output_preview VARCHAR, tool_io_project_id VARCHAR, tool_io_repo_rel_path VARCHAR,
-  tool_io_worktree_root VARCHAR, meta_json VARCHAR USING COMPRESSION zstd)`)
+  tool_io_worktree_root VARCHAR, meta_json VARCHAR USING COMPRESSION zstd` + extra + `)`)
 	return b.String()
 }
 
@@ -414,7 +418,7 @@ func eventsDDL(table string) string {
 //     (the only rows session titles read).
 //
 // The contains() guards skip JSON parsing on the rows that cannot match.
-func insertEventsSQL(table, src string) string {
+func insertEventsSQL(table, src, extra string) string {
 	cols := make([]string, 0, len(schema.EventColumns))
 	for _, c := range schema.EventColumns {
 		if !heavyColumns[c.Name] {
@@ -436,7 +440,7 @@ func insertEventsSQL(table, src string) string {
   ` + tio("repo_rel_path") + `,
   ` + tio("worktree_root") + `,
   CASE WHEN event_kind = 'session_meta' OR (source_name = 'omp' AND contains(payload_json, 'title')
-    AND json_extract_string(payload_json, '$.type') IN ('title', 'title_change')) THEN payload_json END
+    AND json_extract_string(payload_json, '$.type') IN ('title', 'title_change')) THEN payload_json END` + extra + `
 FROM (SELECT *, CASE WHEN tool_phase = 'request' AND contains(payload_json, 'moraine_tool_io')
     THEN json_extract(payload_json, '$.moraine_tool_io') END AS tio
   FROM ` + src + `) r
@@ -592,12 +596,10 @@ func insertSources(ctx context.Context, c *sql.Conn, dataDir string, live []lake
 				rows.Close()
 				return err
 			}
-			m := lakeFileRe.FindStringSubmatch(filepath.ToSlash(name))
-			if m == nil {
+			if err := addSourceCount(counts, name, n); err != nil {
 				rows.Close()
-				return fmt.Errorf("lake parquet outside the source layout: %s", name)
+				return err
 			}
-			counts[sourceKey{m[1], m[2], m[3], m[4]}] = n
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -605,12 +607,26 @@ func insertSources(ctx context.Context, c *sql.Conn, dataDir string, live []lake
 		}
 		rows.Close()
 	}
+	return writeSources(ctx, c, dataDir, "sources", counts)
+}
 
+func addSourceCount(counts map[sourceKey]int64, lakePath string, n int64) error {
+	m := lakeFileRe.FindStringSubmatch(filepath.ToSlash(lakePath))
+	if m == nil {
+		return fmt.Errorf("lake parquet outside the source layout: %s", lakePath)
+	}
+	counts[sourceKey{m[1], m[2], m[3], m[4]}] = n
+	return nil
+}
+
+// writeSources inserts one row per raw manifest into table, with the event
+// count counts holds for its lake file.
+func writeSources(ctx context.Context, c *sql.Conn, dataDir, table string, counts map[sourceKey]int64) error {
 	matches, err := filepath.Glob(filepath.Join(dataDir, "raw", "author=*", "machine=*", "harness=*", "*.json"))
 	if err != nil {
 		return err
 	}
-	stmt, err := c.PrepareContext(ctx, "INSERT INTO sources VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+	stmt, err := c.PrepareContext(ctx, "INSERT INTO "+table+" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 	if err != nil {
 		return err
 	}

@@ -24,20 +24,24 @@ const (
 )
 
 func fixtureDB(t *testing.T) *sql.DB {
+	return lakeDB(t, "codex", "claude_code", "cursor", "cursor_sqlite")
+}
+
+func lakeDB(t *testing.T, goldens ...string) *sql.DB {
 	t.Helper()
 	dataDir := t.TempDir()
-	if err := cachetest.Lake(dataDir, "codex", "claude_code", "cursor", "cursor_sqlite"); err != nil {
+	if err := cachetest.Lake(dataDir, goldens...); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cache.Build(dataDir); err != nil {
-		t.Fatal(err)
-	}
-	db, _, err := cache.OpenNewest(dataDir)
+	ix, err := cache.Open(dataDir, cache.Options{MemoryLimit: "1GB", FlagsSQL: SearchFlagsSQL()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { db.Close() })
-	return db
+	t.Cleanup(func() { ix.Close() })
+	if _, err := ix.Converge(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return ix.DB()
 }
 
 func callTool(t *testing.T, db *sql.DB, tool Tool, args string) (any, string) {

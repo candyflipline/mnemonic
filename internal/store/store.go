@@ -30,9 +30,17 @@ type manifestBody struct {
 
 type Store struct {
 	DataDir string
+	Wake    chan<- struct{}
 
 	mu    sync.Mutex
 	locks map[layout.Key]*sync.Mutex
+}
+
+func (s *Store) wake() {
+	select {
+	case s.Wake <- struct{}{}:
+	default:
+	}
 }
 
 func (s *Store) lockKey(k layout.Key) func() {
@@ -187,6 +195,7 @@ func (s *Store) replace(w http.ResponseWriter, k layout.Key, headHash, sourceNam
 		http.Error(w, "write manifest", http.StatusInternalServerError)
 		return
 	}
+	s.wake()
 	writeJSON(w, http.StatusOK, m.Source)
 }
 
@@ -229,6 +238,7 @@ func (s *Store) append(w http.ResponseWriter, k layout.Key, offset int64, headHa
 		http.Error(w, "write manifest", http.StatusInternalServerError)
 		return
 	}
+	s.wake()
 	writeJSON(w, http.StatusOK, m.Source)
 }
 

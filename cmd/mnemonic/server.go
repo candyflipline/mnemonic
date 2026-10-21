@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sync"
 	"syscall"
 	"time"
 
@@ -48,77 +47,25 @@ func serve(args []string) error {
 		authors[t.SHA256] = t.Author
 	}
 
-	// The queries read one DuckDB file; the rebuild loop swaps it in when a
-	// newer cache appears. The old handle stays valid for in-flight calls
-	// until the swap is done.
-	var dbMu sync.Mutex
-	var db *sql.DB
-	var dbPath string
-	open := func() (*sql.DB, error) {
-		dbMu.Lock()
-		defer dbMu.Unlock()
-		if db != nil {
-			return db, nil
-		}
-		conn, path, err := cache.OpenNewest(cfg.DataDir)
-		if err != nil {
-			return nil, err
-		}
-		db, dbPath = conn, path
-		return db, nil
+	ix, err := cache.Open(cfg.DataDir, cache.Options{MemoryLimit: "1GB", FlagsSQL: query.SearchFlagsSQL()})
+	if err != nil {
+		return err
 	}
-	rebuild := func() {
-		if stats, err := lake.Run(cfg.DataDir); err != nil {
-			log.Printf("lake: %v", err)
-		} else {
-			log.Printf("lake: sources=%d rewrote=%d unchanged=%d raw_only=%d failed=%d events=%d",
-				stats.Sources, stats.Rewrote, stats.Unchanged, stats.RawOnly, stats.Failed, stats.Events)
-		}
-		if stats, err := cache.Build(cfg.DataDir); err != nil {
-			log.Printf("cache: %v", err)
-		} else {
-			log.Printf("cache: %s lake_files=%d events=%d docs=%d postings=%d",
-				stats.Path, stats.LakeFiles, stats.Events, stats.Docs, stats.Postings)
-		}
-		newest, err := cache.NewestPath(cfg.DataDir)
-		dbMu.Lock()
-		defer dbMu.Unlock()
-		if err == nil && newest == dbPath && db != nil {
-			return
-		}
-		conn, path, err := cache.OpenNewest(cfg.DataDir)
-		if err != nil {
-			log.Printf("cache: open newest: %v", err)
-			return
-		}
-		old := db
-		db, dbPath = conn, path
-		if old != nil {
-			old.Close()
-		}
-	}
+	defer ix.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	wake := make(chan struct{}, 1)
+	looped := make(chan struct{})
 	go func() {
-		rebuild()
-		ticker := time.NewTicker(120 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				rebuild()
-			}
-		}
+		defer close(looped)
+		convergeLoop(ctx, cfg.DataDir, ix, wake)
+	}()
+	defer func() {
+		stop()
+		<-looped
 	}()
 
-	mux := http.NewServeMux()
-	st := store.Store{DataDir: cfg.DataDir}
-	mux.Handle("/v1/", auth.Middleware(authors)(st.Handler()))
-	mux.Handle("/mcp", auth.Middleware(authors)(mcp.Handler(open, query.Lookup)))
-	srv := &http.Server{Addr: cfg.Listen, Handler: mux}
+	srv := &http.Server{Addr: cfg.Listen, Handler: serveMux(cfg.DataDir, authors, ix, wake)}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -132,6 +79,71 @@ func serve(args []string) error {
 		return fmt.Errorf("listen on %s: %w", cfg.Listen, err)
 	}
 	return nil
+}
+
+func serveMux(dataDir string, authors map[string]string, ix *cache.Index, wake chan<- struct{}) http.Handler {
+	db := ix.DB()
+	mux := http.NewServeMux()
+	st := &store.Store{DataDir: dataDir, Wake: wake}
+	mux.Handle("/v1/", auth.Middleware(authors)(st.Handler()))
+	mux.Handle("/mcp", auth.Middleware(authors)(mcp.Handler(func() (*sql.DB, error) { return db, nil }, query.Lookup)))
+	return mux
+}
+
+const (
+	settleQuiet = time.Second
+	settleMax   = 3 * time.Second
+	reconcile   = 5 * time.Minute
+)
+
+func convergeLoop(ctx context.Context, dataDir string, ix *cache.Index, wake <-chan struct{}) {
+	cycle(ctx, dataDir, ix, "boot")
+	for {
+		reason := "reconcile"
+		select {
+		case <-ctx.Done():
+			return
+		case <-wake:
+			reason = "put"
+			settle(ctx, wake)
+		case <-time.After(reconcile):
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		cycle(ctx, dataDir, ix, reason)
+	}
+}
+
+func settle(ctx context.Context, wake <-chan struct{}) {
+	quiet := time.NewTimer(settleQuiet)
+	defer quiet.Stop()
+	limit := time.NewTimer(settleMax)
+	defer limit.Stop()
+	for {
+		select {
+		case <-wake:
+			quiet.Reset(settleQuiet)
+		case <-quiet.C:
+			return
+		case <-limit.C:
+			return
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func cycle(ctx context.Context, dataDir string, ix *cache.Index, reason string) {
+	start := time.Now()
+	ls, lerr := lake.Run(dataDir)
+	lakeWall := time.Since(start)
+	cs, cerr := ix.Converge(ctx)
+	log.Printf("cycle %s: lake sources=%d rewrote=%d unchanged=%d raw_only=%d failed=%d events=%d in %s err=%v; "+
+		"converge files=%d batches=%d inserted=%d deleted=%d moved=%d reordered=%d sessions=%d in %s err=%v; wall %s",
+		reason, ls.Sources, ls.Rewrote, ls.Unchanged, ls.RawOnly, ls.Failed, ls.Events, lakeWall.Round(time.Millisecond), lerr,
+		cs.Files, cs.Batches, cs.Inserted, cs.Deleted, cs.Moved, cs.Reordered, cs.Sessions,
+		(time.Since(start) - lakeWall).Round(time.Millisecond), cerr, time.Since(start).Round(time.Millisecond))
 }
 
 func importCH(args []string) error {
