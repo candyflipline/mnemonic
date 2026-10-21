@@ -259,7 +259,7 @@ func (w *watcher) list(dir string, added []string) []string {
 		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
 			continue
 		}
-		w.files[path] = &watched{fileRef: fileRef{path: path, harness: g.src.Harness, sourceName: g.src.SourceName}}
+		w.files[path] = &watched{fileRef: fileRef{path: path, harness: g.src.Harness, sourceName: g.src.SourceName, head: new(rawHead)}}
 		added = append(added, path)
 	}
 	return added
