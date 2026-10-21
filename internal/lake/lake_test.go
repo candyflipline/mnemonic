@@ -321,3 +321,52 @@ func TestImportClickHouse(t *testing.T) {
 		t.Fatalf("rerun archive rows = %d, want 1", n)
 	}
 }
+
+func TestRunParsesAppendStampedBeforeLakeWrite(t *testing.T) {
+	dataDir := t.TempDir()
+	key := layout.Key{Author: "alice", Machine: "chris-mbp", Harness: "test-fake", SrcID: "eeeeeeeeeeeeeeee"}
+	writeSource(t, dataDir, key.Author, key.Machine, key.Harness, key.SrcID, []string{
+		"uid-1|1|2024-01-02 03:04:05.000",
+	})
+	setManifest := func(f func(*manifest)) {
+		var m manifest
+		b, err := os.ReadFile(key.Manifest(dataDir))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatal(err)
+		}
+		f(&m)
+		if b, err = json.Marshal(m); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(key.Manifest(dataDir), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pushedAt := time.Now().Add(-time.Second).UnixMilli()
+	setManifest(func(m *manifest) { m.UpdatedMs = pushedAt })
+	if st, err := Run(dataDir); err != nil || st.Rewrote != 1 {
+		t.Fatalf("first run: %+v %v", st, err)
+	}
+
+	raw, err := os.OpenFile(key.Raw(dataDir), os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw, _ := zstd.NewWriter(raw)
+	zw.Write([]byte("uid-2|1|2024-01-02 03:04:06.000\n"))
+	zw.Close()
+	info, _ := raw.Stat()
+	raw.Close()
+	setManifest(func(m *manifest) { m.ZstSize, m.UpdatedMs = info.Size(), pushedAt+1 })
+
+	st, err := Run(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Rewrote != 1 || st.Unchanged != 0 || st.Events != 1 {
+		t.Fatalf("append pushed 1 ms after the parsed push: %+v, want it parsed", st)
+	}
+}
