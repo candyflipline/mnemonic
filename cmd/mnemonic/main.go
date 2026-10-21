@@ -1,6 +1,6 @@
 // mnemonic collects agent session traces and serves them over MCP.
 //
-//	mnemonic push [--watch] [--config ~/.mnemonic/config.toml]   one pass, or resident and polling every 60 s
+//	mnemonic push [--watch] [--config ~/.mnemonic/config.toml]   one pass, or resident and woken by file writes
 //	mnemonic serve --config server.toml                HTTP /v1 + /mcp, normalize and cache loops
 //	mnemonic import-ch --config server.toml --author A <export_dir>
 //
@@ -43,7 +43,7 @@ func main() {
 func push(args []string) error {
 	fs := flag.NewFlagSet("push", flag.ContinueOnError)
 	configPath := fs.String("config", "~/.mnemonic/config.toml", "path to the client config TOML")
-	watch := fs.Bool("watch", false, "stay resident and push every 60 s")
+	watch := fs.Bool("watch", false, "stay resident and push files within 60 s of their writes")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
