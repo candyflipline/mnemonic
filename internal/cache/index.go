@@ -237,11 +237,14 @@ func (ix *Index) Converge(ctx context.Context, f Failed) (ConvergeStats, error) 
 		}
 	}
 	ix.failed = failed
-	st, errs := ix.apply(ctx, c, batches(fresh, batchRows))
+	fresh, errs := ix.countRows(ctx, c, fresh)
+	st, aerrs := ix.apply(ctx, c, batches(fresh, batchRows))
+	errs = append(errs, aerrs...)
 	if f == RetryFailed {
+		held, cerrs := ix.countRows(ctx, c, held)
 		rst, rerrs := ix.apply(ctx, c, bySource(held))
 		st.add(rst)
-		errs = append(errs, rerrs...)
+		errs = append(append(errs, cerrs...), rerrs...)
 	}
 	if err := syncManifests(ctx, c, ix.dataDir); err != nil {
 		errs = append(errs, err)
@@ -310,9 +313,6 @@ func diffLake(ctx context.Context, c *sql.Conn, dataDir string) ([]change, error
 		}
 		delete(applied, m)
 	}
-	if err := countRows(ctx, c, out); err != nil {
-		return nil, err
-	}
 	for _, f := range applied {
 		out = append(out, change{file: f, gone: true})
 	}
@@ -329,32 +329,59 @@ func diffLake(ctx context.Context, c *sql.Conn, dataDir string) ([]change, error
 	return out, nil
 }
 
-func countRows(ctx context.Context, c *sql.Conn, changes []change) error {
-	if len(changes) == 0 {
-		return nil
+func (ix *Index) countRows(ctx context.Context, c *sql.Conn, changes []change) ([]change, []error) {
+	var paths []string
+	for _, ch := range changes {
+		if !ch.gone {
+			paths = append(paths, ch.file.path)
+		}
 	}
-	idx := make(map[string]int, len(changes))
-	paths := make([]string, len(changes))
-	for i, ch := range changes {
-		idx[ch.file.path] = i
-		paths[i] = sqlStr(ch.file.path)
-	}
-	rows, err := c.QueryContext(ctx, "SELECT file_name, num_rows FROM parquet_file_metadata(["+strings.Join(paths, ", ")+"])")
+	n, err := numRows(ctx, c, paths)
+	var errs []error
+	unreadable := map[string]bool{}
 	if err != nil {
-		return err
+		n = map[string]int64{}
+		for _, p := range paths {
+			one, err := numRows(ctx, c, []string{p})
+			if err != nil {
+				unreadable[p] = true
+				errs = append(errs, fmt.Errorf("%s: %w", p, err))
+				continue
+			}
+			n[p] = one[p]
+		}
+	}
+	var out []change
+	for _, ch := range changes {
+		if unreadable[ch.file.path] {
+			ix.failed[ch.file.path] = ch.file
+			continue
+		}
+		ch.rows = n[ch.file.path]
+		out = append(out, ch)
+	}
+	return out, errs
+}
+
+func numRows(ctx context.Context, c *sql.Conn, paths []string) (map[string]int64, error) {
+	out := make(map[string]int64, len(paths))
+	if len(paths) == 0 {
+		return out, nil
+	}
+	rows, err := c.QueryContext(ctx, "SELECT file_name, num_rows FROM parquet_file_metadata(["+strings.Join(quoteAll(paths), ", ")+"])")
+	if err != nil {
+		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var name string
-		var n int64
-		if err := rows.Scan(&name, &n); err != nil {
-			return err
+		var k int64
+		if err := rows.Scan(&name, &k); err != nil {
+			return nil, err
 		}
-		if i, ok := idx[name]; ok {
-			changes[i].rows += n
-		}
+		out[name] += k
 	}
-	return rows.Err()
+	return out, rows.Err()
 }
 
 // sourceOf is a lake file's path without its .parquet or .tail.parquet

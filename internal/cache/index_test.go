@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/candyflipline/mnemonic/internal/cache/cachetest"
@@ -248,5 +249,37 @@ func TestConvergeHoldsFailedBatchUntilReconcile(t *testing.T) {
 	}
 	if _, err := ix.Converge(ctx, RetryFailed); err == nil || events() != 21 {
 		t.Fatalf("reconcile: err %v, %d events", err, events())
+	}
+}
+
+func TestConvergeHoldsUnreadableParquet(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	if err := cachetest.Lake(dataDir, "codex", "claude_code"); err != nil {
+		t.Fatal(err)
+	}
+	ix, err := Open(dataDir, Options{MemoryLimit: "1GB", FlagsSQL: "0::USMALLINT"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ix.Close()
+	garbage := layout.Key{Author: cachetest.Author, Machine: cachetest.Machine, Harness: "codex", SrcID: wire.SrcID("/garbage")}.Events(dataDir)
+	if err := os.WriteFile(garbage, []byte("not a parquet file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	events := func() (n int) {
+		if err := ix.DB().QueryRow("SELECT count(*) FROM events").Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if _, err := ix.Converge(ctx, SkipFailed); err == nil || !strings.Contains(err.Error(), garbage) || events() != 21 {
+		t.Fatalf("garbage parquet: err %v, %d events", err, events())
+	}
+	if st, err := ix.Converge(ctx, SkipFailed); err != nil || st.Files != 0 {
+		t.Fatalf("push after an unreadable file: %+v err %v", st, err)
+	}
+	if _, err := ix.Converge(ctx, RetryFailed); err == nil || !strings.Contains(err.Error(), garbage) {
+		t.Fatalf("reconcile: err %v", err)
 	}
 }
