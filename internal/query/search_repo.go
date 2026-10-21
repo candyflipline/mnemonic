@@ -239,7 +239,7 @@ func scopeExistsFor(ctx context.Context, tx *sql.Tx, q searchQuery) (bool, error
 	if !q.sessionOK {
 		return true, nil
 	}
-	s := "SELECT count(*) FROM events WHERE session_id = " + sqlQuote(q.sessionID)
+	s := "SELECT count(*) FROM events WHERE " + published + " AND session_id = " + sqlQuote(q.sessionID)
 	if q.turnOK {
 		s += " AND turn_seq = " + strconv.Itoa(int(q.turnSeq))
 	}
