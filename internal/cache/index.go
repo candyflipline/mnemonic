@@ -3,10 +3,12 @@ package cache
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -178,29 +180,48 @@ type change struct {
 }
 
 func (ix *Index) Converge(ctx context.Context) (ConvergeStats, error) {
-	var st ConvergeStats
 	c, err := ix.db.Conn(ctx)
 	if err != nil {
-		return st, err
+		return ConvergeStats{}, err
 	}
 	defer c.Close()
 	changes, err := diffLake(ctx, c, ix.dataDir)
 	if err != nil {
-		return st, err
+		return ConvergeStats{}, err
 	}
+	st, errs := ix.apply(ctx, c, changes)
+	if err := syncManifests(ctx, c, ix.dataDir); err != nil {
+		errs = append(errs, err)
+	}
+	return st, errors.Join(errs...)
+}
+
+func (ix *Index) ConvergeFiles(ctx context.Context, paths []string) (ConvergeStats, error) {
+	c, err := ix.db.Conn(ctx)
+	if err != nil {
+		return ConvergeStats{}, err
+	}
+	defer c.Close()
+	changes, err := diffFiles(ctx, c, paths, false)
+	if err != nil {
+		return ConvergeStats{}, err
+	}
+	st, errs := ix.apply(ctx, c, changes)
+	return st, errors.Join(errs...)
+}
+
+func (ix *Index) apply(ctx context.Context, c *sql.Conn, changes []change) (ConvergeStats, []error) {
+	var st ConvergeStats
 	var errs []error
 	for _, b := range batches(changes, batchRows) {
-		bst, err := applyBatch(ctx, c, ix.flags, b)
+		bst, err := applyBatch(ctx, c, ix.flags, ix.dataDir, b)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("batch of %d files from %s: %w", len(b), b[0].file.path, err))
 			continue
 		}
 		st.add(bst)
 	}
-	if err := refreshSources(ctx, c, ix.dataDir); err != nil {
-		errs = append(errs, err)
-	}
-	return st, errors.Join(errs...)
+	return st, errs
 }
 
 func diffLake(ctx context.Context, c *sql.Conn, dataDir string) ([]change, error) {
@@ -208,9 +229,22 @@ func diffLake(ctx context.Context, c *sql.Conn, dataDir string) ([]change, error
 	if err != nil {
 		return nil, err
 	}
+	return diffFiles(ctx, c, matches, true)
+}
+
+func diffFiles(ctx context.Context, c *sql.Conn, paths []string, whole bool) ([]change, error) {
+	matches := slices.Clone(paths)
 	sort.Strings(matches)
+	matches = slices.Compact(matches)
+	if len(matches) == 0 && !whole {
+		return nil, nil
+	}
+	q := "SELECT path, size, mtime_ns FROM lake_files"
+	if !whole {
+		q += " WHERE path IN (" + strings.Join(quoteAll(matches), ", ") + ")"
+	}
 	applied := map[string]lakeFile{}
-	rows, err := c.QueryContext(ctx, "SELECT path, size, mtime_ns FROM lake_files")
+	rows, err := c.QueryContext(ctx, q)
 	if err != nil {
 		return nil, err
 	}
@@ -298,7 +332,7 @@ func batches(changes []change, max int64) [][]change {
 	return out
 }
 
-func applyBatch(ctx context.Context, c *sql.Conn, flagsSQL string, b []change) (st ConvergeStats, err error) {
+func applyBatch(ctx context.Context, c *sql.Conn, flagsSQL, dataDir string, b []change) (st ConvergeStats, err error) {
 	if _, err := c.ExecContext(ctx, "BEGIN"); err != nil {
 		return st, err
 	}
@@ -344,7 +378,12 @@ func applyBatch(ctx context.Context, c *sql.Conn, flagsSQL string, b []change) (
 	for _, f := range present {
 		stmts = append(stmts, fmt.Sprintf("INSERT INTO lake_files VALUES (%s, %d, %d)", sqlStr(f.path), f.size, f.mtime))
 	}
-	stmts = append(stmts, "DROP TABLE n", "DROP TABLE old", "DROP TABLE aff", "COMMIT")
+	srcStmts, err := sourceRows(dataDir, b)
+	if err != nil {
+		return st, err
+	}
+	stmts = append(stmts, srcStmts...)
+	stmts = append(stmts, "DROP TABLE IF EXISTS n", "DROP TABLE IF EXISTS old", "DROP TABLE IF EXISTS aff", "COMMIT")
 	return st, execAll(ctx, c, stmts)
 }
 
@@ -352,10 +391,12 @@ func applyWinners(ctx context.Context, c *sql.Conn, flagsSQL, inBatch string, st
 	if err := execAll(ctx, c, []string{
 		"DELETE FROM lake_rows WHERE " + inBatch,
 		"INSERT INTO lake_rows SELECT * FROM n",
+		"DROP TABLE n", "DROP TABLE old",
 		`CREATE OR REPLACE TEMP TABLE win AS SELECT l.* FROM lake_rows l SEMI JOIN aff USING (event_uid)
 QUALIFY row_number() OVER (PARTITION BY event_uid ORDER BY ` + winnerOrder + `) = 1`,
 		`CREATE OR REPLACE TEMP TABLE cur AS SELECT doc, event_uid, lake_file, lake_row, row_hash, session_id, doc_len
 FROM events SEMI JOIN aff USING (event_uid)`,
+		"DROP TABLE aff",
 		`CREATE OR REPLACE TEMP TABLE del AS SELECT c.doc, c.session_id, c.doc_len FROM cur c LEFT JOIN win w USING (event_uid)
 WHERE w.event_uid IS NULL OR w.row_hash <> c.row_hash`,
 	}); err != nil {
@@ -394,6 +435,7 @@ WHERE events.doc = c.doc AND c.event_uid = w.event_uid AND c.row_hash = w.row_ha
 		`CREATE OR REPLACE TEMP TABLE ins AS SELECT w.lake_file, w.lake_row, w.row_hash,
   cast(` + strconv.FormatInt(firstDoc, 10) + ` + row_number() OVER (ORDER BY w.lake_file, w.lake_row) - 1 AS UINTEGER) AS doc
 FROM win w LEFT JOIN cur c USING (event_uid) WHERE c.event_uid IS NULL OR c.row_hash <> w.row_hash`,
+		"DROP TABLE win", "DROP TABLE cur",
 	}); err != nil {
 		return err
 	}
@@ -414,7 +456,7 @@ FROM win w LEFT JOIN cur c USING (event_uid) WHERE c.event_uid IS NULL OR c.row_
 	if err := reorder(ctx, c, st); err != nil {
 		return err
 	}
-	return execAll(ctx, c, []string{"DROP TABLE win", "DROP TABLE cur", "DROP TABLE del", "DROP TABLE ins", "DROP TABLE s"})
+	return execAll(ctx, c, []string{"DROP TABLE del", "DROP TABLE ins", "DROP TABLE s"})
 }
 
 func insertChunk(ctx context.Context, c *sql.Conn, flagsSQL string, from, to int64) error {
@@ -534,44 +576,108 @@ func docSet(ctx context.Context, c *sql.Conn, col, table string) (string, int64,
 	return col + " IN (" + strings.Join(docs, ", ") + ")", n, nil
 }
 
-func refreshSources(ctx context.Context, c *sql.Conn, dataDir string) error {
-	counts := map[sourceKey]int64{}
-	rows, err := c.QueryContext(ctx, "SELECT lake_file, count(*) FROM lake_rows WHERE NOT "+archiveSQL+" GROUP BY lake_file")
+func sourceRows(dataDir string, b []change) ([]string, error) {
+	var stmts []string
+	for _, ch := range b {
+		m := lakeFileRe.FindStringSubmatch(filepath.ToSlash(ch.file.path))
+		if m == nil {
+			return nil, fmt.Errorf("lake parquet outside the source layout: %s", ch.file.path)
+		}
+		k := layout.Key{Author: m[1], Machine: m[2], Harness: m[3], SrcID: m[4]}
+		if k.Machine == layout.ArchiveMachine {
+			continue
+		}
+		stmts = append(stmts, "DELETE FROM sources WHERE "+sourceWhere(k))
+		src, ok, err := readManifest(k.Manifest(dataDir))
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		var n int64
+		if !ch.gone {
+			n = ch.rows
+		}
+		stmts = append(stmts, sourceInsert(k, src, n))
+	}
+	return stmts, nil
+}
+
+func syncManifests(ctx context.Context, c *sql.Conn, dataDir string) error {
+	matches, err := filepath.Glob(filepath.Join(dataDir, "raw", "author=*", "machine=*", "harness=*", "*.json"))
 	if err != nil {
 		return err
 	}
+	onDisk := map[layout.Key]string{}
+	for _, m := range matches {
+		parts := strings.Split(filepath.ToSlash(m), "/")
+		n := len(parts)
+		author, _ := strings.CutPrefix(parts[n-4], "author=")
+		machine, _ := strings.CutPrefix(parts[n-3], "machine=")
+		harness, _ := strings.CutPrefix(parts[n-2], "harness=")
+		onDisk[layout.Key{Author: author, Machine: machine, Harness: harness, SrcID: strings.TrimSuffix(parts[n-1], ".json")}] = m
+	}
+	rows, err := c.QueryContext(ctx, "SELECT author, machine_id, harness, src_id FROM sources")
+	if err != nil {
+		return err
+	}
+	var stmts []string
 	for rows.Next() {
-		var path string
-		var n int64
-		if err := rows.Scan(&path, &n); err != nil {
+		var k layout.Key
+		if err := rows.Scan(&k.Author, &k.Machine, &k.Harness, &k.SrcID); err != nil {
 			rows.Close()
 			return err
 		}
-		if err := addSourceCount(counts, path, n); err != nil {
-			rows.Close()
-			return err
+		if _, ok := onDisk[k]; ok {
+			delete(onDisk, k)
+		} else {
+			stmts = append(stmts, "DELETE FROM sources WHERE "+sourceWhere(k))
 		}
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	if _, err := c.ExecContext(ctx, "CREATE OR REPLACE TEMP TABLE sources_new AS SELECT * FROM sources LIMIT 0"); err != nil {
-		return err
+	for k, path := range onDisk {
+		src, ok, err := readManifest(path)
+		if err != nil {
+			return err
+		}
+		if ok {
+			stmts = append(stmts, sourceInsert(k, src, 0))
+		}
 	}
-	if err := writeSources(ctx, c, dataDir, "sources_new", counts); err != nil {
-		return err
+	if len(stmts) == 0 {
+		return nil
 	}
-	var diff int64
-	if err := c.QueryRowContext(ctx, `SELECT count(*) FROM (
-  (SELECT * FROM sources_new EXCEPT ALL SELECT * FROM sources) UNION ALL (SELECT * FROM sources EXCEPT ALL SELECT * FROM sources_new))`).Scan(&diff); err != nil {
-		return err
+	return execAll(ctx, c, append(append([]string{"BEGIN"}, stmts...), "COMMIT"))
+}
+
+func readManifest(path string) (manifest, bool, error) {
+	var src manifest
+	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return src, false, nil
 	}
-	stmts := []string{"DROP TABLE sources_new"}
-	if diff > 0 {
-		stmts = []string{"BEGIN", "DELETE FROM sources", "INSERT INTO sources SELECT * FROM sources_new", "COMMIT", "DROP TABLE sources_new"}
+	if err != nil {
+		return src, false, err
 	}
-	return execAll(ctx, c, stmts)
+	if err := json.Unmarshal(b, &src); err != nil {
+		return src, false, fmt.Errorf("%s: %w", path, err)
+	}
+	return src, true, nil
+}
+
+func sourceWhere(k layout.Key) string {
+	return fmt.Sprintf("author = %s AND machine_id = %s AND harness = %s AND src_id = %s",
+		sqlStr(k.Author), sqlStr(k.Machine), sqlStr(k.Harness), sqlStr(k.SrcID))
+}
+
+func sourceInsert(k layout.Key, src manifest, events int64) string {
+	return fmt.Sprintf("INSERT INTO sources VALUES (%s, %s, %s, %s, %s, %s, %d, %s, %d, %d)",
+		sqlStr(k.Author), sqlStr(k.Machine), sqlStr(k.Harness), sqlStr(src.SourceName), sqlStr(src.Path),
+		sqlStr(k.SrcID), src.Size, sqlStr(src.HeadHash), src.UpdatedMs, events)
 }
 
 func quotePaths(files []lakeFile) []string {
