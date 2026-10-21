@@ -381,7 +381,11 @@ WHERE n.lake_file = o.lake_file AND n.event_uid = o.event_uid AND n.row_hash = o
 			return st, err
 		}
 	}
-	stmts = []string{"DELETE FROM lake_files WHERE path IN (" + strings.Join(quotePaths(all), ", ") + ")"}
+	stmts = nil
+	if affected > 0 {
+		stmts = append(stmts, "DELETE FROM lake_rows WHERE "+inBatch, "INSERT INTO lake_rows SELECT * FROM n")
+	}
+	stmts = append(stmts, "DELETE FROM lake_files WHERE path IN ("+strings.Join(quotePaths(all), ", ")+")")
 	for _, f := range present {
 		stmts = append(stmts, fmt.Sprintf("INSERT INTO lake_files VALUES (%s, %d, %d)", sqlStr(f.path), f.size, f.mtime))
 	}
@@ -390,55 +394,27 @@ WHERE n.lake_file = o.lake_file AND n.event_uid = o.event_uid AND n.row_hash = o
 		return st, err
 	}
 	stmts = append(stmts, srcStmts...)
-	stmts = append(stmts, "DROP TABLE IF EXISTS n", "DROP TABLE IF EXISTS old", "DROP TABLE IF EXISTS aff", "COMMIT")
+	stmts = append(stmts, "DROP TABLE n", "DROP TABLE IF EXISTS old", "DROP TABLE IF EXISTS aff", "COMMIT")
 	return st, execAll(ctx, c, stmts)
 }
 
 func applyWinners(ctx context.Context, c *sql.Conn, flagsSQL, inBatch string, st *ConvergeStats) error {
-	if err := execAll(ctx, c, []string{
-		"DELETE FROM lake_rows WHERE " + inBatch,
-		"INSERT INTO lake_rows SELECT * FROM n",
-		"DROP TABLE n", "DROP TABLE old",
-		`CREATE OR REPLACE TEMP TABLE win AS SELECT l.* FROM lake_rows l SEMI JOIN aff USING (event_uid)
-QUALIFY row_number() OVER (PARTITION BY event_uid ORDER BY ` + winnerOrder + `) = 1`,
-		`CREATE OR REPLACE TEMP TABLE cur AS SELECT doc, event_uid, lake_file, lake_row, row_hash, session_id, doc_len
-FROM events SEMI JOIN aff USING (event_uid)`,
-		"DROP TABLE aff",
-		`CREATE OR REPLACE TEMP TABLE del AS SELECT c.doc, c.session_id, c.doc_len FROM cur c LEFT JOIN win w USING (event_uid)
-WHERE w.event_uid IS NULL OR w.row_hash <> c.row_hash`,
-	}); err != nil {
-		return err
-	}
-	inDel, deleted, err := docSet(ctx, c, "doc", "del")
-	if err != nil {
-		return err
-	}
-	st.Deleted = deleted
-	moved, err := c.ExecContext(ctx, `UPDATE events SET lake_file = w.lake_file, lake_row = w.lake_row FROM win w, cur c
-WHERE events.doc = c.doc AND c.event_uid = w.event_uid AND c.row_hash = w.row_hash
-  AND (c.lake_file <> w.lake_file OR c.lake_row <> w.lake_row)`)
-	if err != nil {
-		return err
-	}
-	if st.Moved, err = moved.RowsAffected(); err != nil {
-		return err
-	}
-	if deleted > 0 {
-		if err := execAll(ctx, c, []string{
-			`UPDATE corpus SET docs = docs - (SELECT count(*) FILTER (WHERE doc_len > 0) FROM del),
-  total_len = total_len - (SELECT coalesce(sum(doc_len), 0) FROM del)`,
-			"DELETE FROM postings WHERE " + inDel,
-			"DELETE FROM events WHERE " + inDel,
-		}); err != nil {
-			return err
-		}
-	}
-
 	var firstDoc int64
 	if err := c.QueryRowContext(ctx, "SELECT next_doc FROM corpus").Scan(&firstDoc); err != nil {
 		return err
 	}
 	if err := execAll(ctx, c, []string{
+		`CREATE OR REPLACE TEMP TABLE win AS SELECT * FROM (
+  SELECT l.* FROM lake_rows l SEMI JOIN aff USING (event_uid) WHERE NOT (` + inBatch + `)
+  UNION ALL SELECT * FROM n SEMI JOIN aff USING (event_uid))
+QUALIFY row_number() OVER (PARTITION BY event_uid ORDER BY ` + winnerOrder + `) = 1`,
+		`CREATE OR REPLACE TEMP TABLE cur AS SELECT doc, event_uid, lake_file, lake_row, row_hash, session_id, doc_len
+FROM events SEMI JOIN aff USING (event_uid)`,
+		"DROP TABLE old", "DROP TABLE aff",
+		`CREATE OR REPLACE TEMP TABLE del AS SELECT c.doc, c.session_id, c.doc_len FROM cur c LEFT JOIN win w USING (event_uid)
+WHERE w.event_uid IS NULL OR w.row_hash <> c.row_hash`,
+		`CREATE OR REPLACE TEMP TABLE mv AS SELECT c.doc, w.lake_file, w.lake_row FROM cur c JOIN win w USING (event_uid)
+WHERE c.row_hash = w.row_hash AND (c.lake_file <> w.lake_file OR c.lake_row <> w.lake_row)`,
 		`CREATE OR REPLACE TEMP TABLE ins AS SELECT w.lake_file, w.lake_row, w.row_hash,
   cast(` + strconv.FormatInt(firstDoc, 10) + ` + row_number() OVER (ORDER BY w.lake_file, w.lake_row) - 1 AS UINTEGER) AS doc
 FROM win w LEFT JOIN cur c USING (event_uid) WHERE c.event_uid IS NULL OR c.row_hash <> w.row_hash`,
@@ -449,21 +425,60 @@ FROM win w LEFT JOIN cur c USING (event_uid) WHERE c.event_uid IS NULL OR c.row_
 	if err := c.QueryRowContext(ctx, "SELECT count(*) FROM ins").Scan(&st.Inserted); err != nil {
 		return err
 	}
+	split := st.Inserted > chunkRows
 	for a := firstDoc; a < firstDoc+st.Inserted; a += chunkRows {
+		stmts := []string{}
+		if split {
+			stmts = append(stmts, "COMMIT", "BEGIN")
+		}
+		if err := execAll(ctx, c, stmts); err != nil {
+			return err
+		}
 		if err := insertChunk(ctx, c, flagsSQL, a, a+chunkRows); err != nil {
+			return err
+		}
+	}
+	if split {
+		if err := execAll(ctx, c, []string{"COMMIT", "BEGIN"}); err != nil {
+			return err
+		}
+	}
+
+	inDel, deleted, err := docSet(ctx, c, "doc", "del")
+	if err != nil {
+		return err
+	}
+	st.Deleted = deleted
+	if deleted > 0 {
+		if err := execAll(ctx, c, []string{
+			`UPDATE corpus SET docs = docs - (SELECT count(*) FILTER (WHERE doc_len > 0) FROM del),
+  total_len = total_len - (SELECT coalesce(sum(doc_len), 0) FROM del)`,
+			"DELETE FROM postings WHERE " + inDel,
+			"DELETE FROM events WHERE " + inDel,
+		}); err != nil {
+			return err
+		}
+	}
+	if err := c.QueryRowContext(ctx, "SELECT count(*) FROM mv").Scan(&st.Moved); err != nil {
+		return err
+	}
+	if st.Moved > 0 {
+		if _, err := c.ExecContext(ctx, "UPDATE events SET lake_file = m.lake_file, lake_row = m.lake_row FROM mv m WHERE events.doc = m.doc"); err != nil {
 			return err
 		}
 	}
 	if err := execAll(ctx, c, []string{
 		`CREATE OR REPLACE TEMP TABLE s AS SELECT DISTINCT session_id FROM (
-  SELECT session_id FROM del UNION ALL SELECT session_id FROM events WHERE doc >= ` + strconv.FormatInt(firstDoc, 10) + `)`,
+  SELECT session_id FROM del
+  UNION ALL SELECT session_id FROM events WHERE doc >= ` + strconv.FormatInt(firstDoc, 10) + `
+  UNION ALL SELECT session_id FROM events WHERE event_order IS NULL)`,
 	}); err != nil {
 		return err
 	}
 	if err := reorder(ctx, c, st); err != nil {
 		return err
 	}
-	return execAll(ctx, c, []string{"DROP TABLE del", "DROP TABLE ins", "DROP TABLE s"})
+	return execAll(ctx, c, []string{"DROP TABLE del", "DROP TABLE mv", "DROP TABLE ins", "DROP TABLE s"})
 }
 
 func insertChunk(ctx context.Context, c *sql.Conn, flagsSQL string, from, to int64) error {
