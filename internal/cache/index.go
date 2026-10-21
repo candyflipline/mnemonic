@@ -18,7 +18,7 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-const indexVersion = 2
+const indexVersion = 3
 
 const (
 	batchRows   = 500_000
@@ -96,7 +96,7 @@ func Open(dataDir string, o Options) (*Index, error) {
 	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
-	db, err := newDB(path, setup...)
+	db, err := newDB(path+"?storage_compatibility_version=latest", setup...)
 	if err != nil {
 		return nil, err
 	}
