@@ -414,7 +414,7 @@ func importHarness(db *sql.DB, export, harness, out, author string, live map[str
 	return copyParquet(db, query, out, "")
 }
 
-func open() (*sql.DB, error) { return sql.Open("duckdb", "") }
+func open() (*sql.DB, error) { return sql.Open("duckdb", "?threads=1") }
 
 // copyParquet writes query to outPath through a temp file and a rename, with
 // kv, when set, as the checkpoint metadata, and returns the rows written.
