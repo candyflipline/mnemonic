@@ -33,6 +33,9 @@ const epochIngestedAt = "1970-01-01 00:00:00.000"
 type Stats struct {
 	Sources, Rewrote, Unchanged, RawOnly, Failed int
 	Events                                       int64
+	// Stale counts the idle sources a parser sweep stopped before reaching,
+	// so the caller knows to call Run again.
+	Stale int
 }
 
 type manifest struct {
@@ -48,12 +51,13 @@ type manifest struct {
 // without a parser counts as RawOnly. A second run rewrites 0.
 //
 // While events/.parser-version differs from normalize.Version, Run also
-// re-parses, after the pushed sources and within sweepBudget, each unchanged
-// source whose lake file records another parser version. The marker is written
+// re-parses, after the pushed sources, within sweepBudget and until yield
+// returns true, each unchanged source whose lake file records another parser
+// version. The marker is written
 // when a call leaves none of them and fails nothing; a crash before that
 // leaves it old, and the next call redoes only what the checkpoints still show
 // stale.
-func Run(dataDir string) (Stats, error) {
+func Run(dataDir string, yield func() bool) (Stats, error) {
 	rawDir := filepath.Join(dataDir, "raw")
 	if _, err := os.Stat(rawDir); err != nil {
 		if os.IsNotExist(err) {
@@ -118,19 +122,25 @@ func Run(dataDir string) (Stats, error) {
 	}
 
 	sweepEnd := time.Now().Add(sweepBudget)
-	pending := false
-	for _, i := range idles {
+	for n, i := range idles {
+		if yield() {
+			st.Unchanged += len(idles) - n
+			st.Stale = len(idles) - n
+			break
+		}
 		parser, ok := normalize.For(i.src.Harness)
-		if cp, has := readCheckpoint(db, i.key.Events(dataDir)); !ok || (has && cp.Parser == normalize.Version) {
-			st.Unchanged++
-		} else if time.Now().After(sweepEnd) {
-			st.Unchanged++
-			pending = true
-		} else {
+		if cp, has := readCheckpoint(db, i.key.Events(dataDir)); ok && (!has || cp.Parser != normalize.Version) {
+			if time.Now().After(sweepEnd) {
+				st.Unchanged += len(idles) - n
+				st.Stale = len(idles) - n
+				break
+			}
 			parse(i.mpath, i.key, i.src, parser)
+		} else {
+			st.Unchanged++
 		}
 	}
-	if sweeping && !pending && st.Failed == 0 {
+	if sweeping && st.Stale == 0 && st.Failed == 0 {
 		if err := writeParserMarker(dataDir); err != nil {
 			return st, err
 		}
@@ -138,13 +148,13 @@ func Run(dataDir string) (Stats, error) {
 	return st, nil
 }
 
-// sweepBudget bounds the wall time one Run spends re-parsing sources whose
-// lake file was written by another parser version. Serve runs Run before it
-// converges the cache, so a sweep over a big corpus in one call would hold
-// every later push back for minutes. The check is before each source, so a
-// call overruns by at most one source's parse. The next cycle (a push, or the
-// 5-minute reconcile) continues where the checkpoints say work remains.
-const sweepBudget = 20 * time.Second
+// sweepBudget bounds the wall time one Run spends re-parsing swept sources,
+// checked before each parse. The converge after Run must apply every file the
+// sweep wrote before the next push's cycle can start, so this caps that
+// converge. It does not bound the sweep's total time: Run's caller starts the
+// next cycle at once while Stale > 0, and Run stops at once when yield says a
+// push is pending.
+const sweepBudget = 5 * time.Second
 
 // readParserMarker is the normalize.Version the whole lake was last fully
 // swept at, 0 when there is no marker.

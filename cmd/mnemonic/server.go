@@ -95,21 +95,25 @@ const (
 )
 
 func convergeLoop(ctx context.Context, dataDir string, ix *cache.Index, wake <-chan struct{}) {
-	cycle(ctx, dataDir, ix, "boot")
+	pushPending := func() bool { return len(wake) > 0 }
+	stale := cycle(ctx, dataDir, ix, "boot", pushPending)
 	for {
-		reason := "reconcile"
-		select {
-		case <-ctx.Done():
-			return
-		case <-wake:
-			reason = "put"
-			settle(ctx, wake)
-		case <-time.After(reconcile):
+		reason := "sweep"
+		if stale == 0 || pushPending() {
+			reason = "reconcile"
+			select {
+			case <-ctx.Done():
+				return
+			case <-wake:
+				reason = "put"
+				settle(ctx, wake)
+			case <-time.After(reconcile):
+			}
 		}
 		if ctx.Err() != nil {
 			return
 		}
-		cycle(ctx, dataDir, ix, reason)
+		stale = cycle(ctx, dataDir, ix, reason, pushPending)
 	}
 }
 
@@ -132,16 +136,17 @@ func settle(ctx context.Context, wake <-chan struct{}) {
 	}
 }
 
-func cycle(ctx context.Context, dataDir string, ix *cache.Index, reason string) {
+func cycle(ctx context.Context, dataDir string, ix *cache.Index, reason string, pushPending func() bool) int {
 	start := time.Now()
-	ls, lerr := lake.Run(dataDir)
+	ls, lerr := lake.Run(dataDir, pushPending)
 	lakeWall := time.Since(start)
 	cs, cerr := ix.Converge(ctx)
-	log.Printf("cycle %s: lake sources=%d rewrote=%d unchanged=%d raw_only=%d failed=%d events=%d in %s err=%v; "+
+	log.Printf("cycle %s: lake sources=%d rewrote=%d unchanged=%d raw_only=%d failed=%d stale=%d events=%d in %s err=%v; "+
 		"converge files=%d batches=%d inserted=%d deleted=%d moved=%d reordered=%d sessions=%d in %s err=%v; wall %s",
-		reason, ls.Sources, ls.Rewrote, ls.Unchanged, ls.RawOnly, ls.Failed, ls.Events, lakeWall.Round(time.Millisecond), lerr,
+		reason, ls.Sources, ls.Rewrote, ls.Unchanged, ls.RawOnly, ls.Failed, ls.Stale, ls.Events, lakeWall.Round(time.Millisecond), lerr,
 		cs.Files, cs.Batches, cs.Inserted, cs.Deleted, cs.Moved, cs.Reordered, cs.Sessions,
 		(time.Since(start) - lakeWall).Round(time.Millisecond), cerr, time.Since(start).Round(time.Millisecond))
+	return ls.Stale
 }
 
 func importCH(args []string) error {
