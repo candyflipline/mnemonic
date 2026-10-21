@@ -74,6 +74,10 @@ func parquetSource(files []lakeFile) string {
 		"], hive_partitioning=false, filename=true, file_row_number=true)"
 }
 
+func md5Key(expr string) string {
+	return "cast(md5_number(" + expr + ") >> 64 AS UBIGINT)"
+}
+
 var heavyColumns = map[string]bool{"payload_json": true, "token_usage_json": true}
 
 func eventsDDL() string {
@@ -95,7 +99,7 @@ func eventsDDL() string {
   tool_io_worktree_root VARCHAR, meta_json VARCHAR USING COMPRESSION zstd,
   row_hash UBIGINT NOT NULL, flags USMALLINT NOT NULL, doc_len UINTEGER NOT NULL,
   event_time TIMESTAMP, event_order BIGINT, turn_seq UINTEGER, event_ordinal UINTEGER,
-  text_hash UBIGINT NOT NULL)`)
+  text_hash UBIGINT NOT NULL, uid_key UBIGINT NOT NULL)`)
 	return b.String()
 }
 
@@ -134,7 +138,7 @@ func insertEventsSQL(src string) string {
   CASE WHEN event_kind = 'session_meta' OR (source_name = 'omp' AND contains(payload_json, 'title')
     AND json_extract_string(payload_json, '$.type') IN ('title', 'title_change')) THEN payload_json END,
   w.row_hash, w.flags, w.doc_len, ` + eventTimeSQL + `, NULL, NULL, NULL,
-  cast(md5_number(coalesce(r.text_content, '')) >> 64 AS UBIGINT)
+  ` + md5Key("coalesce(r.text_content, '')") + `, ` + md5Key("r.event_uid") + `
 FROM (SELECT *, CASE WHEN tool_phase = 'request' AND contains(payload_json, 'moraine_tool_io')
     THEN json_extract(payload_json, '$.moraine_tool_io') END AS tio
   FROM ` + src + `) r

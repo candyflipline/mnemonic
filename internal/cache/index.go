@@ -18,7 +18,7 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-const indexVersion = 4
+const indexVersion = 5
 
 const (
 	batchRows   = 500_000
@@ -129,7 +129,7 @@ func indexDDL() []string {
 		"CREATE TABLE corpus (docs UBIGINT NOT NULL, total_len UBIGINT NOT NULL, next_doc UINTEGER NOT NULL)",
 		"CREATE TABLE lake_files (path VARCHAR NOT NULL, size UBIGINT NOT NULL, mtime_ns BIGINT NOT NULL)",
 		`CREATE TABLE lake_rows (lake_file VARCHAR NOT NULL, lake_row UBIGINT NOT NULL, event_uid VARCHAR,
-  event_version UBIGINT, ingested_at TIMESTAMP, row_hash UBIGINT NOT NULL)`,
+  event_version UBIGINT, ingested_at TIMESTAMP, row_hash UBIGINT NOT NULL, uid_key UBIGINT NOT NULL)`,
 		eventsDDL(),
 		"CREATE TABLE postings (term VARCHAR NOT NULL, doc UINTEGER NOT NULL, tf USMALLINT NOT NULL, doc_len UINTEGER NOT NULL, flags USMALLINT NOT NULL)",
 		`CREATE TABLE turns (session_id VARCHAR, turn_seq UINTEGER, event_count BIGINT NOT NULL,
@@ -354,11 +354,11 @@ func applyBatch(ctx context.Context, c *sql.Conn, flagsSQL, dataDir string, b []
 	inBatch := "lake_file IN (" + strings.Join(quotePaths(all), ", ") + ")"
 	stmts := []string{
 		`CREATE OR REPLACE TEMP TABLE n (lake_file VARCHAR, lake_row UBIGINT, event_uid VARCHAR,
-  event_version UBIGINT, ingested_at TIMESTAMP, row_hash UBIGINT)`,
+  event_version UBIGINT, ingested_at TIMESTAMP, row_hash UBIGINT, uid_key UBIGINT)`,
 	}
 	if len(present) > 0 {
 		stmts = append(stmts, "INSERT INTO n SELECT filename, file_row_number, event_uid, event_version, ingested_at, "+
-			rowHashSQL()+" FROM "+parquetSource(present))
+			rowHashSQL()+", "+md5Key("event_uid")+" FROM "+parquetSource(present))
 	}
 	stmts = append(stmts,
 		"CREATE OR REPLACE TEMP TABLE old AS SELECT * FROM lake_rows WHERE "+inBatch,
@@ -366,7 +366,7 @@ func applyBatch(ctx context.Context, c *sql.Conn, flagsSQL, dataDir string, b []
   SELECT lake_file, event_uid, row_hash, max(event_version) AS event_version, max(ingested_at) AS ingested_at
   FROM old GROUP BY ALL) o
 WHERE n.lake_file = o.lake_file AND n.event_uid = o.event_uid AND n.row_hash = o.row_hash`,
-		`CREATE OR REPLACE TEMP TABLE aff AS SELECT DISTINCT event_uid FROM (
+		`CREATE OR REPLACE TEMP TABLE aff AS SELECT DISTINCT uid_key FROM (
   (SELECT * FROM n EXCEPT ALL SELECT * FROM old) UNION ALL (SELECT * FROM old EXCEPT ALL SELECT * FROM n))`)
 	if err := execAll(ctx, c, stmts); err != nil {
 		return st, err
@@ -404,11 +404,11 @@ func applyWinners(ctx context.Context, c *sql.Conn, flagsSQL, inBatch string, st
 	}
 	if err := execAll(ctx, c, []string{
 		`CREATE OR REPLACE TEMP TABLE win AS SELECT * FROM (
-  SELECT l.* FROM lake_rows l SEMI JOIN aff USING (event_uid) WHERE NOT (` + inBatch + `)
-  UNION ALL SELECT * FROM n SEMI JOIN aff USING (event_uid))
+  SELECT * FROM lake_rows WHERE rowid IN (SELECT rowid FROM lake_rows SEMI JOIN aff USING (uid_key)) AND NOT (` + inBatch + `)
+  UNION ALL SELECT * FROM n SEMI JOIN aff USING (uid_key))
 QUALIFY row_number() OVER (PARTITION BY event_uid ORDER BY ` + winnerOrder + `) = 1`,
 		`CREATE OR REPLACE TEMP TABLE cur AS SELECT doc, event_uid, lake_file, lake_row, row_hash, session_id, doc_len
-FROM events SEMI JOIN aff USING (event_uid)`,
+FROM events WHERE rowid IN (SELECT rowid FROM events SEMI JOIN aff USING (uid_key))`,
 		"DROP TABLE old", "DROP TABLE aff",
 		`CREATE OR REPLACE TEMP TABLE keep AS SELECT c.event_uid, min(c.doc) AS doc
 FROM cur c JOIN win w USING (event_uid) WHERE c.row_hash = w.row_hash GROUP BY c.event_uid`,
