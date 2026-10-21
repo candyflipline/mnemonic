@@ -21,17 +21,28 @@ type Store struct {
 	faExact, faTio, faBlob    []byte
 	hotB, hotOff              []byte
 	light, heavy              []*os.File
-	cache                     map[frameKey][]*Row
-	cacheOrder                []frameKey
-	hcache                    map[frameKey][][]byte
-	hcacheOrder               []frameKey
+	fc                        *frameCache
 	maps                      [][]byte
 	nSessions, nTurns, nTerms int
 	scratch                   []byte
 	ls                        []lsRec
 }
 
+// frameCache holds the last decoded light and heavy frames of every part of
+// one DB, so batch memory is bounded by the cache sizes, not by the part count.
+type frameCache struct {
+	light      map[frameKey][]*Row
+	lightOrder []frameKey
+	heavy      map[frameKey][][]byte
+	heavyOrder []frameKey
+}
+
+func newFrameCache() *frameCache {
+	return &frameCache{light: map[frameKey][]*Row{}, heavy: map[frameKey][][]byte{}}
+}
+
 type frameKey struct {
+	part  *Store
 	src   uint16
 	frame uint64
 }
@@ -52,8 +63,8 @@ func mmapFile(path string) ([]byte, error) {
 	return syscall.Mmap(int(f.Fd()), 0, int(fi.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
 }
 
-func openPart(store, dir string) (*Store, error) {
-	st := &Store{dir: dir, cache: map[frameKey][]*Row{}, hcache: map[frameKey][][]byte{}}
+func openPart(store, dir string, fc *frameCache) (*Store, error) {
+	st := &Store{dir: dir, fc: fc}
 	mb, err := os.ReadFile(filepath.Join(dir, "meta.json"))
 	if err != nil {
 		return nil, err
@@ -181,9 +192,9 @@ func (st *Store) turn(session int, seq uint32) (turnInfo, bool) {
 
 func (st *Store) row(d int) (*Row, error) {
 	rec := st.docRec(d)
-	k := frameKey{src: binary.LittleEndian.Uint16(rec[10:]), frame: binary.LittleEndian.Uint64(rec[0:])}
+	k := frameKey{part: st, src: binary.LittleEndian.Uint16(rec[10:]), frame: binary.LittleEndian.Uint64(rec[0:])}
 	idx := int(binary.LittleEndian.Uint16(rec[8:]))
-	rows, ok := st.cache[k]
+	rows, ok := st.fc.light[k]
 	if !ok {
 		recs, _, err := readFrame(st.light[k.src], int64(k.frame), st.scratch)
 		if err != nil {
@@ -197,11 +208,11 @@ func (st *Store) row(d int) (*Row, error) {
 			}
 			rows[i] = r
 		}
-		st.cache[k] = rows
-		st.cacheOrder = append(st.cacheOrder, k)
-		if len(st.cacheOrder) > 48 {
-			delete(st.cache, st.cacheOrder[0])
-			st.cacheOrder = st.cacheOrder[1:]
+		st.fc.light[k] = rows
+		st.fc.lightOrder = append(st.fc.lightOrder, k)
+		if len(st.fc.lightOrder) > 48 {
+			delete(st.fc.light, st.fc.lightOrder[0])
+			st.fc.lightOrder = st.fc.lightOrder[1:]
 		}
 	}
 	if idx >= len(rows) {
@@ -212,19 +223,19 @@ func (st *Store) row(d int) (*Row, error) {
 
 // heavyOf returns payload_json and token_usage_json of row r from source src.
 func (st *Store) heavyOf(src uint16, r *Row) (string, string, error) {
-	k := frameKey{src: src, frame: r.HeavyFrame}
-	recs, ok := st.hcache[k]
+	k := frameKey{part: st, src: src, frame: r.HeavyFrame}
+	recs, ok := st.fc.heavy[k]
 	if !ok {
 		var err error
 		recs, _, err = readFrame(st.heavy[src], int64(r.HeavyFrame), nil)
 		if err != nil {
 			return "", "", err
 		}
-		st.hcache[k] = recs
-		st.hcacheOrder = append(st.hcacheOrder, k)
-		if len(st.hcacheOrder) > 16 {
-			delete(st.hcache, st.hcacheOrder[0])
-			st.hcacheOrder = st.hcacheOrder[1:]
+		st.fc.heavy[k] = recs
+		st.fc.heavyOrder = append(st.fc.heavyOrder, k)
+		if len(st.fc.heavyOrder) > 16 {
+			delete(st.fc.heavy, st.fc.heavyOrder[0])
+			st.fc.heavyOrder = st.fc.heavyOrder[1:]
 		}
 	}
 	if int(r.HeavyIdx) >= len(recs) {

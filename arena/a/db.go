@@ -42,8 +42,9 @@ func openDB(store string) (*DB, error) {
 		return nil, err
 	}
 	db := &DB{sessPart: map[string]int{}, sources: m.Sources}
+	fc := newFrameCache()
 	for i, id := range m.Parts {
-		st, err := openPart(store, partDir(store, id))
+		st, err := openPart(store, partDir(store, id), fc)
 		if err != nil {
 			return nil, err
 		}
