@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/candyflipline/mnemonic/internal/cache"
 )
 
 type searchQuery struct {
@@ -101,16 +103,11 @@ type mcpDetail struct {
 	sourceName        string
 	harness           string
 	inferenceProvider string
-	endpointKind      string
 	eventClass        string
 	payloadType       string
 	actorRole         string
-	name              string
 	phase             string
 	sourceRef         string
-	callID            string
-	itemID            string
-	model             string
 	textPreview       string
 	textContent       string
 	textHash          uint64
@@ -170,22 +167,33 @@ func searchMcpCandidates(ctx context.Context, db *sql.DB, q searchQuery, terms [
 		filters = append(filters, "p.doc IN (SELECT doc FROM events WHERE "+strings.Join(scope, " AND ")+")")
 	}
 
-	sqlStr := `WITH p AS (SELECT term, doc, tf, doc_len, flags FROM postings WHERE term IN (` + strings.Join(quoteAll(terms), ", ") + `)),
+	sorted := slices.Clone(terms)
+	slices.Sort(sorted)
+	perTerm := make([]string, len(sorted))
+	total := make([]string, len(sorted))
+	for i, t := range sorted {
+		perTerm[i] = fmt.Sprintf("sum(x) FILTER (WHERE term = %s) AS t%d", sqlQuote(t), i)
+		total[i] = fmt.Sprintf("coalesce(t%d, 0)", i)
+	}
+
+	sqlStr := `WITH p AS (` + postingsFor(terms) + `),
 s AS (SELECT term, count(*) AS df FROM p GROUP BY term),
 k AS (SELECT cast(docs AS DOUBLE) AS docs,
              cast(coalesce(total_len / nullif(docs, 0), 0) AS DOUBLE) AS avg_doc_len FROM corpus),
-c AS MATERIALIZED (
-  SELECT p.doc,
-    sum(ln(1.0 + ((greatest(k.docs, cast(s.df AS DOUBLE))
+x AS (
+  SELECT p.doc, p.term,
+    ln(1.0 + ((greatest(k.docs, cast(s.df AS DOUBLE))
         - cast(s.df AS DOUBLE) + 0.5) / (cast(s.df AS DOUBLE) + 0.5)))
       * ((cast(p.tf AS DOUBLE) * 1.200000)
         / (cast(p.tf AS DOUBLE) + 1.200000 * (1.0 - 0.750000
           + 0.750000 * (cast(p.doc_len AS DOUBLE)
-            / greatest(k.avg_doc_len, 1.0))))) ORDER BY p.term) AS raw_score
+            / greatest(k.avg_doc_len, 1.0))))) AS x
   FROM p JOIN s ON s.term = p.term CROSS JOIN k
-  WHERE ` + strings.Join(filters, "\n    AND ") + `
-  GROUP BY p.doc
-  HAVING raw_score >= 0.000000)
+  WHERE ` + strings.Join(filters, "\n    AND ") + `),
+c AS MATERIALIZED (
+  SELECT doc, ` + strings.Join(total, " + ") + ` AS raw_score
+  FROM (SELECT doc, ` + strings.Join(perTerm, ", ") + ` FROM x GROUP BY doc)
+  WHERE ` + strings.Join(total, " + ") + ` >= 0.000000)
 SELECT doc, raw_score FROM c
 WHERE raw_score >= (SELECT coalesce(min(raw_score), 0) FROM (SELECT raw_score FROM c ORDER BY raw_score DESC LIMIT ` + strconv.Itoa(limit) + `))`
 
@@ -203,6 +211,23 @@ WHERE raw_score >= (SELECT coalesce(min(raw_score), 0) FROM (SELECT raw_score FR
 		out = append(out, &r)
 	}
 	return out, rows.Err()
+}
+
+func postingsFor(terms []string) string {
+	byTable := map[string][]string{}
+	var tables []string
+	for _, t := range terms {
+		tb := cache.PostingTable(t)
+		if byTable[tb] == nil {
+			tables = append(tables, tb)
+		}
+		byTable[tb] = append(byTable[tb], sqlQuote(t))
+	}
+	parts := []string{"SELECT term, doc, tf, doc_len, flags FROM postings_delta WHERE term IN (" + strings.Join(quoteAll(terms), ", ") + ")"}
+	for _, tb := range tables {
+		parts = append(parts, "SELECT term, doc, tf, doc_len, flags FROM "+tb+" WHERE term IN ("+strings.Join(byTable[tb], ", ")+")")
+	}
+	return strings.Join(parts, " UNION ALL ")
 }
 
 func scopeExistsFor(ctx context.Context, db *sql.DB, q searchQuery) (bool, error) {
@@ -229,47 +254,34 @@ func hydrateMcpCandidates(ctx context.Context, db *sql.DB, rows []*mcpRow, limit
 		byDoc[r.doc] = r
 		docs[i] = strconv.FormatInt(r.doc, 10)
 	}
-	rs, err := db.QueryContext(ctx, `WITH e AS MATERIALIZED (
-  SELECT doc, event_uid, session_id,
+	rs, err := db.QueryContext(ctx, `SELECT doc, event_uid, session_id,
     coalesce(epoch_ms(event_ts), 0) AS ts_ms, epoch_ms(event_time) AS time_ms,
     event_order, turn_seq, event_ordinal,
-    event_kind, payload_type, actor_kind, tool_name, coalesce(nullif(tool_phase, ''), op_status) AS phase,
-    tool_call_id, item_id, source_ref, text_preview, text_hash,
-    source_name, harness, inference_provider, endpoint_kind, model
-  FROM events WHERE rowid IN (SELECT rowid FROM events WHERE doc IN (`+strings.Join(docs, ", ")+`)))
-SELECT e.*, t.event_count, t.completed, t.terminal_uid,
-  epoch_ms(se.first_event_time), epoch_ms(se.last_event_time), se.completed
-FROM e
-JOIN turns t ON t.session_id = e.session_id AND t.turn_seq = e.turn_seq
-JOIN sessions se ON se.session_id = e.session_id`)
+    event_kind, payload_type, actor_kind, coalesce(nullif(tool_phase, ''), op_status) AS phase,
+    source_ref, text_preview, text_hash, source_name, harness, inference_provider
+  FROM events WHERE rowid IN (SELECT rowid FROM events WHERE doc IN (`+strings.Join(docs, ", ")+`))`)
 	if err != nil {
 		return nil, err
 	}
 	defer rs.Close()
 	var out []*mcpRow
 	for rs.Next() {
-		var doc int64
 		var x mcpRow
 		r := &x.mcpDetail
-		var turnCompleted, sessionCompleted int
-		var turnTerminal any
-		if err := rs.Scan(&doc, &x.eventUID, &x.sessionID, &x.eventTsMs, &x.eventUnixMs,
+		if err := rs.Scan(&x.doc, &x.eventUID, &x.sessionID, &x.eventTsMs, &x.eventUnixMs,
 			&r.eventOrder, &r.turnSeq, &r.eventOrdinal,
-			&r.eventClass, &r.payloadType, &r.actorRole, &r.name, &r.phase,
-			&r.callID, &r.itemID, &r.sourceRef, &r.textContent, &r.textHash,
-			&r.sourceName, &r.harness, &r.inferenceProvider, &r.endpointKind, &r.model,
-			&r.turnEventCount, &turnCompleted, &turnTerminal,
-			&r.sessionStartedMs, &r.sessionUpdatedMs, &sessionCompleted); err != nil {
+			&r.eventClass, &r.payloadType, &r.actorRole, &r.phase,
+			&r.sourceRef, &r.textContent, &r.textHash, &r.sourceName, &r.harness, &r.inferenceProvider); err != nil {
 			return nil, err
 		}
-		r.turnCompleted = turnCompleted != 0
-		r.sessionCompleted = sessionCompleted != 0
-		r.turnTerminalUID = jsonAsString(turnTerminal)
 		r.textPreview = truncateRunes(r.textContent, previewChars)
-		x.doc, x.rawScore = doc, byDoc[doc].rawScore
+		x.rawScore = byDoc[x.doc].rawScore
 		out = append(out, &x)
 	}
 	if err := rs.Err(); err != nil {
+		return nil, err
+	}
+	if out, err = joinTurnsAndSessions(ctx, db, out); err != nil {
 		return nil, err
 	}
 	sort.SliceStable(out, func(i, j int) bool {
@@ -284,6 +296,74 @@ JOIN sessions se ON se.session_id = e.session_id`)
 	})
 	if len(out) > limit {
 		out = out[:limit]
+	}
+	return out, nil
+}
+
+type turnKey struct {
+	sessionID string
+	turnSeq   uint32
+}
+
+func joinTurnsAndSessions(ctx context.Context, db *sql.DB, rows []*mcpRow) ([]*mcpRow, error) {
+	if len(rows) == 0 {
+		return rows, nil
+	}
+	var sids, seqs []string
+	seenS, seenT := map[string]bool{}, map[uint32]bool{}
+	for _, r := range rows {
+		if !seenS[r.sessionID] {
+			seenS[r.sessionID] = true
+			sids = append(sids, sqlQuote(r.sessionID))
+		}
+		if !seenT[r.turnSeq] {
+			seenT[r.turnSeq] = true
+			seqs = append(seqs, strconv.FormatUint(uint64(r.turnSeq), 10))
+		}
+	}
+	inS := strings.Join(sids, ", ")
+	rs, err := db.QueryContext(ctx, `SELECT t.session_id, t.turn_seq, t.event_count, t.completed, t.terminal_uid,
+  epoch_ms(se.first_event_time), epoch_ms(se.last_event_time), se.completed
+FROM (SELECT * FROM turns WHERE session_id IN (`+inS+`) AND turn_seq IN (`+strings.Join(seqs, ", ")+`)) t
+JOIN (SELECT * FROM sessions WHERE session_id IN (`+inS+`)) se ON se.session_id = t.session_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rs.Close()
+	type joined struct {
+		eventCount           int64
+		turnCompleted        bool
+		terminalUID          string
+		startedMs, updatedMs int64
+		sessionCompleted     bool
+	}
+	byKey := map[turnKey]joined{}
+	for rs.Next() {
+		var k turnKey
+		var j joined
+		var turnCompleted, sessionCompleted int
+		var terminal any
+		if err := rs.Scan(&k.sessionID, &k.turnSeq, &j.eventCount, &turnCompleted, &terminal,
+			&j.startedMs, &j.updatedMs, &sessionCompleted); err != nil {
+			return nil, err
+		}
+		j.turnCompleted = turnCompleted != 0
+		j.sessionCompleted = sessionCompleted != 0
+		j.terminalUID = jsonAsString(terminal)
+		byKey[k] = j
+	}
+	if err := rs.Err(); err != nil {
+		return nil, err
+	}
+	out := rows[:0]
+	for _, r := range rows {
+		j, ok := byKey[turnKey{r.sessionID, r.turnSeq}]
+		if !ok {
+			continue
+		}
+		r.turnEventCount, r.turnCompleted, r.turnTerminalUID = j.eventCount, j.turnCompleted, j.terminalUID
+		r.sessionStartedMs, r.sessionUpdatedMs, r.sessionCompleted = j.startedMs, j.updatedMs, j.sessionCompleted
+		out = append(out, r)
 	}
 	return out, nil
 }
