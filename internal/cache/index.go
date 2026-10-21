@@ -70,7 +70,7 @@ func Open(dataDir string, o Options) (*Index, error) {
 	}
 	path := IndexPath(dataDir)
 	setup := []string{
-		"SET threads = 2",
+		"SET threads = 1",
 		"SET preserve_insertion_order = false",
 		"SET memory_limit = " + sqlStr(o.MemoryLimit),
 		"SET temp_directory = " + sqlStr(spill),
