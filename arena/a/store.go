@@ -20,6 +20,7 @@ type Store struct {
 	terms, termsOff, postings []byte
 	faExact, faTio, faBlob    []byte
 	hotB, hotOff              []byte
+	faTri, faTrip             []byte
 	light, heavy              []*os.File
 	fc                        *frameCache
 	maps                      [][]byte
@@ -75,7 +76,7 @@ func openPart(store, dir string, fc *frameCache) (*Store, error) {
 	for name, dst := range map[string]*[]byte{"docs": &st.docs, "sessions": &st.sessions, "sessions.str": &st.sessStr,
 		"turns": &st.turns, "uids": &st.uids, "terms": &st.terms, "terms.off": &st.termsOff, "postings": &st.postings,
 		"fa.exact": &st.faExact, "fa.tio": &st.faTio, "fa.blob": &st.faBlob,
-		"hot": &st.hotB, "hot.off": &st.hotOff} {
+		"hot": &st.hotB, "hot.off": &st.hotOff, "fa.tri": &st.faTri, "fa.trip": &st.faTrip} {
 		b, err := mmapFile(filepath.Join(dir, name))
 		if err != nil {
 			return nil, err
@@ -345,4 +346,59 @@ func (st *Store) hot(d int) (*Row, uint64, error) {
 		return nil, 0, err
 	}
 	return r, th, nil
+}
+
+// faCandidates returns the ascending fa.blob entries that hold every
+// trigram of needle, a superset of the entries containing it; ok is false
+// when needle is too short to narrow anything.
+func (st *Store) faCandidates(needle []byte) ([]int, bool) {
+	if len(needle) < 3 {
+		return nil, false
+	}
+	var out []int
+	for j := 0; j+3 <= len(needle); j++ {
+		k := trigram(needle[j:])
+		n := len(st.faTri) / 8
+		i := sort.Search(n, func(i int) bool { return binary.LittleEndian.Uint32(st.faTri[i*8:]) >= k })
+		if i == n || binary.LittleEndian.Uint32(st.faTri[i*8:]) != k {
+			return []int{}, true
+		}
+		p := st.faTrip[binary.LittleEndian.Uint32(st.faTri[i*8+4:]):]
+		c, w := binary.Uvarint(p)
+		p = p[w:]
+		list := make([]int, 0, c)
+		e := 0
+		for range c {
+			g, w := binary.Uvarint(p)
+			p = p[w:]
+			e += int(g)
+			list = append(list, e)
+		}
+		if j == 0 {
+			out = list
+			continue
+		}
+		out = intersect(out, list)
+		if len(out) == 0 {
+			return out, true
+		}
+	}
+	return out, true
+}
+
+func intersect(a, b []int) []int {
+	out := a[:0]
+	for i, j := 0, 0; i < len(a) && j < len(b); {
+		switch {
+		case a[i] < b[j]:
+			i++
+		case a[i] > b[j]:
+			j++
+		default:
+			out = append(out, a[i])
+			i++
+			j++
+		}
+	}
+	return out
 }

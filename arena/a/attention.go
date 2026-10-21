@@ -252,7 +252,17 @@ func (st *Store) faSuffixTouches(q faQuery, compiled **faRegexps) ([]faTouch, er
 	}
 	var out []faTouch
 	n := len(st.faTio)/8 - 1
-	for i := 0; i < n; i++ {
+	cand, narrowed := []int(nil), false
+	if len(needles) > 0 {
+		cand, narrowed = st.faCandidates(needles[0])
+	}
+	if !narrowed {
+		cand = make([]int, n)
+		for i := range cand {
+			cand[i] = i
+		}
+	}
+	for _, i := range cand {
 		e := st.faTio[i*8:]
 		lo := binary.LittleEndian.Uint32(e[4:])
 		hi := binary.LittleEndian.Uint32(e[12:])

@@ -363,7 +363,8 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 	}
 	ft = binary.LittleEndian.AppendUint32(ft, 0)
 	ft = binary.LittleEndian.AppendUint32(ft, faOffs[len(faOffs)-1])
-	for name, b := range map[string][]byte{"fa.exact": fe, "fa.tio": ft, "fa.blob": faBlob} {
+	tri, trip := trigramIndex(faBlob, faOffs)
+	for name, b := range map[string][]byte{"fa.exact": fe, "fa.tio": ft, "fa.blob": faBlob, "fa.tri": tri, "fa.trip": trip} {
 		if err := os.WriteFile(filepath.Join(dir, name), b, 0o644); err != nil {
 			return err
 		}
@@ -583,3 +584,40 @@ func hotRow(r Row) *Row {
 	}
 	return &r
 }
+
+// trigramIndex maps every 3-byte sequence of each fa.blob entry to the
+// ascending entries holding it: fa.tri is sorted (trigram u32, postings
+// offset u32) pairs, fa.trip the uvarint count and entry gaps.
+func trigramIndex(blob []byte, offs []uint32) ([]byte, []byte) {
+	post := map[uint32][]uint32{}
+	for i := 0; i+1 < len(offs); i++ {
+		e := blob[offs[i]:offs[i+1]]
+		for j := 0; j+3 <= len(e); j++ {
+			k := trigram(e[j:])
+			p := post[k]
+			if n := len(p); n == 0 || p[n-1] != uint32(i) {
+				post[k] = append(p, uint32(i))
+			}
+		}
+	}
+	keys := make([]uint32, 0, len(post))
+	for k := range post {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	var tri, trip []byte
+	for _, k := range keys {
+		tri = binary.LittleEndian.AppendUint32(tri, k)
+		tri = binary.LittleEndian.AppendUint32(tri, uint32(len(trip)))
+		p := post[k]
+		trip = binary.AppendUvarint(trip, uint64(len(p)))
+		prev := uint32(0)
+		for _, e := range p {
+			trip = binary.AppendUvarint(trip, uint64(e-prev))
+			prev = e
+		}
+	}
+	return tri, trip
+}
+
+func trigram(b []byte) uint32 { return uint32(b[0])<<16 | uint32(b[1])<<8 | uint32(b[2]) }
