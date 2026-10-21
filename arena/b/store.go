@@ -77,6 +77,7 @@ type sessionStats struct {
 	Complete   bool
 }
 type Store struct {
+	listRows          []lsItem
 	manifest          Manifest
 	directory         string
 	stamp             manifestStamp
@@ -609,6 +610,7 @@ func loadSnapshot(dir string) (_ *Store, loadErr error) {
 		}
 	}
 	db.buildPaths()
+	db.buildListRollups()
 	db.scoreValues = mappedSlice[float64](&db.arena, len(db.events))
 	db.scoreStamps = mappedSlice[uint32](&db.arena, len(db.events))
 	db.scoreTouched = mappedSlice[uint32](&db.arena, len(db.events))[:0]

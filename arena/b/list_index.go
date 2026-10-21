@@ -7,23 +7,20 @@ import (
 	"time"
 )
 
-func lsSelectPage(_ context.Context, db *Store, a *lsArgs, cursor *lsCursor) ([]lsItem, error) {
-	var out []lsItem
+func (db *Store) buildListRollups() {
+	out := mappedSlice[lsItem](&db.arena, len(db.sessions))[:0]
+	maxEvents := 0
+	for _, es := range db.sessions {
+		maxEvents = max(maxEvents, len(es))
+	}
+	scratch := mappedSlice[*event](&db.arena, maxEvents)
 	for sid, es := range db.sessions {
 		ss := db.stats[sid]
-		if strings.TrimSpace(sid) == "" || ss.End < a.StartUnixMs || ss.Start >= a.EndUnixMs {
+		if strings.TrimSpace(sid) == "" {
 			continue
 		}
-		if cursor != nil {
-			cmp := ss.End > cursor.LastEventUnixMs || ss.End == cursor.LastEventUnixMs && sid > cursor.SessionID
-			if a.Sort == lsSortDesc {
-				cmp = ss.End < cursor.LastEventUnixMs || ss.End == cursor.LastEventUnixMs && sid < cursor.SessionID
-			}
-			if !cmp {
-				continue
-			}
-		}
-		sorted := append([]*event(nil), es...)
+		sorted := scratch[:len(es)]
+		copy(sorted, es)
 		sort.Slice(sorted, func(i, j int) bool {
 			if sorted[i].Timestamp != sorted[j].Timestamp {
 				return sorted[i].Timestamp < sorted[j].Timestamp
@@ -110,31 +107,66 @@ func lsSelectPage(_ context.Context, db *Store, a *lsArgs, cursor *lsCursor) ([]
 			summary = firstNonEmpty(ms, mt, mn, dispatch)
 		}
 		mode := modeFromRank(rank)
-		if a.Mode != nil && mode != *a.Mode || a.Harness != nil && harness != *a.Harness || a.Source != nil && source != *a.Source {
-			continue
-		}
 		if harness != "codex" {
 			preview = ""
 		}
 		item := lsItem{SessionID: sid, FirstEventUnixMs: ss.Start, LastEventUnixMs: ss.End, FirstEventTime: qFormatDateTime(time.UnixMilli(ss.Start)), LastEventTime: qFormatDateTime(time.UnixMilli(ss.End)), TotalTurns: int(turns), TotalEvents: int64(len(es)), Mode: mode, Completed: terminalTurn == turns && terminal == "task_complete", Title: strPtr(title), Source: strPtr(source), Harness: strPtr(harness), SessionSlug: strPtr(slug), SessionSummary: strPtr(summary)}
 		item.DisplayLabel = lsDisplayLabel(explicit, preview, title, summary, slug, harness, lsParseMode(mode), item.LastEventTime, item.TotalTurns)
+		for _, p := range []*string{&item.SessionID, &item.FirstEventTime, &item.LastEventTime, &item.Mode, &item.DisplayLabel} {
+			*p = db.arena.text(*p)
+		}
+		for _, p := range []**string{&item.Title, &item.Source, &item.Harness, &item.SessionSlug, &item.SessionSummary} {
+			if *p != nil {
+				v := &mappedSlice[string](&db.arena, 1)[0]
+				*v = db.arena.text(**p)
+				*p = v
+			}
+		}
 		out = append(out, item)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		x, y := out[i], out[j]
-		if a.Sort == lsSortDesc {
-			if x.LastEventUnixMs != y.LastEventUnixMs {
-				return x.LastEventUnixMs > y.LastEventUnixMs
-			}
-			return x.SessionID > y.SessionID
-		}
 		if x.LastEventUnixMs != y.LastEventUnixMs {
 			return x.LastEventUnixMs < y.LastEventUnixMs
 		}
 		return x.SessionID < y.SessionID
 	})
-	if len(out) > a.Limit+1 {
-		out = out[:a.Limit+1]
+	db.listRows = out
+}
+
+func lsSelectPage(_ context.Context, db *Store, a *lsArgs, cursor *lsCursor) ([]lsItem, error) {
+	rows := db.listRows
+	start, step := 0, 1
+	if a.Sort == lsSortDesc {
+		start = len(rows) - 1
+		step = -1
+	}
+	if cursor != nil {
+		if step == 1 {
+			start = sort.Search(len(rows), func(i int) bool {
+				r := rows[i]
+				return r.LastEventUnixMs > cursor.LastEventUnixMs || r.LastEventUnixMs == cursor.LastEventUnixMs && r.SessionID > cursor.SessionID
+			})
+		} else {
+			start = sort.Search(len(rows), func(i int) bool {
+				r := rows[i]
+				return r.LastEventUnixMs > cursor.LastEventUnixMs || r.LastEventUnixMs == cursor.LastEventUnixMs && r.SessionID >= cursor.SessionID
+			}) - 1
+		}
+	}
+	var out []lsItem
+	for i := start; i >= 0 && i < len(rows); i += step {
+		r := rows[i]
+		if r.LastEventUnixMs < a.StartUnixMs || r.FirstEventUnixMs >= a.EndUnixMs {
+			continue
+		}
+		if a.Mode != nil && r.Mode != *a.Mode || a.Harness != nil && (r.Harness == nil || *r.Harness != *a.Harness) || a.Source != nil && (r.Source == nil || *r.Source != *a.Source) {
+			continue
+		}
+		out = append(out, r)
+		if len(out) == a.Limit+1 {
+			break
+		}
 	}
 	return out, nil
 }

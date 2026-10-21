@@ -59,7 +59,9 @@ queries fault them back on demand. Checker idle RSS fell from 98.0 to 41.8 MB.
   have conservative candidate fallbacks. Project scope remains closed.
 - `open`: binary UID lookup, ordered session vectors, turn metadata, lazy heavy
   frames and the original navigation/content/cursor logic.
-- `list_sessions`: session vectors and original aggregate/filter/cursor logic.
+- `list_sessions`: mapped per-session rollups, sorted by update time and ID;
+  binary cursor seeks with the original filters and labels. Built once per
+  snapshot; p50 fell from 3,165 to 27 microseconds.
 - `get_ingest_status`: source manifest counters and original status derivation.
 
 ## Ingest profile and parser scope
@@ -72,7 +74,7 @@ filesystem changes between ingests. Only files inside this lane are modified.
 Compressed input and heavy output are buffered; offsets are tracked directly.
 The ASCII scanner preserves lowercasing, length limits and token frequencies.
 All five tools pass public, hidden, incremental and three-kill recovery checks.
-Clean ingest improved from 6.12 to 3.06 seconds. macOS full flushes and serialized
+Clean ingest improved from 6.12 to 2.95 seconds. macOS full flushes and serialized
 parse/write work were additional wall-time costs after removing repeated probes.
 
 ## Recovery and freshness
@@ -114,7 +116,7 @@ Neither that merge policy nor the journal is implemented in this prototype.
 Peak ingest memory is O(three segment budgets + codecs + bounded in-flight
 records + source manifest), independent of total event count for fixed source
 count and record size. Each writer queues at most eight events. The sample peak
-is about 249 MB. The required 900 MiB Go soft limit remains enabled in runs;
+is about 256 MB. The required 900 MiB Go soft limit remains enabled in runs;
 it is not a hard RSS ceiling. The parser accepts unbounded single raw lines, so
 there is no unconditional sub-1-GB bound for arbitrary inputs. Production needs
 an explicit oversized-record policy and a measured bound before adoption.

@@ -75,6 +75,36 @@ func TestStore(t *testing.T) {
 			t.Fatal("ASCII tokenization differs from the contract")
 		}
 	})
+	t.Run("list_rollup_cursors", func(t *testing.T) {
+		db := &Store{listRows: []lsItem{{SessionID: "a", FirstEventUnixMs: 10, LastEventUnixMs: 100, Harness: strPtr("x")}, {SessionID: "b", FirstEventUnixMs: 20, LastEventUnixMs: 100, Harness: strPtr("y")}, {SessionID: "c", FirstEventUnixMs: 30, LastEventUnixMs: 200, Harness: strPtr("x")}}}
+		for _, tc := range []struct {
+			name    string
+			sort    lsSort
+			cursor  *lsCursor
+			start   int64
+			harness *string
+			want    string
+		}{
+			{"ascending", lsSortAsc, nil, 0, nil, "a,b"}, {"descending", lsSortDesc, nil, 0, nil, "c,b"},
+			{"asc_tie_cursor", lsSortAsc, &lsCursor{LastEventUnixMs: 100, SessionID: "a"}, 0, nil, "b,c"},
+			{"desc_tie_cursor", lsSortDesc, &lsCursor{LastEventUnixMs: 100, SessionID: "b"}, 0, nil, "a"},
+			{"time", lsSortAsc, nil, 150, nil, "c"}, {"harness", lsSortDesc, nil, 0, strPtr("x"), "c,a"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				rows, err := lsSelectPage(context.Background(), db, &lsArgs{Sort: tc.sort, StartUnixMs: tc.start, EndUnixMs: 1000, Limit: 1, Harness: tc.harness}, tc.cursor)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var ids []string
+				for _, r := range rows {
+					ids = append(ids, r.SessionID)
+				}
+				if strings.Join(ids, ",") != tc.want {
+					t.Fatalf("ids=%v want=%s", ids, tc.want)
+				}
+			})
+		}
+	})
 	t.Run("dictionary_fences", func(t *testing.T) {
 		dir := t.TempDir()
 		codecs, err := newSegmentCodecs()
