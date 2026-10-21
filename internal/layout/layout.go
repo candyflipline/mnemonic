@@ -35,4 +35,8 @@ func (k Key) Tail(root string) string {
 	return filepath.Join(k.dir(root, "events"), k.SrcID+".tail.parquet")
 }
 
+// ParserMarker holds the normalize.Version the whole lake was last fully
+// swept at.
+func ParserMarker(root string) string { return filepath.Join(root, "events", ".parser-version") }
+
 func CacheDir(root string) string { return filepath.Join(root, "cache") }

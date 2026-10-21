@@ -46,6 +46,13 @@ type manifest struct {
 // ingested_at, dedupes event_uid by highest event_version, and writes
 // events/... via DuckDB COPY (zstd) to a temp file then rename. A harness
 // without a parser counts as RawOnly. A second run rewrites 0.
+//
+// While events/.parser-version differs from normalize.Version, Run also
+// re-parses, after the pushed sources and within sweepBudget, each unchanged
+// source whose lake file records another parser version. The marker is written
+// when a call leaves none of them and fails nothing; a crash before that
+// leaves it old, and the next call redoes only what the checkpoints still show
+// stale.
 func Run(dataDir string) (Stats, error) {
 	rawDir := filepath.Join(dataDir, "raw")
 	if _, err := os.Stat(rawDir); err != nil {
@@ -66,6 +73,26 @@ func Run(dataDir string) (Stats, error) {
 	ingestedAt := time.Now().UTC().Format(tsFormat)
 
 	var st Stats
+	parse := func(mpath string, key layout.Key, src manifest, parser normalize.Parser) {
+		written, n, err := parseAndWrite(db, dataDir, key, src, parser, ingestedAt)
+		if err == nil {
+			err = stamp(written, src.UpdatedMs)
+		}
+		if err != nil {
+			st.Failed++
+			fmt.Fprintf(os.Stderr, "lake: %s: %v\n", mpath, err)
+			return
+		}
+		st.Rewrote++
+		st.Events += n
+	}
+	type idle struct {
+		mpath string
+		key   layout.Key
+		src   manifest
+	}
+	sweeping := readParserMarker(dataDir) != normalize.Version
+	var idles []idle
 	for _, mpath := range paths {
 		st.Sources++
 		src, key, err := readManifest(rawDir, mpath)
@@ -75,7 +102,11 @@ func Run(dataDir string) (Stats, error) {
 			continue
 		}
 		if lakeMtime(key, dataDir) >= src.UpdatedMs {
-			st.Unchanged++
+			if sweeping {
+				idles = append(idles, idle{mpath, key, src})
+			} else {
+				st.Unchanged++
+			}
 			continue
 		}
 		parser, ok := normalize.For(src.Harness)
@@ -83,21 +114,62 @@ func Run(dataDir string) (Stats, error) {
 			st.RawOnly++
 			continue
 		}
-		written, n, err := parseAndWrite(db, dataDir, key, src, parser, ingestedAt)
-		if err != nil {
-			st.Failed++
-			fmt.Fprintf(os.Stderr, "lake: %s: %v\n", mpath, err)
-			continue
+		parse(mpath, key, src, parser)
+	}
+
+	sweepEnd := time.Now().Add(sweepBudget)
+	pending := false
+	for _, i := range idles {
+		parser, ok := normalize.For(i.src.Harness)
+		if cp, has := readCheckpoint(db, i.key.Events(dataDir)); !ok || (has && cp.Parser == normalize.Version) {
+			st.Unchanged++
+		} else if time.Now().After(sweepEnd) {
+			st.Unchanged++
+			pending = true
+		} else {
+			parse(i.mpath, i.key, i.src, parser)
 		}
-		if err := stamp(written, src.UpdatedMs); err != nil {
-			st.Failed++
-			fmt.Fprintf(os.Stderr, "lake: %s: %v\n", mpath, err)
-			continue
+	}
+	if sweeping && !pending && st.Failed == 0 {
+		if err := writeParserMarker(dataDir); err != nil {
+			return st, err
 		}
-		st.Rewrote++
-		st.Events += n
 	}
 	return st, nil
+}
+
+// sweepBudget bounds the wall time one Run spends re-parsing sources whose
+// lake file was written by another parser version. Serve runs Run before it
+// converges the cache, so a sweep over a big corpus in one call would hold
+// every later push back for minutes. The check is before each source, so a
+// call overruns by at most one source's parse. The next cycle (a push, or the
+// 5-minute reconcile) continues where the checkpoints say work remains.
+const sweepBudget = 20 * time.Second
+
+// readParserMarker is the normalize.Version the whole lake was last fully
+// swept at, 0 when there is no marker.
+func readParserMarker(dataDir string) int {
+	b, err := os.ReadFile(layout.ParserMarker(dataDir))
+	if err != nil {
+		return 0
+	}
+	v, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+func writeParserMarker(dataDir string) error {
+	path := layout.ParserMarker(dataDir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(strconv.Itoa(normalize.Version)+"\n"), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // ImportClickHouse reads per-month parquet exports of the retired ClickHouse
