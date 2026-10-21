@@ -10,11 +10,14 @@ import (
 const vnodeEvents = syscall.NOTE_WRITE | syscall.NOTE_EXTEND | syscall.NOTE_DELETE | syscall.NOTE_RENAME
 
 // notifier holds one O_EVTONLY descriptor per watched file and directory on
-// a kqueue. A file path on changed means it was written, removed or renamed;
-// a directory path means its entries changed.
+// a kqueue. A file path means it was written, removed or renamed; a directory
+// path means its entries changed. changed carries the first batch of events
+// after each rearm; drain returns the events queued since, without waiting, so
+// a burst of writes wakes the process once rather than once per write.
 type notifier struct {
 	kq      int
 	changed chan string
+	armed   chan struct{}
 	done    chan struct{}
 	exited  chan struct{}
 	mu      sync.Mutex
@@ -36,6 +39,7 @@ func newNotifier() (*notifier, error) {
 	n := &notifier{
 		kq:      kq,
 		changed: make(chan string, 64),
+		armed:   make(chan struct{}, 1),
 		done:    make(chan struct{}),
 		exited:  make(chan struct{}),
 		fds:     make(map[string]int),
@@ -78,9 +82,8 @@ func (n *notifier) drop(path string) {
 	}
 }
 
-// read delivers each event's path. A delete or rename leaves the descriptor
-// on a vnode the path no longer names, so it is closed and the loop's next
-// watch of the path opens whatever the path names now.
+// read waits for events, delivers their paths, then waits for a rearm before
+// waiting again; events in between stay queued for drain or the next wait.
 func (n *notifier) read() {
 	defer close(n.exited)
 	var buf [64]syscall.Kevent_t
@@ -92,26 +95,78 @@ func (n *notifier) read() {
 		if err != nil {
 			return
 		}
-		for _, ev := range buf[:k] {
-			if ev.Filter == syscall.EVFILT_USER {
-				return
-			}
-			n.mu.Lock()
-			path, ok := n.paths[int(ev.Ident)]
-			if ok && ev.Fflags&(syscall.NOTE_DELETE|syscall.NOTE_RENAME) != 0 {
-				n.drop(path)
-			}
-			n.mu.Unlock()
-			if !ok {
-				continue
-			}
+		paths, stop := n.decode(buf[:k])
+		if stop {
+			return
+		}
+		if len(paths) == 0 {
+			continue
+		}
+		for _, p := range paths {
 			select {
-			case n.changed <- path:
+			case n.changed <- p:
 			case <-n.done:
 				return
 			}
 		}
+		select {
+		case <-n.armed:
+		case <-n.done:
+			return
+		}
 	}
+}
+
+// rearm lets read wait for the next batch.
+func (n *notifier) rearm() {
+	select {
+	case n.armed <- struct{}{}:
+	default:
+	}
+}
+
+// drain returns the paths of the events queued now.
+func (n *notifier) drain() []string {
+	var buf [64]syscall.Kevent_t
+	var now syscall.Timespec
+	var all []string
+	for {
+		k, err := syscall.Kevent(n.kq, nil, buf[:], &now)
+		if err == syscall.EINTR {
+			continue
+		}
+		if err != nil || k == 0 {
+			return all
+		}
+		paths, _ := n.decode(buf[:k])
+		all = append(all, paths...)
+		if k < len(buf) {
+			return all
+		}
+	}
+}
+
+// decode returns each event's path, and stop for the close trigger. A delete
+// or rename leaves the descriptor on a vnode the path no longer names, so it
+// is closed and the loop's next watch of the path opens whatever the path
+// names now.
+func (n *notifier) decode(evs []syscall.Kevent_t) (out []string, stop bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for _, ev := range evs {
+		if ev.Filter == syscall.EVFILT_USER {
+			return out, true
+		}
+		path, ok := n.paths[int(ev.Ident)]
+		if !ok {
+			continue
+		}
+		if ev.Fflags&(syscall.NOTE_DELETE|syscall.NOTE_RENAME) != 0 {
+			n.drop(path)
+		}
+		out = append(out, path)
+	}
+	return out, false
 }
 
 func (n *notifier) close() {

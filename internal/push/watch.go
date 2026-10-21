@@ -57,10 +57,10 @@ type watcher struct {
 	watchErr error
 }
 
-// Watch runs until ctx ends. Paths named by file events are sent once no
-// event has arrived for quietFor, or flushWithin after the first unsent
-// event, whichever comes first; a stats line is printed when something was
-// sent or failed.
+// Watch runs until ctx ends. Paths named by file events are sent at the first
+// quietFor tick after the first unsent event that finds no newer event, or
+// flushWithin after it, whichever comes first; a stats line is printed when
+// something was sent or failed.
 func Watch(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client, out io.Writer) error {
 	return newWatcher(cfg, red, hc).run(ctx, out)
 }
@@ -91,28 +91,43 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 	flushAt := time.NewTimer(time.Hour)
 	flushAt.Stop()
 	defer flushAt.Stop()
+	mark := func(p string) {
+		if p == lostEvents {
+			w.stale = true
+		} else {
+			dirty[p] = true
+		}
+	}
 	var firstEvent time.Time
 	var window, retry <-chan time.Time
+	var fresh, delivered bool
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case p := <-n.changed:
-			if p == lostEvents {
-				w.stale = true
-			} else {
-				dirty[p] = true
+			mark(p)
+			delivered = true
+			if window != nil {
+				fresh = true
+				continue
 			}
-			now := time.Now()
-			if window == nil {
-				firstEvent = now
-				window = flushAt.C
-			}
-			flushAt.Reset(min(w.quiet, firstEvent.Add(w.within).Sub(now)))
+			firstEvent = time.Now()
+			window = flushAt.C
+			flushAt.Reset(w.quiet)
 			continue
 		case <-window:
+			for _, p := range n.drain() {
+				mark(p)
+				fresh = true
+			}
+			if left := w.within - time.Since(firstEvent); fresh && left > 0 {
+				fresh = false
+				flushAt.Reset(min(w.quiet, left))
+				continue
+			}
 			if retry != nil {
-				window = nil
+				window, fresh = nil, false
 				continue
 			}
 		case <-retry:
@@ -121,7 +136,7 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 			w.stale = true
 		}
 		flushAt.Stop()
-		window = nil
+		window, fresh = nil, false
 		w.failed = false
 		var st Stats
 		var err error
@@ -132,6 +147,10 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 			st = w.flush(ctx, dirty)
 		}
 		clear(dirty)
+		if delivered {
+			n.rearm()
+			delivered = false
+		}
 		if ctx.Err() != nil {
 			return nil
 		}
