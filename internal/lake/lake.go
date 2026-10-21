@@ -89,7 +89,7 @@ func Run(dataDir string) (Stats, error) {
 			fmt.Fprintf(os.Stderr, "lake: %s: %v\n", mpath, err)
 			continue
 		}
-		if err := restampIfSuperseded(mpath, written, src); err != nil {
+		if err := stamp(written, src.UpdatedMs); err != nil {
 			st.Failed++
 			fmt.Fprintf(os.Stderr, "lake: %s: %v\n", mpath, err)
 			continue
@@ -411,24 +411,10 @@ func readCheckpoint(db *sql.DB, eventsPath string) (checkpoint, bool) {
 	return cp, true
 }
 
-// restampIfSuperseded re-reads the manifest after the lake file rename: when
-// a push landed while this source was parsing, the fresh mtime would make the
-// next Run call the source current and the appended lines would sit unparsed
-// until the source changed again, so pin the written file's mtime to the
-// manifest this run parsed and let the next Run see it as stale.
-func restampIfSuperseded(mpath, written string, parsed manifest) error {
-	var now manifest
-	b, err := os.ReadFile(mpath)
-	if err != nil {
-		return err
-	}
-	if err := json.Unmarshal(b, &now); err != nil {
-		return err
-	}
-	if now.UpdatedMs == parsed.UpdatedMs && now.ZstSize == parsed.ZstSize {
-		return nil
-	}
-	t := time.UnixMilli(parsed.UpdatedMs)
+// stamp sets written's mtime to the millisecond of parsedMs, the manifest
+// UpdatedMs it was parsed from, and below it the write's own nanoseconds.
+func stamp(written string, parsedMs int64) error {
+	t := time.UnixMilli(parsedMs).Add(time.Duration(time.Now().Nanosecond() % 1e6))
 	return os.Chtimes(written, t, t)
 }
 

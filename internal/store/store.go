@@ -173,6 +173,10 @@ func (s *Store) replaceRaw(k layout.Key, body []byte) (int64, error) {
 }
 
 func (s *Store) replace(w http.ResponseWriter, k layout.Key, headHash, sourceName, srcPath string, body []byte, rawEnd int64) {
+	var prevMs int64
+	if prev, err := readManifest(k.Manifest(s.DataDir)); err == nil {
+		prevMs = prev.UpdatedMs
+	}
 	zst, err := s.replaceRaw(k, body)
 	if err != nil {
 		http.Error(w, "write raw", http.StatusInternalServerError)
@@ -187,7 +191,7 @@ func (s *Store) replace(w http.ResponseWriter, k layout.Key, headHash, sourceNam
 			Size:       int64(len(body)),
 			RawEnd:     rawEnd,
 			HeadHash:   headHash,
-			UpdatedMs:  time.Now().UnixMilli(),
+			UpdatedMs:  max(time.Now().UnixMilli(), prevMs+1),
 		},
 		ZstSize: zst,
 	}
@@ -230,7 +234,7 @@ func (s *Store) append(w http.ResponseWriter, k layout.Key, offset int64, headHa
 	}
 	m.Size += int64(len(body))
 	m.RawEnd = rawEnd
-	m.UpdatedMs = time.Now().UnixMilli()
+	m.UpdatedMs = max(time.Now().UnixMilli(), m.UpdatedMs+1)
 	m.ZstSize = zst
 	if err := writeManifest(k.Manifest(s.DataDir), *m); err != nil {
 		http.Error(w, "write manifest", http.StatusInternalServerError)
