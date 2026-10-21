@@ -113,6 +113,7 @@ type mcpDetail struct {
 	model             string
 	textPreview       string
 	textContent       string
+	textHash          uint64
 	eventOrder        int64
 	turnSeq           uint32
 	eventOrdinal      uint32
@@ -228,18 +229,19 @@ func hydrateMcpCandidates(ctx context.Context, db *sql.DB, rows []*mcpRow, limit
 		byDoc[r.doc] = r
 		docs[i] = strconv.FormatInt(r.doc, 10)
 	}
-	rs, err := db.QueryContext(ctx, `SELECT e.doc, e.event_uid, e.session_id,
-  coalesce(epoch_ms(e.event_ts), 0), epoch_ms(e.event_time),
-  e.event_order, e.turn_seq, e.event_ordinal,
-  e.event_kind, e.payload_type, e.actor_kind, e.tool_name, coalesce(nullif(e.tool_phase, ''), e.op_status),
-  e.tool_call_id, e.item_id, e.source_ref, e.text_preview,
-  e.source_name, e.harness, e.inference_provider, e.endpoint_kind, e.model,
-  t.event_count, t.completed, t.terminal_uid,
+	rs, err := db.QueryContext(ctx, `WITH e AS MATERIALIZED (
+  SELECT doc, event_uid, session_id,
+    coalesce(epoch_ms(event_ts), 0) AS ts_ms, epoch_ms(event_time) AS time_ms,
+    event_order, turn_seq, event_ordinal,
+    event_kind, payload_type, actor_kind, tool_name, coalesce(nullif(tool_phase, ''), op_status) AS phase,
+    tool_call_id, item_id, source_ref, text_preview, text_hash,
+    source_name, harness, inference_provider, endpoint_kind, model
+  FROM events WHERE rowid IN (SELECT rowid FROM events WHERE doc IN (`+strings.Join(docs, ", ")+`)))
+SELECT e.*, t.event_count, t.completed, t.terminal_uid,
   epoch_ms(se.first_event_time), epoch_ms(se.last_event_time), se.completed
-FROM events e
+FROM e
 JOIN turns t ON t.session_id = e.session_id AND t.turn_seq = e.turn_seq
-JOIN sessions se ON se.session_id = e.session_id
-WHERE e.doc IN (`+strings.Join(docs, ", ")+`)`)
+JOIN sessions se ON se.session_id = e.session_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -254,7 +256,7 @@ WHERE e.doc IN (`+strings.Join(docs, ", ")+`)`)
 		if err := rs.Scan(&doc, &x.eventUID, &x.sessionID, &x.eventTsMs, &x.eventUnixMs,
 			&r.eventOrder, &r.turnSeq, &r.eventOrdinal,
 			&r.eventClass, &r.payloadType, &r.actorRole, &r.name, &r.phase,
-			&r.callID, &r.itemID, &r.sourceRef, &r.textContent,
+			&r.callID, &r.itemID, &r.sourceRef, &r.textContent, &r.textHash,
 			&r.sourceName, &r.harness, &r.inferenceProvider, &r.endpointKind, &r.model,
 			&r.turnEventCount, &turnCompleted, &turnTerminal,
 			&r.sessionStartedMs, &r.sessionUpdatedMs, &sessionCompleted); err != nil {
@@ -268,9 +270,6 @@ WHERE e.doc IN (`+strings.Join(docs, ", ")+`)`)
 		out = append(out, &x)
 	}
 	if err := rs.Err(); err != nil {
-		return nil, err
-	}
-	if err := fullTextForTies(ctx, db, out); err != nil {
 		return nil, err
 	}
 	sort.SliceStable(out, func(i, j int) bool {
@@ -287,44 +286,6 @@ WHERE e.doc IN (`+strings.Join(docs, ", ")+`)`)
 		out = out[:limit]
 	}
 	return out, nil
-}
-
-func fullTextForTies(ctx context.Context, db *sql.DB, rows []*mcpRow) error {
-	type key struct {
-		session, eventType, text string
-		turn                     uint32
-	}
-	seen := map[key]*mcpRow{}
-	tied := map[int64]*mcpRow{}
-	for _, r := range rows {
-		k := key{r.sessionID, eventTypeFor(r.eventClass, r.payloadType, r.actorRole), r.textContent, r.turnSeq}
-		if prev, ok := seen[k]; ok {
-			tied[prev.doc], tied[r.doc] = prev, r
-		}
-		seen[k] = r
-	}
-	if len(tied) == 0 {
-		return nil
-	}
-	docs := make([]string, 0, len(tied))
-	for d := range tied {
-		docs = append(docs, strconv.FormatInt(d, 10))
-	}
-	rs, err := db.QueryContext(ctx, "SELECT doc, text_content FROM events WHERE doc IN ("+strings.Join(docs, ", ")+")")
-	if err != nil {
-		return err
-	}
-	defer rs.Close()
-	for rs.Next() {
-		var doc int64
-		var text string
-		if err := rs.Scan(&doc, &text); err != nil {
-			return err
-		}
-		tied[doc].textContent = text
-		tied[doc].textPreview = truncateRunes(text, previewChars)
-	}
-	return rs.Err()
 }
 
 func truncateRunes(s string, n int) string {
@@ -373,7 +334,7 @@ func dedupeMcpRows(rows []*mcpRow, limit int) []*mcpRow {
 // codex-mirror extension (adjacent agent_message/message rows within 10 ms)
 // rides on top, as upstream.
 func mcpRowsAreEquivalent(a, b *mcpRow) bool {
-	sameContent := a.textContent == b.textContent
+	sameContent := a.textHash == b.textHash && a.textContent == b.textContent
 	sameCoords := a.sessionID == b.sessionID && a.turnSeq == b.turnSeq &&
 		eventTypeFor(a.eventClass, a.payloadType, a.actorRole) == eventTypeFor(b.eventClass, b.payloadType, b.actorRole) &&
 		sameContent

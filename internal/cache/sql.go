@@ -74,11 +74,15 @@ func parquetSource(files []lakeFile) string {
 		"], hive_partitioning=false, filename=true, file_row_number=true)"
 }
 
+func md5Key(expr string) string {
+	return "cast(md5_number(" + expr + ") >> 64 AS UBIGINT)"
+}
+
 var heavyColumns = map[string]bool{"payload_json": true, "token_usage_json": true}
 
-func eventsDDL(table, extra string) string {
+func eventsDDL() string {
 	var b strings.Builder
-	b.WriteString("CREATE TABLE " + table + " (doc UINTEGER NOT NULL")
+	b.WriteString("CREATE TABLE events (doc UINTEGER NOT NULL")
 	for _, c := range schema.EventColumns {
 		if heavyColumns[c.Name] {
 			continue
@@ -92,12 +96,15 @@ func eventsDDL(table, extra string) string {
   lake_file VARCHAR, lake_row UBIGINT, emission_index UINTEGER,
   tool_io_input_json VARCHAR USING COMPRESSION zstd, tool_io_input_preview VARCHAR,
   tool_io_output_preview VARCHAR, tool_io_project_id VARCHAR, tool_io_repo_rel_path VARCHAR,
-  tool_io_worktree_root VARCHAR, meta_json VARCHAR USING COMPRESSION zstd` + extra + `)`)
+  tool_io_worktree_root VARCHAR, meta_json VARCHAR USING COMPRESSION zstd,
+  row_hash UBIGINT NOT NULL, flags USMALLINT NOT NULL, doc_len UINTEGER NOT NULL,
+  event_time TIMESTAMP, event_order BIGINT, turn_seq UINTEGER, event_ordinal UINTEGER,
+  text_hash UBIGINT NOT NULL, uid_key UBIGINT NOT NULL)`)
 	return b.String()
 }
 
 // insertEventsSQL copies the winners in temp table w (filename,
-// file_row_number, doc) from src into table, deriving the payload fields:
+// file_row_number, doc) from src into events, deriving the payload fields:
 //   - emission_index: payload_json's moraine_emission_index the way
 //     JSONExtractUInt reads it (missing or non-numeric is 0);
 //   - tool_io_*: the moraine_tool_io fields of tool requests, ” for a
@@ -107,7 +114,7 @@ func eventsDDL(table, extra string) string {
 //     (the only rows session titles read).
 //
 // The contains() guards skip JSON parsing on the rows that cannot match.
-func insertEventsSQL(table, src, extra string) string {
+func insertEventsSQL(src string) string {
 	cols := make([]string, 0, len(schema.EventColumns))
 	for _, c := range schema.EventColumns {
 		if !heavyColumns[c.Name] {
@@ -117,7 +124,7 @@ func insertEventsSQL(table, src, extra string) string {
 	tio := func(field string) string {
 		return "CASE WHEN tio IS NOT NULL THEN coalesce(json_extract_string(tio, '$." + field + "'), '') END"
 	}
-	return "INSERT INTO " + table + " SELECT w.doc, " + strings.Join(cols, ", ") + `,
+	return "INSERT INTO events SELECT w.doc, " + strings.Join(cols, ", ") + `,
   r.author, r.machine_id, r.ingested_at, r.filename, r.file_row_number,
   CASE WHEN contains(payload_json, 'moraine_emission_index')
     THEN coalesce(try_cast(json_extract_string(payload_json, '$.moraine_emission_index') AS UINTEGER), 0)
@@ -129,7 +136,9 @@ func insertEventsSQL(table, src, extra string) string {
   ` + tio("repo_rel_path") + `,
   ` + tio("worktree_root") + `,
   CASE WHEN event_kind = 'session_meta' OR (source_name = 'omp' AND contains(payload_json, 'title')
-    AND json_extract_string(payload_json, '$.type') IN ('title', 'title_change')) THEN payload_json END` + extra + `
+    AND json_extract_string(payload_json, '$.type') IN ('title', 'title_change')) THEN payload_json END,
+  w.row_hash, w.flags, w.doc_len, ` + eventTimeSQL + `, NULL, NULL, NULL,
+  ` + md5Key("coalesce(r.text_content, '')") + `, ` + md5Key("r.event_uid") + `
 FROM (SELECT *, CASE WHEN tool_phase = 'request' AND contains(payload_json, 'moraine_tool_io')
     THEN json_extract(payload_json, '$.moraine_tool_io') END AS tio
   FROM ` + src + `) r
