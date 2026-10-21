@@ -139,6 +139,8 @@ func countRows(t *testing.T, db *sql.DB, parquet string) int {
 	return n
 }
 
+func never() bool { return false }
+
 func TestRun(t *testing.T) {
 	dataDir := t.TempDir()
 	writeSource(t, dataDir, "alice", "chris-mbp", "test-fake", "aaaaaaaaaaaaaaaa", []string{
@@ -154,7 +156,7 @@ func TestRun(t *testing.T) {
 		"uid-x|1|2024-01-02 03:04:10.000",
 	})
 
-	st, err := Run(dataDir)
+	st, err := Run(dataDir, never, Sweep{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +218,7 @@ func TestRun(t *testing.T) {
 		t.Fatalf("parquet schema = %v, want %v", got, want)
 	}
 
-	st2, err := Run(dataDir)
+	st2, err := Run(dataDir, never, Sweep{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +235,7 @@ func TestRunKeepsHighestEventVersion(t *testing.T) {
 		"uid-a|9|2024-01-02 03:04:07.000",
 	})
 
-	st, err := Run(dataDir)
+	st, err := Run(dataDir, never, Sweep{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +258,7 @@ func TestImportClickHouse(t *testing.T) {
 	writeSource(t, dataDir, "alice", "chris-mbp", "test-fake", "eeeeeeeeeeeeeeee", []string{
 		"uid-live|1|2024-01-02 03:04:05.000",
 	})
-	if st, err := Run(dataDir); err != nil || st.Events != 1 {
+	if st, err := Run(dataDir, never, Sweep{}); err != nil || st.Events != 1 {
 		t.Fatalf("live run: %+v, %v", st, err)
 	}
 
@@ -347,7 +349,7 @@ func TestRunParsesAppendStampedBeforeLakeWrite(t *testing.T) {
 	}
 	pushedAt := time.Now().Add(-time.Second).UnixMilli()
 	setManifest(func(m *manifest) { m.UpdatedMs = pushedAt })
-	if st, err := Run(dataDir); err != nil || st.Rewrote != 1 {
+	if st, err := Run(dataDir, never, Sweep{}); err != nil || st.Rewrote != 1 {
 		t.Fatalf("first run: %+v %v", st, err)
 	}
 
@@ -362,11 +364,55 @@ func TestRunParsesAppendStampedBeforeLakeWrite(t *testing.T) {
 	raw.Close()
 	setManifest(func(m *manifest) { m.ZstSize, m.UpdatedMs = info.Size(), pushedAt+1 })
 
-	st, err := Run(dataDir)
+	st, err := Run(dataDir, never, Sweep{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if st.Rewrote != 1 || st.Unchanged != 0 || st.Events != 1 {
 		t.Fatalf("append pushed 1 ms after the parsed push: %+v, want it parsed", st)
+	}
+}
+
+func TestRunReparsesIdleSourceOfOlderParser(t *testing.T) {
+	dataDir := t.TempDir()
+	key := layout.Key{Author: "alice", Machine: "chris-mbp", Harness: "test-fake", SrcID: "ffffffffffffffff"}
+	writeSource(t, dataDir, key.Author, key.Machine, key.Harness, key.SrcID, []string{
+		"uid-1|1|2024-01-02 03:04:05.000",
+		"uid-2|1|2024-01-02 03:04:06.000",
+	})
+	if st, err := Run(dataDir, never, Sweep{}); err != nil || st.Rewrote != 1 {
+		t.Fatalf("first run: %+v %v", st, err)
+	}
+
+	db := openDB(t)
+	base := key.Events(dataDir)
+	cp, ok := readCheckpoint(db, base)
+	if !ok {
+		t.Fatal("no checkpoint on the first run's file")
+	}
+	cp.Parser = normalize.Version - 1
+	kv, err := json.Marshal(cp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := copyParquet(db, "SELECT * FROM "+lakeRows(base), base, string(kv), ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dataDir, "events", ".parser-version")); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+
+	st, err := Run(dataDir, never, Sweep{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != (Stats{Sources: 1, Rewrote: 1, Events: 2}) {
+		t.Fatalf("run after a parser bump, no new push: %+v, want {1 1 0 0 0 2}", st)
+	}
+	if cp, _ := readCheckpoint(db, base); cp.Parser != normalize.Version {
+		t.Fatalf("checkpoint parser = %d, want %d", cp.Parser, normalize.Version)
+	}
+	if st, err := Run(dataDir, never, Sweep{}); err != nil || st != (Stats{Sources: 1, Unchanged: 1}) {
+		t.Fatalf("further run: %+v %v, want {1 0 1 0 0 0}", st, err)
 	}
 }

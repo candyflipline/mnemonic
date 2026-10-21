@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -35,7 +34,15 @@ type Index struct {
 	db      *sql.DB
 	dataDir string
 	flags   string
+	failed  map[string]lakeFile
 }
+
+type Failed int
+
+const (
+	SkipFailed Failed = iota
+	RetryFailed
+)
 
 type ConvergeStats struct {
 	Files, Batches                      int
@@ -76,15 +83,21 @@ func Open(dataDir string, o Options) (*Index, error) {
 		"SET temp_directory = " + sqlStr(spill),
 	}
 	if _, err := os.Stat(path); err == nil {
-		db, err := newDB(path, setup...)
-		if err == nil {
-			var v int
-			var flags string
-			err = db.QueryRow("SELECT version, flags_sql FROM meta").Scan(&v, &flags)
-			if err == nil && v == indexVersion && flags == o.FlagsSQL {
-				return &Index{db: db, dataDir: dataDir, flags: o.FlagsSQL}, nil
+		db, err := openCurrent(path, o.FlagsSQL, setup)
+		if err != nil {
+			return nil, err
+		}
+		if db != nil {
+			return &Index{db: db, dataDir: dataDir, flags: o.FlagsSQL, failed: map[string]lakeFile{}}, nil
+		}
+		old, err := filepath.Glob(path + ".*.broken*")
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range old {
+			if err := os.Remove(f); err != nil {
+				return nil, err
 			}
-			db.Close()
 		}
 		aside := fmt.Sprintf("%s.%d.broken", path, time.Now().UnixMilli())
 		if err := os.Rename(path, aside); err != nil {
@@ -116,7 +129,30 @@ func Open(dataDir string, o Options) (*Index, error) {
 		db.Close()
 		return nil, err
 	}
-	return &Index{db: db, dataDir: dataDir, flags: o.FlagsSQL}, nil
+	return &Index{db: db, dataDir: dataDir, flags: o.FlagsSQL, failed: map[string]lakeFile{}}, nil
+}
+
+func openCurrent(path, flagsSQL string, setup []string) (*sql.DB, error) {
+	db, err := newDB(path, setup...)
+	if err != nil {
+		return nil, err
+	}
+	var hasMeta bool
+	var v int
+	var flags string
+	err = db.QueryRow("SELECT count(*) > 0 FROM duckdb_tables() WHERE schema_name = 'main' AND table_name = 'meta'").Scan(&hasMeta)
+	if err == nil && hasMeta {
+		err = db.QueryRow("SELECT version, flags_sql FROM meta").Scan(&v, &flags)
+	}
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	if !hasMeta || v != indexVersion || flags != flagsSQL {
+		db.Close()
+		return nil, nil
+	}
+	return db, nil
 }
 
 func (ix *Index) DB() *sql.DB { return ix.db }
@@ -180,7 +216,7 @@ type change struct {
 	rows int64
 }
 
-func (ix *Index) Converge(ctx context.Context) (ConvergeStats, error) {
+func (ix *Index) Converge(ctx context.Context, f Failed) (ConvergeStats, error) {
 	c, err := ix.db.Conn(ctx)
 	if err != nil {
 		return ConvergeStats{}, err
@@ -190,7 +226,23 @@ func (ix *Index) Converge(ctx context.Context) (ConvergeStats, error) {
 	if err != nil {
 		return ConvergeStats{}, err
 	}
-	st, errs := ix.apply(ctx, c, changes)
+	var fresh, held []change
+	failed := map[string]lakeFile{}
+	for _, ch := range changes {
+		if ix.failed[ch.file.path] == ch.file {
+			held = append(held, ch)
+			failed[ch.file.path] = ch.file
+		} else {
+			fresh = append(fresh, ch)
+		}
+	}
+	ix.failed = failed
+	st, errs := ix.apply(ctx, c, batches(fresh, batchRows))
+	if f == RetryFailed {
+		rst, rerrs := ix.apply(ctx, c, bySource(held))
+		st.add(rst)
+		errs = append(errs, rerrs...)
+	}
 	if err := syncManifests(ctx, c, ix.dataDir); err != nil {
 		errs = append(errs, err)
 	}
@@ -200,25 +252,18 @@ func (ix *Index) Converge(ctx context.Context) (ConvergeStats, error) {
 	return st, errors.Join(errs...)
 }
 
-func (ix *Index) ConvergeFiles(ctx context.Context, paths []string) (ConvergeStats, error) {
-	c, err := ix.db.Conn(ctx)
-	if err != nil {
-		return ConvergeStats{}, err
-	}
-	defer c.Close()
-	changes, err := diffFiles(ctx, c, paths, false)
-	if err != nil {
-		return ConvergeStats{}, err
-	}
-	st, errs := ix.apply(ctx, c, changes)
-	return st, errors.Join(errs...)
-}
-
-func (ix *Index) apply(ctx context.Context, c *sql.Conn, changes []change) (ConvergeStats, []error) {
+func (ix *Index) apply(ctx context.Context, c *sql.Conn, bs [][]change) (ConvergeStats, []error) {
 	var st ConvergeStats
 	var errs []error
-	for _, b := range batches(changes, batchRows) {
+	for _, b := range bs {
 		bst, err := applyBatch(ctx, c, ix.flags, ix.dataDir, b)
+		for _, ch := range b {
+			if err != nil {
+				ix.failed[ch.file.path] = ch.file
+			} else {
+				delete(ix.failed, ch.file.path)
+			}
+		}
 		if err != nil {
 			errs = append(errs, fmt.Errorf("batch of %d files from %s: %w", len(b), b[0].file.path, err))
 			continue
@@ -233,22 +278,8 @@ func diffLake(ctx context.Context, c *sql.Conn, dataDir string) ([]change, error
 	if err != nil {
 		return nil, err
 	}
-	return diffFiles(ctx, c, matches, true)
-}
-
-func diffFiles(ctx context.Context, c *sql.Conn, paths []string, whole bool) ([]change, error) {
-	matches := slices.Clone(paths)
-	sort.Strings(matches)
-	matches = slices.Compact(matches)
-	if len(matches) == 0 && !whole {
-		return nil, nil
-	}
-	q := "SELECT path, size, mtime_ns FROM lake_files"
-	if !whole {
-		q += " WHERE path IN (" + strings.Join(quoteAll(matches), ", ") + ")"
-	}
 	applied := map[string]lakeFile{}
-	rows, err := c.QueryContext(ctx, q)
+	rows, err := c.QueryContext(ctx, "SELECT path, size, mtime_ns FROM lake_files")
 	if err != nil {
 		return nil, err
 	}
@@ -348,6 +379,17 @@ func batches(changes []change, max int64) [][]change {
 	}
 	if len(cur) > 0 {
 		out = append(out, cur)
+	}
+	return out
+}
+
+func bySource(changes []change) [][]change {
+	var out [][]change
+	for i, ch := range changes {
+		if i == 0 || sourceOf(changes[i-1].file.path) != sourceOf(ch.file.path) {
+			out = append(out, nil)
+		}
+		out[len(out)-1] = append(out[len(out)-1], ch)
 	}
 	return out
 }
@@ -677,34 +719,46 @@ func syncManifests(ctx context.Context, c *sql.Conn, dataDir string) error {
 		harness, _ := strings.CutPrefix(parts[n-2], "harness=")
 		onDisk[layout.Key{Author: author, Machine: machine, Harness: harness, SrcID: strings.TrimSuffix(parts[n-1], ".json")}] = m
 	}
-	rows, err := c.QueryContext(ctx, "SELECT author, machine_id, harness, src_id FROM sources")
+	type row struct{ size, updatedMs int64 }
+	inIndex := map[layout.Key]row{}
+	rows, err := c.QueryContext(ctx, "SELECT author, machine_id, harness, src_id, size, updated_ms FROM sources")
 	if err != nil {
 		return err
 	}
-	var stmts []string
 	for rows.Next() {
 		var k layout.Key
-		if err := rows.Scan(&k.Author, &k.Machine, &k.Harness, &k.SrcID); err != nil {
+		var r row
+		if err := rows.Scan(&k.Author, &k.Machine, &k.Harness, &k.SrcID, &r.size, &r.updatedMs); err != nil {
 			rows.Close()
 			return err
 		}
-		if _, ok := onDisk[k]; ok {
-			delete(onDisk, k)
-		} else {
-			stmts = append(stmts, "DELETE FROM sources WHERE "+sourceWhere(k))
-		}
+		inIndex[k] = r
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return err
+	}
+	var stmts []string
+	for k := range inIndex {
+		if _, ok := onDisk[k]; !ok {
+			stmts = append(stmts, "DELETE FROM sources WHERE "+sourceWhere(k))
+		}
 	}
 	for k, path := range onDisk {
 		src, ok, err := readManifest(path)
 		if err != nil {
 			return err
 		}
-		if ok {
+		if !ok {
+			continue
+		}
+		r, indexed := inIndex[k]
+		switch {
+		case !indexed:
 			stmts = append(stmts, sourceInsert(k, src, 0))
+		case r.size != src.Size || r.updatedMs != src.UpdatedMs:
+			stmts = append(stmts, fmt.Sprintf("UPDATE sources SET source_name = %s, source_file = %s, size = %d, head_hash = %s, updated_ms = %d WHERE %s",
+				sqlStr(src.SourceName), sqlStr(src.Path), src.Size, sqlStr(src.HeadHash), src.UpdatedMs, sourceWhere(k)))
 		}
 	}
 	if len(stmts) == 0 {

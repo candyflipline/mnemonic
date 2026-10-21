@@ -38,7 +38,7 @@ func lakeDB(t *testing.T, goldens ...string) *sql.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ix.Close() })
-	if _, err := ix.Converge(context.Background()); err != nil {
+	if _, err := ix.Converge(context.Background(), cache.RetryFailed); err != nil {
 		t.Fatal(err)
 	}
 	return ix.DB()

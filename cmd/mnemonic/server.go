@@ -95,21 +95,25 @@ const (
 )
 
 func convergeLoop(ctx context.Context, dataDir string, ix *cache.Index, wake <-chan struct{}) {
-	cycle(ctx, dataDir, ix, "boot")
+	pushPending := func() bool { return len(wake) > 0 }
+	ls := cycle(ctx, dataDir, ix, "boot", pushPending, lake.Sweep{})
 	for {
-		reason := "reconcile"
-		select {
-		case <-ctx.Done():
-			return
-		case <-wake:
-			reason = "put"
-			settle(ctx, wake)
-		case <-time.After(reconcile):
+		reason := "sweep"
+		if ls.Stale == 0 || pushPending() {
+			reason = "reconcile"
+			select {
+			case <-ctx.Done():
+				return
+			case <-wake:
+				reason = "put"
+				settle(ctx, wake)
+			case <-time.After(reconcile):
+			}
 		}
 		if ctx.Err() != nil {
 			return
 		}
-		cycle(ctx, dataDir, ix, reason)
+		ls = cycle(ctx, dataDir, ix, reason, pushPending, ls.Next)
 	}
 }
 
@@ -132,16 +136,21 @@ func settle(ctx context.Context, wake <-chan struct{}) {
 	}
 }
 
-func cycle(ctx context.Context, dataDir string, ix *cache.Index, reason string) {
+func cycle(ctx context.Context, dataDir string, ix *cache.Index, reason string, pushPending func() bool, sweep lake.Sweep) lake.Stats {
 	start := time.Now()
-	ls, lerr := lake.Run(dataDir)
+	ls, lerr := lake.Run(dataDir, pushPending, sweep)
 	lakeWall := time.Since(start)
-	cs, cerr := ix.Converge(ctx)
-	log.Printf("cycle %s: lake sources=%d rewrote=%d unchanged=%d raw_only=%d failed=%d events=%d in %s err=%v; "+
+	failed := cache.SkipFailed
+	if reason == "reconcile" {
+		failed = cache.RetryFailed
+	}
+	cs, cerr := ix.Converge(ctx, failed)
+	log.Printf("cycle %s: lake sources=%d rewrote=%d unchanged=%d raw_only=%d failed=%d stale=%d events=%d in %s err=%v; "+
 		"converge files=%d batches=%d inserted=%d deleted=%d moved=%d reordered=%d sessions=%d in %s err=%v; wall %s",
-		reason, ls.Sources, ls.Rewrote, ls.Unchanged, ls.RawOnly, ls.Failed, ls.Events, lakeWall.Round(time.Millisecond), lerr,
+		reason, ls.Sources, ls.Rewrote, ls.Unchanged, ls.RawOnly, ls.Failed, ls.Stale, ls.Events, lakeWall.Round(time.Millisecond), lerr,
 		cs.Files, cs.Batches, cs.Inserted, cs.Deleted, cs.Moved, cs.Reordered, cs.Sessions,
 		(time.Since(start) - lakeWall).Round(time.Millisecond), cerr, time.Since(start).Round(time.Millisecond))
+	return ls
 }
 
 func importCH(args []string) error {
