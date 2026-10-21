@@ -56,7 +56,11 @@ func main() {
 		fail(mkMasks(os.Args[2:]))
 		return
 	}
-	fail(score(os.Args[1:]))
+	pass, err := score(os.Args[1:])
+	fail(err)
+	if !pass {
+		os.Exit(2)
+	}
 }
 
 func fail(err error) {
@@ -537,7 +541,7 @@ func loadSet(name, dir string) (set, error) {
 	return set{name: name, calls: cs, expected: exp}, nil
 }
 
-func score(args []string) error {
+func score(args []string) (bool, error) {
 	fs := flag.NewFlagSet("check", flag.ExitOnError)
 	bin := fs.String("bin", "", "candidate binary")
 	name := fs.String("name", "", "candidate name")
@@ -547,16 +551,16 @@ func score(args []string) error {
 	skip := fs.String("skip", "", "comma list of phases to skip: incremental,crash")
 	fs.Parse(args)
 	if *bin == "" || *name == "" {
-		return fmt.Errorf("-bin and -name are required")
+		return false, fmt.Errorf("-bin and -name are required")
 	}
 	absBin, err := filepath.Abs(*bin)
 	if err != nil {
-		return err
+		return false, err
 	}
 	ts := time.Now().UTC().Format("20060102T150405Z")
 	work := filepath.Join(arena, "check", "work", *name+"-"+ts)
 	if err := os.MkdirAll(work, 0o755); err != nil {
-		return err
+		return false, err
 	}
 	defer os.RemoveAll(work)
 	c := card{Name: *name, Bin: absBin, At: ts, Pass: true}
@@ -572,14 +576,11 @@ func score(args []string) error {
 	os.MkdirAll(filepath.Join(arena, "runs"), 0o755)
 	out := filepath.Join(arena, "runs", *name+"-"+ts+".json")
 	if werr := os.WriteFile(out, append(b, '\n'), 0o644); werr != nil {
-		return werr
+		return false, werr
 	}
 	fmt.Println(string(b))
 	fmt.Fprintln(os.Stderr, "scorecard:", out)
-	if !c.Pass {
-		os.Exit(2)
-	}
-	return nil
+	return c.Pass, nil
 }
 
 func scoreInto(c *card, bin, work, src, seedBin string, crashSeed int64, skip string) error {
