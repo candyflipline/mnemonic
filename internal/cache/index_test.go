@@ -68,6 +68,42 @@ func TestConverge(t *testing.T) {
 	}
 }
 
+func TestConvergeKeepsOneDocPerUID(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	if err := cachetest.Lake(dataDir, "claude_code"); err != nil {
+		t.Fatal(err)
+	}
+	ix, err := Open(dataDir, Options{MemoryLimit: "1GB", FlagsSQL: "0::USMALLINT"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ix.Close()
+	if _, err := ix.Converge(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		"INSERT INTO events SELECT * REPLACE (doc + 1000 AS doc) FROM events",
+		"DELETE FROM lake_rows",
+		"DELETE FROM lake_files",
+	} {
+		if _, err := ix.DB().Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st, err := ix.Converge(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := ix.DB().QueryRow("SELECT count(*) || '/' || count(DISTINCT event_uid) FROM events").Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "6/6" || st.Inserted != 0 || st.Deleted != 6 {
+		t.Fatalf("events %s after %+v", got, st)
+	}
+}
+
 func TestConvergeReparseKeepsRows(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()

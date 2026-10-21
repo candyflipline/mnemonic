@@ -411,14 +411,16 @@ QUALIFY row_number() OVER (PARTITION BY event_uid ORDER BY ` + winnerOrder + `) 
 		`CREATE OR REPLACE TEMP TABLE cur AS SELECT doc, event_uid, lake_file, lake_row, row_hash, session_id, doc_len
 FROM events SEMI JOIN aff USING (event_uid)`,
 		"DROP TABLE old", "DROP TABLE aff",
-		`CREATE OR REPLACE TEMP TABLE del AS SELECT c.doc, c.session_id, c.doc_len FROM cur c LEFT JOIN win w USING (event_uid)
-WHERE w.event_uid IS NULL OR w.row_hash <> c.row_hash`,
-		`CREATE OR REPLACE TEMP TABLE mv AS SELECT c.doc, w.lake_file, w.lake_row FROM cur c JOIN win w USING (event_uid)
-WHERE c.row_hash = w.row_hash AND (c.lake_file <> w.lake_file OR c.lake_row <> w.lake_row)`,
+		`CREATE OR REPLACE TEMP TABLE keep AS SELECT c.event_uid, min(c.doc) AS doc
+FROM cur c JOIN win w USING (event_uid) WHERE c.row_hash = w.row_hash GROUP BY c.event_uid`,
+		`CREATE OR REPLACE TEMP TABLE del AS SELECT c.doc, c.session_id, c.doc_len FROM cur c ANTI JOIN keep k USING (doc)`,
+		`CREATE OR REPLACE TEMP TABLE mv AS SELECT c.doc, w.lake_file, w.lake_row
+FROM keep k JOIN cur c USING (doc) JOIN win w ON w.event_uid = k.event_uid
+WHERE c.lake_file <> w.lake_file OR c.lake_row <> w.lake_row`,
 		`CREATE OR REPLACE TEMP TABLE ins AS SELECT w.lake_file, w.lake_row, w.row_hash,
   cast(` + strconv.FormatInt(firstDoc, 10) + ` + row_number() OVER (ORDER BY w.lake_file, w.lake_row) - 1 AS UINTEGER) AS doc
-FROM win w LEFT JOIN cur c USING (event_uid) WHERE c.event_uid IS NULL OR c.row_hash <> w.row_hash`,
-		"DROP TABLE win", "DROP TABLE cur",
+FROM win w ANTI JOIN keep k USING (event_uid)`,
+		"DROP TABLE win", "DROP TABLE cur", "DROP TABLE keep",
 	}); err != nil {
 		return err
 	}
