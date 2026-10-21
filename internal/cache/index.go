@@ -18,7 +18,7 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-const indexVersion = 1
+const indexVersion = 2
 
 const (
 	batchRows   = 500_000
@@ -168,7 +168,9 @@ const winnerOrder = "event_version DESC, " + archiveSQL + ", ingested_at DESC, l
 func rowHashSQL() string {
 	cols := make([]string, 0, len(schema.EventColumns)+2)
 	for _, c := range schema.EventColumns {
-		cols = append(cols, c.Name)
+		if c.Name != "event_version" {
+			cols = append(cols, c.Name)
+		}
 	}
 	return "hash(" + strings.Join(append(cols, "author", "machine_id"), ", ") + ")"
 }
@@ -360,6 +362,10 @@ func applyBatch(ctx context.Context, c *sql.Conn, flagsSQL, dataDir string, b []
 	}
 	stmts = append(stmts,
 		"CREATE OR REPLACE TEMP TABLE old AS SELECT * FROM lake_rows WHERE "+inBatch,
+		`UPDATE n SET event_version = o.event_version, ingested_at = o.ingested_at FROM (
+  SELECT lake_file, event_uid, row_hash, max(event_version) AS event_version, max(ingested_at) AS ingested_at
+  FROM old GROUP BY ALL) o
+WHERE n.lake_file = o.lake_file AND n.event_uid = o.event_uid AND n.row_hash = o.row_hash`,
 		`CREATE OR REPLACE TEMP TABLE aff AS SELECT DISTINCT event_uid FROM (
   (SELECT * FROM n EXCEPT ALL SELECT * FROM old) UNION ALL (SELECT * FROM old EXCEPT ALL SELECT * FROM n))`)
 	if err := execAll(ctx, c, stmts); err != nil {

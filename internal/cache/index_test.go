@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/candyflipline/mnemonic/internal/cache/cachetest"
@@ -64,5 +65,44 @@ func TestConverge(t *testing.T) {
 	}
 	if st != (ConvergeStats{}) {
 		t.Fatalf("rerun wrote: %+v", st)
+	}
+}
+
+func TestConvergeReparseKeepsRows(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	if err := cachetest.Lake(dataDir, "claude_code"); err != nil {
+		t.Fatal(err)
+	}
+	ix, err := Open(dataDir, Options{MemoryLimit: "1GB", FlagsSQL: "0::USMALLINT"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ix.Close()
+	if _, err := ix.Converge(ctx); err != nil {
+		t.Fatal(err)
+	}
+	path := layout.Key{Author: cachetest.Author, Machine: cachetest.Machine, Harness: "claude-code",
+		SrcID: wire.SrcID("/fixtures/claude-code/session.jsonl")}.Events(dataDir)
+	if _, err := ix.DB().Exec("COPY (SELECT * REPLACE (event_version + 1000 AS event_version, ingested_at + INTERVAL 1 HOUR AS ingested_at) FROM read_parquet(" +
+		sqlStr(path) + ")) TO " + sqlStr(path+".tmp") + " (FORMAT parquet)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path+".tmp", path); err != nil {
+		t.Fatal(err)
+	}
+	st, err := ix.Converge(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprintf("%+v", st); got != "{Files:1 Batches:1 Inserted:0 Deleted:0 Moved:0 Reordered:0 Sessions:0}" {
+		t.Fatalf("re-parse: %s", got)
+	}
+	var v string
+	if err := ix.DB().QueryRow("SELECT min(event_version) || '/' || max(event_version) FROM events").Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v != "1/1" {
+		t.Fatalf("event_version: %s", v)
 	}
 }
