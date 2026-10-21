@@ -236,14 +236,6 @@ func (ix *Index) Converge(ctx context.Context, f Failed) (st ConvergeStats, err 
 		return ConvergeStats{}, err
 	}
 	defer c.Close()
-	if _, err := c.ExecContext(ctx, "SET threads = "+convergeThreads); err != nil {
-		return ConvergeStats{}, err
-	}
-	defer func() {
-		if _, rerr := c.ExecContext(context.Background(), "SET threads = "+queryThreads); rerr != nil {
-			err = errors.Join(err, rerr)
-		}
-	}()
 	changes, err := diffLake(ctx, c, ix.dataDir)
 	if err != nil {
 		return ConvergeStats{}, err
@@ -260,10 +252,32 @@ func (ix *Index) Converge(ctx context.Context, f Failed) (st ConvergeStats, err 
 	}
 	ix.failed = failed
 	fresh, errs := ix.countRows(ctx, c, fresh)
+	var cerrs []error
+	if f == RetryFailed {
+		held, cerrs = ix.countRows(ctx, c, held)
+	}
+	rows := int64(0)
+	for _, ch := range fresh {
+		rows += ch.rows
+	}
+	if f == RetryFailed {
+		for _, ch := range held {
+			rows += ch.rows
+		}
+	}
+	if rows >= chunkRows {
+		if _, err := c.ExecContext(ctx, "SET threads = "+convergeThreads); err != nil {
+			return ConvergeStats{}, errors.Join(append(errs, err)...)
+		}
+		defer func() {
+			if _, rerr := c.ExecContext(context.Background(), "SET threads = "+queryThreads); rerr != nil {
+				err = errors.Join(err, rerr)
+			}
+		}()
+	}
 	st, aerrs := ix.apply(ctx, c, batches(fresh, batchRows))
 	errs = append(errs, aerrs...)
 	if f == RetryFailed {
-		held, cerrs := ix.countRows(ctx, c, held)
 		rst, rerrs := ix.apply(ctx, c, bySource(held))
 		st.add(rst)
 		errs = append(append(errs, cerrs...), rerrs...)
