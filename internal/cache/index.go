@@ -18,7 +18,7 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-const indexVersion = 3
+const indexVersion = 4
 
 const (
 	batchRows   = 500_000
@@ -130,8 +130,7 @@ func indexDDL() []string {
 		"CREATE TABLE lake_files (path VARCHAR NOT NULL, size UBIGINT NOT NULL, mtime_ns BIGINT NOT NULL)",
 		`CREATE TABLE lake_rows (lake_file VARCHAR NOT NULL, lake_row UBIGINT NOT NULL, event_uid VARCHAR,
   event_version UBIGINT, ingested_at TIMESTAMP, row_hash UBIGINT NOT NULL)`,
-		eventsDDL("events", `, row_hash UBIGINT NOT NULL, flags USMALLINT NOT NULL, doc_len UINTEGER NOT NULL,
-  event_time TIMESTAMP, event_order BIGINT, turn_seq UINTEGER, event_ordinal UINTEGER`),
+		eventsDDL(),
 		"CREATE TABLE postings (term VARCHAR NOT NULL, doc UINTEGER NOT NULL, tf USMALLINT NOT NULL, doc_len UINTEGER NOT NULL, flags USMALLINT NOT NULL)",
 		`CREATE TABLE turns (session_id VARCHAR, turn_seq UINTEGER, event_count BIGINT NOT NULL,
   completed INTEGER NOT NULL, terminal_uid VARCHAR)`,
@@ -509,8 +508,7 @@ FROM (SELECT filename, file_row_number, event_kind, payload_type, actor_kind, so
     ` + tokenList + ` AS toks FROM ` + src + `) r
 JOIN insc i ON i.lake_file = r.filename AND i.lake_row = r.file_row_number`,
 		"CREATE OR REPLACE TEMP TABLE w AS SELECT filename, file_row_number, doc, row_hash, flags, doc_len FROM tok",
-		insertEventsSQL("events", src, `,
-  w.row_hash, w.flags, w.doc_len, `+eventTimeSQL+`, NULL, NULL, NULL`),
+		insertEventsSQL(src),
 		`INSERT INTO postings SELECT term, doc, cast(least(tf, 65535) AS USMALLINT), doc_len, flags FROM (
   SELECT doc, doc_len, flags, unnest(map_keys(h)) AS term, unnest(map_values(h)) AS tf FROM tok WHERE doc_len > 0) ORDER BY term`,
 		`UPDATE corpus SET docs = docs + (SELECT count(*) FILTER (WHERE doc_len > 0) FROM w),
