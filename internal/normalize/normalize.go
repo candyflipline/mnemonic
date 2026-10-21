@@ -6,6 +6,10 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
+// Version names the parsers' output. Lake files parsed under another
+// Version are parsed again.
+const Version = 1
+
 type SourceMeta struct {
 	SourceName string
 	Harness    string

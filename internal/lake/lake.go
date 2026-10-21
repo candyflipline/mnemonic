@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/candyflipline/mnemonic/internal/layout"
@@ -183,10 +182,10 @@ func readManifest(rawDir, mpath string) (manifest, layout.Key, error) {
 // below ZstSize only by a replace, which renames a new raw into place; an
 // append truncates to ZstSize and writes a new frame past it. So a raw whose
 // window still hashes the same and holds a zstd frame at ZstSize is this one
-// grown by appends. A file parsed by another binary or under another source
+// grown by appends. A file parsed under another normalize.Version or source
 // identity, or failing either check, is parsed whole again.
 type checkpoint struct {
-	Binary       string          `json:"binary"`
+	Parser       int             `json:"parser"`
 	Harness      string          `json:"harness"`
 	SourceName   string          `json:"source_name"`
 	SourceFile   string          `json:"source_file"`
@@ -198,7 +197,7 @@ type checkpoint struct {
 }
 
 func (cp checkpoint) sameSource(o checkpoint) bool {
-	return cp.Binary != "" && cp.Binary == o.Binary && cp.Harness == o.Harness &&
+	return cp.Parser == o.Parser && cp.Harness == o.Harness &&
 		cp.SourceName == o.SourceName && cp.SourceFile == o.SourceFile
 }
 
@@ -209,23 +208,6 @@ const window = 64 << 10
 var zstdFrameMagic = [4]byte{0x28, 0xb5, 0x2f, 0xfd}
 
 const compactAt = 32 << 20
-
-var binaryID = sync.OnceValue(func() string {
-	exe, err := os.Executable()
-	if err != nil {
-		return ""
-	}
-	f, err := os.Open(exe)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return ""
-	}
-	return hex.EncodeToString(h.Sum(nil))
-})
 
 // parseAndWrite parses the raw bytes the checkpoint has not seen, from its
 // State, and returns the lake file it wrote and that file's row count. A
@@ -244,7 +226,7 @@ func parseAndWrite(db *sql.DB, dataDir string, key layout.Key, src manifest, par
 	}
 	defer raw.Close()
 	basePath, tailPath := key.Events(dataDir), key.Tail(dataDir)
-	next := checkpoint{Binary: binaryID(), Harness: src.Harness, SourceName: src.SourceName, SourceFile: src.Path}
+	next := checkpoint{Parser: normalize.Version, Harness: src.Harness, SourceName: src.SourceName, SourceFile: src.Path}
 	baseCP, hasBase := readCheckpoint(db, basePath)
 	tailCP, hasTail := readCheckpoint(db, tailPath)
 	if !hasBase || !hasTail || !tailCP.sameSource(baseCP) || tailCP.BaseZstSize != baseCP.ZstSize {
