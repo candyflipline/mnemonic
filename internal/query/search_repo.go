@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/candyflipline/mnemonic/internal/cache"
 )
 
 type searchQuery struct {
@@ -174,7 +176,7 @@ func searchMcpCandidates(ctx context.Context, db *sql.DB, q searchQuery, terms [
 		total[i] = fmt.Sprintf("coalesce(t%d, 0)", i)
 	}
 
-	sqlStr := `WITH p AS (SELECT term, doc, tf, doc_len, flags FROM postings WHERE term IN (` + strings.Join(quoteAll(terms), ", ") + `)),
+	sqlStr := `WITH p AS (` + postingsFor(terms) + `),
 s AS (SELECT term, count(*) AS df FROM p GROUP BY term),
 k AS (SELECT cast(docs AS DOUBLE) AS docs,
              cast(coalesce(total_len / nullif(docs, 0), 0) AS DOUBLE) AS avg_doc_len FROM corpus),
@@ -209,6 +211,23 @@ WHERE raw_score >= (SELECT coalesce(min(raw_score), 0) FROM (SELECT raw_score FR
 		out = append(out, &r)
 	}
 	return out, rows.Err()
+}
+
+func postingsFor(terms []string) string {
+	byTable := map[string][]string{}
+	var tables []string
+	for _, t := range terms {
+		tb := cache.PostingTable(t)
+		if byTable[tb] == nil {
+			tables = append(tables, tb)
+		}
+		byTable[tb] = append(byTable[tb], sqlQuote(t))
+	}
+	parts := []string{"SELECT term, doc, tf, doc_len, flags FROM postings_delta WHERE term IN (" + strings.Join(quoteAll(terms), ", ") + ")"}
+	for _, tb := range tables {
+		parts = append(parts, "SELECT term, doc, tf, doc_len, flags FROM "+tb+" WHERE term IN ("+strings.Join(byTable[tb], ", ")+")")
+	}
+	return strings.Join(parts, " UNION ALL ")
 }
 
 func scopeExistsFor(ctx context.Context, db *sql.DB, q searchQuery) (bool, error) {
