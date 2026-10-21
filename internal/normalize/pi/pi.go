@@ -13,8 +13,8 @@ type Parser struct{}
 
 func (Parser) Harness() string { return "pi-coding-agent" }
 
-func (Parser) Parse(r io.Reader, src normalize.SourceMeta, from normalize.State) ([]schema.Event, normalize.State, error) {
-	return shared.ParseJSONL(r, src, from, piSource{})
+func (Parser) Parse(r io.Reader, src normalize.SourceMeta, from normalize.State, emit func(*schema.Event) error) (normalize.State, error) {
+	return shared.ParseJSONL(r, src, from, piSource{}, emit)
 }
 
 func init() { normalize.Register(Parser{}) }

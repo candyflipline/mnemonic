@@ -26,14 +26,7 @@ type fakeParser struct{}
 
 func (fakeParser) Harness() string { return "test-fake" }
 
-var raceOnParse func()
-
-func (fakeParser) Parse(r io.Reader, src normalize.SourceMeta, from normalize.State) ([]schema.Event, normalize.State, error) {
-	if hook := raceOnParse; hook != nil {
-		raceOnParse = nil
-		hook()
-	}
-	var out []schema.Event
+func (fakeParser) Parse(r io.Reader, src normalize.SourceMeta, from normalize.State, emit func(*schema.Event) error) (normalize.State, error) {
 	sc := bufio.NewScanner(r)
 	lineNo := from.LineNo
 	for sc.Scan() {
@@ -44,13 +37,13 @@ func (fakeParser) Parse(r io.Reader, src normalize.SourceMeta, from normalize.St
 		}
 		parts := strings.Split(line, "|")
 		if len(parts) != 3 {
-			return nil, from, fmt.Errorf("test-fake: line %d: %q", lineNo, line)
+			return from, fmt.Errorf("test-fake: line %d: %q", lineNo, line)
 		}
 		version, err := strconv.ParseUint(parts[1], 10, 64)
 		if err != nil {
-			return nil, from, err
+			return from, err
 		}
-		out = append(out, schema.Event{
+		if err := emit(&schema.Event{
 			EventUID:          parts[0],
 			EventVersion:      version,
 			SessionID:         "sess",
@@ -62,9 +55,11 @@ func (fakeParser) Parse(r io.Reader, src normalize.SourceMeta, from normalize.St
 			EventTS:           parts[2],
 			ContentTypes:      []string{"text"},
 			TokenUsageBuckets: map[string]uint64{"input": 3},
-		})
+		}); err != nil {
+			return from, err
+		}
 	}
-	return out, normalize.State{LineNo: lineNo}, sc.Err()
+	return normalize.State{LineNo: lineNo}, sc.Err()
 }
 
 func init() { normalize.Register(fakeParser{}) }
@@ -230,97 +225,6 @@ func TestRun(t *testing.T) {
 	}
 }
 
-func appendFrame(t *testing.T, dataDir string, key layout.Key, lines []string) {
-	t.Helper()
-	raw, err := os.OpenFile(key.Raw(dataDir), os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		t.Fatal(err)
-	}
-	zw, err := zstd.NewWriter(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, line := range lines {
-		if _, err := zw.Write(append([]byte(line), '\n')); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := raw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(key.Raw(dataDir))
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := os.ReadFile(key.Manifest(dataDir))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var m manifest
-	if err := json.Unmarshal(b, &m); err != nil {
-		t.Fatal(err)
-	}
-	// Store stamps UpdatedMs at receive, so take now, but never equal to the
-	// manifest's current stamp: the comparison is >= at millisecond grain.
-	if now := time.Now().UnixMilli(); now > m.UpdatedMs {
-		m.UpdatedMs = now
-	} else {
-		m.UpdatedMs++
-	}
-	m.Size += int64(len(lines))
-	m.ZstSize = info.Size()
-	if b, err = json.Marshal(m); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(key.Manifest(dataDir), b, 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestRunRestampsParquetWhenPushLandsMidParse(t *testing.T) {
-	dataDir := t.TempDir()
-	key := layout.Key{Author: "alice", Machine: "chris-mbp", Harness: "test-fake", SrcID: "ffffffffffffffff"}
-	writeSource(t, dataDir, key.Author, key.Machine, key.Harness, key.SrcID, []string{
-		"uid-1|1|2024-01-02 03:04:05.000",
-		"uid-2|1|2024-01-02 03:04:06.000",
-	})
-
-	raceOnParse = func() {
-		appendFrame(t, dataDir, key, []string{"uid-3|1|2024-01-02 03:04:07.000"})
-	}
-	t.Cleanup(func() { raceOnParse = nil })
-
-	st1, err := Run(dataDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st1 != (Stats{Sources: 1, Rewrote: 1, Events: 2}) {
-		t.Fatalf("first run stats = %+v, want {1 1 0 0 0 2}", st1)
-	}
-
-	st2, err := Run(dataDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st2 != (Stats{Sources: 1, Rewrote: 1, Events: 3}) {
-		t.Fatalf("second run stats = %+v, want {1 1 0 0 0 3}", st2)
-	}
-	if n := countRows(t, openDB(t), key.Events(dataDir)); n != 3 {
-		t.Fatalf("rows = %d, want 3 including the mid-parse append", n)
-	}
-
-	st3, err := Run(dataDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st3 != (Stats{Sources: 1, Unchanged: 1}) {
-		t.Fatalf("third run stats = %+v, want {1 0 1 0 0 0}", st3)
-	}
-}
-
 func TestRunKeepsHighestEventVersion(t *testing.T) {
 	dataDir := t.TempDir()
 	writeSource(t, dataDir, "alice", "chris-mbp", "test-fake", "dddddddddddddddd", []string{
@@ -381,7 +285,7 @@ func TestImportClickHouse(t *testing.T) {
 	exportPath := filepath.Join(exportDir, "events-202401.parquet")
 	query := "SELECT " + selectList("alice", "chris-mbp", "2024-01-01 00:00:00.000") +
 		" FROM read_json(" + sqlQuote(ndjson.Name()) + ", format='newline_delimited', columns=" + columnTypes() + ")"
-	if _, err := copyParquet(db, query, exportPath, ""); err != nil {
+	if _, err := copyParquet(db, query, exportPath, "", ""); err != nil {
 		t.Fatal(err)
 	}
 

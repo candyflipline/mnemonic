@@ -3,13 +3,13 @@
 Collects agent session traces (Claude Code, Codex, Cursor, ...) from every machine, keeps them on one server, and serves them to agents over MCP from DuckDB. Replaced a ClickHouse-backed predecessor (see NOTICE), for personal and team use.
 
 ## Shape
-- `mnemonic push --watch` on each machine (resident under launchd or systemd, wakes on kernel file events and uploads within 60 s) sends **redacted raw lines** to the server. It is pure Go, built with `CGO_ENABLED=0`, and has no parser or DuckDB in it.
+- `mnemonic push --watch` on each machine (resident under launchd or systemd, wakes on kernel file events and uploads within 5 s of a write) sends **redacted raw lines** to the server. It is pure Go, built with `CGO_ENABLED=0`, and has no parser or DuckDB in it.
 - `mnemonic serve` on the server:
   - accepts pushes (`/v1/*`);
   - parses appended raw into `events` parquet (`internal/lake`);
   - converges the changed parquet files into one `cache/index.duckdb` (`internal/cache`), woken by each PUT after 1 s of quiet and every 5 min without one;
   - answers MCP on `POST /mcp` (`internal/mcp`, `internal/query`).
-- Raw is the source of truth, and parquet and the cache are derived. A parser fix is a redeploy plus a re-parse.
+- Raw is the source of truth, and parquet and the cache are derived. A parser fix bumps `normalize.Version`, and serve re-parses every source parsed under another; `TestVersionNamesOutput` fails when parser output changes and the version does not.
 - Paths live in `internal/layout`. The push protocol is `internal/wire`. Auth (bearer token → author) is `internal/auth`; the author is never taken from a request.
 
 ## Contracts (change only with the owner)

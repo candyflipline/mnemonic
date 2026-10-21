@@ -6,6 +6,7 @@ import (
 
 	"github.com/candyflipline/mnemonic/internal/normalize"
 	"github.com/candyflipline/mnemonic/internal/normalize/claudecode"
+	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
 func TestParseJSONLSkippedLineKeepsOffsets(t *testing.T) {
@@ -13,10 +14,11 @@ func TestParseJSONLSkippedLineKeepsOffsets(t *testing.T) {
 not json
 {"timestamp":"2026-01-01T00:00:01.000Z","type":"system"}`
 
-	events, _, err := claudecode.Parser{}.Parse(strings.NewReader(input), normalize.SourceMeta{
+	var events []schema.Event
+	_, err := claudecode.Parser{}.Parse(strings.NewReader(input), normalize.SourceMeta{
 		SourceName: "golden-claude-code", Harness: "claude-code",
 		SourceFile: "/fixtures/claude-code/session.jsonl",
-	}, normalize.State{})
+	}, normalize.State{}, func(e *schema.Event) error { events = append(events, *e); return nil })
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -3,8 +3,9 @@
 //
 //	raw/author=A/machine=M/harness=H/<src_id>.jsonl.zst   redacted raw lines, zstd frames appended
 //	raw/author=A/machine=M/harness=H/<src_id>.json        wire.Source, the manifest entry
-//	events/author=A/machine=M/harness=H/<src_id>.parquet  normalized events of the whole raw file
-//	cache/index.duckdb                                    derived; serve converges it from events/
+//	events/author=A/machine=M/harness=H/<src_id>.parquet       normalized events up to the base's checkpoint
+//	events/author=A/machine=M/harness=H/<src_id>.tail.parquet  events appended since, when any
+//	cache/index.duckdb                                         derived; serve converges it from events/
 package layout
 
 import "path/filepath"
@@ -29,6 +30,9 @@ func (k Key) Raw(root string) string      { return filepath.Join(k.dir(root, "ra
 func (k Key) Manifest(root string) string { return filepath.Join(k.dir(root, "raw"), k.SrcID+".json") }
 func (k Key) Events(root string) string {
 	return filepath.Join(k.dir(root, "events"), k.SrcID+".parquet")
+}
+func (k Key) Tail(root string) string {
+	return filepath.Join(k.dir(root, "events"), k.SrcID+".tail.parquet")
 }
 
 func CacheDir(root string) string { return filepath.Join(root, "cache") }

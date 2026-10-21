@@ -18,7 +18,7 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-const indexVersion = 5
+const indexVersion = 6
 
 const (
 	batchRows   = 500_000
@@ -127,7 +127,7 @@ func indexDDL() []string {
 	return []string{
 		"CREATE TABLE meta (version INTEGER NOT NULL, flags_sql VARCHAR NOT NULL)",
 		"CREATE TABLE corpus (docs UBIGINT NOT NULL, total_len UBIGINT NOT NULL, next_doc UINTEGER NOT NULL)",
-		"CREATE TABLE lake_files (path VARCHAR NOT NULL, size UBIGINT NOT NULL, mtime_ns BIGINT NOT NULL)",
+		"CREATE TABLE lake_files (path VARCHAR NOT NULL, size UBIGINT NOT NULL, mtime_ns BIGINT NOT NULL, rows UBIGINT NOT NULL)",
 		`CREATE TABLE lake_rows (lake_file VARCHAR NOT NULL, lake_row UBIGINT NOT NULL, event_uid VARCHAR,
   event_version UBIGINT, ingested_at TIMESTAMP, row_hash UBIGINT NOT NULL, uid_key UBIGINT NOT NULL)`,
 		eventsDDL(),
@@ -277,15 +277,23 @@ func diffFiles(ctx context.Context, c *sql.Conn, paths []string, whole bool) ([]
 		}
 		delete(applied, m)
 	}
-	var gone []change
-	for _, f := range applied {
-		gone = append(gone, change{file: f, gone: true})
-	}
-	sort.Slice(gone, func(i, j int) bool { return gone[i].file.path < gone[j].file.path })
 	if err := countRows(ctx, c, out); err != nil {
 		return nil, err
 	}
-	return append(gone, out...), nil
+	for _, f := range applied {
+		out = append(out, change{file: f, gone: true})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if sa, sb := sourceOf(a.file.path), sourceOf(b.file.path); sa != sb {
+			return sa < sb
+		}
+		if a.gone != b.gone {
+			return a.gone
+		}
+		return a.file.path < b.file.path
+	})
+	return out, nil
 }
 
 func countRows(ctx context.Context, c *sql.Conn, changes []change) error {
@@ -316,12 +324,20 @@ func countRows(ctx context.Context, c *sql.Conn, changes []change) error {
 	return rows.Err()
 }
 
+// sourceOf is a lake file's path without its .parquet or .tail.parquet
+// suffix: the files of one source share it.
+func sourceOf(path string) string {
+	return strings.TrimSuffix(strings.TrimSuffix(path, ".parquet"), ".tail")
+}
+
+// batches splits changes, ordered by source, into runs of about max rows,
+// never between two files of one source.
 func batches(changes []change, max int64) [][]change {
 	var out [][]change
 	var cur []change
 	var n int64
 	for _, ch := range changes {
-		if len(cur) > 0 && n+ch.rows > max {
+		if len(cur) > 0 && n+ch.rows > max && sourceOf(cur[len(cur)-1].file.path) != sourceOf(ch.file.path) {
 			out = append(out, cur)
 			cur, n = nil, 0
 		}
@@ -385,8 +401,11 @@ WHERE n.lake_file = o.lake_file AND n.event_uid = o.event_uid AND n.row_hash = o
 		stmts = append(stmts, "DELETE FROM lake_rows WHERE "+inBatch, "INSERT INTO lake_rows SELECT * FROM n")
 	}
 	stmts = append(stmts, "DELETE FROM lake_files WHERE path IN ("+strings.Join(quotePaths(all), ", ")+")")
-	for _, f := range present {
-		stmts = append(stmts, fmt.Sprintf("INSERT INTO lake_files VALUES (%s, %d, %d)", sqlStr(f.path), f.size, f.mtime))
+	for _, ch := range b {
+		if !ch.gone {
+			stmts = append(stmts, fmt.Sprintf("INSERT INTO lake_files VALUES (%s, %d, %d, %d)",
+				sqlStr(ch.file.path), ch.file.size, ch.file.mtime, ch.rows))
+		}
 	}
 	srcStmts, err := sourceRows(dataDir, b)
 	if err != nil {
@@ -598,8 +617,11 @@ func docSet(ctx context.Context, c *sql.Conn, col, table string) (string, int64,
 	return col + " IN (" + strings.Join(docs, ", ") + ")", n, nil
 }
 
+// sourceRows rewrites the sources row of every live source in b, with events
+// the sum of lake_files.rows over its base and tail.
 func sourceRows(dataDir string, b []change) ([]string, error) {
 	var stmts []string
+	seen := map[layout.Key]bool{}
 	for _, ch := range b {
 		path := filepath.ToSlash(ch.file.path)
 		if strings.Contains(path, "/machine="+layout.ArchiveMachine+"/") {
@@ -610,6 +632,10 @@ func sourceRows(dataDir string, b []change) ([]string, error) {
 			return nil, fmt.Errorf("lake parquet outside the source layout: %s", ch.file.path)
 		}
 		k := layout.Key{Author: m[1], Machine: m[2], Harness: m[3], SrcID: m[4]}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
 		stmts = append(stmts, "DELETE FROM sources WHERE "+sourceWhere(k))
 		src, ok, err := readManifest(k.Manifest(dataDir))
 		if err != nil {
@@ -618,11 +644,10 @@ func sourceRows(dataDir string, b []change) ([]string, error) {
 		if !ok {
 			continue
 		}
-		var n int64
-		if !ch.gone {
-			n = ch.rows
-		}
-		stmts = append(stmts, sourceInsert(k, src, n))
+		base := sourceOf(ch.file.path)
+		stmts = append(stmts, sourceInsert(k, src, 0),
+			"UPDATE sources SET events = (SELECT coalesce(sum(rows), 0) FROM lake_files WHERE path IN ("+
+				sqlStr(base+".parquet")+", "+sqlStr(base+".tail.parquet")+")) WHERE "+sourceWhere(k))
 	}
 	return stmts, nil
 }

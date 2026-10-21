@@ -6,6 +6,10 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
+// Version names the parsers' output. Lake files parsed under another
+// Version are parsed again.
+const Version = 1
+
 type SourceMeta struct {
 	SourceName string
 	Harness    string
@@ -26,7 +30,7 @@ type State struct {
 
 type Parser interface {
 	Harness() string
-	Parse(r io.Reader, src SourceMeta, from State) ([]schema.Event, State, error)
+	Parse(r io.Reader, src SourceMeta, from State, emit func(*schema.Event) error) (State, error)
 }
 
 var parsers = map[string]Parser{}

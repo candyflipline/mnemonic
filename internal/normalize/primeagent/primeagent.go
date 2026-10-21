@@ -16,8 +16,8 @@ type Parser struct{}
 
 func (Parser) Harness() string { return "prime-agent" }
 
-func (Parser) Parse(r io.Reader, src normalize.SourceMeta, from normalize.State) ([]schema.Event, normalize.State, error) {
-	return shared.ParseJSONL(r, src, from, primeSource{})
+func (Parser) Parse(r io.Reader, src normalize.SourceMeta, from normalize.State, emit func(*schema.Event) error) (normalize.State, error) {
+	return shared.ParseJSONL(r, src, from, primeSource{}, emit)
 }
 
 func init() { normalize.Register(Parser{}) }
