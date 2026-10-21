@@ -85,15 +85,7 @@ func faSinglePath(expr string) string {
 	return b.String()
 }
 
-func faNav(scope string) string {
-	return "nav AS (\n" +
-		"  SELECT session_id, event_uid, event_time,\n" +
-		"    cast(event_order AS UBIGINT) AS event_order,\n" +
-		"    cast(turn_seq AS UBIGINT) AS turn_seq\n" +
-		"  FROM trace\n" +
-		"  WHERE (session_id, event_uid) IN (SELECT session_id, event_uid FROM " + scope + ") AND " + published + "\n" +
-		")"
-}
+const faOrderColumns = "e.event_time, cast(e.event_order AS UBIGINT) AS event_order, cast(e.turn_seq AS UBIGINT) AS turn_seq"
 
 func faFilters(prefix string, q faQuery) []string {
 	toolName := prefix + "tool_name"
@@ -116,10 +108,10 @@ func faFilters(prefix string, q faQuery) []string {
 func faTimeClauses(q faQuery) []string {
 	var outer []string
 	if q.StartUnixMs != nil {
-		outer = append(outer, "epoch_ms(tr.event_time) >= "+strconv.FormatInt(*q.StartUnixMs, 10))
+		outer = append(outer, "epoch_ms(ti.event_time) >= "+strconv.FormatInt(*q.StartUnixMs, 10))
 	}
 	if q.EndUnixMs != nil {
-		outer = append(outer, "epoch_ms(tr.event_time) < "+strconv.FormatInt(*q.EndUnixMs, 10))
+		outer = append(outer, "epoch_ms(ti.event_time) < "+strconv.FormatInt(*q.EndUnixMs, 10))
 	}
 	if q.SourceName != "" {
 		outer = append(outer, "ti.source_name = "+sqlQuote(q.SourceName))
@@ -147,10 +139,11 @@ func faExact(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTou
 		"    e.tool_name, e.tool_phase,\n" +
 		"    coalesce(e.tool_io_input_preview, '') AS input_preview,\n" +
 		"    coalesce(e.tool_io_output_preview, '') AS output_preview,\n" +
-		"    e.repo_rel_path, e.worktree_root, e.cwd\n" +
+		"    e.repo_rel_path, e.worktree_root, e.cwd,\n" +
+		"    " + faOrderColumns + "\n" +
 		"  FROM events e\n" +
 		"  WHERE " + strings.Join(clauses, "\n    AND ") + "\n" +
-		"),\n" + faNav("matched") + "\n" +
+		")\n" +
 		"SELECT\n" +
 		"  ti.session_id, ti.event_uid, ti.tool_call_id, ti.harness, ti.source_name,\n" +
 		"  ti.tool_name, ti.tool_phase,\n" +
@@ -158,12 +151,9 @@ func faExact(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTou
 		"  'path_suffix' AS match_kind,\n" +
 		"  if(" + single + ", ti.worktree_root, '') AS worktree_root,\n" +
 		"  ti.cwd,\n" +
-		"  epoch_ms(tr.event_time) AS event_unix_ms,\n" +
-		"  coalesce(tr.event_order, 0) AS event_order,\n" +
-		"  tr.turn_seq,\n" +
+		"  epoch_ms(ti.event_time) AS event_unix_ms, ti.event_order, ti.turn_seq,\n" +
 		"  ti.input_preview, ti.output_preview\n" +
 		"FROM matched ti\n" +
-		"LEFT JOIN nav tr ON tr.session_id = ti.session_id AND tr.event_uid = ti.event_uid\n" +
 		"WHERE " + faOuterWhere(q) + "\n" +
 		"ORDER BY (event_unix_ms IS NULL) ASC, event_unix_ms DESC, event_order DESC, ti.event_uid DESC\n" +
 		"LIMIT " + strconv.Itoa(limitPlus)
@@ -228,7 +218,8 @@ func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTo
 		"  coalesce(e.tool_io_repo_rel_path, '') AS repo_rel_path,\n" +
 		"  coalesce(e.tool_io_worktree_root, '') AS worktree_root,\n" +
 		"  e.source_name AS source_name, e.cwd AS cwd,\n" +
-		"  e.project_id AS event_project_id, e.worktree_root AS event_worktree_root\n" +
+		"  e.project_id AS event_project_id, e.worktree_root AS event_worktree_root,\n" +
+		"  " + faOrderColumns + "\n" +
 		"FROM events e\n" +
 		"WHERE " + strings.Join(append(faInputContains(rel), "e."+published), " AND ") + ")"
 
@@ -320,22 +311,19 @@ func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTo
 		"    " + candidateRoot + " AS legacy_candidate_root\n" +
 		"  FROM paths2 ti\n" +
 		"),\n" +
-		"scoped AS MATERIALIZED (\n" +
+		"scoped AS (\n" +
 		"  SELECT ti.*,\n" + verifiedColumn +
 		"    if(matched_path != '', 'path_suffix', 'shell_path') AS match_kind,\n" +
 		"    " + worktreeRootExpr + " AS worktree_root_final\n" +
 		"  FROM annotated ti\n" +
-		"),\n" + faNav("scoped") + "\n" +
+		")\n" +
 		"SELECT\n" +
 		"  ti.session_id, ti.event_uid, ti.tool_call_id, ti.harness, ti.source_name,\n" +
 		"  ti.tool_name, ti.tool_phase,\n" +
 		"  ti.matched_path, ti.match_kind, ti.worktree_root_final AS worktree_root, ti.cwd,\n" +
-		"  epoch_ms(tr.event_time) AS event_unix_ms,\n" +
-		"  coalesce(tr.event_order, 0) AS event_order,\n" +
-		"  tr.turn_seq,\n" +
+		"  epoch_ms(ti.event_time) AS event_unix_ms, ti.event_order, ti.turn_seq,\n" +
 		"  ti.input_preview, ti.output_preview\n" +
 		"FROM scoped ti\n" +
-		"LEFT JOIN nav tr ON tr.session_id = ti.session_id AND tr.event_uid = ti.event_uid\n" +
 		"WHERE " + outerWhere + "\n" +
 		"ORDER BY (event_unix_ms IS NULL) ASC, event_unix_ms DESC, event_order DESC, ti.event_uid DESC\n" +
 		"LIMIT " + strconv.Itoa(limitPlus)
