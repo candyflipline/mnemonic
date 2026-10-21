@@ -2,149 +2,149 @@
 
 A single static binary, `a ingest|batch -root R -store S`. It is pure Go
 (CGO_ENABLED=0), and its only non-std dependency is klauspost/compress for zstd.
-The parsers are the repo's own (`internal/normalize`), and the tool code is
-`internal/query` copied in with its SQL replaced by reads of the index
+The parsers are the repo's own (`internal/normalize`). The tool code is
+`internal/query` copied in, with its SQL replaced by reads of the index
 (`q_*.go`).
 
 ## On-disk formats
 
 ```
-S/src/<author__machine__harness__srcid>.ckpt          JSON, written by tmp+fsync+rename
-S/src/<key>.<gen>.light                               append-only frame log
-S/src/<key>.<gen>.heavy                               append-only frame log
-S/CURRENT                                             "index.N\n", written by tmp+fsync+rename
-S/index.N/{docs,sessions,sessions.str,turns,uids,terms,terms.off,postings,
-           fa.exact,fa.tio,fa.blob,ls.json,sources.json,meta.json}
+S/src/<author__machine__harness__srcid>.ckpt    JSON, tmp+fsync+rename: the source's commit point
+S/src/<key>.<gen>.light | .heavy                append-only zstd frame logs
+S/parts/<fingerprint>/                          one immutable index part (below)
+S/CURRENT                                       JSON {parts, sources}, tmp+fsync+rename: the index commit point
 ```
 
-- **Frame log.** A frame is: u32 compressed length, u32 record count, then
-  zstd (level 3) of uvarint-length-prefixed records. Light frames hold about
-  128 KB of plain records and heavy frames about 256 KB. A row is addressed by
-  (source, frame offset, record index).
-- **Light record** (`row.go`). Every column a tool reads except payload_json
-  and token_usage_json, plus record_ts in µs, event_ts in ms, the
-  moraine_tool_io fields, and where its heavy record is.
-- **Heavy record.** payload_json and token_usage_json. Only `open` reads it,
-  and only for rows it prints. At build, it is also read for session_meta rows.
-- **Checkpoint** (`ingest.go`). Source identity, parser version, raw zst
-  bytes consumed and the SHA-256 of the 64 KB before them, the parser `State`
-  (a resumed parse continues exactly where it stopped), the generation, and
-  the valid lengths of both logs.
-- **Index** (`build.go`). Fixed-width little-endian arrays, mmapped read-only:
-  - `docs`: 40 B per event in session order. It holds the frame, record,
-    source, search flags, harness and source-name ids, session, turn_seq,
-    ordinal, doc_len and event_time ms.
-  - `sessions`: 32 B each, sorted by id, holding the doc range,
-    first/last ms and completed.
-  - `turns`: 24 B each, holding the count, completed and terminal doc.
-  - `uids`: (fnv64, doc) pairs, sorted.
-  - `terms` plus `terms.off`: a sorted dictionary.
-  - `postings`: a uvarint count, then (doc gap, tf) pairs.
-  - `fa.exact`: (repo_rel_path, doc) for tool requests that carry a project.
-  - `fa.tio` plus `fa.blob`: the moraine_tool_io input_json of every tool
-    request, uncompressed, so it can be scanned.
-  - `ls.json`: list_sessions rollups for each session.
-  - `sources.json`: the manifest rows behind get_ingest_status.
+- **Frame log.** u32 length, u32 count, then zstd-3 records (128 KB light,
+  256 KB heavy frames). Light (`row.go`) holds every column but payload_json
+  and token_usage_json, which are heavy: read only by `open` and session_meta.
+- **Checkpoint** (`ingest.go`): identity, parser version, zst bytes consumed
+  and the SHA-256 of the 64 KB before them, parser `State`, generation, valid
+  lengths of both logs, and the source's sorted session ids.
+- **Part** (`build.go`). Fixed-width little-endian arrays, all mmapped:
+  - `docs`: 40 B per event, in session window order.
+  - `sessions`, `turns`, and `uids` (fnv64 to doc).
+  - `terms` and `postings`.
+  - `hot`: an uncompressed hit record per doc plus a text_content hash. A
+    search or file_attention hit reads one record, never a log frame.
+  - `fa.exact`, `fa.tio`, `fa.blob`, and the `fa.tri` trigram index.
+  - `ls.json` rollups and `meta.json`.
 
-Store for the 22 MB arena raw (70 sources, 17.7k events): light 8.2 MB, heavy
-21.7 MB, index 7.1 MB. Total 37 MB, against 113 MB for the DuckDB cache path.
+Store for the arena raw (22 MB, 70 sources, 17.7k events): logs 29.7 MB and
+62 parts at 30.7 MB, for 58 MB total. The DuckDB path takes 113 MB.
 
 ## Which structure serves each tool
 
-- **search_sessions.** Look up each query term in the dictionary (binary
-  search), then walk its postings. Docs are filtered by the `docs` flags word
-  (searchable bit plus event-type bits) and by session, turn, harness and
-  source. BM25 is scored exhaustively with the cache's exact formula: idf over
-  unfiltered df, and avgdl taken from meta. The top n+1 cut keeps ties.
-  Survivors are hydrated from light frames only. Sessions and turns come from
-  `sessions` and `turns`.
-- **file_attention.** The exact pass is a scan of `fa.exact`. The suffix pass
-  scans `fa.blob`, prefiltering on the literal runs of the path, then runs the
-  query package's key, regex, shell and root logic on the candidates. Rows are
-  hydrated from light frames.
-- **open.** A session id resolves through `sessions`, an event id through
-  `uids`. The session's doc range is already in window order with turn_seq
-  and ordinals, so the scan decodes light frames sequentially. Only printed
-  rows and session_meta rows read their heavy record.
-- **list_sessions.** Filter `sessions` plus `ls.json` in memory by window,
-  mode, harness and source. Order by last µs then id for the limit, then by
-  ms for the page, which is the same two-step order as the SQL.
-- **get_ingest_status.** `sources.json`, grouped by author and machine, fed
-  to the copied derive code.
+- **search_sessions.**
+  - df per query term is summed over every part's dictionary. N and total_len
+    are summed from the part metas. This is the cache's exact idf, computed
+    over unfiltered df.
+  - Each part scores postings through `docs` flags and scope; the global top
+    n+1 cut keeps ties; survivors read `hot`, `turns` and `sessions`.
+- **file_attention.**
+  - Exact pass: `fa.exact` in each part.
+  - Suffix pass: the trigrams of the path's longest literal run, intersected
+    in `fa.tri`, give a superset of the entries containing it. The same
+    `bytes.Contains` and regex logic then runs on those entries only.
+  - Regexps compile once per query; lists merge across parts, then sort and limit.
+- **open.** The session → part map or a `uids` probe picks the part; the
+  scan decodes that session's light frames in order.
+- **list_sessions / get_ingest_status.** Parts' `sessions` + `ls.json`; `CURRENT` rows.
 
 ## Ingest, crash and recovery
 
-1. List manifests. Sources are parsed on GOMAXPROCS workers, one source per
-   worker. Each source's state is private: its two logs and its checkpoint.
-2. **Resume test.** The checkpoint must have the same identity and parser
-   version. Its `zst_size` must be no larger than the raw. The 64 KB window
-   hash must be unchanged. The next 4 bytes must be zstd magic, or the end of
-   file. If all of these hold, the parser decodes only the new frames, starting
-   from the saved `State`. Otherwise the generation is bumped and the source is
-   re-parsed from byte 0 into new logs.
-3. Open both logs and truncate them to the checkpoint's valid lengths. This
-   removes any tail a killed run wrote past its last checkpoint. Append the
-   frames, fsync both logs, then write the checkpoint (tmp, fsync, rename).
-   The checkpoint is the commit point. A kill at any instant leaves either the
-   old checkpoint with junk past its lengths (truncated on the next run) or the
-   new checkpoint with fully synced logs.
-4. **Fingerprint.** Hash every checkpoint (key, gen, lengths, rows) plus the
-   manifest rows. If it equals the current index's fingerprint, ingest is a
-   no-op, which makes it idempotent.
-5. **Build.**
-   - Read all light logs and resolve winners: within a source, the highest
-     event_version wins and the later row breaks a tie; across sources,
-     version desc, then lake path.
-   - Sort each session in window order. Assign turn_seq and ordinals; derive
-     turns, sessions, postings, file_attention lists and rollups.
-   - Write `index.tmp`, fsync every file, rename it to `index.N+1`, then
-     write `CURRENT` by tmp+rename. A kill before the CURRENT rename leaves
-     the old index serving. An orphan dir is overwritten next time.
-6. **GC.** Remove the previous index dir, and every log generation no
-   checkpoint names. A batch that is still reading keeps its open files, as
-   POSIX allows.
+1. **Parse.** Sources are parsed on GOMAXPROCS workers, one source per worker,
+   each with only its own two logs and checkpoint.
+   - Resume requires same identity and parser version, `zst_size` within the
+     raw, an unchanged window hash, and zstd magic next. Then only the new
+     frames are decoded, starting from the saved `State`.
+   - Otherwise the generation is bumped and the source re-parses from byte 0.
+   - Logs are truncated to the checkpoint's lengths, then appended and
+     fsynced, then the checkpoint is renamed into place. A kill at any instant
+     leaves either the old checkpoint (the junk tail is cut on the next run),
+     or the new checkpoint over synced logs.
+2. **Plan.** Union-find joins sources that share a session id.
+   - Each component goes to shard `fnv32(least session id) % 256`.
+   - A part is that shard's sources. Its name is the fingerprint of their
+     checkpoints (key, gen, lengths, rows).
+3. **Build only what is missing.** A part dir that exists is complete:
+   it is built in `<id>.tmp`, fsynced, then renamed. Unchanged parts are
+   reused; a killed build leaves a `.tmp` that GC removes.
+   - Within a part, winners are: the highest version per uid within a source,
+     then version desc and lake path across sources. Then come session order,
+     turn_seq, ordinals and rollups.
+4. **Commit.** `CURRENT` is rewritten (tmp+fsync+rename) only if its bytes
+   changed, which makes ingest idempotent. After that, GC removes the part
+   dirs and log generations the new state does not name. A batch still
+   reading keeps its open files.
 
-Rows without a parseable record_ts get one fixed stamp (2100-01-01) instead
-of a wall-clock ingested_at. It is later than every record_ts and identical
-across runs, so a crash or split ingest orders exactly like a clean one
-(CONTRACT-NOTES 4).
+Rows with no record_ts get one fixed stamp (2100-01-01), never the wall clock.
+A crash or split ingest therefore orders exactly like a clean one
+(CONTRACT-NOTES 4). The plan rests on one assumption: a uid belongs to one
+session. Every version that competes for a uid is then in the same part. If a
+uid ever spans sessions, cross-part winners would not be resolved; nothing
+checks for this.
 
 ## Freshness
 
-`batch` serves the index named by `CURRENT` when it opens. There is no
-background work. Data is fresh as of the last completed `ingest`, and an
-append costs a parse of only the new zst frames plus a full index rebuild
-(the checker's final crash-run ingest took 1.0 s in total).
+`batch` serves the `CURRENT` it opened, fresh as of the last `ingest`. An append
+costs a parse of its new zst frames plus a rebuild of its one part.
 
 ## Rejected alternatives
 
-- **One global append log, with an LSM or segment merge for the index.**
-  Incremental index updates need tombstones for re-parsed generations and
-  winner changes. A full rebuild from light logs is simpler and fast at this
-  size. It is the first thing to change at 100x (below).
-- **Re-reading payload_json from raw** instead of a heavy log. The raw is one
-  zstd frame per append, so random access means decompressing and re-parsing
-  the whole source with parser state. That would save about 22 MB here but
-  makes `open` cost O(source).
-- **BM25 with WAND or block-max pruning.** The exhaustive scorer matches the
-  SQL tie semantics (the n+1 cut keeps ties) trivially, and p99 is under 7 ms.
-- **SQLite or bbolt**: cgo or a dependency, and a second format to keep
-  consistent with the logs. **Wall-clock ingested_at**: breaks crash order.
+- **One global index, rebuilt in full.** This was the first version of this
+  lane. Each ingest re-read every light log: 0.40 s and 123 MB when 1 of 70
+  sources grew, which is O(corpus).
+- **LSM tiers of per-source segments with tombstones.** An append changes old
+  rows' turn counts, session bounds and winners. Tombstones would have to
+  undo those, and correct BM25's df too. Replacing a whole session-closed part
+  needs neither.
+- **Re-reading payload from raw**: one zstd frame per append, `open` O(source).
+- **Small light frames**, used to speed up hits. Search fell to 0.36 ms, but
+  `open` rose to 8.6 to 11.7 ms and the light log grew 1.4 to 1.8x. `hot`
+  replaced this.
+- **SQLite or bbolt**: cgo or a dependency. **Clock ingested_at**: crash order.
 
-## What changes at 100x (about 8.8M events, 20 GB raw)
+## At 500x (8.8M events, 20 GB raw)
 
-- **Build memory.** Loading every light row (190 MB peak here) would be
-  about 19 GB.
-  - Partition the index by session hash, about 64 shards. Each shard is
-    rebuilt only when one of its sessions changed, and the checkpoint already
-    knows which sources moved.
-  - Winner resolution needs a uid→(version, path) map across shards. That is
-    about 8.8M × 16 B, which can be sorted on disk.
-- **Postings** (about 200 MB) mmap fine. BM25 N, total_len and df become
-  per-shard sums in a header. Common terms need block-max WAND to stay fast.
-- **fa.blob** (about 270 MB) makes the suffix scan the slow path: index
-  basename trigrams of input_json paths and scan only the candidates.
-- **ls.json** becomes fixed-width. The heavy log (about 2 GB) is fine.
-- **Ingest.** It stays proportional to new bytes for parse. With sharding,
-  the rebuild becomes proportional to the sessions touched. Directory fsync
-  after renames is needed for power loss; it is not needed for kill -9.
+- **Merge policy.** There are no merges: a part is replaced whole. 256 fixed
+  shards make about 34k events per part.
+  - An ingest touching m sources rebuilds at most m parts.
+  - Each rebuild reads that part's light logs (about 16 MB) and writes its
+    index (about 60 MB). These sizes are scaled from 8.2 MB of light and
+    30.7 MB of parts here (inferred).
+  - So write amplification is fixed per touched part, not per appended byte.
+    A 1 KB append costs about 60 MB of writes. That is the price of skipping
+    tombstones.
+  - Changing `partShards` re-plans everything once. When parts outgrow the
+    budget, double it. Resharding is not automated.
+- **Peak ingest RSS.** The bound is 4 parse workers plus one part build.
+  - A worker holds parser state and about 2 frames, a few MB.
+  - A build holds its part's light rows. The full corpus here peaked at
+    190 MB, so call it at most 11 KB per event, or at most about 370 MB for a
+    34k-event part (inferred).
+  - A single session component larger than a shard is the unbounded case. It
+    cannot be split without breaking turn_seq.
+  - Grow-1 here peaks at 30 to 39 MB (measured).
+- **Parser-version re-parse.** A new `normalize.Version` fails every resume
+  test.
+  - Each source re-parses from byte 0 into generation+1 logs, and every part
+    fingerprint changes, so this is one full rebuild. Here, 22 MB parses in
+    about 2.3 s on 4 workers, so 20 GB takes about 35 minutes (inferred).
+  - A kill resumes per source. The old `CURRENT` and logs serve until the one
+    commit; disk briefly doubles.
+- **Idle batch RSS** is:
+  - about 8 MB of runtime;
+  - plus the session → part map, at about 120 B per session;
+  - plus one frame cache shared across all parts, at most 48 light and 16
+    heavy frames, a few tens of MB;
+  - plus `ls.json`, at about 300 B per session, once list_sessions runs;
+  - plus the mmapped pages queries touched, which the kernel can reclaim.
+  - It grows with sessions and parts, not events. Each part costs two fds per source and 15 mappings, so 256 parts means
+    about 3.8k mappings.
+- **Latency.**
+  - search fans out over 256 dictionaries per term, and exhaustive BM25 on
+    common terms needs block-max WAND.
+  - file_attention's trigram intersection stays small. Its cost moves to the
+    per-candidate JSON and regex work.
+- Directory fsync after renames is missing: needed for power loss, not kill -9.
