@@ -156,7 +156,7 @@ func TestRun(t *testing.T) {
 		"uid-x|1|2024-01-02 03:04:10.000",
 	})
 
-	st, err := Run(dataDir, never)
+	st, err := Run(dataDir, never, Sweep{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func TestRun(t *testing.T) {
 		t.Fatalf("parquet schema = %v, want %v", got, want)
 	}
 
-	st2, err := Run(dataDir, never)
+	st2, err := Run(dataDir, never, Sweep{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +235,7 @@ func TestRunKeepsHighestEventVersion(t *testing.T) {
 		"uid-a|9|2024-01-02 03:04:07.000",
 	})
 
-	st, err := Run(dataDir, never)
+	st, err := Run(dataDir, never, Sweep{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func TestImportClickHouse(t *testing.T) {
 	writeSource(t, dataDir, "alice", "chris-mbp", "test-fake", "eeeeeeeeeeeeeeee", []string{
 		"uid-live|1|2024-01-02 03:04:05.000",
 	})
-	if st, err := Run(dataDir, never); err != nil || st.Events != 1 {
+	if st, err := Run(dataDir, never, Sweep{}); err != nil || st.Events != 1 {
 		t.Fatalf("live run: %+v, %v", st, err)
 	}
 
@@ -349,7 +349,7 @@ func TestRunParsesAppendStampedBeforeLakeWrite(t *testing.T) {
 	}
 	pushedAt := time.Now().Add(-time.Second).UnixMilli()
 	setManifest(func(m *manifest) { m.UpdatedMs = pushedAt })
-	if st, err := Run(dataDir, never); err != nil || st.Rewrote != 1 {
+	if st, err := Run(dataDir, never, Sweep{}); err != nil || st.Rewrote != 1 {
 		t.Fatalf("first run: %+v %v", st, err)
 	}
 
@@ -364,7 +364,7 @@ func TestRunParsesAppendStampedBeforeLakeWrite(t *testing.T) {
 	raw.Close()
 	setManifest(func(m *manifest) { m.ZstSize, m.UpdatedMs = info.Size(), pushedAt+1 })
 
-	st, err := Run(dataDir, never)
+	st, err := Run(dataDir, never, Sweep{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +380,7 @@ func TestRunReparsesIdleSourceOfOlderParser(t *testing.T) {
 		"uid-1|1|2024-01-02 03:04:05.000",
 		"uid-2|1|2024-01-02 03:04:06.000",
 	})
-	if st, err := Run(dataDir, never); err != nil || st.Rewrote != 1 {
+	if st, err := Run(dataDir, never, Sweep{}); err != nil || st.Rewrote != 1 {
 		t.Fatalf("first run: %+v %v", st, err)
 	}
 
@@ -402,7 +402,7 @@ func TestRunReparsesIdleSourceOfOlderParser(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	st, err := Run(dataDir, never)
+	st, err := Run(dataDir, never, Sweep{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,7 +412,7 @@ func TestRunReparsesIdleSourceOfOlderParser(t *testing.T) {
 	if cp, _ := readCheckpoint(db, base); cp.Parser != normalize.Version {
 		t.Fatalf("checkpoint parser = %d, want %d", cp.Parser, normalize.Version)
 	}
-	if st, err := Run(dataDir, never); err != nil || st != (Stats{Sources: 1, Unchanged: 1}) {
+	if st, err := Run(dataDir, never, Sweep{}); err != nil || st != (Stats{Sources: 1, Unchanged: 1}) {
 		t.Fatalf("further run: %+v %v, want {1 0 1 0 0 0}", st, err)
 	}
 }

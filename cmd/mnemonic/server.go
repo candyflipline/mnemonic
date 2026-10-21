@@ -96,10 +96,10 @@ const (
 
 func convergeLoop(ctx context.Context, dataDir string, ix *cache.Index, wake <-chan struct{}) {
 	pushPending := func() bool { return len(wake) > 0 }
-	stale := cycle(ctx, dataDir, ix, "boot", pushPending)
+	ls := cycle(ctx, dataDir, ix, "boot", pushPending, lake.Sweep{})
 	for {
 		reason := "sweep"
-		if stale == 0 || pushPending() {
+		if ls.Stale == 0 || pushPending() {
 			reason = "reconcile"
 			select {
 			case <-ctx.Done():
@@ -113,7 +113,7 @@ func convergeLoop(ctx context.Context, dataDir string, ix *cache.Index, wake <-c
 		if ctx.Err() != nil {
 			return
 		}
-		stale = cycle(ctx, dataDir, ix, reason, pushPending)
+		ls = cycle(ctx, dataDir, ix, reason, pushPending, ls.Next)
 	}
 }
 
@@ -136,9 +136,9 @@ func settle(ctx context.Context, wake <-chan struct{}) {
 	}
 }
 
-func cycle(ctx context.Context, dataDir string, ix *cache.Index, reason string, pushPending func() bool) int {
+func cycle(ctx context.Context, dataDir string, ix *cache.Index, reason string, pushPending func() bool, sweep lake.Sweep) lake.Stats {
 	start := time.Now()
-	ls, lerr := lake.Run(dataDir, pushPending)
+	ls, lerr := lake.Run(dataDir, pushPending, sweep)
 	lakeWall := time.Since(start)
 	cs, cerr := ix.Converge(ctx)
 	log.Printf("cycle %s: lake sources=%d rewrote=%d unchanged=%d raw_only=%d failed=%d stale=%d events=%d in %s err=%v; "+
@@ -146,7 +146,7 @@ func cycle(ctx context.Context, dataDir string, ix *cache.Index, reason string, 
 		reason, ls.Sources, ls.Rewrote, ls.Unchanged, ls.RawOnly, ls.Failed, ls.Stale, ls.Events, lakeWall.Round(time.Millisecond), lerr,
 		cs.Files, cs.Batches, cs.Inserted, cs.Deleted, cs.Moved, cs.Reordered, cs.Sessions,
 		(time.Since(start) - lakeWall).Round(time.Millisecond), cerr, time.Since(start).Round(time.Millisecond))
-	return ls.Stale
+	return ls
 }
 
 func importCH(args []string) error {
