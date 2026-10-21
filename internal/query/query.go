@@ -18,6 +18,8 @@ type ArgError struct{ Msg string }
 
 func (e *ArgError) Error() string { return e.Msg }
 
+const published = "event_order IS NOT NULL"
+
 var tools = map[string]Tool{}
 
 func register(t Tool) { tools[t.Name()] = t }

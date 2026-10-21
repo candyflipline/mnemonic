@@ -207,10 +207,10 @@ func loadSessionScan(ctx context.Context, db *sql.DB, sessionID string, opts sca
        cast(to_json(t.token_usage_native_units) AS VARCHAR),
        e.source_name, e.harness, e.inference_provider,
        t.event_order, t.turn_seq
-FROM trace t LEFT JOIN events e ON e.event_uid = t.event_uid AND e.session_id = %SID%
-WHERE t.session_id = %SID%
+FROM trace t LEFT JOIN events e ON e.event_uid = t.event_uid AND e.session_id = %SID% AND e.%PUB%
+WHERE t.session_id = %SID% AND t.%PUB%
 ORDER BY t.event_order`
-	q := strings.ReplaceAll(scanSQL, "%SID%", sqlQuote(sessionID))
+	q := strings.NewReplacer("%SID%", sqlQuote(sessionID), "%PUB%", published).Replace(scanSQL)
 	rows, err := db.QueryContext(ctx, q)
 	if err != nil {
 		return nil, err

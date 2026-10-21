@@ -264,7 +264,7 @@ func hydrateMcpCandidates(ctx context.Context, tx *sql.Tx, rows []*mcpRow, limit
     event_order, turn_seq, event_ordinal,
     event_kind, payload_type, actor_kind, coalesce(nullif(tool_phase, ''), op_status) AS phase,
     source_ref, text_preview, text_hash, source_name, harness, inference_provider
-  FROM events WHERE rowid IN (SELECT rowid FROM events WHERE doc IN (`+strings.Join(docs, ", ")+`))`)
+  FROM events WHERE rowid IN (SELECT rowid FROM events WHERE doc IN (`+strings.Join(docs, ", ")+`)) AND `+published)
 	if err != nil {
 		return nil, err
 	}

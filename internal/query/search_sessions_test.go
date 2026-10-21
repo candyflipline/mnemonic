@@ -299,3 +299,30 @@ func TestSearchSessionsFixture(t *testing.T) {
 		t.Fatalf("second score: %v", score)
 	}
 }
+
+func TestReadersSkipDocsOfAHalfAppliedBatch(t *testing.T) {
+	ctx := context.Background()
+	db := lakeDB(t, "codex", "claude_code")
+	for _, q := range []string{
+		"INSERT INTO events SELECT * REPLACE (doc + 1000 AS doc, NULL AS event_order, NULL AS turn_seq, NULL AS event_ordinal) FROM events",
+		"INSERT INTO postings_delta SELECT cast(('0x' || md5(term)[1:4]) AS INTEGER) >> 8, term, doc + 1000, tf, doc_len, flags FROM postings",
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, _, err := searchSessionsTool{}.Call(ctx, db, []byte(`{"query":"workspace","n_hits":5,"event_types":["tool_response"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := data.(map[string]any)["result_count"]; got != 2 {
+		t.Fatalf("search result_count: %v", got)
+	}
+	data, _, err = openTool{}.Call(ctx, db, []byte(`{"id":"`+formatSessionID(fixtureCodexSession)+`"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := jsonAsInt64(data.(map[string]any)["session"].(map[string]any)["event_count"]); got != 15 {
+		t.Fatalf("open event_count: %d", got)
+	}
+}
