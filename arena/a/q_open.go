@@ -11,7 +11,6 @@ type openTool struct{}
 
 func (openTool) Name() string { return "open" }
 
-
 type canonicalOpenArgs struct {
 	target mcpID
 	page   *openPage

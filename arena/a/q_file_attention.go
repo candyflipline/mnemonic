@@ -9,7 +9,6 @@ type fileAttention struct{}
 
 func (fileAttention) Name() string { return "file_attention" }
 
-
 const (
 	faMinLimit        = 1
 	faDefaultLimit    = 50

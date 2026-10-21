@@ -10,7 +10,6 @@ type searchSessionsTool struct{}
 
 func (searchSessionsTool) Name() string { return "search_sessions" }
 
-
 type canonicalSearchSessionsArgs struct {
 	query      string
 	withinID   *mcpID

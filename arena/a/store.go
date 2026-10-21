@@ -14,20 +14,20 @@ import (
 // Store is a read-only view of one committed index plus the source logs it
 // points into.
 type Store struct {
-	dir                         string
-	meta                        indexMeta
-	docs, sessions, sessStr     []byte
-	turns, uids                 []byte
-	terms, termsOff, postings   []byte
-	faExact, faTio, faBlob      []byte
-	light, heavy                []*os.File
-	cache                       map[frameKey][]*Row
-	cacheOrder                  []frameKey
-	hcache                      map[frameKey][][]byte
-	hcacheOrder                 []frameKey
-	maps                        [][]byte
-	nSessions, nTurns, nTerms   int
-	scratch                     []byte
+	dir                       string
+	meta                      indexMeta
+	docs, sessions, sessStr   []byte
+	turns, uids               []byte
+	terms, termsOff, postings []byte
+	faExact, faTio, faBlob    []byte
+	light, heavy              []*os.File
+	cache                     map[frameKey][]*Row
+	cacheOrder                []frameKey
+	hcache                    map[frameKey][][]byte
+	hcacheOrder               []frameKey
+	maps                      [][]byte
+	nSessions, nTurns, nTerms int
+	scratch                   []byte
 }
 
 type frameKey struct {
@@ -102,11 +102,11 @@ func (st *Store) harnessOf(d int) string {
 func (st *Store) sourceNameOf(d int) string {
 	return st.meta.SourceNames[st.docRec(d)[15]]
 }
-func (st *Store) sessionOf(d int) int    { return int(binary.LittleEndian.Uint32(st.docRec(d)[16:])) }
-func (st *Store) turnSeq(d int) uint32  { return binary.LittleEndian.Uint32(st.docRec(d)[20:]) }
-func (st *Store) ordinal(d int) uint32  { return binary.LittleEndian.Uint32(st.docRec(d)[24:]) }
-func (st *Store) docLen(d int) uint32   { return binary.LittleEndian.Uint32(st.docRec(d)[28:]) }
-func (st *Store) timeMsOf(d int) int64  { return int64(binary.LittleEndian.Uint64(st.docRec(d)[32:])) }
+func (st *Store) sessionOf(d int) int  { return int(binary.LittleEndian.Uint32(st.docRec(d)[16:])) }
+func (st *Store) turnSeq(d int) uint32 { return binary.LittleEndian.Uint32(st.docRec(d)[20:]) }
+func (st *Store) ordinal(d int) uint32 { return binary.LittleEndian.Uint32(st.docRec(d)[24:]) }
+func (st *Store) docLen(d int) uint32  { return binary.LittleEndian.Uint32(st.docRec(d)[28:]) }
+func (st *Store) timeMsOf(d int) int64 { return int64(binary.LittleEndian.Uint64(st.docRec(d)[32:])) }
 
 const sessWidth = 32
 

@@ -12,22 +12,22 @@ import (
 // Row is the light part of one parsed event: every field a tool reads except
 // payload_json and token_usage_json, which live in the heavy log.
 type Row struct {
-	UID, Session, SourceName, Harness, InfProv           string
-	SourceFile, SourceRef                                string
-	EventKind, ActorKind, PayloadType, ToolPhase, Phase  string
-	ItemID, ToolCallID, ToolName, EndpointKind           string
-	Text, TextPreview                                    string
-	ProjectID, RepoRelPath, WorktreeRoot, Cwd            string
-	Buckets, Native                                      string
+	UID, Session, SourceName, Harness, InfProv              string
+	SourceFile, SourceRef                                   string
+	EventKind, ActorKind, PayloadType, ToolPhase, Phase     string
+	ItemID, ToolCallID, ToolName, EndpointKind              string
+	Text, TextPreview                                       string
+	ProjectID, RepoRelPath, WorktreeRoot, Cwd               string
+	Buckets, Native                                         string
 	TioInput, TioInPrev, TioOutPrev, TioProj, TioRel, TioWT string
-	TimeUs                                               int64
-	TsMs                                                 int64
-	Gen                                                  uint64
-	LineNo, Offset, Version                              uint64
-	Emission, TurnIndex                                  uint64
-	Bits                                                 uint64
-	HeavyFrame                                           uint64
-	HeavyIdx                                             uint64
+	TimeUs                                                  int64
+	TsMs                                                    int64
+	Gen                                                     uint64
+	LineNo, Offset, Version                                 uint64
+	Emission, TurnIndex                                     uint64
+	Bits                                                    uint64
+	HeavyFrame                                              uint64
+	HeavyIdx                                                uint64
 }
 
 const (

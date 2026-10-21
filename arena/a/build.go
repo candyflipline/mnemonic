@@ -119,9 +119,9 @@ func buildIndex(store string, cks []ckpt, fp string) error {
 	harnesses, sourceNames := dict{}, dict{}
 	var docs []built
 	type sess struct {
-		start, end      uint32
-		first, last     int64
-		completed       bool
+		start, end  uint32
+		first, last int64
+		completed   bool
 	}
 	type turn struct {
 		session, seq, count uint32
