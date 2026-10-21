@@ -278,15 +278,23 @@ func diffFiles(ctx context.Context, c *sql.Conn, paths []string, whole bool) ([]
 		}
 		delete(applied, m)
 	}
-	var gone []change
-	for _, f := range applied {
-		gone = append(gone, change{file: f, gone: true})
-	}
-	sort.Slice(gone, func(i, j int) bool { return gone[i].file.path < gone[j].file.path })
 	if err := countRows(ctx, c, out); err != nil {
 		return nil, err
 	}
-	return append(gone, out...), nil
+	for _, f := range applied {
+		out = append(out, change{file: f, gone: true})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if sa, sb := sourceOf(a.file.path), sourceOf(b.file.path); sa != sb {
+			return sa < sb
+		}
+		if a.gone != b.gone {
+			return a.gone
+		}
+		return a.file.path < b.file.path
+	})
+	return out, nil
 }
 
 func countRows(ctx context.Context, c *sql.Conn, changes []change) error {
@@ -317,12 +325,18 @@ func countRows(ctx context.Context, c *sql.Conn, changes []change) error {
 	return rows.Err()
 }
 
+// sourceOf is a lake file's path without its .parquet or .tail.parquet
+// suffix: the files of one source share it.
+func sourceOf(path string) string {
+	return strings.TrimSuffix(strings.TrimSuffix(path, ".parquet"), ".tail")
+}
+
 func batches(changes []change, max int64) [][]change {
 	var out [][]change
 	var cur []change
 	var n int64
 	for _, ch := range changes {
-		if len(cur) > 0 && n+ch.rows > max {
+		if len(cur) > 0 && n+ch.rows > max && sourceOf(cur[len(cur)-1].file.path) != sourceOf(ch.file.path) {
 			out = append(out, cur)
 			cur, n = nil, 0
 		}
@@ -620,11 +634,10 @@ func sourceRows(dataDir string, b []change) ([]string, error) {
 		if !ok {
 			continue
 		}
-		var n int64
-		if !ch.gone {
-			n = ch.rows
-		}
-		stmts = append(stmts, sourceInsert(k, src, n))
+		base := sourceOf(ch.file.path) + ".parquet"
+		stmts = append(stmts, sourceInsert(k, src, 0),
+			"UPDATE sources SET events = (SELECT count(*) FROM lake_rows WHERE lake_file IN ("+
+				sqlStr(base)+", "+sqlStr(sourceOf(ch.file.path)+".tail.parquet")+")) WHERE "+sourceWhere(k))
 	}
 	return stmts, nil
 }
