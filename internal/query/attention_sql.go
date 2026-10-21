@@ -176,6 +176,20 @@ func faJStr(input, key string) string {
 	return "CASE WHEN json_valid(" + input + ") THEN coalesce(json_extract_string(" + input + ", '$." + key + "'), '') ELSE '' END"
 }
 
+var faLiteralRun = regexp.MustCompile(`[A-Za-z0-9._-]+`)
+
+func faInputContains(rel string) []string {
+	clauses := []string{"e.tool_io_input_json IS NOT NULL"}
+	seen := map[string]bool{}
+	for _, run := range faLiteralRun.FindAllString(rel, -1) {
+		if !seen[run] {
+			seen[run] = true
+			clauses = append(clauses, "contains(e.tool_io_input_json, "+sqlQuote(run)+")")
+		}
+	}
+	return clauses
+}
+
 func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTouch, error) {
 	rel := q.Rel
 	relQ := sqlQuote(rel)
@@ -216,7 +230,7 @@ func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTo
 		"  e.source_name AS source_name, e.cwd AS cwd,\n" +
 		"  e.project_id AS event_project_id, e.worktree_root AS event_worktree_root\n" +
 		"FROM events e\n" +
-		"WHERE e.tool_io_input_json IS NOT NULL AND e." + published + ")"
+		"WHERE " + strings.Join(append(faInputContains(rel), "e."+published), " AND ") + ")"
 
 	inner := append(faFilters("", q),
 		"("+strings.Join(keyMatch, "\n        OR ")+"\n        OR "+nestedMatch+"\n        OR "+shellMatch+")")
@@ -308,7 +322,7 @@ func faSuffix(ctx context.Context, db *sql.DB, q faQuery, limitPlus int) ([]faTo
 		"    " + candidateRoot + " AS legacy_candidate_root\n" +
 		"  FROM paths2 ti\n" +
 		"),\n" +
-		"scoped AS (\n" +
+		"scoped AS MATERIALIZED (\n" +
 		"  SELECT ti.*,\n" +
 		"    if(matched_path != '', 'path_suffix', 'shell_path') AS match_kind,\n" +
 		"    " + worktreeRootExpr + " AS worktree_root_final" + verifiedColumn + "\n" +
