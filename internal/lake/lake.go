@@ -62,12 +62,14 @@ type manifest struct {
 // from sweep.From: a source whose lake file records another parser version is
 // re-parsed, one already current is passed. It stops, with Stats.Next set to
 // the first source not visited, when yield returns true or sweepBudget has
-// elapsed (after at least one visit). When it reaches the end of the list it
-// writes the marker and returns the zero Next. The marker means every source
-// was tried at this version, not that every one parsed: a source that failed
-// stays on its older output and a push or the next version bump parses it
-// again, so one poison source cannot keep the lake sweeping. A crash before the marker leaves it old, and a
-// later lap redoes only what the checkpoints still show stale.
+// elapsed, never before the first visit, so pushes arriving faster than a
+// cycle still advance the lap. When it reaches the end of the
+// list it writes the marker and returns the zero Next. The marker means every
+// source was tried at this version, not that every one parsed: a source that
+// failed stays on its older output and a push or the next version bump
+// parses it again, so one poison source cannot keep the lake sweeping. A
+// crash before the marker leaves it old, and a later lap redoes only what the
+// checkpoints still show stale.
 func Run(dataDir string, yield func() bool, sweep Sweep) (Stats, error) {
 	rawDir := filepath.Join(dataDir, "raw")
 	if _, err := os.Stat(rawDir); err != nil {
@@ -138,7 +140,7 @@ func Run(dataDir string, yield func() bool, sweep Sweep) (Stats, error) {
 	sweepEnd := time.Now().Add(sweepBudget)
 	n := start
 	for ; n < len(idles); n++ {
-		if yield() || (n > start && time.Now().After(sweepEnd)) {
+		if n > start && (yield() || time.Now().After(sweepEnd)) {
 			break
 		}
 		i := idles[n]
@@ -167,8 +169,8 @@ func Run(dataDir string, yield func() bool, sweep Sweep) (Stats, error) {
 // each visit after the first. The converge after Run must apply every file the
 // sweep wrote before the next push's cycle can start, so this caps that
 // converge. It does not bound the lap: Run's caller starts the next cycle at
-// once while Stale > 0, from Next, and Run stops at once when yield says a push
-// is pending.
+// once while Stale > 0, from Next, and Run stops after one visit when yield says
+// a push is pending.
 const sweepBudget = 5 * time.Second
 
 // readParserMarker is the normalize.Version the whole lake was last fully
