@@ -71,6 +71,7 @@ func Open(dataDir string, o Options) (*Index, error) {
 	path := IndexPath(dataDir)
 	setup := []string{
 		"SET threads = 2",
+		"SET preserve_insertion_order = false",
 		"SET memory_limit = " + sqlStr(o.MemoryLimit),
 		"SET temp_directory = " + sqlStr(spill),
 	}
@@ -585,14 +586,15 @@ func docSet(ctx context.Context, c *sql.Conn, col, table string) (string, int64,
 func sourceRows(dataDir string, b []change) ([]string, error) {
 	var stmts []string
 	for _, ch := range b {
-		m := lakeFileRe.FindStringSubmatch(filepath.ToSlash(ch.file.path))
+		path := filepath.ToSlash(ch.file.path)
+		if strings.Contains(path, "/machine="+layout.ArchiveMachine+"/") {
+			continue
+		}
+		m := lakeFileRe.FindStringSubmatch(path)
 		if m == nil {
 			return nil, fmt.Errorf("lake parquet outside the source layout: %s", ch.file.path)
 		}
 		k := layout.Key{Author: m[1], Machine: m[2], Harness: m[3], SrcID: m[4]}
-		if k.Machine == layout.ArchiveMachine {
-			continue
-		}
 		stmts = append(stmts, "DELETE FROM sources WHERE "+sourceWhere(k))
 		src, ok, err := readManifest(k.Manifest(dataDir))
 		if err != nil {
