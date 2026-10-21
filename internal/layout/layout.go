@@ -5,13 +5,10 @@
 //	raw/author=A/machine=M/harness=H/<src_id>.json        wire.Source, the manifest entry
 //	events/author=A/machine=M/harness=H/<src_id>.parquet       normalized events up to the base's checkpoint
 //	events/author=A/machine=M/harness=H/<src_id>.tail.parquet  events appended since, when any
-//	cache/cache-<unix_ms>.duckdb                          derived; newest complete file wins
+//	cache/index.duckdb                                         derived; serve converges it from events/
 package layout
 
-import (
-	"fmt"
-	"path/filepath"
-)
+import "path/filepath"
 
 // ArchiveMachine is the machine prefix for rows imported from ClickHouse
 // whose source files no longer exist anywhere.
@@ -39,7 +36,3 @@ func (k Key) Tail(root string) string {
 }
 
 func CacheDir(root string) string { return filepath.Join(root, "cache") }
-
-func CacheFile(root string, unixMs int64) string {
-	return filepath.Join(CacheDir(root), fmt.Sprintf("cache-%d.duckdb", unixMs))
-}

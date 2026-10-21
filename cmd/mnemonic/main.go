@@ -1,7 +1,7 @@
 // mnemonic collects agent session traces and serves them over MCP.
 //
 //	mnemonic push [--watch] [--config ~/.mnemonic/config.toml]   one pass, or resident and woken by file writes
-//	mnemonic serve --config server.toml                HTTP /v1 + /mcp, normalize and cache loops
+//	mnemonic serve --config server.toml                HTTP /v1 + /mcp, one lake and index loop
 //	mnemonic import-ch --config server.toml --author A <export_dir>
 //
 // push builds with CGO_ENABLED=0; serve and import-ch need the server build

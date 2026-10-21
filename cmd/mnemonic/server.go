@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -82,11 +81,10 @@ func serve(args []string) error {
 }
 
 func serveMux(dataDir string, authors map[string]string, ix *cache.Index, wake chan<- struct{}) http.Handler {
-	db := ix.DB()
 	mux := http.NewServeMux()
 	st := &store.Store{DataDir: dataDir, Wake: wake}
 	mux.Handle("/v1/", auth.Middleware(authors)(st.Handler()))
-	mux.Handle("/mcp", auth.Middleware(authors)(mcp.Handler(func() (*sql.DB, error) { return db, nil }, query.Lookup)))
+	mux.Handle("/mcp", auth.Middleware(authors)(mcp.Handler(ix.DB(), query.Lookup)))
 	return mux
 }
 

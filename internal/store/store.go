@@ -212,9 +212,7 @@ func (s *Store) append(w http.ResponseWriter, k layout.Key, offset int64, headHa
 	if len(body) == 0 {
 		// A raw_end backfill: offset and head hash just proved the client holds
 		// nothing new, so record where the stored bytes end in the raw file and
-		// leave Size, ZstSize and UpdatedMs alone so lake re-parses nothing. The
-		// manifest's new mtime still costs the cache one rebuild, once per
-		// source.
+		// leave Size, ZstSize and UpdatedMs alone so lake re-parses nothing.
 		if rawEnd > 0 {
 			m.RawEnd = rawEnd
 			if err := writeManifest(k.Manifest(s.DataDir), *m); err != nil {
