@@ -18,7 +18,7 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-const indexVersion = 1
+const indexVersion = 3
 
 const (
 	batchRows   = 500_000
@@ -71,6 +71,7 @@ func Open(dataDir string, o Options) (*Index, error) {
 	path := IndexPath(dataDir)
 	setup := []string{
 		"SET threads = 2",
+		"SET preserve_insertion_order = false",
 		"SET memory_limit = " + sqlStr(o.MemoryLimit),
 		"SET temp_directory = " + sqlStr(spill),
 	}
@@ -95,7 +96,7 @@ func Open(dataDir string, o Options) (*Index, error) {
 	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
-	db, err := newDB(path, setup...)
+	db, err := newDB(path+"?storage_compatibility_version=latest", setup...)
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +169,9 @@ const winnerOrder = "event_version DESC, " + archiveSQL + ", ingested_at DESC, l
 func rowHashSQL() string {
 	cols := make([]string, 0, len(schema.EventColumns)+2)
 	for _, c := range schema.EventColumns {
-		cols = append(cols, c.Name)
+		if c.Name != "event_version" {
+			cols = append(cols, c.Name)
+		}
 	}
 	return "hash(" + strings.Join(append(cols, "author", "machine_id"), ", ") + ")"
 }
@@ -360,6 +363,10 @@ func applyBatch(ctx context.Context, c *sql.Conn, flagsSQL, dataDir string, b []
 	}
 	stmts = append(stmts,
 		"CREATE OR REPLACE TEMP TABLE old AS SELECT * FROM lake_rows WHERE "+inBatch,
+		`UPDATE n SET event_version = o.event_version, ingested_at = o.ingested_at FROM (
+  SELECT lake_file, event_uid, row_hash, max(event_version) AS event_version, max(ingested_at) AS ingested_at
+  FROM old GROUP BY ALL) o
+WHERE n.lake_file = o.lake_file AND n.event_uid = o.event_uid AND n.row_hash = o.row_hash`,
 		`CREATE OR REPLACE TEMP TABLE aff AS SELECT DISTINCT event_uid FROM (
   (SELECT * FROM n EXCEPT ALL SELECT * FROM old) UNION ALL (SELECT * FROM old EXCEPT ALL SELECT * FROM n))`)
 	if err := execAll(ctx, c, stmts); err != nil {
@@ -374,7 +381,11 @@ func applyBatch(ctx context.Context, c *sql.Conn, flagsSQL, dataDir string, b []
 			return st, err
 		}
 	}
-	stmts = []string{"DELETE FROM lake_files WHERE path IN (" + strings.Join(quotePaths(all), ", ") + ")"}
+	stmts = nil
+	if affected > 0 {
+		stmts = append(stmts, "DELETE FROM lake_rows WHERE "+inBatch, "INSERT INTO lake_rows SELECT * FROM n")
+	}
+	stmts = append(stmts, "DELETE FROM lake_files WHERE path IN ("+strings.Join(quotePaths(all), ", ")+")")
 	for _, f := range present {
 		stmts = append(stmts, fmt.Sprintf("INSERT INTO lake_files VALUES (%s, %d, %d)", sqlStr(f.path), f.size, f.mtime))
 	}
@@ -383,39 +394,63 @@ func applyBatch(ctx context.Context, c *sql.Conn, flagsSQL, dataDir string, b []
 		return st, err
 	}
 	stmts = append(stmts, srcStmts...)
-	stmts = append(stmts, "DROP TABLE IF EXISTS n", "DROP TABLE IF EXISTS old", "DROP TABLE IF EXISTS aff", "COMMIT")
+	stmts = append(stmts, "DROP TABLE n", "DROP TABLE IF EXISTS old", "DROP TABLE IF EXISTS aff", "COMMIT")
 	return st, execAll(ctx, c, stmts)
 }
 
 func applyWinners(ctx context.Context, c *sql.Conn, flagsSQL, inBatch string, st *ConvergeStats) error {
+	var firstDoc int64
+	if err := c.QueryRowContext(ctx, "SELECT next_doc FROM corpus").Scan(&firstDoc); err != nil {
+		return err
+	}
 	if err := execAll(ctx, c, []string{
-		"DELETE FROM lake_rows WHERE " + inBatch,
-		"INSERT INTO lake_rows SELECT * FROM n",
-		"DROP TABLE n", "DROP TABLE old",
-		`CREATE OR REPLACE TEMP TABLE win AS SELECT l.* FROM lake_rows l SEMI JOIN aff USING (event_uid)
+		`CREATE OR REPLACE TEMP TABLE win AS SELECT * FROM (
+  SELECT l.* FROM lake_rows l SEMI JOIN aff USING (event_uid) WHERE NOT (` + inBatch + `)
+  UNION ALL SELECT * FROM n SEMI JOIN aff USING (event_uid))
 QUALIFY row_number() OVER (PARTITION BY event_uid ORDER BY ` + winnerOrder + `) = 1`,
 		`CREATE OR REPLACE TEMP TABLE cur AS SELECT doc, event_uid, lake_file, lake_row, row_hash, session_id, doc_len
 FROM events SEMI JOIN aff USING (event_uid)`,
-		"DROP TABLE aff",
-		`CREATE OR REPLACE TEMP TABLE del AS SELECT c.doc, c.session_id, c.doc_len FROM cur c LEFT JOIN win w USING (event_uid)
-WHERE w.event_uid IS NULL OR w.row_hash <> c.row_hash`,
+		"DROP TABLE old", "DROP TABLE aff",
+		`CREATE OR REPLACE TEMP TABLE keep AS SELECT c.event_uid, min(c.doc) AS doc
+FROM cur c JOIN win w USING (event_uid) WHERE c.row_hash = w.row_hash GROUP BY c.event_uid`,
+		`CREATE OR REPLACE TEMP TABLE del AS SELECT c.doc, c.session_id, c.doc_len FROM cur c ANTI JOIN keep k USING (doc)`,
+		`CREATE OR REPLACE TEMP TABLE mv AS SELECT c.doc, w.lake_file, w.lake_row
+FROM keep k JOIN cur c USING (doc) JOIN win w ON w.event_uid = k.event_uid
+WHERE c.lake_file <> w.lake_file OR c.lake_row <> w.lake_row`,
+		`CREATE OR REPLACE TEMP TABLE ins AS SELECT w.lake_file, w.lake_row, w.row_hash,
+  cast(` + strconv.FormatInt(firstDoc, 10) + ` + row_number() OVER (ORDER BY w.lake_file, w.lake_row) - 1 AS UINTEGER) AS doc
+FROM win w ANTI JOIN keep k USING (event_uid)`,
+		"DROP TABLE win", "DROP TABLE cur", "DROP TABLE keep",
 	}); err != nil {
 		return err
 	}
+	if err := c.QueryRowContext(ctx, "SELECT count(*) FROM ins").Scan(&st.Inserted); err != nil {
+		return err
+	}
+	split := st.Inserted > chunkRows
+	for a := firstDoc; a < firstDoc+st.Inserted; a += chunkRows {
+		stmts := []string{}
+		if split {
+			stmts = append(stmts, "COMMIT", "BEGIN")
+		}
+		if err := execAll(ctx, c, stmts); err != nil {
+			return err
+		}
+		if err := insertChunk(ctx, c, flagsSQL, a, a+chunkRows); err != nil {
+			return err
+		}
+	}
+	if split {
+		if err := execAll(ctx, c, []string{"COMMIT", "BEGIN"}); err != nil {
+			return err
+		}
+	}
+
 	inDel, deleted, err := docSet(ctx, c, "doc", "del")
 	if err != nil {
 		return err
 	}
 	st.Deleted = deleted
-	moved, err := c.ExecContext(ctx, `UPDATE events SET lake_file = w.lake_file, lake_row = w.lake_row FROM win w, cur c
-WHERE events.doc = c.doc AND c.event_uid = w.event_uid AND c.row_hash = w.row_hash
-  AND (c.lake_file <> w.lake_file OR c.lake_row <> w.lake_row)`)
-	if err != nil {
-		return err
-	}
-	if st.Moved, err = moved.RowsAffected(); err != nil {
-		return err
-	}
 	if deleted > 0 {
 		if err := execAll(ctx, c, []string{
 			`UPDATE corpus SET docs = docs - (SELECT count(*) FILTER (WHERE doc_len > 0) FROM del),
@@ -426,37 +461,26 @@ WHERE events.doc = c.doc AND c.event_uid = w.event_uid AND c.row_hash = w.row_ha
 			return err
 		}
 	}
-
-	var firstDoc int64
-	if err := c.QueryRowContext(ctx, "SELECT next_doc FROM corpus").Scan(&firstDoc); err != nil {
+	if err := c.QueryRowContext(ctx, "SELECT count(*) FROM mv").Scan(&st.Moved); err != nil {
 		return err
 	}
-	if err := execAll(ctx, c, []string{
-		`CREATE OR REPLACE TEMP TABLE ins AS SELECT w.lake_file, w.lake_row, w.row_hash,
-  cast(` + strconv.FormatInt(firstDoc, 10) + ` + row_number() OVER (ORDER BY w.lake_file, w.lake_row) - 1 AS UINTEGER) AS doc
-FROM win w LEFT JOIN cur c USING (event_uid) WHERE c.event_uid IS NULL OR c.row_hash <> w.row_hash`,
-		"DROP TABLE win", "DROP TABLE cur",
-	}); err != nil {
-		return err
-	}
-	if err := c.QueryRowContext(ctx, "SELECT count(*) FROM ins").Scan(&st.Inserted); err != nil {
-		return err
-	}
-	for a := firstDoc; a < firstDoc+st.Inserted; a += chunkRows {
-		if err := insertChunk(ctx, c, flagsSQL, a, a+chunkRows); err != nil {
+	if st.Moved > 0 {
+		if _, err := c.ExecContext(ctx, "UPDATE events SET lake_file = m.lake_file, lake_row = m.lake_row FROM mv m WHERE events.doc = m.doc"); err != nil {
 			return err
 		}
 	}
 	if err := execAll(ctx, c, []string{
 		`CREATE OR REPLACE TEMP TABLE s AS SELECT DISTINCT session_id FROM (
-  SELECT session_id FROM del UNION ALL SELECT session_id FROM events WHERE doc >= ` + strconv.FormatInt(firstDoc, 10) + `)`,
+  SELECT session_id FROM del
+  UNION ALL SELECT session_id FROM events WHERE doc >= ` + strconv.FormatInt(firstDoc, 10) + `
+  UNION ALL SELECT session_id FROM events WHERE event_order IS NULL)`,
 	}); err != nil {
 		return err
 	}
 	if err := reorder(ctx, c, st); err != nil {
 		return err
 	}
-	return execAll(ctx, c, []string{"DROP TABLE del", "DROP TABLE ins", "DROP TABLE s"})
+	return execAll(ctx, c, []string{"DROP TABLE del", "DROP TABLE mv", "DROP TABLE ins", "DROP TABLE s"})
 }
 
 func insertChunk(ctx context.Context, c *sql.Conn, flagsSQL string, from, to int64) error {
@@ -579,14 +603,15 @@ func docSet(ctx context.Context, c *sql.Conn, col, table string) (string, int64,
 func sourceRows(dataDir string, b []change) ([]string, error) {
 	var stmts []string
 	for _, ch := range b {
-		m := lakeFileRe.FindStringSubmatch(filepath.ToSlash(ch.file.path))
+		path := filepath.ToSlash(ch.file.path)
+		if strings.Contains(path, "/machine="+layout.ArchiveMachine+"/") {
+			continue
+		}
+		m := lakeFileRe.FindStringSubmatch(path)
 		if m == nil {
 			return nil, fmt.Errorf("lake parquet outside the source layout: %s", ch.file.path)
 		}
 		k := layout.Key{Author: m[1], Machine: m[2], Harness: m[3], SrcID: m[4]}
-		if k.Machine == layout.ArchiveMachine {
-			continue
-		}
 		stmts = append(stmts, "DELETE FROM sources WHERE "+sourceWhere(k))
 		src, ok, err := readManifest(k.Manifest(dataDir))
 		if err != nil {
