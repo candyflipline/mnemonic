@@ -19,7 +19,8 @@ import (
 const indexVersion = 1
 
 const (
-	batchRows   = 1_500_000
+	batchRows   = 500_000
+	chunkRows   = 200_000
 	inlineLimit = 2048
 )
 
@@ -396,37 +397,13 @@ FROM win w LEFT JOIN cur c USING (event_uid) WHERE c.event_uid IS NULL OR c.row_
 	}); err != nil {
 		return err
 	}
-	insFiles, err := queryStrings(ctx, c, "SELECT DISTINCT lake_file FROM ins ORDER BY 1")
-	if err != nil {
-		return err
-	}
-	if len(insFiles) > 0 {
-		files := make([]lakeFile, len(insFiles))
-		for i, f := range insFiles {
-			files[i] = lakeFile{path: f}
-		}
-		src := parquetSource(files)
-		if err := execAll(ctx, c, []string{
-			`CREATE OR REPLACE TEMP TABLE w AS
-SELECT i.lake_file AS filename, cast(i.lake_row AS BIGINT) AS file_row_number, i.doc, i.row_hash,
-  ` + flagsSQL + ` AS flags, list_aggregate(r.toks, 'histogram') AS h, cast(len(r.toks) AS UINTEGER) AS doc_len
-FROM (SELECT filename, file_row_number, event_kind, payload_type, actor_kind, source_name, tool_name,
-    ` + tokenList + ` AS toks FROM ` + src + `) r
-JOIN ins i ON i.lake_file = r.filename AND i.lake_row = r.file_row_number`,
-			insertEventsSQL("events", src, `,
-  w.row_hash, w.flags, w.doc_len, `+eventTimeSQL+`, NULL, NULL, NULL`),
-			`INSERT INTO postings SELECT term, doc, cast(least(tf, 65535) AS USMALLINT), doc_len, flags FROM (
-  SELECT doc, doc_len, flags, unnest(map_keys(h)) AS term, unnest(map_values(h)) AS tf FROM w WHERE doc_len > 0) ORDER BY term`,
-			`UPDATE corpus SET docs = docs + (SELECT count(*) FILTER (WHERE doc_len > 0) FROM w),
-  total_len = total_len + (SELECT coalesce(sum(doc_len), 0) FROM w),
-  next_doc = next_doc + (SELECT count(*) FROM w)`,
-			"DROP TABLE w",
-		}); err != nil {
-			return err
-		}
-	}
 	if err := c.QueryRowContext(ctx, "SELECT count(*) FROM ins").Scan(&st.Inserted); err != nil {
 		return err
+	}
+	for a := firstDoc; a < firstDoc+st.Inserted; a += chunkRows {
+		if err := insertChunk(ctx, c, flagsSQL, a, a+chunkRows); err != nil {
+			return err
+		}
 	}
 	if err := execAll(ctx, c, []string{
 		`CREATE OR REPLACE TEMP TABLE s AS SELECT DISTINCT session_id FROM (
@@ -438,6 +415,43 @@ JOIN ins i ON i.lake_file = r.filename AND i.lake_row = r.file_row_number`,
 		return err
 	}
 	return execAll(ctx, c, []string{"DROP TABLE win", "DROP TABLE cur", "DROP TABLE del", "DROP TABLE ins", "DROP TABLE s"})
+}
+
+func insertChunk(ctx context.Context, c *sql.Conn, flagsSQL string, from, to int64) error {
+	if _, err := c.ExecContext(ctx, fmt.Sprintf(
+		"CREATE OR REPLACE TEMP TABLE insc AS SELECT * FROM ins WHERE doc >= %d AND doc < %d", from, to)); err != nil {
+		return err
+	}
+	insFiles, err := queryStrings(ctx, c, "SELECT DISTINCT lake_file FROM insc ORDER BY 1")
+	if err != nil {
+		return err
+	}
+	var lo, hi int64
+	if err := c.QueryRowContext(ctx, "SELECT min(lake_row), max(lake_row) FROM insc").Scan(&lo, &hi); err != nil {
+		return err
+	}
+	files := make([]lakeFile, len(insFiles))
+	for i, f := range insFiles {
+		files[i] = lakeFile{path: f}
+	}
+	src := fmt.Sprintf("(SELECT * FROM %s WHERE file_row_number BETWEEN %d AND %d)", parquetSource(files), lo, hi)
+	return execAll(ctx, c, []string{
+		`CREATE OR REPLACE TEMP TABLE tok AS
+SELECT i.lake_file AS filename, cast(i.lake_row AS BIGINT) AS file_row_number, i.doc, i.row_hash,
+  ` + flagsSQL + ` AS flags, list_aggregate(r.toks, 'histogram') AS h, cast(len(r.toks) AS UINTEGER) AS doc_len
+FROM (SELECT filename, file_row_number, event_kind, payload_type, actor_kind, source_name, tool_name,
+    ` + tokenList + ` AS toks FROM ` + src + `) r
+JOIN insc i ON i.lake_file = r.filename AND i.lake_row = r.file_row_number`,
+		"CREATE OR REPLACE TEMP TABLE w AS SELECT filename, file_row_number, doc, row_hash, flags, doc_len FROM tok",
+		insertEventsSQL("events", src, `,
+  w.row_hash, w.flags, w.doc_len, `+eventTimeSQL+`, NULL, NULL, NULL`),
+		`INSERT INTO postings SELECT term, doc, cast(least(tf, 65535) AS USMALLINT), doc_len, flags FROM (
+  SELECT doc, doc_len, flags, unnest(map_keys(h)) AS term, unnest(map_values(h)) AS tf FROM tok WHERE doc_len > 0) ORDER BY term`,
+		`UPDATE corpus SET docs = docs + (SELECT count(*) FILTER (WHERE doc_len > 0) FROM w),
+  total_len = total_len + (SELECT coalesce(sum(doc_len), 0) FROM w),
+  next_doc = next_doc + (SELECT count(*) FROM w)`,
+		"DROP TABLE w", "DROP TABLE tok", "DROP TABLE insc",
+	})
 }
 
 const orderSQL = `
