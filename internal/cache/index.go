@@ -351,12 +351,10 @@ func batches(changes []change, max int64) [][]change {
 }
 
 func applyBatch(ctx context.Context, c *sql.Conn, flagsSQL, dataDir string, b []change) (st ConvergeStats, err error) {
-	if _, err := c.ExecContext(ctx, "BEGIN"); err != nil {
-		return st, err
-	}
 	defer func() {
 		if err != nil {
 			c.ExecContext(context.Background(), "ROLLBACK")
+			dropTemps(c)
 		}
 	}()
 	st.Files, st.Batches = len(b), 1
@@ -395,6 +393,8 @@ WHERE n.lake_file = o.lake_file AND n.event_uid = o.event_uid AND n.row_hash = o
 		if err := applyWinners(ctx, c, flagsSQL, inBatch, &st); err != nil {
 			return st, err
 		}
+	} else if _, err := c.ExecContext(ctx, "BEGIN"); err != nil {
+		return st, err
 	}
 	stmts = nil
 	if affected > 0 {
@@ -445,21 +445,14 @@ FROM win w ANTI JOIN keep k USING (event_uid)`,
 	if err := c.QueryRowContext(ctx, "SELECT count(*) FROM ins").Scan(&st.Inserted); err != nil {
 		return err
 	}
-	split := st.Inserted > chunkRows
-	for a := firstDoc; a < firstDoc+st.Inserted; a += chunkRows {
-		stmts := []string{}
-		if split {
-			stmts = append(stmts, "COMMIT", "BEGIN")
-		}
-		if err := execAll(ctx, c, stmts); err != nil {
-			return err
-		}
-		if err := insertChunk(ctx, c, flagsSQL, a, a+chunkRows); err != nil {
+	end := firstDoc + st.Inserted
+	if st.Inserted == 0 {
+		if _, err := c.ExecContext(ctx, "BEGIN"); err != nil {
 			return err
 		}
 	}
-	if split {
-		if err := execAll(ctx, c, []string{"COMMIT", "BEGIN"}); err != nil {
+	for a := firstDoc; a < end; a += chunkRows {
+		if err := insertChunk(ctx, c, flagsSQL, a, min(a+chunkRows, end), a+chunkRows >= end); err != nil {
 			return err
 		}
 	}
@@ -501,7 +494,7 @@ FROM win w ANTI JOIN keep k USING (event_uid)`,
 	return execAll(ctx, c, []string{"DROP TABLE del", "DROP TABLE mv", "DROP TABLE ins", "DROP TABLE s"})
 }
 
-func insertChunk(ctx context.Context, c *sql.Conn, flagsSQL string, from, to int64) error {
+func insertChunk(ctx context.Context, c *sql.Conn, flagsSQL string, from, to int64, last bool) error {
 	if _, err := c.ExecContext(ctx, fmt.Sprintf(
 		"CREATE OR REPLACE TEMP TABLE insc AS SELECT * FROM ins WHERE doc >= %d AND doc < %d", from, to)); err != nil {
 		return err
@@ -519,7 +512,7 @@ func insertChunk(ctx context.Context, c *sql.Conn, flagsSQL string, from, to int
 		files[i] = lakeFile{path: f}
 	}
 	src := fmt.Sprintf("(SELECT * FROM %s WHERE file_row_number BETWEEN %d AND %d)", parquetSource(files), lo, hi)
-	return execAll(ctx, c, []string{
+	stmts := []string{
 		`CREATE OR REPLACE TEMP TABLE tok AS
 SELECT i.lake_file AS filename, cast(i.lake_row AS BIGINT) AS file_row_number, i.doc, i.row_hash,
   ` + flagsSQL + ` AS flags, list_aggregate(r.toks, 'histogram') AS h, cast(len(r.toks) AS UINTEGER) AS doc_len
@@ -527,14 +520,19 @@ FROM (SELECT filename, file_row_number, event_kind, payload_type, actor_kind, so
     ` + tokenList + ` AS toks FROM ` + src + `) r
 JOIN insc i ON i.lake_file = r.filename AND i.lake_row = r.file_row_number`,
 		"CREATE OR REPLACE TEMP TABLE w AS SELECT filename, file_row_number, doc, row_hash, flags, doc_len FROM tok",
+	}
+	stmts = append(stmts,
+		"BEGIN",
 		insertEventsSQL(src),
 		`INSERT INTO postings SELECT term, doc, cast(least(tf, 65535) AS USMALLINT), doc_len, flags FROM (
   SELECT doc, doc_len, flags, unnest(map_keys(h)) AS term, unnest(map_values(h)) AS tf FROM tok WHERE doc_len > 0) ORDER BY term`,
 		`UPDATE corpus SET docs = docs + (SELECT count(*) FILTER (WHERE doc_len > 0) FROM w),
   total_len = total_len + (SELECT coalesce(sum(doc_len), 0) FROM w),
-  next_doc = next_doc + (SELECT count(*) FROM w)`,
-		"DROP TABLE w", "DROP TABLE tok", "DROP TABLE insc",
-	})
+  next_doc = next_doc + (SELECT count(*) FROM w)`)
+	if !last {
+		stmts = append(stmts, "COMMIT")
+	}
+	return execAll(ctx, c, append(stmts, "DROP TABLE w", "DROP TABLE tok", "DROP TABLE insc"))
 }
 
 const orderSQL = `
@@ -597,6 +595,17 @@ FROM events WHERE `+inS+` GROUP BY session_id, turn_seq`,
 FROM events WHERE `+inS+` GROUP BY session_id`,
 		"DROP TABLE ord")
 	return execAll(ctx, c, stmts)
+}
+
+func dropTemps(c *sql.Conn) {
+	ctx := context.Background()
+	names, err := queryStrings(ctx, c, "SELECT table_name FROM duckdb_tables() WHERE temporary")
+	if err != nil {
+		return
+	}
+	for _, n := range names {
+		c.ExecContext(ctx, "DROP TABLE IF EXISTS temp."+n)
+	}
 }
 
 func docSet(ctx context.Context, c *sql.Conn, col, table string) (string, int64, error) {
