@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -57,6 +58,7 @@ func push(args []string) error {
 	}
 	hc := &http.Client{Timeout: 60 * time.Second}
 	if *watch {
+		runtime.GOMAXPROCS(1)
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		return pushrun.Watch(ctx, cfg, red, hc, os.Stdout)
