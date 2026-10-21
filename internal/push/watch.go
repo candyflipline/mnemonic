@@ -18,8 +18,11 @@ import (
 )
 
 const (
-	uploadWindow   = time.Minute
-	retryEvery     = time.Minute
+	quietFor       = 1 * time.Second
+	flushWithin    = 5 * time.Second
+	conflictRetry  = time.Second
+	errorRetryMin  = 5 * time.Second
+	errorRetryMax  = time.Minute
 	reconcileEvery = 6 * time.Hour
 )
 
@@ -42,7 +45,10 @@ type watcher struct {
 	red      Redactor
 	hc       *http.Client
 	globs    []watchGlob
-	window   time.Duration
+	quiet    time.Duration
+	within   time.Duration
+	failed   bool
+	retries  int
 	note     *notifier
 	held     map[string]*wire.Source
 	files    map[string]*watched
@@ -51,15 +57,16 @@ type watcher struct {
 	watchErr error
 }
 
-// Watch runs until ctx ends. The first file event after a quiet spell opens
-// an upload window; at its end only the paths written in it are sent, and a
-// stats line is printed when something was sent or failed.
+// Watch runs until ctx ends. Paths named by file events are sent at the first
+// quietFor tick after the first unsent event that finds no newer event, or
+// flushWithin after it, whichever comes first; a stats line is printed when
+// something was sent or failed.
 func Watch(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client, out io.Writer) error {
 	return newWatcher(cfg, red, hc).run(ctx, out)
 }
 
 func newWatcher(cfg config.Client, red Redactor, hc *http.Client) *watcher {
-	w := &watcher{cfg: cfg, red: red, hc: hc, window: uploadWindow, stale: true}
+	w := &watcher{cfg: cfg, red: red, hc: hc, quiet: quietFor, within: flushWithin, stale: true}
 	for _, src := range cfg.Sources {
 		glob, err := filepath.Abs(src.Glob)
 		if err != nil {
@@ -81,28 +88,56 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 	periodic := time.NewTimer(0)
 	defer periodic.Stop()
 	dirty := make(map[string]bool)
+	flushAt := time.NewTimer(time.Hour)
+	flushAt.Stop()
+	defer flushAt.Stop()
+	mark := func(p string) {
+		if p == lostEvents {
+			w.stale = true
+		} else {
+			dirty[p] = true
+		}
+	}
+	var firstEvent time.Time
 	var window, retry <-chan time.Time
+	var fresh, delivered bool
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case p := <-n.changed:
-			if p == lostEvents {
-				w.stale = true
-			} else {
-				dirty[p] = true
+			mark(p)
+			delivered = true
+			if window != nil {
+				fresh = true
+				continue
 			}
-			if window == nil {
-				window = time.After(w.window)
-			}
+			firstEvent = time.Now()
+			window = flushAt.C
+			flushAt.Reset(w.quiet)
 			continue
 		case <-window:
+			for _, p := range n.drain() {
+				mark(p)
+				fresh = true
+			}
+			if left := w.within - time.Since(firstEvent); fresh && left > 0 {
+				fresh = false
+				flushAt.Reset(min(w.quiet, left))
+				continue
+			}
+			if retry != nil {
+				window, fresh = nil, false
+				continue
+			}
 		case <-retry:
 			retry = nil
 		case <-periodic.C:
 			w.stale = true
 		}
-		window = nil
+		flushAt.Stop()
+		window, fresh = nil, false
+		w.failed = false
 		var st Stats
 		var err error
 		if w.stale {
@@ -112,6 +147,10 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 			st = w.flush(ctx, dirty)
 		}
 		clear(dirty)
+		if delivered {
+			n.rearm()
+			delivered = false
+		}
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -125,10 +164,28 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 		if st.Appended+st.Replaced+st.Failed > 0 {
 			fmt.Fprintln(out, st)
 		}
-		if w.stale && retry == nil {
-			retry = time.After(retryEvery)
+		if !w.stale {
+			w.retries = 0
+		} else if retry == nil {
+			retry = time.After(w.retryDelay(err))
 		}
 	}
+}
+
+// retryDelay is how long a stale watcher waits before it reconciles again;
+// file events in the meantime wait for it too. A 409 alone means the server's
+// size moved, not that it is struggling, so it starts from conflictRetry; a
+// failed request may mean an overloaded or absent server, so it starts from
+// errorRetryMin. Each consecutive stale pass doubles the wait up to
+// errorRetryMax, and a clean pass resets it.
+func (w *watcher) retryDelay(reconcileErr error) time.Duration {
+	base := conflictRetry
+	if reconcileErr != nil || w.failed {
+		base = errorRetryMin
+	}
+	d := base << min(w.retries, 8)
+	w.retries++
+	return min(d, errorRetryMax)
 }
 
 func (w *watcher) reconcile(ctx context.Context) (Stats, error) {
@@ -221,7 +278,7 @@ func (w *watcher) list(dir string, added []string) []string {
 		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
 			continue
 		}
-		w.files[path] = &watched{fileRef: fileRef{path: path, harness: g.src.Harness, sourceName: g.src.SourceName}}
+		w.files[path] = &watched{fileRef: fileRef{path: path, harness: g.src.Harness, sourceName: g.src.SourceName, head: new(rawHead)}}
 		added = append(added, path)
 	}
 	return added
@@ -249,7 +306,7 @@ func (w *watcher) classify(path string) (watchGlob, bool) {
 
 // sync watches each known path, then sends it when its (size, mtime) differs
 // from its stamp at its last completed sync. A 409 or an error makes the next
-// wake reconcile.
+// wake reconcile, after conflictRetry or a backoff.
 func (w *watcher) sync(ctx context.Context, paths []string) Stats {
 	var st Stats
 	for _, path := range paths {
@@ -282,6 +339,7 @@ func (w *watcher) sync(ctx context.Context, paths []string) Stats {
 			w.stale = true
 		}
 		if err != nil {
+			w.failed = true
 			st.Failed++
 			continue
 		}

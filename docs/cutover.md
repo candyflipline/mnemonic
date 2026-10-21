@@ -122,7 +122,7 @@ rather not use the default path.
 ## Push on every Mac
 
 `mnemonic push --watch` stays resident under launchd, wakes on kernel file
-events and uploads what changed within 60 s; launchd restarts it if it exits. `mnemonic init` installs the plist; to
+events and uploads what changed within 5 s; launchd restarts it if it exits. `mnemonic init` installs the plist; to
 bootstrap it by hand:
 
 ```

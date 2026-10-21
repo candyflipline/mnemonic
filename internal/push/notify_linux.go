@@ -128,6 +128,12 @@ func (n *notifier) deliver(paths ...string) bool {
 	return true
 }
 
+// rearm and drain exist for the kqueue notifier, which delivers one batch per
+// rearm; inotify reads park on the netpoller, so every event goes on changed.
+func (n *notifier) rearm() {}
+
+func (n *notifier) drain() []string { return nil }
+
 func (n *notifier) close() {
 	close(n.done)
 	n.f.Close()

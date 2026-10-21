@@ -41,6 +41,7 @@ type fileRef struct {
 	sourceName string
 	mtimeMs    int64
 	size       int64
+	head       *rawHead
 }
 
 func Run(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client) (Stats, error) {
@@ -184,7 +185,7 @@ type tailResult struct {
 }
 
 func syncTail(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client, f fileRef, srcID string, entry *wire.Source, st *Stats) (tailResult, error) {
-	tail, err := redactTail(f.path, red, entry)
+	tail, err := redactTail(f.path, red, entry, f.head)
 	if err != nil {
 		return tailResult{}, err
 	}
@@ -318,7 +319,7 @@ func scan(sources []config.SourceGlob) []fileRef {
 				continue
 			}
 			seen[abs] = true
-			files = append(files, fileRef{path: abs, harness: src.Harness, sourceName: src.SourceName, mtimeMs: info.ModTime().UnixMilli(), size: info.Size()})
+			files = append(files, fileRef{path: abs, harness: src.Harness, sourceName: src.SourceName, mtimeMs: info.ModTime().UnixMilli(), size: info.Size(), head: new(rawHead)})
 		}
 	}
 	return files
