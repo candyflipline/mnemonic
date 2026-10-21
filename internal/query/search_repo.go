@@ -180,7 +180,7 @@ c AS MATERIALIZED (
       * ((cast(p.tf AS DOUBLE) * 1.200000)
         / (cast(p.tf AS DOUBLE) + 1.200000 * (1.0 - 0.750000
           + 0.750000 * (cast(p.doc_len AS DOUBLE)
-            / greatest(k.avg_doc_len, 1.0)))))) AS raw_score
+            / greatest(k.avg_doc_len, 1.0))))) ORDER BY p.term) AS raw_score
   FROM p JOIN s ON s.term = p.term CROSS JOIN k
   WHERE ` + strings.Join(filters, "\n    AND ") + `
   GROUP BY p.doc
