@@ -103,8 +103,8 @@ func eventsDDL() string {
 	return b.String()
 }
 
-// insertEventsSQL copies the winners in temp table w (filename,
-// file_row_number, doc) from src into events, deriving the payload fields:
+// payloadFieldsSQL fills temp tables pe, pt and pm with the fields
+// insertEventsSQL derives from payload_json:
 //   - emission_index: payload_json's moraine_emission_index the way
 //     JSONExtractUInt reads it (missing or non-numeric is 0);
 //   - tool_io_*: the moraine_tool_io fields of tool requests, ” for a
@@ -114,6 +114,29 @@ func eventsDDL() string {
 //     (the only rows session titles read).
 //
 // The contains() guards skip JSON parsing on the rows that cannot match.
+func payloadFieldsSQL(src string) []string {
+	tio := func(field string) string {
+		return "coalesce(json_extract_string(tio, '$." + field + "'), '') AS tool_io_" + field
+	}
+	return []string{
+		`CREATE OR REPLACE TEMP TABLE pe AS SELECT filename, file_row_number,
+  coalesce(try_cast(json_extract_string(payload_json, '$.moraine_emission_index') AS UINTEGER), 0) AS emission_index
+FROM ` + src + ` WHERE contains(payload_json, 'moraine_emission_index')`,
+		`CREATE OR REPLACE TEMP TABLE pt AS SELECT filename, file_row_number,
+  ` + tio("input_json") + `, ` + tio("input_preview") + `, ` + tio("output_preview") + `,
+  ` + tio("project_id") + `, ` + tio("repo_rel_path") + `, ` + tio("worktree_root") + `
+FROM (SELECT filename, file_row_number, json_extract(payload_json, '$.moraine_tool_io') AS tio
+  FROM ` + src + ` WHERE tool_phase = 'request' AND contains(payload_json, 'moraine_tool_io'))
+WHERE tio IS NOT NULL`,
+		`CREATE OR REPLACE TEMP TABLE pm AS SELECT filename, file_row_number, payload_json AS meta_json
+FROM ` + src + ` WHERE event_kind = 'session_meta' OR (source_name = 'omp' AND contains(payload_json, 'title')
+  AND json_extract_string(payload_json, '$.type') IN ('title', 'title_change'))`,
+	}
+}
+
+// insertEventsSQL copies the winners in temp table w (filename,
+// file_row_number, doc) from src into events, with the payload fields in pe,
+// pt and pm.
 func insertEventsSQL(src string) string {
 	cols := make([]string, 0, len(schema.EventColumns))
 	for _, c := range schema.EventColumns {
@@ -121,28 +144,17 @@ func insertEventsSQL(src string) string {
 			cols = append(cols, "r."+c.Name)
 		}
 	}
-	tio := func(field string) string {
-		return "CASE WHEN tio IS NOT NULL THEN coalesce(json_extract_string(tio, '$." + field + "'), '') END"
-	}
 	return "INSERT INTO events SELECT w.doc, " + strings.Join(cols, ", ") + `,
-  r.author, r.machine_id, r.ingested_at, r.filename, r.file_row_number,
-  CASE WHEN contains(payload_json, 'moraine_emission_index')
-    THEN coalesce(try_cast(json_extract_string(payload_json, '$.moraine_emission_index') AS UINTEGER), 0)
-    ELSE 0 END,
-  ` + tio("input_json") + `,
-  ` + tio("input_preview") + `,
-  ` + tio("output_preview") + `,
-  ` + tio("project_id") + `,
-  ` + tio("repo_rel_path") + `,
-  ` + tio("worktree_root") + `,
-  CASE WHEN event_kind = 'session_meta' OR (source_name = 'omp' AND contains(payload_json, 'title')
-    AND json_extract_string(payload_json, '$.type') IN ('title', 'title_change')) THEN payload_json END,
+  r.author, r.machine_id, r.ingested_at, r.filename, r.file_row_number, coalesce(e.emission_index, 0),
+  t.tool_io_input_json, t.tool_io_input_preview, t.tool_io_output_preview, t.tool_io_project_id,
+  t.tool_io_repo_rel_path, t.tool_io_worktree_root, m.meta_json,
   w.row_hash, w.flags, w.doc_len, ` + eventTimeSQL + `, NULL, NULL, NULL,
   ` + md5Key("coalesce(r.text_content, '')") + `, ` + md5Key("r.event_uid") + `
-FROM (SELECT *, CASE WHEN tool_phase = 'request' AND contains(payload_json, 'moraine_tool_io')
-    THEN json_extract(payload_json, '$.moraine_tool_io') END AS tio
-  FROM ` + src + `) r
-JOIN w ON w.filename = r.filename AND w.file_row_number = r.file_row_number`
+FROM ` + src + ` r
+JOIN w ON w.filename = r.filename AND w.file_row_number = r.file_row_number
+LEFT JOIN pe e ON e.filename = r.filename AND e.file_row_number = r.file_row_number
+LEFT JOIN pt t ON t.filename = r.filename AND t.file_row_number = r.file_row_number
+LEFT JOIN pm m ON m.filename = r.filename AND m.file_row_number = r.file_row_number`
 }
 
 // A term is a 2..64 char token of lower(text_content), doc_len counts only

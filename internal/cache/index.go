@@ -521,6 +521,7 @@ FROM (SELECT filename, file_row_number, event_kind, payload_type, actor_kind, so
 JOIN insc i ON i.lake_file = r.filename AND i.lake_row = r.file_row_number`,
 		"CREATE OR REPLACE TEMP TABLE w AS SELECT filename, file_row_number, doc, row_hash, flags, doc_len FROM tok",
 	}
+	stmts = append(stmts, payloadFieldsSQL(src)...)
 	stmts = append(stmts,
 		"BEGIN",
 		insertEventsSQL(src),
@@ -532,7 +533,7 @@ JOIN insc i ON i.lake_file = r.filename AND i.lake_row = r.file_row_number`,
 	if !last {
 		stmts = append(stmts, "COMMIT")
 	}
-	return execAll(ctx, c, append(stmts, "DROP TABLE w", "DROP TABLE tok", "DROP TABLE insc"))
+	return execAll(ctx, c, append(stmts, "DROP TABLE pe", "DROP TABLE pt", "DROP TABLE pm", "DROP TABLE w", "DROP TABLE tok", "DROP TABLE insc"))
 }
 
 const orderSQL = `
