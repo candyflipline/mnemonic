@@ -312,3 +312,57 @@ func TestNewPooledConnKeepsThreads(t *testing.T) {
 		t.Fatalf("threads %s after the pool grew, want %s", got, convergeThreads)
 	}
 }
+
+func TestConvergeReordersSessionsAfterFailedRangeDeletes(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	if err := cachetest.Lake(dataDir, "claude_code"); err != nil {
+		t.Fatal(err)
+	}
+	ix, err := Open(dataDir, Options{MemoryLimit: "1GB", FlagsSQL: "0::USMALLINT"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ix.Close()
+	if _, err := ix.DB().Exec(fmt.Sprintf("UPDATE corpus SET next_doc = %d", chunkRows-3)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ix.Converge(ctx, RetryFailed); err != nil {
+		t.Fatal(err)
+	}
+	k := layout.Key{Author: cachetest.Author, Machine: cachetest.Machine, Harness: "claude-code",
+		SrcID: wire.SrcID("/fixtures/claude-code/session.jsonl")}
+	path := k.Events(dataDir)
+	if _, err := ix.DB().Exec("COPY (SELECT * EXCLUDE (file_row_number) FROM read_parquet(" + sqlStr(path) +
+		", file_row_number=true) WHERE file_row_number NOT IN (1, 4) ORDER BY file_row_number) TO " +
+		sqlStr(path+".tmp") + " (FORMAT parquet)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path+".tmp", path); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := os.ReadFile(k.Manifest(dataDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(k.Manifest(dataDir), []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ix.Converge(ctx, RetryFailed); err == nil {
+		t.Fatal("converge with a broken manifest succeeded")
+	}
+	if err := os.WriteFile(k.Manifest(dataDir), manifest, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ix.Converge(ctx, RetryFailed); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := ix.DB().QueryRow(`SELECT (SELECT string_agg(total_events, ' ') FROM sessions) || '/' ||
+  (SELECT string_agg(event_order, ' ' ORDER BY event_order) FROM events)`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "4/1 2 3 4" {
+		t.Fatalf("sessions/event_order %s", got)
+	}
+}

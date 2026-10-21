@@ -94,6 +94,10 @@ func Open(dataDir string, o Options) (*Index, error) {
 			return nil, err
 		}
 		if db != nil {
+			if _, err := db.Exec(pendingSessionsDDL); err != nil {
+				db.Close()
+				return nil, err
+			}
 			return &Index{db: db, dataDir: dataDir, flags: o.FlagsSQL, failed: map[string]lakeFile{}}, nil
 		}
 		old, err := filepath.Glob(path + ".*.broken*")
@@ -180,9 +184,12 @@ func indexDDL() []string {
   total_turns UINTEGER, total_events UBIGINT, tool_calls UBIGINT, tool_results UBIGINT,
   user_messages UBIGINT, assistant_messages UBIGINT, completed INTEGER NOT NULL)`,
 		sourcesDDL,
+		pendingSessionsDDL,
 		indexTraceDDL,
 	}, postingsDDL()...)
 }
+
+const pendingSessionsDDL = "CREATE TABLE IF NOT EXISTS pending_sessions (session_id VARCHAR)"
 
 const indexTraceDDL = `
 CREATE VIEW trace AS
@@ -562,7 +569,8 @@ FROM win w ANTI JOIN keep k USING (event_uid)`,
 				return err
 			}
 			in := fmt.Sprintf("doc >= %d AND doc < %d AND doc IN (SELECT doc FROM del)", lo*chunkRows, (lo+1)*chunkRows)
-			if err := execAll(ctx, c, append(append([]string{"BEGIN"}, deleteDocs(in)...), "COMMIT", "FORCE CHECKPOINT")); err != nil {
+			stmts := append([]string{"BEGIN", "INSERT INTO pending_sessions SELECT DISTINCT session_id FROM del WHERE " + in}, deleteDocs(in)...)
+			if err := execAll(ctx, c, append(stmts, "COMMIT", "FORCE CHECKPOINT")); err != nil {
 				return err
 			}
 		}
@@ -586,7 +594,9 @@ FROM win w ANTI JOIN keep k USING (event_uid)`,
 		`CREATE OR REPLACE TEMP TABLE s AS SELECT DISTINCT session_id FROM (
   SELECT session_id FROM del
   UNION ALL SELECT session_id FROM events WHERE doc >= ` + strconv.FormatInt(firstDoc, 10) + `
-  UNION ALL SELECT session_id FROM events WHERE event_order IS NULL)`,
+  UNION ALL SELECT session_id FROM events WHERE event_order IS NULL
+  UNION ALL SELECT session_id FROM pending_sessions)`,
+		"DELETE FROM pending_sessions",
 	}); err != nil {
 		return err
 	}
