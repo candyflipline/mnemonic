@@ -75,15 +75,21 @@ func Open(dataDir string, o Options) (*Index, error) {
 		"SET temp_directory = " + sqlStr(spill),
 	}
 	if _, err := os.Stat(path); err == nil {
-		db, err := newDB(path, setup...)
-		if err == nil {
-			var v int
-			var flags string
-			err = db.QueryRow("SELECT version, flags_sql FROM meta").Scan(&v, &flags)
-			if err == nil && v == indexVersion && flags == o.FlagsSQL {
-				return &Index{db: db, dataDir: dataDir, flags: o.FlagsSQL}, nil
+		db, err := openCurrent(path, o.FlagsSQL, setup)
+		if err != nil {
+			return nil, err
+		}
+		if db != nil {
+			return &Index{db: db, dataDir: dataDir, flags: o.FlagsSQL}, nil
+		}
+		old, err := filepath.Glob(path + ".*.broken*")
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range old {
+			if err := os.Remove(f); err != nil {
+				return nil, err
 			}
-			db.Close()
 		}
 		aside := fmt.Sprintf("%s.%d.broken", path, time.Now().UnixMilli())
 		if err := os.Rename(path, aside); err != nil {
@@ -116,6 +122,29 @@ func Open(dataDir string, o Options) (*Index, error) {
 		return nil, err
 	}
 	return &Index{db: db, dataDir: dataDir, flags: o.FlagsSQL}, nil
+}
+
+func openCurrent(path, flagsSQL string, setup []string) (*sql.DB, error) {
+	db, err := newDB(path, setup...)
+	if err != nil {
+		return nil, err
+	}
+	var hasMeta bool
+	var v int
+	var flags string
+	err = db.QueryRow("SELECT count(*) > 0 FROM duckdb_tables() WHERE schema_name = 'main' AND table_name = 'meta'").Scan(&hasMeta)
+	if err == nil && hasMeta {
+		err = db.QueryRow("SELECT version, flags_sql FROM meta").Scan(&v, &flags)
+	}
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	if !hasMeta || v != indexVersion || flags != flagsSQL {
+		db.Close()
+		return nil, nil
+	}
+	return db, nil
 }
 
 func (ix *Index) DB() *sql.DB { return ix.db }

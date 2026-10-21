@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/candyflipline/mnemonic/internal/cache/cachetest"
@@ -140,5 +141,43 @@ func TestConvergeReparseKeepsRows(t *testing.T) {
 	}
 	if v != "1/1" {
 		t.Fatalf("event_version: %s", v)
+	}
+}
+
+func TestOpenRebuildsOnlyOnStaleMeta(t *testing.T) {
+	dataDir := t.TempDir()
+	open := func(flags string) error {
+		ix, err := Open(dataDir, Options{MemoryLimit: "1GB", FlagsSQL: flags})
+		if err == nil {
+			ix.Close()
+		}
+		return err
+	}
+	broken := func() int {
+		m, err := filepath.Glob(IndexPath(dataDir) + ".*.broken")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(m)
+	}
+	if err := open("0::USMALLINT"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(IndexPath(dataDir), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := open("0::USMALLINT"); err == nil || broken() != 0 {
+		t.Fatalf("unreadable index: err %v, %d moved aside", err, broken())
+	}
+	if err := os.Chmod(IndexPath(dataDir), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, flags := range []string{"1::USMALLINT", "2::USMALLINT"} {
+		if err := open(flags); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := broken(); n != 1 {
+		t.Fatalf("%d broken indexes kept, want 1", n)
 	}
 }
