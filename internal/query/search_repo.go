@@ -151,6 +151,23 @@ func eventTypeMask(types []string) int {
 }
 
 func searchMcpCandidates(ctx context.Context, tx *sql.Tx, q searchQuery, terms []string, limit int) ([]*mcpRow, error) {
+	rows, err := tx.QueryContext(ctx, candidateSQL(q, terms, limit))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*mcpRow
+	for rows.Next() {
+		var r mcpRow
+		if err := rows.Scan(&r.doc, &r.rawScore); err != nil {
+			return nil, err
+		}
+		out = append(out, &r)
+	}
+	return out, rows.Err()
+}
+
+func candidateSQL(q searchQuery, terms []string, limit int) string {
 	filters := []string{"(p.flags & " + strconv.Itoa(flagSearchable) + ") <> 0"}
 	if len(q.eventTypes) > 0 {
 		filters = append(filters, "(p.flags & "+strconv.Itoa(eventTypeMask(q.eventTypes))+") <> 0")
@@ -176,24 +193,24 @@ func searchMcpCandidates(ctx context.Context, tx *sql.Tx, q searchQuery, terms [
 	slices.Sort(sorted)
 	perTerm := make([]string, len(sorted))
 	total := make([]string, len(sorted))
-	for i, t := range sorted {
-		perTerm[i] = fmt.Sprintf("sum(x) FILTER (WHERE term = %s) AS t%d", sqlQuote(t), i)
+	for i := range sorted {
+		perTerm[i] = fmt.Sprintf("sum(x) FILTER (WHERE ti = %d) AS t%d", i, i)
 		total[i] = fmt.Sprintf("coalesce(t%d, 0)", i)
 	}
 
-	sqlStr := `WITH p AS (` + postingsFor(terms) + `),
-s AS (SELECT term, count(*) AS df FROM p GROUP BY term),
+	return `WITH p AS MATERIALIZED (` + postingsFor(sorted) + `),
+s AS (SELECT ti, count(*) AS df FROM p GROUP BY ti),
 k AS (SELECT cast(docs AS DOUBLE) AS docs,
              cast(coalesce(total_len / nullif(docs, 0), 0) AS DOUBLE) AS avg_doc_len FROM corpus),
 x AS (
-  SELECT p.doc, p.term,
+  SELECT p.doc, p.ti,
     ln(1.0 + ((greatest(k.docs, cast(s.df AS DOUBLE))
         - cast(s.df AS DOUBLE) + 0.5) / (cast(s.df AS DOUBLE) + 0.5)))
       * ((cast(p.tf AS DOUBLE) * 1.200000)
         / (cast(p.tf AS DOUBLE) + 1.200000 * (1.0 - 0.750000
           + 0.750000 * (cast(p.doc_len AS DOUBLE)
             / greatest(k.avg_doc_len, 1.0))))) AS x
-  FROM p JOIN s ON s.term = p.term CROSS JOIN k
+  FROM p JOIN s ON s.ti = p.ti CROSS JOIN k
   WHERE ` + strings.Join(filters, "\n    AND ") + `),
 c AS MATERIALIZED (
   SELECT doc, ` + strings.Join(total, " + ") + ` AS raw_score
@@ -201,38 +218,39 @@ c AS MATERIALIZED (
   WHERE ` + strings.Join(total, " + ") + ` >= 0.000000)
 SELECT doc, raw_score FROM c
 WHERE raw_score >= (SELECT coalesce(min(raw_score), 0) FROM (SELECT raw_score FROM c ORDER BY raw_score DESC LIMIT ` + strconv.Itoa(limit) + `))`
-
-	rows, err := tx.QueryContext(ctx, sqlStr)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []*mcpRow
-	for rows.Next() {
-		var r mcpRow
-		if err := rows.Scan(&r.doc, &r.rawScore); err != nil {
-			return nil, err
-		}
-		out = append(out, &r)
-	}
-	return out, rows.Err()
 }
 
-func postingsFor(terms []string) string {
-	byTable := map[string][]string{}
+func postingsFor(sorted []string) string {
+	byTable := map[string][]int{}
 	var tables []string
-	for _, t := range terms {
+	all := make([]int, len(sorted))
+	for i, t := range sorted {
+		all[i] = i
 		tb := cache.PostingTable(t)
 		if byTable[tb] == nil {
 			tables = append(tables, tb)
 		}
-		byTable[tb] = append(byTable[tb], sqlQuote(t))
+		byTable[tb] = append(byTable[tb], i)
 	}
-	parts := []string{"SELECT term, doc, tf, doc_len, flags FROM postings_delta WHERE term IN (" + strings.Join(quoteAll(terms), ", ") + ")"}
+	parts := []string{postingsSelect("postings_delta", sorted, all)}
 	for _, tb := range tables {
-		parts = append(parts, "SELECT term, doc, tf, doc_len, flags FROM "+tb+" WHERE term IN ("+strings.Join(byTable[tb], ", ")+")")
+		parts = append(parts, postingsSelect(tb, sorted, byTable[tb]))
 	}
 	return strings.Join(parts, " UNION ALL ")
+}
+
+func postingsSelect(table string, sorted []string, idx []int) string {
+	if len(idx) == 1 {
+		return fmt.Sprintf("SELECT %d::UTINYINT AS ti, doc, tf, doc_len, flags FROM %s WHERE term = %s", idx[0], table, sqlQuote(sorted[idx[0]]))
+	}
+	when := make([]string, len(idx))
+	in := make([]string, len(idx))
+	for j, i := range idx {
+		when[j] = fmt.Sprintf("WHEN %s THEN %d", sqlQuote(sorted[i]), i)
+		in[j] = sqlQuote(sorted[i])
+	}
+	return "SELECT (CASE term " + strings.Join(when, " ") + " END)::UTINYINT AS ti, doc, tf, doc_len, flags FROM " + table +
+		" WHERE term IN (" + strings.Join(in, ", ") + ")"
 }
 
 func scopeExistsFor(ctx context.Context, tx *sql.Tx, q searchQuery) (bool, error) {
@@ -559,12 +577,4 @@ func mapMcpRowsToHits(rows []*mcpRow) []searchHit {
 		})
 	}
 	return hits
-}
-
-func quoteAll(values []string) []string {
-	out := make([]string, len(values))
-	for i, v := range values {
-		out[i] = sqlQuote(v)
-	}
-	return out
 }
