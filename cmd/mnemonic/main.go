@@ -44,7 +44,7 @@ func main() {
 func push(args []string) error {
 	fs := flag.NewFlagSet("push", flag.ContinueOnError)
 	configPath := fs.String("config", "~/.mnemonic/config.toml", "path to the client config TOML")
-	watch := fs.Bool("watch", false, "stay resident and push files within 60 s of their writes")
+	watch := fs.Bool("watch", false, "stay resident and push each write within 5 s")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

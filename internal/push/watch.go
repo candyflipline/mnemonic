@@ -18,8 +18,11 @@ import (
 )
 
 const (
-	uploadWindow   = time.Minute
-	retryEvery     = time.Minute
+	quietFor       = 1 * time.Second
+	flushWithin    = 5 * time.Second
+	conflictRetry  = time.Second
+	errorRetryMin  = 5 * time.Second
+	errorRetryMax  = time.Minute
 	reconcileEvery = 6 * time.Hour
 )
 
@@ -42,7 +45,10 @@ type watcher struct {
 	red      Redactor
 	hc       *http.Client
 	globs    []watchGlob
-	window   time.Duration
+	quiet    time.Duration
+	within   time.Duration
+	failed   bool
+	failures int
 	note     *notifier
 	held     map[string]*wire.Source
 	files    map[string]*watched
@@ -51,15 +57,16 @@ type watcher struct {
 	watchErr error
 }
 
-// Watch runs until ctx ends. The first file event after a quiet spell opens
-// an upload window; at its end only the paths written in it are sent, and a
-// stats line is printed when something was sent or failed.
+// Watch runs until ctx ends. Paths named by file events are sent once no
+// event has arrived for quietFor, or flushWithin after the first unsent
+// event, whichever comes first; a stats line is printed when something was
+// sent or failed.
 func Watch(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client, out io.Writer) error {
 	return newWatcher(cfg, red, hc).run(ctx, out)
 }
 
 func newWatcher(cfg config.Client, red Redactor, hc *http.Client) *watcher {
-	w := &watcher{cfg: cfg, red: red, hc: hc, window: uploadWindow, stale: true}
+	w := &watcher{cfg: cfg, red: red, hc: hc, quiet: quietFor, within: flushWithin, stale: true}
 	for _, src := range cfg.Sources {
 		glob, err := filepath.Abs(src.Glob)
 		if err != nil {
@@ -81,6 +88,10 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 	periodic := time.NewTimer(0)
 	defer periodic.Stop()
 	dirty := make(map[string]bool)
+	flushAt := time.NewTimer(time.Hour)
+	flushAt.Stop()
+	defer flushAt.Stop()
+	var firstEvent time.Time
 	var window, retry <-chan time.Time
 	for {
 		select {
@@ -92,9 +103,12 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 			} else {
 				dirty[p] = true
 			}
+			now := time.Now()
 			if window == nil {
-				window = time.After(w.window)
+				firstEvent = now
+				window = flushAt.C
 			}
+			flushAt.Reset(min(w.quiet, firstEvent.Add(w.within).Sub(now)))
 			continue
 		case <-window:
 		case <-retry:
@@ -102,7 +116,9 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 		case <-periodic.C:
 			w.stale = true
 		}
+		flushAt.Stop()
 		window = nil
+		w.failed = false
 		var st Stats
 		var err error
 		if w.stale {
@@ -125,10 +141,26 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 		if st.Appended+st.Replaced+st.Failed > 0 {
 			fmt.Fprintln(out, st)
 		}
-		if w.stale && retry == nil {
-			retry = time.After(retryEvery)
+		if !w.stale {
+			w.failures = 0
+		} else if retry == nil {
+			retry = time.After(w.retryDelay(err))
 		}
 	}
+}
+
+// retryDelay is how long a stale watcher waits before it reconciles again.
+// A 409 alone means the server's size moved, not that it is struggling, so it
+// retries after conflictRetry. A failed request may mean an overloaded or
+// absent server, so consecutive failures double the wait from errorRetryMin
+// up to errorRetryMax.
+func (w *watcher) retryDelay(reconcileErr error) time.Duration {
+	if reconcileErr == nil && !w.failed {
+		return conflictRetry
+	}
+	d := errorRetryMin << min(w.failures, 8)
+	w.failures++
+	return min(d, errorRetryMax)
 }
 
 func (w *watcher) reconcile(ctx context.Context) (Stats, error) {
@@ -249,7 +281,7 @@ func (w *watcher) classify(path string) (watchGlob, bool) {
 
 // sync watches each known path, then sends it when its (size, mtime) differs
 // from its stamp at its last completed sync. A 409 or an error makes the next
-// wake reconcile.
+// wake reconcile, after conflictRetry or a backoff.
 func (w *watcher) sync(ctx context.Context, paths []string) Stats {
 	var st Stats
 	for _, path := range paths {
@@ -282,6 +314,7 @@ func (w *watcher) sync(ctx context.Context, paths []string) Stats {
 			w.stale = true
 		}
 		if err != nil {
+			w.failed = true
 			st.Failed++
 			continue
 		}
