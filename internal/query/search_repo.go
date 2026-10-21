@@ -101,16 +101,11 @@ type mcpDetail struct {
 	sourceName        string
 	harness           string
 	inferenceProvider string
-	endpointKind      string
 	eventClass        string
 	payloadType       string
 	actorRole         string
-	name              string
 	phase             string
 	sourceRef         string
-	callID            string
-	itemID            string
-	model             string
 	textPreview       string
 	textContent       string
 	textHash          uint64
@@ -243,9 +238,8 @@ func hydrateMcpCandidates(ctx context.Context, db *sql.DB, rows []*mcpRow, limit
 	rs, err := db.QueryContext(ctx, `SELECT doc, event_uid, session_id,
     coalesce(epoch_ms(event_ts), 0) AS ts_ms, epoch_ms(event_time) AS time_ms,
     event_order, turn_seq, event_ordinal,
-    event_kind, payload_type, actor_kind, tool_name, coalesce(nullif(tool_phase, ''), op_status) AS phase,
-    tool_call_id, item_id, source_ref, text_preview, text_hash,
-    source_name, harness, inference_provider, endpoint_kind, model
+    event_kind, payload_type, actor_kind, coalesce(nullif(tool_phase, ''), op_status) AS phase,
+    source_ref, text_preview, text_hash, source_name, harness, inference_provider
   FROM events WHERE rowid IN (SELECT rowid FROM events WHERE doc IN (`+strings.Join(docs, ", ")+`))`)
 	if err != nil {
 		return nil, err
@@ -257,9 +251,8 @@ func hydrateMcpCandidates(ctx context.Context, db *sql.DB, rows []*mcpRow, limit
 		r := &x.mcpDetail
 		if err := rs.Scan(&x.doc, &x.eventUID, &x.sessionID, &x.eventTsMs, &x.eventUnixMs,
 			&r.eventOrder, &r.turnSeq, &r.eventOrdinal,
-			&r.eventClass, &r.payloadType, &r.actorRole, &r.name, &r.phase,
-			&r.callID, &r.itemID, &r.sourceRef, &r.textContent, &r.textHash,
-			&r.sourceName, &r.harness, &r.inferenceProvider, &r.endpointKind, &r.model); err != nil {
+			&r.eventClass, &r.payloadType, &r.actorRole, &r.phase,
+			&r.sourceRef, &r.textContent, &r.textHash, &r.sourceName, &r.harness, &r.inferenceProvider); err != nil {
 			return nil, err
 		}
 		r.textPreview = truncateRunes(r.textContent, previewChars)
