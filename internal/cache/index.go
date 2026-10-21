@@ -667,34 +667,46 @@ func syncManifests(ctx context.Context, c *sql.Conn, dataDir string) error {
 		harness, _ := strings.CutPrefix(parts[n-2], "harness=")
 		onDisk[layout.Key{Author: author, Machine: machine, Harness: harness, SrcID: strings.TrimSuffix(parts[n-1], ".json")}] = m
 	}
-	rows, err := c.QueryContext(ctx, "SELECT author, machine_id, harness, src_id FROM sources")
+	type row struct{ size, updatedMs int64 }
+	inIndex := map[layout.Key]row{}
+	rows, err := c.QueryContext(ctx, "SELECT author, machine_id, harness, src_id, size, updated_ms FROM sources")
 	if err != nil {
 		return err
 	}
-	var stmts []string
 	for rows.Next() {
 		var k layout.Key
-		if err := rows.Scan(&k.Author, &k.Machine, &k.Harness, &k.SrcID); err != nil {
+		var r row
+		if err := rows.Scan(&k.Author, &k.Machine, &k.Harness, &k.SrcID, &r.size, &r.updatedMs); err != nil {
 			rows.Close()
 			return err
 		}
-		if _, ok := onDisk[k]; ok {
-			delete(onDisk, k)
-		} else {
-			stmts = append(stmts, "DELETE FROM sources WHERE "+sourceWhere(k))
-		}
+		inIndex[k] = r
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return err
+	}
+	var stmts []string
+	for k := range inIndex {
+		if _, ok := onDisk[k]; !ok {
+			stmts = append(stmts, "DELETE FROM sources WHERE "+sourceWhere(k))
+		}
 	}
 	for k, path := range onDisk {
 		src, ok, err := readManifest(path)
 		if err != nil {
 			return err
 		}
-		if ok {
+		if !ok {
+			continue
+		}
+		r, indexed := inIndex[k]
+		switch {
+		case !indexed:
 			stmts = append(stmts, sourceInsert(k, src, 0))
+		case r.size != src.Size || r.updatedMs != src.UpdatedMs:
+			stmts = append(stmts, fmt.Sprintf("UPDATE sources SET source_name = %s, source_file = %s, size = %d, head_hash = %s, updated_ms = %d WHERE %s",
+				sqlStr(src.SourceName), sqlStr(src.Path), src.Size, sqlStr(src.HeadHash), src.UpdatedMs, sourceWhere(k)))
 		}
 	}
 	if len(stmts) == 0 {

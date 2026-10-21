@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -179,5 +180,41 @@ func TestOpenRebuildsOnlyOnStaleMeta(t *testing.T) {
 	}
 	if n := broken(); n != 1 {
 		t.Fatalf("%d broken indexes kept, want 1", n)
+	}
+}
+
+func TestConvergeRefreshesSourceRows(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	k := layout.Key{Author: cachetest.Author, Machine: cachetest.Machine, Harness: "raw-only", SrcID: wire.SrcID("/raw-only.jsonl")}
+	write := func(size, ms int64) {
+		b, err := json.Marshal(wire.Source{SourceName: "raw-only", Path: "/raw-only.jsonl", Size: size, HeadHash: "h", UpdatedMs: ms})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(k.Manifest(dataDir)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(k.Manifest(dataDir), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ix, err := Open(dataDir, Options{MemoryLimit: "1GB", FlagsSQL: "0::USMALLINT"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ix.Close()
+	var got string
+	for _, m := range [][2]int64{{10, 1000}, {99999, 2000}} {
+		write(m[0], m[1])
+		if _, err := ix.Converge(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := ix.DB().QueryRow("SELECT string_agg(size || '/' || updated_ms, ' ') FROM sources").Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got != "99999/2000" {
+		t.Fatalf("sources: %s", got)
 	}
 }
