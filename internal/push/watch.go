@@ -48,7 +48,7 @@ type watcher struct {
 	quiet    time.Duration
 	within   time.Duration
 	failed   bool
-	failures int
+	retries  int
 	note     *notifier
 	held     map[string]*wire.Source
 	files    map[string]*watched
@@ -111,6 +111,10 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 			flushAt.Reset(min(w.quiet, firstEvent.Add(w.within).Sub(now)))
 			continue
 		case <-window:
+			if retry != nil {
+				window = nil
+				continue
+			}
 		case <-retry:
 			retry = nil
 		case <-periodic.C:
@@ -142,24 +146,26 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 			fmt.Fprintln(out, st)
 		}
 		if !w.stale {
-			w.failures = 0
+			w.retries = 0
 		} else if retry == nil {
 			retry = time.After(w.retryDelay(err))
 		}
 	}
 }
 
-// retryDelay is how long a stale watcher waits before it reconciles again.
-// A 409 alone means the server's size moved, not that it is struggling, so it
-// retries after conflictRetry. A failed request may mean an overloaded or
-// absent server, so consecutive failures double the wait from errorRetryMin
-// up to errorRetryMax.
+// retryDelay is how long a stale watcher waits before it reconciles again;
+// file events in the meantime wait for it too. A 409 alone means the server's
+// size moved, not that it is struggling, so it starts from conflictRetry; a
+// failed request may mean an overloaded or absent server, so it starts from
+// errorRetryMin. Each consecutive stale pass doubles the wait up to
+// errorRetryMax, and a clean pass resets it.
 func (w *watcher) retryDelay(reconcileErr error) time.Duration {
-	if reconcileErr == nil && !w.failed {
-		return conflictRetry
+	base := conflictRetry
+	if reconcileErr != nil || w.failed {
+		base = errorRetryMin
 	}
-	d := errorRetryMin << min(w.failures, 8)
-	w.failures++
+	d := base << min(w.retries, 8)
+	w.retries++
 	return min(d, errorRetryMax)
 }
 
