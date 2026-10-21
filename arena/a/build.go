@@ -77,7 +77,7 @@ func loadSourceRows(store string, si int, c ckpt) ([]built, error) {
 	return out, nil
 }
 
-func buildIndex(store string, cks []ckpt, fp string) error {
+func buildIndex(store string, cks []ckpt, fp string, sources []byte) error {
 	sort.Slice(cks, func(i, j int) bool { return cks[i].Key < cks[j].Key })
 	type winner struct {
 		b    built
@@ -129,6 +129,9 @@ func buildIndex(store string, cks []ckpt, fp string) error {
 		terminal            int64
 		terminalOrder       int
 	}
+	heavy := newHeavyReader(store, cks)
+	defer heavy.close()
+	var lsRecs []lsRec
 	var sessions []sess
 	var turns []turn
 	turnSeqs := []uint32{}
@@ -175,6 +178,7 @@ func buildIndex(store string, cks []ckpt, fp string) error {
 		}
 		s.end = uint32(len(docs))
 		sessions = append(sessions, s)
+		lsRecs = append(lsRecs, lsAggregate(evs, turnSeqs[start:], heavy.payload))
 		seqs := make([]uint32, 0, len(perTurn))
 		for q := range perTurn {
 			seqs = append(seqs, q)
@@ -240,6 +244,15 @@ func buildIndex(store string, cks []ckpt, fp string) error {
 	faOffs = append(faOffs, uint32(len(faBlob)))
 	docs = nil
 
+	if heavy.err != nil {
+		return heavy.err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sources.json"), sources, 0o644); err != nil {
+		return err
+	}
+	if err := writeLs(dir, lsRecs); err != nil {
+		return err
+	}
 	if err := os.WriteFile(filepath.Join(dir, "docs"), docCol, 0o644); err != nil {
 		return err
 	}
@@ -518,4 +531,50 @@ func tokenize(text string, emit func(string)) int {
 		flush(len(text))
 	}
 	return n
+}
+
+// heavyReader reads payload_json of rows at build, one frame at a time.
+type heavyReader struct {
+	files []*os.File
+	key   frameKey
+	recs  [][]byte
+	err   error
+}
+
+func newHeavyReader(store string, cks []ckpt) *heavyReader {
+	h := &heavyReader{key: frameKey{frame: ^uint64(0)}}
+	for _, c := range cks {
+		f, err := os.Open(logPath(store, c.Key, c.Gen, "heavy"))
+		if err != nil && h.err == nil {
+			h.err = err
+		}
+		h.files = append(h.files, f)
+	}
+	return h
+}
+
+func (h *heavyReader) payload(b built) string {
+	if h.err != nil {
+		return ""
+	}
+	k := frameKey{src: b.loc.src, frame: b.row.HeavyFrame}
+	if k != h.key {
+		recs, _, err := readFrame(h.files[k.src], int64(k.frame), nil)
+		if err != nil {
+			h.err = err
+			return ""
+		}
+		h.key, h.recs = k, recs
+	}
+	rec := h.recs[b.row.HeavyIdx]
+	l, n := binary.Uvarint(rec)
+	return string(rec[n : n+int(l)])
+}
+
+func (h *heavyReader) close() {
+	for _, f := range h.files {
+		if f != nil {
+			f.Close()
+		}
+	}
 }

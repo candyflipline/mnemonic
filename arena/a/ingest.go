@@ -51,7 +51,10 @@ const window = 64 << 10
 
 var zstdMagic = []byte{0x28, 0xb5, 0x2f, 0xfd}
 
-const frameTarget = 64 << 10
+const (
+	lightFrame = 128 << 10
+	heavyFrame = 256 << 10
+)
 
 func srcDir(store string) string { return filepath.Join(store, "src") }
 
@@ -209,8 +212,8 @@ func ingestSource(root, store string, s source) (bool, error) {
 	}
 	defer zr.Close()
 
-	lw := &frameWriter{f: lightF, off: from.LightLen}
-	hw := &frameWriter{f: heavyF, off: from.HeavyLen}
+	lw := &frameWriter{f: lightF, off: from.LightLen, target: lightFrame, enc: encoder}
+	hw := &frameWriter{f: heavyF, off: from.HeavyLen, target: heavyFrame, enc: heavyEncoder}
 	rows := from.Rows
 	state, err := parser.Parse(zr, normalize.SourceMeta{SourceName: s.src.SourceName, Harness: s.src.Harness, SourceFile: s.src.Path},
 		from.State, func(ev *schema.Event) error {
@@ -281,16 +284,19 @@ func openLog(path string, validLen int64) (*os.File, error) {
 // frameWriter appends frames: u32 compressed length, u32 record count, then
 // the zstd-compressed records, each a uvarint length and its bytes.
 type frameWriter struct {
-	f   *os.File
-	off int64
-	buf []byte
-	n   int
+	f      *os.File
+	target int
+	enc    *zstd.Encoder
+	off    int64
+	buf    []byte
+	n      int
 }
 
-var encoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(1), zstd.WithLowerEncoderMem(true))
+var encoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBetterCompression), zstd.WithEncoderConcurrency(1), zstd.WithLowerEncoderMem(true))
+var heavyEncoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBetterCompression), zstd.WithEncoderConcurrency(1), zstd.WithLowerEncoderMem(true))
 
 func (w *frameWriter) add(rec []byte) (int64, int, error) {
-	if len(w.buf) > 0 && len(w.buf)+len(rec) > frameTarget {
+	if len(w.buf) > 0 && len(w.buf)+len(rec) > w.target {
 		if err := w.flush(); err != nil {
 			return 0, 0, err
 		}
@@ -305,7 +311,7 @@ func (w *frameWriter) flush() error {
 	if w.n == 0 {
 		return nil
 	}
-	comp := encoder.EncodeAll(w.buf, make([]byte, 8, 8+len(w.buf)/3))
+	comp := w.enc.EncodeAll(w.buf, make([]byte, 8, 8+len(w.buf)/3))
 	binary.LittleEndian.PutUint32(comp[0:4], uint32(len(comp)-8))
 	binary.LittleEndian.PutUint32(comp[4:8], uint32(w.n))
 	if _, err := w.f.Write(comp); err != nil {

@@ -28,6 +28,7 @@ type Store struct {
 	maps                      [][]byte
 	nSessions, nTurns, nTerms int
 	scratch                   []byte
+	ls                        []lsRec
 }
 
 type frameKey struct {

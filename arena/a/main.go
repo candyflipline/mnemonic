@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -23,9 +24,11 @@ type ArgError struct{ Msg string }
 func (e *ArgError) Error() string { return e.Msg }
 
 var tools = map[string]Tool{
-	"search_sessions": searchSessionsTool{},
-	"file_attention":  fileAttention{},
-	"open":            openTool{},
+	"search_sessions":   searchSessionsTool{},
+	"file_attention":    fileAttention{},
+	"open":              openTool{},
+	"list_sessions":     listSessions{},
+	"get_ingest_status": getIngestStatus{},
 }
 
 func main() {
@@ -61,19 +64,24 @@ func ingest(root, store string) error {
 		return err
 	}
 	var cks []ckpt
+	var srcs []stSource
 	for _, s := range sources {
 		if _, err := ingestSource(root, store, s); err != nil {
 			fmt.Fprintf(os.Stderr, "ingest: %s: %v\n", s.mpath, err)
 		}
+		row := stSource{Author: s.key.Author, Machine: s.key.Machine, UpdatedMs: s.src.UpdatedMs, Size: s.src.Size}
 		if c, ok := readCkpt(store, sourceKey(s.key)); ok {
 			cks = append(cks, c)
+			row.Events = c.Rows
 		}
+		srcs = append(srcs, row)
 	}
-	fp := fingerprint(cks)
+	sb, _ := json.Marshal(srcs)
+	fp := fingerprint(cks) + fmt.Sprintf("%x", sha256.Sum256(sb))
 	if cur, err := currentMeta(store); err == nil && cur.Fingerprint == fp {
 		return nil
 	}
-	if err := buildIndex(store, cks, fp); err != nil {
+	if err := buildIndex(store, cks, fp, sb); err != nil {
 		return err
 	}
 	return gcLogs(store, cks)
