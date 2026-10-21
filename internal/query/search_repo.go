@@ -64,18 +64,23 @@ func searchMcpEvents(ctx context.Context, db *sql.DB, q searchQuery) (*searchRes
 		return nil, argErrorf("query has no searchable terms (tokens shorter than 2 characters are excluded)")
 	}
 
-	fetchLimit := q.nHits + 1
-	rows, err := searchMcpCandidates(ctx, db, q, terms, fetchLimit)
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-	scopeExists, err := scopeExistsFor(ctx, db, q)
+	defer tx.Rollback()
+	fetchLimit := q.nHits + 1
+	rows, err := searchMcpCandidates(ctx, tx, q, terms, fetchLimit)
+	if err != nil {
+		return nil, err
+	}
+	scopeExists, err := scopeExistsFor(ctx, tx, q)
 	if err != nil {
 		return nil, err
 	}
 	res := &searchResult{scopeExists: scopeExists}
 	if len(rows) > 0 {
-		if rows, err = hydrateMcpCandidates(ctx, db, rows, fetchLimit); err != nil {
+		if rows, err = hydrateMcpCandidates(ctx, tx, rows, fetchLimit); err != nil {
 			return nil, err
 		}
 		sortMcpRows(rows)
@@ -145,7 +150,7 @@ func eventTypeMask(types []string) int {
 	return mask
 }
 
-func searchMcpCandidates(ctx context.Context, db *sql.DB, q searchQuery, terms []string, limit int) ([]*mcpRow, error) {
+func searchMcpCandidates(ctx context.Context, tx *sql.Tx, q searchQuery, terms []string, limit int) ([]*mcpRow, error) {
 	filters := []string{"(p.flags & " + strconv.Itoa(flagSearchable) + ") <> 0"}
 	if len(q.eventTypes) > 0 {
 		filters = append(filters, "(p.flags & "+strconv.Itoa(eventTypeMask(q.eventTypes))+") <> 0")
@@ -197,7 +202,7 @@ c AS MATERIALIZED (
 SELECT doc, raw_score FROM c
 WHERE raw_score >= (SELECT coalesce(min(raw_score), 0) FROM (SELECT raw_score FROM c ORDER BY raw_score DESC LIMIT ` + strconv.Itoa(limit) + `))`
 
-	rows, err := db.QueryContext(ctx, sqlStr)
+	rows, err := tx.QueryContext(ctx, sqlStr)
 	if err != nil {
 		return nil, err
 	}
@@ -230,7 +235,7 @@ func postingsFor(terms []string) string {
 	return strings.Join(parts, " UNION ALL ")
 }
 
-func scopeExistsFor(ctx context.Context, db *sql.DB, q searchQuery) (bool, error) {
+func scopeExistsFor(ctx context.Context, tx *sql.Tx, q searchQuery) (bool, error) {
 	if !q.sessionOK {
 		return true, nil
 	}
@@ -239,7 +244,7 @@ func scopeExistsFor(ctx context.Context, db *sql.DB, q searchQuery) (bool, error
 		s += " AND turn_seq = " + strconv.Itoa(int(q.turnSeq))
 	}
 	var n int64
-	if err := db.QueryRowContext(ctx, s).Scan(&n); err != nil {
+	if err := tx.QueryRowContext(ctx, s).Scan(&n); err != nil {
 		return false, err
 	}
 	return n > 0, nil
@@ -247,14 +252,14 @@ func scopeExistsFor(ctx context.Context, db *sql.DB, q searchQuery) (bool, error
 
 // hydrateMcpCandidates: session title/slug/summary stay empty, matching
 // upstream.
-func hydrateMcpCandidates(ctx context.Context, db *sql.DB, rows []*mcpRow, limit int) ([]*mcpRow, error) {
+func hydrateMcpCandidates(ctx context.Context, tx *sql.Tx, rows []*mcpRow, limit int) ([]*mcpRow, error) {
 	byDoc := make(map[int64]*mcpRow, len(rows))
 	docs := make([]string, len(rows))
 	for i, r := range rows {
 		byDoc[r.doc] = r
 		docs[i] = strconv.FormatInt(r.doc, 10)
 	}
-	rs, err := db.QueryContext(ctx, `SELECT doc, event_uid, session_id,
+	rs, err := tx.QueryContext(ctx, `SELECT doc, event_uid, session_id,
     coalesce(epoch_ms(event_ts), 0) AS ts_ms, epoch_ms(event_time) AS time_ms,
     event_order, turn_seq, event_ordinal,
     event_kind, payload_type, actor_kind, coalesce(nullif(tool_phase, ''), op_status) AS phase,
@@ -281,7 +286,7 @@ func hydrateMcpCandidates(ctx context.Context, db *sql.DB, rows []*mcpRow, limit
 	if err := rs.Err(); err != nil {
 		return nil, err
 	}
-	if out, err = joinTurnsAndSessions(ctx, db, out); err != nil {
+	if out, err = joinTurnsAndSessions(ctx, tx, out); err != nil {
 		return nil, err
 	}
 	sort.SliceStable(out, func(i, j int) bool {
@@ -305,7 +310,7 @@ type turnKey struct {
 	turnSeq   uint32
 }
 
-func joinTurnsAndSessions(ctx context.Context, db *sql.DB, rows []*mcpRow) ([]*mcpRow, error) {
+func joinTurnsAndSessions(ctx context.Context, tx *sql.Tx, rows []*mcpRow) ([]*mcpRow, error) {
 	if len(rows) == 0 {
 		return rows, nil
 	}
@@ -322,7 +327,7 @@ func joinTurnsAndSessions(ctx context.Context, db *sql.DB, rows []*mcpRow) ([]*m
 		}
 	}
 	inS := strings.Join(sids, ", ")
-	rs, err := db.QueryContext(ctx, `SELECT t.session_id, t.turn_seq, t.event_count, t.completed, t.terminal_uid,
+	rs, err := tx.QueryContext(ctx, `SELECT t.session_id, t.turn_seq, t.event_count, t.completed, t.terminal_uid,
   epoch_ms(se.first_event_time), epoch_ms(se.last_event_time), se.completed
 FROM (SELECT * FROM turns WHERE session_id IN (`+inS+`) AND turn_seq IN (`+strings.Join(seqs, ", ")+`)) t
 JOIN (SELECT * FROM sessions WHERE session_id IN (`+inS+`)) se ON se.session_id = t.session_id`)
