@@ -52,16 +52,7 @@ func Run(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client) 
 	var st Stats
 	for _, f := range scan(cfg.Sources) {
 		st.Scanned++
-		entry := manifest[wire.SrcID(f.path)]
-		// The server stamps UpdatedMs after it received the bytes, so a file whose
-		// last write is older than that stamp (with a 5-minute margin for
-		// client/server clock skew) has nothing new; skip it unread. Entries with
-		// RawEnd 0 — the legacy shape — are saved the read by this skip alone.
-		if entry != nil && f.mtimeMs < entry.UpdatedMs-skewMs {
-			st.Unchanged++
-			continue
-		}
-		if _, _, err := syncSource(ctx, cfg, red, hc, entry, f, &st); err != nil {
+		if _, _, err := syncSource(ctx, cfg, red, hc, manifest[wire.SrcID(f.path)], f, &st); err != nil {
 			st.Failed++
 		}
 	}
@@ -104,6 +95,14 @@ func fetchManifest(ctx context.Context, cfg config.Client, hc *http.Client) (map
 func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client, entry *wire.Source, f fileRef, st *Stats) (held *wire.Source, conflicted bool, err error) {
 	srcID := wire.SrcID(f.path)
 	if entry != nil && entry.RawEnd > 0 && f.size == entry.RawEnd {
+		st.Unchanged++
+		return nil, false, nil
+	}
+	// The server stamps UpdatedMs after it received the bytes, so a file whose
+	// last write is older than that stamp (with a 5-minute margin for
+	// client/server clock skew) has nothing new; skip it unread. Entries with
+	// RawEnd 0 — the legacy shape — are saved the read by this skip alone.
+	if entry != nil && f.mtimeMs < entry.UpdatedMs-skewMs {
 		st.Unchanged++
 		return nil, false, nil
 	}

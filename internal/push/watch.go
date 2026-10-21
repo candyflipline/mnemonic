@@ -329,7 +329,7 @@ func (w *watcher) sync(ctx context.Context, paths []string) Stats {
 			continue
 		}
 		st.Scanned++
-		f.size = now.size
+		f.size, f.mtimeMs = now.size, info.ModTime().UnixMilli()
 		srcID := wire.SrcID(path)
 		held, conflicted, err := syncSource(ctx, w.cfg, w.red, w.hc, w.held[srcID], f.fileRef, &st)
 		if held != nil {
