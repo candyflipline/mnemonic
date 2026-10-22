@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -180,7 +179,8 @@ func TestTraceAnnotateRoundTrip(t *testing.T) {
 	defer ts.Close()
 	defer srv.Close()
 	cycle()
-	if b, err := os.ReadFile(layout.ParserMarker(dir)); err != nil || string(b) != fmt.Sprintf("%d\n", normalize.Version) {
+	want, _ := json.Marshal(normalize.Versions())
+	if b, err := os.ReadFile(layout.ParserMarker(dir)); err != nil || string(b) != string(want)+"\n" {
 		t.Fatalf("parser marker after the sweep: %q %v", b, err)
 	}
 	check("after the sweep")

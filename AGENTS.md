@@ -9,7 +9,7 @@ Collects agent session traces (Claude Code, Codex, Cursor, ...) from every machi
   - parses appended raw into `events` parquet (`internal/lake`);
   - converges the changed parquet files into one `cache/index.duckdb` (`internal/cache`), woken by each PUT after 1 s of quiet and every 5 min without one;
   - answers MCP on `POST /mcp` (`internal/mcp`, `internal/query`).
-- Raw is the source of truth, and parquet and the cache are derived. A parser fix bumps `normalize.Version`, and serve re-parses every source parsed under another; `TestVersionNamesOutput` fails when parser output changes and the version does not.
+- Raw is the source of truth, and parquet and the cache are derived. Each parser has its own `Version()`, the lake epoch its output last changed at; a source's checkpoint records the version it was parsed at, and serve re-parses a source recorded below its parser's version, so a fix re-parses only its harness. `TestVersionNamesOutput` hashes each harness's goldens and fails naming the harness whose output changed without a bump, and the number to bump to (one past every version in its table). Goldens miss changes their fixtures do not exercise (7587f30 moved none), so a fix whose output change they miss bumps by hand.
 - Paths live in `internal/layout`. The push protocol is `internal/wire`. Auth (bearer token → author) is `internal/auth`; the author is never taken from a request.
 
 ## Contracts (change only with the owner)

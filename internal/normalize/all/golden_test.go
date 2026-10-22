@@ -75,30 +75,43 @@ func TestGoldens(t *testing.T) {
 	t.Logf("%d of %d golden cases have a parser", ran, len(cases))
 }
 
-var outputs = map[int]string{
-	1: "86abac583cac7670c73428bd75331551c46e1459292091a644158c1ac5bf6c77",
-	2: "86abac583cac7670c73428bd75331551c46e1459292091a644158c1ac5bf6c77",
+var outputs = map[string]map[int]string{
+	"claude-code": {
+		1: "1196b33f5c9632a89c92362976658fcafeb3cac96096cd13da38fd250b4d1641",
+		2: "1196b33f5c9632a89c92362976658fcafeb3cac96096cd13da38fd250b4d1641",
+	},
+	"codex":           {1: "7100d21459a5e6fa8452a3960ba0f893df7cbbe1e27a6d0150ae9aa2c2c2618e"},
+	"cursor":          {1: "9d90adf0d392b99c4016b555ccfb4f600f0d6dd62b2f3a825db023039e3837c6"},
+	"pi-coding-agent": {1: "c603e1ffaf1507915c244803f0eafd2dc589ca16a9fd0683df7a53b3d6ff7c8f"},
+	"prime-agent":     {1: "cd56bccacb162b506ec067980b4233f5c3ad7faf802abfb2245e665c7b5315ee"},
 }
 
 func TestVersionNamesOutput(t *testing.T) {
-	h := sha256.New()
+	next := 1
+	for _, vs := range outputs {
+		for v := range vs {
+			next = max(next, v+1)
+		}
+	}
 	for _, c := range cases {
-		if _, ok := normalize.For(c.harness); !ok {
+		p, ok := normalize.For(c.harness)
+		if !ok {
 			continue
 		}
 		b, err := json.Marshal(parse(t, c.harness, c.sourceName, c.fixture, c.sourceFile))
 		if err != nil {
 			t.Fatal(err)
 		}
+		h := sha256.New()
 		fmt.Fprintf(h, "%s\n%s\n", c.name, b)
-	}
-	sum := hex.EncodeToString(h.Sum(nil))
-	switch want, ok := outputs[normalize.Version]; {
-	case !ok:
-		t.Fatalf("add %d: %q to outputs", normalize.Version, sum)
-	case want != sum:
-		t.Fatalf("parser output changed without normalize.Version: bump it to %d and add %d: %q to outputs; never edit an entry",
-			normalize.Version+1, normalize.Version+1, sum)
+		sum := hex.EncodeToString(h.Sum(nil))
+		switch want, ok := outputs[c.harness][p.Version()]; {
+		case !ok:
+			t.Errorf("add %d: %q to outputs[%q]", p.Version(), sum, c.harness)
+		case want != sum:
+			t.Errorf("%s output changed without a Version bump: set its Version to %d and add %d: %q to outputs[%q]; never edit an entry",
+				c.harness, next, next, sum, c.harness)
+		}
 	}
 }
 

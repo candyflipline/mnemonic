@@ -87,7 +87,7 @@ Span and event names, the scope's name and version, ids, times and the status co
 
 ## Events
 
-The parser `otlp` (`internal/normalize/otlp/otlp.go`) turns each line into one event; a line that is not JSON is skipped. `normalize.Version` is unchanged because no golden case covers the harness.
+The parser `otlp` (`internal/normalize/otlp/otlp.go`) turns each line into one event; a line that is not JSON is skipped. Its `Version()` is 1, and no golden case covers the harness.
 
 | Column | Value |
 |---|---|

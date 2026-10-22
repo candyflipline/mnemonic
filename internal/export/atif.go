@@ -195,10 +195,14 @@ func requestKey(harness string, ev eventRow) string {
 // per system/meta row; a tool result joins the step whose tool_calls carry its
 // tool_call_id.
 func buildTrajectory(sessionID, harness string, evs []eventRow) *Trajectory {
+	version := 0
+	if p, ok := normalize.For(harness); ok {
+		version = p.Version()
+	}
 	t := &Trajectory{
 		SchemaVersion: SchemaVersion,
 		SessionID:     sessionID,
-		Agent:         Agent{Name: harness, Version: strconv.Itoa(normalize.Version)},
+		Agent:         Agent{Name: harness, Version: strconv.Itoa(version)},
 	}
 	var cur *Step
 	curReq := ""

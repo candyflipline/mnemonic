@@ -6,10 +6,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-// Version names the parsers' output. Lake files parsed under another
-// Version are parsed again.
-const Version = 2
-
 type SourceMeta struct {
 	SourceName string
 	Harness    string
@@ -36,8 +32,12 @@ type State struct {
 // not read yet: a resumed parse cannot yield a whole-file parse's rows.
 func (s State) Provisional() bool { return s.LineNo > 0 && s.RecordTSHint == "" }
 
+// Version is the lake epoch at which a parser's output last changed: a lake
+// file recorded at Version or later holds its current output, and one recorded
+// earlier is parsed again.
 type Parser interface {
 	Harness() string
+	Version() int
 	Parse(r io.Reader, src SourceMeta, from State, emit func(*schema.Event) error) (State, error)
 }
 
@@ -53,4 +53,13 @@ func Register(p Parser) {
 func For(harness string) (Parser, bool) {
 	p, ok := parsers[harness]
 	return p, ok
+}
+
+// Versions is every registered parser's Version by harness.
+func Versions() map[string]int {
+	vs := make(map[string]int, len(parsers))
+	for h, p := range parsers {
+		vs[h] = p.Version()
+	}
+	return vs
 }

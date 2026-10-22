@@ -14,6 +14,8 @@ type Parser struct{}
 
 func (Parser) Harness() string { return "cursor" }
 
+func (Parser) Version() int { return 1 }
+
 func (Parser) Parse(r io.Reader, src normalize.SourceMeta, from normalize.State, emit func(*schema.Event) error) (normalize.State, error) {
 	return shared.ParseJSONL(r, src, from, cursorSource{}, emit)
 }

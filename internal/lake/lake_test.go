@@ -28,6 +28,8 @@ type fakeParser struct{}
 
 func (fakeParser) Harness() string { return "test-fake" }
 
+func (fakeParser) Version() int { return 1 }
+
 func (fakeParser) Parse(r io.Reader, src normalize.SourceMeta, from normalize.State, emit func(*schema.Event) error) (normalize.State, error) {
 	sc := bufio.NewScanner(r)
 	lineNo, ts := from.LineNo, from.RecordTSHint
@@ -393,7 +395,7 @@ func TestRunReparsesIdleSourceOfOlderParser(t *testing.T) {
 	if !ok {
 		t.Fatal("no checkpoint on the first run's file")
 	}
-	cp.Parser = normalize.Version - 1
+	cp.Parser = fakeParser{}.Version() - 1
 	kv, err := json.Marshal(cp)
 	if err != nil {
 		t.Fatal(err)
@@ -412,8 +414,8 @@ func TestRunReparsesIdleSourceOfOlderParser(t *testing.T) {
 	if st != (Stats{Sources: 1, Rewrote: 1, Events: 2}) {
 		t.Fatalf("run after a parser bump, no new push: %+v, want {1 1 0 0 0 2}", st)
 	}
-	if cp, _ := readCheckpoint(db, base); cp.Parser != normalize.Version {
-		t.Fatalf("checkpoint parser = %d, want %d", cp.Parser, normalize.Version)
+	if cp, _ := readCheckpoint(db, base); cp.Parser != (fakeParser{}).Version() {
+		t.Fatalf("checkpoint parser = %d, want %d", cp.Parser, fakeParser{}.Version())
 	}
 	if st, err := Run(dataDir, never, Sweep{}); err != nil || st != (Stats{Sources: 1, Unchanged: 1}) {
 		t.Fatalf("further run: %+v %v, want {1 0 1 0 0 0}", st, err)
@@ -483,7 +485,7 @@ func TestRunWritesMarkerDespitePushedSourceThatNeverParses(t *testing.T) {
 			t.Fatalf("run %d: %+v %v, want the poison source failed", i, st, err)
 		}
 	}
-	if got := readParserMarker(dataDir); got != normalize.Version {
-		t.Fatalf("marker = %d after 3 runs, want %d", got, normalize.Version)
+	if got := readParserMarker(dataDir); !reflect.DeepEqual(got, normalize.Versions()) {
+		t.Fatalf("marker = %v after 3 runs, want %v", got, normalize.Versions())
 	}
 }

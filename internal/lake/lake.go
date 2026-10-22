@@ -57,15 +57,16 @@ type manifest struct {
 // events/... via DuckDB COPY (zstd) to a temp file then rename. A harness
 // without a parser counts as RawOnly. A second run rewrites 0.
 //
-// While events/.parser-version differs from normalize.Version, Run also
-// visits, after the pushed sources, the unchanged ones in manifest-path order
-// from sweep.From: a source whose lake file records another parser version is
-// re-parsed, one already current is passed. It stops, with Stats.Next set to
+// While events/.parser-version records another Version for some parser than
+// normalize.Versions, Run also visits, after the pushed sources, the unchanged
+// sources of those parsers in manifest-path order from sweep.From: a source
+// whose lake file records an earlier version than its parser's is re-parsed,
+// one already current is passed. It stops, with Stats.Next set to
 // the first source not visited, when yield returns true or sweepBudget has
 // elapsed, never before the first visit, so pushes arriving faster than a
 // cycle still advance the lap. When it reaches the end of the
-// list it writes the marker and returns the zero Next. The marker means every
-// source was tried at this version, not that every one parsed: a source that
+// list it writes every parser's Version to the marker and returns the zero
+// Next. The marker means every source was tried at its parser's version, not that every one parsed: a source that
 // failed stays on its older output and a push or the next version bump
 // parses it again, so one poison source cannot keep the lake sweeping. A
 // crash before the marker leaves it old, and a later lap redoes only what the
@@ -109,7 +110,14 @@ func Run(dataDir string, yield func() bool, sweep Sweep) (Stats, error) {
 		key   layout.Key
 		src   manifest
 	}
-	sweeping := readParserMarker(dataDir) != normalize.Version
+	versions := normalize.Versions()
+	marker := readParserMarker(dataDir)
+	sweeping := map[string]bool{}
+	for h, v := range versions {
+		if marker[h] != v {
+			sweeping[h] = true
+		}
+	}
 	var idles []idle
 	for _, mpath := range paths {
 		st.Sources++
@@ -120,7 +128,7 @@ func Run(dataDir string, yield func() bool, sweep Sweep) (Stats, error) {
 			continue
 		}
 		if lakeMtime(key, dataDir) >= src.UpdatedMs {
-			if sweeping {
+			if sweeping[src.Harness] {
 				idles = append(idles, idle{mpath, key, src})
 			} else {
 				st.Unchanged++
@@ -145,7 +153,7 @@ func Run(dataDir string, yield func() bool, sweep Sweep) (Stats, error) {
 		}
 		i := idles[n]
 		parser, ok := normalize.For(i.src.Harness)
-		if cp, has := readCheckpoint(db, i.key.Events(dataDir)); ok && (!has || cp.Parser != normalize.Version) {
+		if cp, has := readCheckpoint(db, i.key.Events(dataDir)); ok && (!has || !cp.current(parser)) {
 			parse(i.mpath, i.key, i.src, parser)
 		} else {
 			st.Unchanged++
@@ -157,8 +165,8 @@ func Run(dataDir string, yield func() bool, sweep Sweep) (Stats, error) {
 		st.Next = Sweep{From: idles[n].mpath}
 		return st, nil
 	}
-	if sweeping {
-		if err := writeParserMarker(dataDir); err != nil {
+	if len(sweeping) > 0 {
+		if err := writeParserMarker(dataDir, versions); err != nil {
 			return st, err
 		}
 	}
@@ -173,27 +181,28 @@ func Run(dataDir string, yield func() bool, sweep Sweep) (Stats, error) {
 // a push is pending.
 const sweepBudget = 5 * time.Second
 
-// readParserMarker is the normalize.Version the whole lake was last fully
-// swept at, 0 when there is no marker.
-func readParserMarker(dataDir string) int {
+// readParserMarker is the Version by harness the whole lake was last fully
+// swept at, empty when there is no marker or it predates per-parser versions.
+func readParserMarker(dataDir string) map[string]int {
+	var vs map[string]int
 	b, err := os.ReadFile(layout.ParserMarker(dataDir))
-	if err != nil {
-		return 0
+	if err != nil || json.Unmarshal(b, &vs) != nil {
+		return nil
 	}
-	v, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil {
-		return 0
-	}
-	return v
+	return vs
 }
 
-func writeParserMarker(dataDir string) error {
+func writeParserMarker(dataDir string, versions map[string]int) error {
+	b, err := json.Marshal(versions)
+	if err != nil {
+		return err
+	}
 	path := layout.ParserMarker(dataDir)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(strconv.Itoa(normalize.Version)+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
@@ -284,8 +293,8 @@ func readManifest(rawDir, mpath string) (manifest, layout.Key, error) {
 // below ZstSize only by a replace, which renames a new raw into place; an
 // append truncates to ZstSize and writes a new frame past it. So a raw whose
 // window still hashes the same and holds a zstd frame at ZstSize is this one
-// grown by appends. A file parsed under another normalize.Version or source
-// identity, or failing either check, is parsed whole again.
+// grown by appends. A file of another source identity, recorded at an earlier
+// Version than its parser's, or failing either check, is parsed whole again.
 type checkpoint struct {
 	Parser       int             `json:"parser"`
 	Harness      string          `json:"harness"`
@@ -298,8 +307,10 @@ type checkpoint struct {
 	BaseZstSize  int64           `json:"base_zst_size"`
 }
 
+func (cp checkpoint) current(p normalize.Parser) bool { return cp.Parser >= p.Version() }
+
 func (cp checkpoint) sameSource(o checkpoint) bool {
-	return cp.Parser == o.Parser && cp.Harness == o.Harness &&
+	return cp.Harness == o.Harness &&
 		cp.SourceName == o.SourceName && cp.SourceFile == o.SourceFile
 }
 
@@ -330,7 +341,7 @@ func parseAndWrite(db *sql.DB, dataDir string, key layout.Key, src manifest, par
 	}
 	defer raw.Close()
 	basePath, tailPath := key.Events(dataDir), key.Tail(dataDir)
-	next := checkpoint{Parser: normalize.Version, Harness: src.Harness, SourceName: src.SourceName, SourceFile: src.Path}
+	next := checkpoint{Parser: parser.Version(), Harness: src.Harness, SourceName: src.SourceName, SourceFile: src.Path}
 	baseCP, hasBase := readCheckpoint(db, basePath)
 	tailCP, hasTail := readCheckpoint(db, tailPath)
 	if !hasBase || !hasTail || !tailCP.sameSource(baseCP) || tailCP.BaseZstSize != baseCP.ZstSize {
@@ -343,7 +354,7 @@ func parseAndWrite(db *sql.DB, dataDir string, key layout.Key, src manifest, par
 	if hasTail {
 		cp = tailCP
 	}
-	from, resumed := resume(raw, src, next, cp)
+	from, resumed := resume(raw, src, next, cp, parser)
 
 	zr, err := zstd.NewReader(io.NewSectionReader(raw, from.ZstSize, src.ZstSize-from.ZstSize))
 	if err != nil {
@@ -465,12 +476,13 @@ func lakeMtime(key layout.Key, dataDir string) int64 {
 	return ms
 }
 
-// resume returns cp and true when it belongs to this binary and source, its
-// State is not Provisional, and raw still extends it: the window ending at its ZstSize hashes the same, and
-// a zstd frame starts at ZstSize unless raw ends there. Otherwise it returns
-// the zero checkpoint, a parse from the start.
-func resume(raw *os.File, src manifest, want, cp checkpoint) (checkpoint, bool) {
-	if !cp.sameSource(want) || cp.ZstSize > src.ZstSize || cp.State.Provisional() {
+// resume returns cp and true when it is current for parser and belongs to
+// this source, its State is not Provisional, and raw still extends it: the
+// window ending at its ZstSize hashes the same, and a zstd frame starts at
+// ZstSize unless raw ends there. Otherwise it returns the zero checkpoint, a
+// parse from the start.
+func resume(raw *os.File, src manifest, want, cp checkpoint, parser normalize.Parser) (checkpoint, bool) {
+	if !cp.current(parser) || !cp.sameSource(want) || cp.ZstSize > src.ZstSize || cp.State.Provisional() {
 		return checkpoint{}, false
 	}
 	if sum, err := windowSHA256(raw, cp.ZstSize); err != nil || sum != cp.WindowSHA256 {

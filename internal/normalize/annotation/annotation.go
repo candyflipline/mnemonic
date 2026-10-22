@@ -19,6 +19,8 @@ type Parser struct{}
 
 func (Parser) Harness() string { return schema.AnnotationHarness }
 
+func (Parser) Version() int { return 1 }
+
 func init() { normalize.Register(Parser{}) }
 
 const previewLimit = 320

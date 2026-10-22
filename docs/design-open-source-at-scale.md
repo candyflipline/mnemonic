@@ -43,7 +43,7 @@ The coding harnesses export OTel themselves. Content is off by default:
 
 What is already right, and is the precedent everyone else converged on:
 
-- **Raw is truth, the rest is derived.** Parquet and the cache rebuild from raw, and a parser change bumps `normalize.Version` (`AGENTS.md`, `internal/normalize/normalize.go:9-11`).
+- **Raw is truth, the rest is derived.** Parquet and the cache rebuild from raw, and a parser change bumps that parser's `Version()` (`AGENTS.md`, `internal/normalize/normalize.go`).
 - **Redaction on the client** (`internal/redact`).
 - **The author comes from the token,** never the request (`internal/auth/auth.go`).
 - **Lake partitioned by author, machine, harness** (`internal/lake/lake.go:521`).

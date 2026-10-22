@@ -5,7 +5,7 @@
 //	raw/author=A/machine=M/harness=H/<src_id>.json        wire.Source, the manifest entry
 //	events/author=A/machine=M/harness=H/<src_id>.parquet       normalized events up to the base's checkpoint
 //	events/author=A/machine=M/harness=H/<src_id>.tail.parquet  events appended since, when any
-//	events/.parser-version                                     the normalize.Version the whole lake was last swept at
+//	events/.parser-version                                     each parser's Version the whole lake was last swept at
 //	cache/index.duckdb                                         derived; serve converges it from events/
 package layout
 
@@ -36,8 +36,8 @@ func (k Key) Tail(root string) string {
 	return filepath.Join(k.dir(root, "events"), k.SrcID+".tail.parquet")
 }
 
-// ParserMarker holds the normalize.Version the whole lake was last fully
-// swept at.
+// ParserMarker holds, as JSON by harness, each parser's Version the whole lake
+// was last fully swept at.
 func ParserMarker(root string) string { return filepath.Join(root, "events", ".parser-version") }
 
 func CacheDir(root string) string { return filepath.Join(root, "cache") }

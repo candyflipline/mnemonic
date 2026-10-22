@@ -137,7 +137,7 @@ A parser is `Parse(r io.Reader, src SourceMeta, from State, emit func(*Event) er
 
 - `State` is where a parse stopped: next `LineNo`, byte `Offset`, and the session, model and cwd carried to the next line. Parsing the tail of a file from the `State` its head ended in must give the rows a whole-file parse gives those lines (`internal/normalize/normalize.go:19-32`).
 - The reference helper `shared.ParseJSONL` does the line walking; a new harness supplies the per-record mapping (`internal/normalize/shared/jsonl.go:13-21`, `internal/normalize/shared/pipeline.go:8-18`).
-- A parser change that changes any output must bump `normalize.Version`, and `TestVersionNamesOutput` fails until it does (`internal/normalize/normalize.go:11`, `internal/normalize/all/golden_test.go:83-100`). The server then re-parses every source parsed under another version.
+- A parser change that changes a harness's output must bump that parser's `Version()`, and `TestVersionNamesOutput` fails, naming the harness, when its goldens moved and the version did not (`internal/normalize/all/golden_test.go`). The server then re-parses that harness's sources recorded at an earlier version, and no other.
 
 Registered harnesses: `claude-code`, `codex`, `cursor`, `pi-coding-agent`, `prime-agent` (`internal/normalize/*/*.go`, each file's `Harness()`). A source whose harness has no parser is stored and counted `raw_only`, not parsed (`internal/lake/lake.go:130-133`).
 
