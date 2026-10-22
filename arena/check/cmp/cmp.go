@@ -62,7 +62,7 @@ func Diff(want, got Result, mk Mask) []string {
 	Decode(got.Data, &dg)
 	DiffPaths("data", dw, dg, masked, report)
 	textDiff(want.Text, got.Text, mk.TextLines, report)
-	if (want.Error == "") != (got.Error == "") {
+	if want.Error != got.Error {
 		report("error")
 	}
 	return paths

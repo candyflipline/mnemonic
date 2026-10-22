@@ -215,13 +215,12 @@ func drive(args []string) error {
 				switch w, ok := s.want[c.ID]; {
 				case perr != nil:
 					paths = []string{"transport: " + perr.Error()}
+				case status != http.StatusOK:
+					paths = []string{"status " + strconv.Itoa(status)}
 				case !ok:
 					paths = []string{"baseline:missing"}
 				default:
 					paths = cmp.Diff(w, got, ms[s.name][c.ID])
-					if status != http.StatusOK && len(paths) == 0 && rep.Error == "" {
-						paths = []string{"status " + strconv.Itoa(status)}
-					}
 				}
 				if len(paths) == 0 {
 					equal++
