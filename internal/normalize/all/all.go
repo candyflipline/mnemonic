@@ -1,6 +1,7 @@
 package all
 
 import (
+	_ "github.com/candyflipline/mnemonic/internal/normalize/annotation"
 	_ "github.com/candyflipline/mnemonic/internal/normalize/claudecode"
 	_ "github.com/candyflipline/mnemonic/internal/normalize/codex"
 	_ "github.com/candyflipline/mnemonic/internal/normalize/cursor"
