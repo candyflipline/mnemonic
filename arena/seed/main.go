@@ -12,13 +12,17 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
+	"sync"
+	"sync/atomic"
 
 	"github.com/candyflipline/mnemonic/internal/auth"
 	"github.com/candyflipline/mnemonic/internal/layout"
@@ -74,7 +78,11 @@ func run(srcDir, root, mode string) error {
 		return err
 	}
 	h := auth.Middleware(map[string]string{auth.Hash(token): author})((&store.Store{DataDir: root}).Handler())
-	n := 0
+	type job struct {
+		s    source
+		path string
+	}
+	var jobs []job
 	for _, s := range sources {
 		files, err := filepath.Glob(filepath.Join(srcDir, s.dir, "*.jsonl"))
 		if err != nil {
@@ -86,12 +94,42 @@ func run(srcDir, root, mode string) error {
 			if err != nil {
 				return err
 			}
-			if err := seedOne(h, red, root, s, abs, mode); err != nil {
-				return fmt.Errorf("%s: %w", filepath.Base(abs), err)
-			}
-			n++
+			jobs = append(jobs, job{s, abs})
 		}
 	}
+	errs := make([]error, len(jobs))
+	var failedAt atomic.Int64
+	failedAt.Store(math.MaxInt64)
+	next := make(chan int)
+	var wg sync.WaitGroup
+	for range runtime.GOMAXPROCS(0) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range next {
+				if int64(i) > failedAt.Load() {
+					continue
+				}
+				j := jobs[i]
+				if err := seedOne(h, red, root, j.s, j.path, mode); err != nil {
+					errs[i] = fmt.Errorf("%s: %w", filepath.Base(j.path), err)
+					for cur := failedAt.Load(); int64(i) < cur && !failedAt.CompareAndSwap(cur, int64(i)); cur = failedAt.Load() {
+					}
+				}
+			}
+		}()
+	}
+	for i := range jobs {
+		next <- i
+	}
+	close(next)
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	n := len(jobs)
 	fmt.Fprintf(os.Stderr, "seed %s: %d sources into %s\n", mode, n, root)
 	return nil
 }
