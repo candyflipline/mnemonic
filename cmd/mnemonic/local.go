@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -60,8 +62,10 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 	if err := requireLoopback(opts.listen); err != nil {
 		return err
 	}
-	if home, err := os.UserHomeDir(); err == nil && filepath.Clean(opts.dataDir) == filepath.Join(home, ".mnemonic") {
-		return errors.New("--data-dir ~/.mnemonic belongs to mnemonic push; pick another directory")
+	if home, err := os.UserHomeDir(); err == nil {
+		if err := refuseClientDir(opts.dataDir, home); err != nil {
+			return err
+		}
 	}
 	if err := os.MkdirAll(opts.dataDir, 0o700); err != nil {
 		return err
@@ -72,9 +76,6 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 	}
 	tok := base64.RawURLEncoding.EncodeToString(raw)
 	tokenPath := filepath.Join(opts.dataDir, "token")
-	if err := os.WriteFile(tokenPath, []byte(tok+"\n"), 0o600); err != nil {
-		return err
-	}
 
 	author, machine := localIdentity()
 	srv, err := server.New(opts.dataDir, map[string]string{auth.Hash(tok): author})
@@ -89,6 +90,11 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 	}
 	defer ln.Close()
 	base := "http://" + ln.Addr().String()
+
+	if err := publishToken(tokenPath, tok); err != nil {
+		return err
+	}
+	defer os.Remove(tokenPath)
 
 	red, err := redact.New(nil)
 	if err != nil {
@@ -132,6 +138,72 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 		<-errs
 	}
 	return first
+}
+
+// publishToken replaces path with tok through a temp file and a rename, so a
+// reader sees the old token or the new one, never a torn file.
+func publishToken(path, tok string) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".token.*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	_, err = f.WriteString(tok + "\n")
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// refuseClientDir fails when dir is home's .mnemonic or anything inside it, by
+// absolute path with symlinks resolved, and ignoring case on darwin, whose
+// default volumes do not tell ~/.Mnemonic from ~/.mnemonic.
+func refuseClientDir(dir, home string) error {
+	got, err := resolvePath(dir)
+	if err != nil {
+		return err
+	}
+	client, err := resolvePath(filepath.Join(home, ".mnemonic"))
+	if err != nil {
+		return err
+	}
+	if runtime.GOOS == "darwin" {
+		got, client = strings.ToLower(got), strings.ToLower(client)
+	}
+	if rel, err := filepath.Rel(client, got); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return errors.New("--data-dir ~/.mnemonic belongs to mnemonic push; pick another directory")
+	}
+	return nil
+}
+
+// resolvePath makes p absolute and resolves symlinks through its deepest
+// existing ancestor, so a path that does not exist yet still lands where
+// MkdirAll will create it. A dangling symlink is an error.
+func resolvePath(p string) (string, error) {
+	cur, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	rest := ""
+	for {
+		r, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			return filepath.Join(r, rest), nil
+		}
+		if _, lerr := os.Lstat(cur); lerr == nil || !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return "", err
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = parent
+	}
 }
 
 func requireLoopback(addr string) error {
