@@ -1,11 +1,12 @@
 package trace
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
-	"syscall"
 )
 
 // manifestFile is CURRENT: the parts that make up the index and the source
@@ -123,18 +124,15 @@ func ListParts(store string) ([]LocalPart, json.RawMessage, error) {
 	return out, sources, nil
 }
 
-// CurrentStamp names the CURRENT file batch last opened: every commit renames
-// a new inode into place.
+// CurrentStamp names the CURRENT content batch last opened: the first eight
+// bytes of its SHA-256, so a commit that reuses CURRENT's inode still changes it.
 func CurrentStamp(store string) (uint64, bool) {
-	fi, err := os.Stat(filepath.Join(store, "CURRENT"))
+	b, err := os.ReadFile(filepath.Join(store, "CURRENT"))
 	if err != nil {
 		return 0, false
 	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return 0, false
-	}
-	return st.Ino, true
+	h := sha256.Sum256(b)
+	return binary.LittleEndian.Uint64(h[:8]), true
 }
 
 func (db *DB) part(sessionID string) (*Part, bool) {

@@ -181,12 +181,8 @@ func (st *Part) lsRecs() ([]lsRec, error) {
 	if st.ls != nil {
 		return st.ls, nil
 	}
-	b, err := st.read("ls.json")
-	if err != nil {
-		return nil, err
-	}
 	var recs []lsRec
-	if err := json.Unmarshal(b, &recs); err != nil {
+	if err := json.Unmarshal(st.lsB, &recs); err != nil {
 		return nil, err
 	}
 	st.ls = recs
