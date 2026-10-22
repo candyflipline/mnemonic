@@ -11,40 +11,42 @@ Related specs: [wire](wire.md), [events](events.md), [spans](spans.md), [mcp](mc
 | traces | `POST /v1/traces` | `ExportTraceServiceRequest` |
 | logs | `POST /v1/logs` | `ExportLogsServiceRequest` |
 
-The paths are the OTLP/HTTP defaults; the logs path is `/v1/logs`, and `/v1development/` is the path of the profiles signal only (OTLP spec, "OTLP/HTTP Request"). Metrics are not accepted. Both routes sit behind the same bearer-token middleware as the push store (`internal/server/server.go:45-46`); an exporter sets `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer <token>`. The author a request writes as is the token's author (`internal/otlp/receiver.go:102`).
+The paths are the OTLP/HTTP defaults; the logs path is `/v1/logs`, and `/v1development/` is the path of the profiles signal only (OTLP spec, "OTLP/HTTP Request"). Metrics are not accepted. Both routes sit behind the same bearer-token middleware as the push store (`internal/server/server.go:45-46`); an exporter sets `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer <token>`. The author a request writes as is the token's author (`internal/otlp/receiver.go:119`).
 
-The handler (`internal/otlp/receiver.go:81-126`):
+The handler (`internal/otlp/receiver.go:90-142`):
 
 - Content types are `application/json` and `application/x-protobuf`; anything else is 415. The response uses the request's content type.
 - `Content-Encoding: gzip` is accepted; any other encoding is 415 and a body that is not gzip is 400.
-- The body, compressed or decompressed, is capped at 64 MiB (`MaxBody`, `internal/otlp/receiver.go:37`); above that the answer is 413 (`readBody`, `internal/otlp/receiver.go:129-152`).
+- The body, compressed or decompressed, is capped at 64 MiB (`MaxBody`, `internal/otlp/receiver.go:37`); above that the answer is 413 (`readBody`, `internal/otlp/receiver.go:146-169`).
+- At most two requests (`DecodeSlots`, `internal/otlp/receiver.go:44`) are read, decoded and converted at once, because a body is held several times over while it is bytes, JSON, proto and records. A third request is answered 429 with `Retry-After: 1` before its body is read; OTLP exporters retry 429.
 - An undecodable body is 400. Every 4xx and 5xx body is a `google.rpc.Status` in the request's content type.
 - A failed store write is 503, which OTLP exporters retry; the spec retries only 429, 502, 503 and 504.
 - A request with no spans or records is 200 with an empty response.
 
 ### JSON encoding
 
-OTLP/JSON writes `traceId`, `spanId` and `parentSpanId` as hex, and `protojson` reads `bytes` as base64. `idsToBase64` rewrites those three fields (camelCase or snake_case) to base64 before decoding (`internal/otlp/receiver.go:186-222`); a non-hex id is a 400. 64-bit integers may be decimal strings or numbers, and enums integers or names, both through `protojson`. Unknown fields are ignored.
+OTLP/JSON writes `traceId`, `spanId` and `parentSpanId` as hex, and `protojson` reads `bytes` as base64. `idsToBase64` rewrites those three fields (camelCase or snake_case) to base64 before decoding (`internal/otlp/receiver.go:203-240`); a non-hex id is a 400. 64-bit integers may be decimal strings or numbers, and enums integers or names, both through `protojson`. Unknown fields are ignored.
 
 ### Partial success
 
-A span is rejected when its trace id is not 16 non-zero bytes or its span id is not 8 non-zero bytes (`internal/otlp/convert.go:55-56`). A log record is rejected when it has no session (see below) and no trace id (`internal/otlp/convert.go:112-116`). The rest of the request is stored and the response is 200 with `partialSuccess.rejectedSpans` or `rejectedLogRecords` and an `errorMessage`. A request with nothing rejected leaves `partialSuccess` unset, as the spec requires.
+A span is rejected when its trace id is not 16 non-zero bytes or its span id is not 8 non-zero bytes (`internal/otlp/convert.go:58`). A log record is rejected when it has no session (see below) and no trace id (`internal/otlp/convert.go:117`). The rest of the request is stored and the response is 200 with `partialSuccess.rejectedSpans` or `rejectedLogRecords` and an `errorMessage`. A request with nothing rejected leaves `partialSuccess` unset, as the spec requires.
 
 ## What is stored
 
-The receiver appends the accepted records as JSON lines to a server-owned source through `store.Append` (`internal/store/append.go`). The source is per author, per `service.name` and per UTC day, named `otlp/<service>/<yyyy-mm-dd>` (`store.Today`, `internal/otlp/receiver.go:112`); `service.name` is lowercased and any character outside `a-z 0-9 . - _` becomes `_`, with `unknown_service` when it is missing (`internal/otlp/convert.go:161-179`). A client PUT naming harness `otlp` is refused with 403 (`internal/store/store.go:150`).
+The receiver appends the accepted records as JSON lines to a server-owned source through `store.Append` (`internal/store/append.go`). The source is per author, per `service.name` and per UTC day, named `otlp/<service>/<yyyy-mm-dd>` (`store.Today`, `internal/otlp/receiver.go:129`); `service.name` is lowercased and any character outside `a-z 0-9 . - _` becomes `_`, with `unknown_service` when it is missing (`internal/otlp/convert.go:167-184`). A client PUT naming harness `otlp` is refused with 403 (`internal/store/store.go:150`).
 
 The request key is the sha256 of the decompressed body (`internal/otlp/receiver.go:100`), so an exporter's retry of the same body appends nothing, also across midnight (`store.Append` checks the previous day).
 
-One line per record (`Record`, `internal/otlp/record.go:17`):
+One line per record (`Record`, `internal/otlp/record.go:19`):
 
 | Field | Meaning |
 |---|---|
 | `signal` | `span` or `log` |
 | `session_id` | the session the record belongs to (below) |
+| `author` | the token's author, stamped by the receiver |
 | `trace_id`, `span_id`, `parent_span_id` | lowercase hex; a log carries the trace context it was emitted under |
 | `name` | the span name, or a log's event name (`LogRecord.event_name`, else the `event.name` attribute) |
-| `span_kind`, `status_code`, `status_message` | the OTLP enums as integers |
+| `span_kind`, `status_code`, `status_message` | the OTLP enums as integers; the message only with `content_stored` |
 | `start_unix_nano`, `end_unix_nano` | decimal strings (spans) |
 | `time_unix_nano`, `observed_unix_nano`, `severity_number`, `severity_text` | logs |
 | `body` | a log's body, present only with `content_stored` |
@@ -56,7 +58,7 @@ No receive time is stored, so the same record exported twice is the same line.
 
 ### Session
 
-The session of a record is the first of `gen_ai.conversation.id`, `session.id`, `conversation.id` it carries, record attributes before resource attributes (`SessionKeys`, `internal/otlp/mapping.go`). A record without one takes the session of another record of its trace in the same request, else the trace id (`stampSessions`, `internal/otlp/convert.go:129`). The spans of one trace that arrive in different requests, only some of them naming a session, land in different sessions.
+The session of a record is the first of `gen_ai.conversation.id`, `session.id`, `conversation.id` it carries, record attributes before resource attributes (`SessionKeys`, `internal/otlp/mapping.go`). A record without one takes the session of another record of its trace in the same request, else the trace id (`stampSessions`, `internal/otlp/convert.go:133`). When several services in the request name a session for one trace, the first service in name order wins, then the first record in request order. The spans of one trace that arrive in different requests, only some of them naming a session, land in different sessions.
 
 ## The content gate
 
@@ -67,21 +69,21 @@ Message content is stored only when the server config has
 store_content = false
 ```
 
-set to `true` (`internal/config/config.go:60-65`); the default is false, which matches the OTel GenAI convention that message content SHOULD NOT be captured by default. With it false, the receiver removes the attributes in `Gates` (`internal/otlp/mapping.go:76`) from each span, span event and log record, and from resource attributes, before the first byte is written, so raw, parquet and the index never hold them. A log record's `body` is dropped too (`internal/otlp/convert.go:100-104`). A gate with `In` applies only to records named so, after removing a `claude_code.` or `codex.` prefix.
+set to `true` (`internal/config/config.go:60-65`); the default is false, which matches the OTel GenAI convention that message content SHOULD NOT be captured by default. With it false, the receiver keeps only the attributes named in `allowed` (`internal/otlp/mapping.go:73`) and drops every other one, from the resource, each span, each span event and each log record, before the first byte is written, so raw, parquet and the index never hold the rest (`gate`, `internal/otlp/mapping.go:94`). A key that is allowed keeps only a scalar value: an array or a key-value list is dropped under any key. A log record's `body` and a span's status message are dropped too (`internal/otlp/convert.go:77`, `:103-105`).
 
-| Attributes | Why |
+The table is a list, not a guess about what content looks like, because the conventions keep adding keys (`ai.prompt.messages`, `traceloop.entity.input`, `pydantic_ai.all_messages`, `langfuse.observation.input`) and a deny-list stores each of them until it is told. `allowed` is built from the key lists the parser and the span derivation read, so an attribute is read only if it is kept:
+
+| Kept | Why |
 |---|---|
-| `gen_ai.input.messages`, `gen_ai.output.messages`, `gen_ai.system_instructions`, `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, `gen_ai.tool.definitions` | OTel GenAI opt-in content |
-| `gen_ai.prompt.*`, `gen_ai.completion.*` | OpenLLMetry's flattened prompts and completions |
-| `input.value`, `output.value`, `llm.input_messages.*`, `llm.output_messages.*`, `llm.prompts.*`, `llm.prompt_template.*`, `tool.parameters`, `retrieval.documents.*`, `embedding.embeddings.*`, `reranker.input_documents.*`, `reranker.output_documents.*` | OpenInference content |
-| `process.command_line`, `process.command_args` | a command line can carry a prompt |
-| `prompt`, `prompt_text` on `user_prompt` | Claude Code and Codex prompt text |
-| `user_prompt`, `new_context`, `system_reminders`, `system_prompt_preview`, `user_system_prompt`, `response.model_output` on `interaction` and `llm_request` spans; `response` on `assistant_response`; `body` on `api_request_body` and `api_response_body` | Claude Code prompts, model text and raw API JSON |
-| every attribute but `event.name` on `system_prompt` events and `tool.output` span events | Claude Code system prompt and tool output |
-| `tool_input`, `tool_parameters`, `full_command`, `file_path`, `hook_definitions`, and `error` on `tool_result` and `tool.execution` | Claude Code tool arguments and the full error text its `OTEL_LOG_TOOL_DETAILS` gate covers |
-| `arguments`, `output` on `tool_result` | Codex tool arguments and output snippet |
+| `gen_ai.conversation.id`, `session.id`, `conversation.id` | the session |
+| `gen_ai.response.model`, `gen_ai.request.model`, `llm.model_name`, `model`; `gen_ai.provider.name`, `gen_ai.system`, `llm.provider`, `llm.system` | model and provider |
+| `gen_ai.response.id`, `request_id`; `gen_ai.tool.name`, `tool.name`, `tool_name`; `gen_ai.tool.call.id`, `tool.id`, `tool_use_id`, `call_id`; `gen_ai.agent.name`, `agent.name`; `gen_ai.agent.id`, `agent_id` | ids and names |
+| `gen_ai.usage.input_tokens`, `llm.token_count.prompt`, `input_tokens`, `input_token_count`; `gen_ai.usage.output_tokens`, `llm.token_count.completion`, `output_tokens`, `output_token_count`; the four cache-read and cache-write token keys; `gen_ai.usage.cost`, `cost_usd`; `duration_ms` | usage, cost and latency |
+| `gen_ai.operation.name`, `openinference.span.kind`, `event.name` | the span kind and the log's event name |
+| `exception.type` | the class of an error; its message and stack trace are dropped |
+| `service.name`, `service.version`, `host.name`, `telemetry.sdk.name`, `telemetry.sdk.version`, `telemetry.sdk.language` | resource metadata |
 
-The Claude Code and Codex names come from the Claude Code monitoring documentation (events and the beta trace spans) and `codex-rs/otel` (`user_prompt`, `tool_result`); the sources are in the `Source` column of `Gates`. Counts, sizes, durations, ids, names and model and token attributes are kept.
+Span and event names, the scope's name and version, ids, times and the status code are fields of the record, not attributes, and are kept. An exporter whose useful attribute is not on the list gets it by the server config setting `store_content`, or by a one-line addition to `allowed`.
 
 ## Events
 
@@ -89,7 +91,7 @@ The parser `otlp` (`internal/normalize/otlp/otlp.go`) turns each line into one e
 
 | Column | Value |
 |---|---|
-| `event_uid` | span: sha256 of `otlp\|span\|<trace id>\|<span id>`, the same for every export of the span; log: sha256 of `otlp\|log\|` and the stored line |
+| `event_uid` | span: sha256 of `otlp\|span\|<author>\|<trace id>\|<span id>`, the same for every export of the span by that author, and another event for another author; log: sha256 of `otlp\|log\|` and the stored line, which carries the author |
 | `session_id` | `session_id` of the line |
 | `harness`, `source_name`, `source_file` | `otlp`; the source's name and path, `otlp/<service>/<day>` |
 | `inference_provider` | first of `gen_ai.provider.name`, `gen_ai.system`, `llm.provider`, `llm.system` |
@@ -124,8 +126,8 @@ All mappings of attribute names live in `internal/otlp/mapping.go`; the conventi
 `cache.RegisterSpans("otlp", ...)` (`internal/cache/index_spans_otlp.go:3`) derives spans from the events of sessions whose lake file is under `harness=otlp`.
 
 - A span row is an event with `payload_type = 'span'` and an `op_kind` of `chat`, `execute_tool` or `invoke_agent`. The kind is `gen_ai.operation.name` (`chat`, `text_completion`, `generate_content` to `chat`; `execute_tool`; `invoke_agent`, `create_agent` to `invoke_agent`), else `openinference.span.kind` (`LLM`, `TOOL`, `AGENT`), else the span name `claude_code.llm_request`, `claude_code.tool`, `claude_code.interaction` (`KindOf`, `internal/otlp/mapping.go:54`). Other spans are not emitted.
-- `span_id` is the first 16 hex characters of sha256 over `otlp`, the trace id and the OTLP span id, joined by U+001F (the rule of [spans](spans.md)).
-- `parent_span_id` is the nearest emitted ancestor along `origin_event_id`; a span whose ancestors are all other spans, or absent from the session, is a root with `""`.
+- `span_id` is the first 16 hex characters of sha256 over `otlp`, the author, the trace id and the OTLP span id, joined by U+001F (the rule of [spans](spans.md)).
+- `parent_span_id` is the nearest emitted ancestor along `origin_event_id`; a span whose ancestors are all other spans, or absent from the session, is a root with `""`. A span whose parent span id is its own is a root: the parser leaves its `origin_event_id` empty. Spans whose parents form a cycle (`A` under `B` under `A`) are broken at the span with the smallest OTLP span id, which becomes a root.
 - `name` is the span name, `start_time` the event time, `end_time` the start plus `latency_ms`, `status` `error` when `op_status` is `error`.
 - A `chat` and an `execute_tool` carry their own tokens, model and cost. An `invoke_agent` carries the sum over the `chat` spans beneath it, at any depth, and their cost when any has one; with no chat beneath it, its own figures. `cost` is null when no record reports one.
 - `first_event_uid` and `last_event_uid` are the span's own event.

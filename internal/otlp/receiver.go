@@ -36,6 +36,12 @@ const Harness = "otlp"
 // the 64 MiB the OTLP/HTTP spec recommends.
 const MaxBody = 64 << 20
 
+// DecodeSlots is how many requests a receiver reads, decodes and converts at
+// once. A body of MaxBody is several times that in memory while it is held as
+// bytes, JSON, proto and records, so the next request waits for a slot at the
+// exporter: it gets 429 with Retry-After, which OTLP exporters retry.
+const DecodeSlots = 2
+
 const (
 	protobufType = "application/x-protobuf"
 	jsonType     = "application/json"
@@ -46,9 +52,12 @@ const (
 type Receiver struct {
 	st           *store.Store
 	storeContent atomic.Bool
+	slots        chan struct{}
 }
 
-func NewReceiver(st *store.Store) *Receiver { return &Receiver{st: st} }
+func NewReceiver(st *store.Store) *Receiver {
+	return &Receiver{st: st, slots: make(chan struct{}, DecodeSlots)}
+}
 
 func (r *Receiver) SetStoreContent(on bool) { r.storeContent.Store(on) }
 
@@ -85,6 +94,14 @@ func (r *Receiver) handler(newReq func() proto.Message, convert func(proto.Messa
 			fail(w, media, http.StatusUnsupportedMediaType, "content type must be application/x-protobuf or application/json")
 			return
 		}
+		select {
+		case r.slots <- struct{}{}:
+			defer func() { <-r.slots }()
+		default:
+			w.Header().Set("Retry-After", "1")
+			fail(w, media, http.StatusTooManyRequests, "too many requests are being decoded; retry")
+			return
+		}
 		body, code, err := readBody(w, req)
 		if err != nil {
 			fail(w, media, code, err.Error())
@@ -104,7 +121,7 @@ func (r *Receiver) handler(newReq func() proto.Message, convert func(proto.Messa
 			if len(recs) == 0 {
 				continue
 			}
-			lines, err := encodeLines(recs)
+			lines, err := encodeLines(author, recs)
 			if err != nil {
 				fail(w, media, http.StatusInternalServerError, "encode: "+err.Error())
 				return
@@ -222,9 +239,10 @@ func walkIDs(v any) error {
 	return nil
 }
 
-func encodeLines(recs []Record) ([]byte, error) {
+func encodeLines(author string, recs []Record) ([]byte, error) {
 	var buf bytes.Buffer
 	for i := range recs {
+		recs[i].Author = author
 		b, err := json.Marshal(&recs[i])
 		if err != nil {
 			return nil, err

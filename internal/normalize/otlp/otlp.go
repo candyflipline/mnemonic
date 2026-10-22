@@ -94,10 +94,10 @@ func event(rec *otlp.Record, line []byte, src normalize.SourceMeta, lineNo, offs
 
 	switch rec.Signal {
 	case otlp.SignalSpan:
-		ev.EventUID = otlp.SpanUID(rec.TraceID, rec.SpanID)
+		ev.EventUID = otlp.SpanUID(rec.Author, rec.TraceID, rec.SpanID)
 		ev.ItemID = rec.SpanID
-		if rec.ParentSpanID != "" {
-			ev.OriginEventID = otlp.SpanUID(rec.TraceID, rec.ParentSpanID)
+		if rec.ParentSpanID != "" && rec.ParentSpanID != rec.SpanID {
+			ev.OriginEventID = otlp.SpanUID(rec.Author, rec.TraceID, rec.ParentSpanID)
 		}
 		ev.OpKind = otlp.OpSpan
 		if k := otlp.KindOf(rec); k != "" {
