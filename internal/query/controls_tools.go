@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"slices"
+	"strings"
 
 	"github.com/candyflipline/mnemonic/internal/auth"
 	"github.com/candyflipline/mnemonic/internal/store"
@@ -53,15 +55,15 @@ func parseControlArgs(raw json.RawMessage) (controlArgs, string, error) {
 	return a, id.session, nil
 }
 
-// actor is the caller on ctx when it may act on session: one of the
-// session's authors, or an admin token of a tenant the session is in. A
-// session outside the caller's tenant is not found.
+// actor is the caller on ctx when it may act on session: every author of
+// the session is in the caller's tenant, and the caller is its sole author or
+// holds an admin token. Any other session is not found.
 func actor(ctx context.Context, db *sql.DB, c *Controls, session string) (auth.Identity, error) {
 	id, ok := auth.From(ctx)
 	if !ok || c == nil || store.From(ctx) == nil {
 		return id, errors.New("query: control tools need an identity, controls and a store on ctx")
 	}
-	rows, err := db.QueryContext(ctx, "SELECT DISTINCT author FROM events WHERE session_id = "+sqlQuote(session))
+	rows, err := db.QueryContext(ctx, "SELECT author FROM session_authors WHERE session_id = "+sqlQuote(session)+" ORDER BY author")
 	if err != nil {
 		return id, err
 	}
@@ -77,13 +79,22 @@ func actor(ctx context.Context, db *sql.DB, c *Controls, session string) (auth.I
 	if err := rows.Err(); err != nil {
 		return id, err
 	}
-	if !slices.ContainsFunc(authors, id.Members().Has) {
+	members := id.Members()
+	if len(authors) == 0 || slices.ContainsFunc(authors, func(a string) bool { return !members.Has(a) }) {
 		return id, argErrorf("session not found")
 	}
-	if !slices.Contains(authors, id.Author()) && !id.Can(auth.Admin) {
+	if !slices.Equal(authors, []string{id.Author()}) && !id.Can(auth.Admin) {
 		return id, argErrorf("only the session's author or an admin token may change it")
 	}
 	return id, nil
+}
+
+// recordKey is the key a control record is appended under: the client's key
+// bound to what it asks for, so the key reused for another action is
+// another record and only an exact retry is a duplicate.
+func recordKey(action controlAction, session string, v visibility, client string) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{string(action), session, string(v), client}, "\x1f")))
+	return hex.EncodeToString(sum[:])
 }
 
 func randomKey() string {
@@ -112,7 +123,8 @@ func (setVisibility) Call(ctx context.Context, db *sql.DB, raw json.RawMessage) 
 	if key == "" {
 		key = randomKey()
 	}
-	dup, err := c.record(store.From(ctx), id.Author(), controlRecord{SessionID: session, Action: actVisibility, Visibility: a.Visibility, RequestKey: key})
+	dup, err := c.record(store.From(ctx), id.Author(), controlRecord{SessionID: session, Action: actVisibility, Visibility: a.Visibility,
+		RequestKey: recordKey(actVisibility, session, a.Visibility, key)})
 	if err != nil {
 		return nil, "", err
 	}
@@ -139,7 +151,7 @@ func (deleteSession) Call(ctx context.Context, db *sql.DB, raw json.RawMessage) 
 	}
 	dup := c.deleted(session)
 	if !dup {
-		dup, err = c.record(store.From(ctx), id.Author(), controlRecord{SessionID: session, Action: actDelete, RequestKey: key})
+		dup, err = c.record(store.From(ctx), id.Author(), controlRecord{SessionID: session, Action: actDelete, RequestKey: recordKey(actDelete, session, "", key)})
 		if err != nil {
 			return nil, "", err
 		}

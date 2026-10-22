@@ -12,10 +12,12 @@ import (
 
 // SessionFilter is what the caller on a ctx may read, as SQL predicates over
 // a column holding raw session ids (events.session_id). A session is the
-// tenant's when one of its authors is a member; a delete hides it from
-// everyone, private hides it from all but its authors, and link opens it by
-// id to any caller. The zero SessionFilter, which a ctx without an
-// auth.Identity gets, filters nothing; every predicate method then returns "".
+// tenant's when every author in session_authors is a member, so a session
+// whose authors span two tenants is no one's; a delete hides it from
+// everyone, private hides it from all but its sole author, and link opens a
+// session with a sole author by id to any caller. The zero SessionFilter,
+// which a ctx without an auth.Identity gets, filters nothing; every predicate
+// method then returns "".
 type SessionFilter struct {
 	scoped bool
 	tenant auth.AuthorSet
@@ -36,7 +38,7 @@ func Sessions(ctx context.Context, db *sql.DB) (SessionFilter, error) {
 	sets := c.sets()
 	hidden := sets.deleted
 	if len(sets.private) > 0 {
-		mine, err := authoredBy(ctx, db, id.Author(), sets.private)
+		mine, err := soleAuthor(ctx, db, id.Author(), sets.private)
 		if err != nil {
 			return SessionFilter{}, err
 		}
@@ -50,9 +52,10 @@ func Sessions(ctx context.Context, db *sql.DB) (SessionFilter, error) {
 	return SessionFilter{scoped: true, tenant: id.Members(), hidden: hidden, link: sets.link}, nil
 }
 
-func authoredBy(ctx context.Context, db *sql.DB, author string, sessions []string) (map[string]bool, error) {
-	rows, err := db.QueryContext(ctx, "SELECT DISTINCT session_id FROM events WHERE author = "+sqlQuote(author)+
-		" AND session_id IN ("+qQuoteJoin(sessions)+")")
+// soleAuthor is which of sessions have author as their only author.
+func soleAuthor(ctx context.Context, db *sql.DB, author string, sessions []string) (map[string]bool, error) {
+	rows, err := db.QueryContext(ctx, "SELECT session_id FROM session_authors WHERE session_id IN ("+qQuoteJoin(sessions)+
+		") GROUP BY session_id HAVING bool_and(author = "+sqlQuote(author)+")")
 	if err != nil {
 		return nil, err
 	}
@@ -82,7 +85,7 @@ func (f SessionFilter) Authors(col string) string {
 
 func (f SessionFilter) inTenant(col string) string {
 	if a := f.Authors("author"); a != "" {
-		return col + " IN (SELECT session_id FROM events WHERE " + a + ")"
+		return col + " IN (SELECT session_id FROM session_authors GROUP BY session_id HAVING bool_and(" + a + "))"
 	}
 	return ""
 }
@@ -100,11 +103,12 @@ func (f SessionFilter) Listed(col string) string {
 }
 
 // Opened is the predicate for sessions the caller may open by id: Listed,
-// plus link sessions of any tenant.
+// plus link sessions of any tenant that have a sole author.
 func (f SessionFilter) Opened(col string) string {
 	t := f.inTenant(col)
 	if t != "" && len(f.link) > 0 {
-		t = "(" + t + " OR " + col + " IN (" + qQuoteJoin(f.link) + "))"
+		t = "(" + t + " OR " + col + " IN (SELECT session_id FROM session_authors WHERE session_id IN (" + qQuoteJoin(f.link) +
+			") GROUP BY session_id HAVING count(*) = 1))"
 	}
 	return and(t, f.notHidden(col))
 }

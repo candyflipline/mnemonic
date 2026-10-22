@@ -94,7 +94,7 @@ func Open(dataDir string, o Options) (*Index, error) {
 			return nil, err
 		}
 		if db != nil {
-			for _, stmt := range append([]string{pendingSessionsDDL}, spansDDL()...) {
+			for _, stmt := range append(append([]string{pendingSessionsDDL}, spansDDL()...), sessionAuthorsDDL()...) {
 				if _, err := db.Exec(stmt); err != nil {
 					db.Close()
 					return nil, err
@@ -137,7 +137,7 @@ func Open(dataDir string, o Options) (*Index, error) {
 	stmts = append(stmts,
 		"INSERT INTO meta VALUES ("+strconv.Itoa(indexVersion)+", "+sqlStr(o.FlagsSQL)+")",
 		"INSERT INTO corpus VALUES (0, 0, 0)")
-	stmts = append(append(stmts, spansDDL()...), "COMMIT")
+	stmts = append(append(append(stmts, spansDDL()...), sessionAuthorsDDL()...), "COMMIT")
 	if err := execAll(ctx, c, stmts); err != nil {
 		db.Close()
 		return nil, err
@@ -295,6 +295,9 @@ func (ix *Index) Converge(ctx context.Context, f Failed) (st ConvergeStats, err 
 		errs = append(errs, aerrs...)
 	}
 	if err := convergeSpans(ctx, c); err != nil {
+		errs = append(errs, err)
+	}
+	if err := convergeSessionAuthors(ctx, c); err != nil {
 		errs = append(errs, err)
 	}
 	if err := syncManifests(ctx, c, ix.dataDir); err != nil {
@@ -748,6 +751,7 @@ FROM events WHERE `+inS+` GROUP BY session_id, turn_seq`,
   max(CASE WHEN payload_type = 'task_complete' THEN 1 ELSE 0 END)
 FROM events WHERE `+inS+` GROUP BY session_id`)
 	stmts = append(stmts, "INSERT INTO pending_spans SELECT DISTINCT session_id FROM s WHERE NOT EXISTS (SELECT 1 FROM pending_spans p WHERE p.session_id = s.session_id)")
+	stmts = append(stmts, "INSERT INTO pending_session_authors SELECT DISTINCT session_id FROM s WHERE NOT EXISTS (SELECT 1 FROM pending_session_authors p WHERE p.session_id = s.session_id)")
 	return execAll(ctx, c, append(stmts, "DROP TABLE ord"))
 }
 

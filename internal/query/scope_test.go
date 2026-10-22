@@ -2,13 +2,18 @@ package query
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/candyflipline/mnemonic/internal/auth"
 	"github.com/candyflipline/mnemonic/internal/cache"
@@ -117,7 +122,58 @@ func TestSessionScope(t *testing.T) {
 			return err
 		}
 	}
+	converge := func() error { _, err := ix.Converge(context.Background(), cache.RetryFailed); return err }
+	intrude := func(author, golden, srcID string) func() error {
+		return func() error {
+			if err := cachetest.Source(dataDir, layout.Key{Author: author, SrcID: srcID}, golden); err != nil {
+				return err
+			}
+			paths, err := filepath.Glob(filepath.Join(dataDir, "events", "author="+author, "machine=*", "harness=*", srcID+".parquet"))
+			if err != nil || len(paths) != 1 {
+				return fmt.Errorf("intrude %s: %v %v", srcID, paths, err)
+			}
+			db, err := sql.Open("duckdb", "")
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+			if _, err := db.Exec("COPY (SELECT * REPLACE (event_uid || '-" + author + "' AS event_uid) FROM read_parquet(" + sqlQuote(paths[0]) +
+				") ORDER BY event_uid LIMIT 1) TO " + sqlQuote(paths[0]+".one") + " (FORMAT parquet)"); err != nil {
+				return err
+			}
+			if err := os.Rename(paths[0]+".one", paths[0]); err != nil {
+				return err
+			}
+			return converge()
+		}
+	}
+	futureLine := func(session string) func() error {
+		return func() error {
+			id, err := parseMcpID(session)
+			if err != nil {
+				return err
+			}
+			line := `{"session_id":"` + id.session + `","action":"visibility","visibility":"team","ts":"` +
+				time.Now().UTC().Format(time.RFC3339Nano) + `","request_key":"later","added_later":1}` + "\n"
+			if _, _, err := st.Append(store.Today("bob", controlHarness, ""), "later", []byte(line)); err != nil {
+				return err
+			}
+			ctl, err = LoadControls(dataDir)
+			return err
+		}
+	}
+	then := func(acts ...func() error) func() error {
+		return func() error {
+			for _, a := range acts {
+				if err := a(); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
 	claude, codex, cursor := fxClaudeSessionID, fxCodexSessionID, fxCursorSessionID
+	carolSees := map[string][]string{"list": nil, "search": nil, "attention": nil, "status": {"5"}}
 	for _, step := range []struct {
 		name   string
 		act    func() error
@@ -161,6 +217,32 @@ func TestSessionScope(t *testing.T) {
 		{name: "a converge keeps them, and control sources are not ingestion", as: "bob",
 			act: func() error { _, err := ix.Converge(context.Background(), cache.RetryFailed); return err }, want: map[string][]string{
 				"list": {claude}, "search": {claude}, "open": {claude, codex}, "attention": {claude}, "status": {"3"}}},
+		{name: "a request key reused for another action is applied: first team", as: "carol",
+			act: act("bob", "set_visibility", `{"session_id":"`+claude+`","visibility":"team","request_key":"k"}`), want: map[string][]string{
+				"list": {claude}, "search": {claude}, "open": {claude, codex}, "attention": {claude}, "status": {"3"}}},
+		{name: "a request key reused for another action is applied: then private", as: "carol",
+			act: act("bob", "set_visibility", `{"session_id":"`+claude+`","visibility":"private","request_key":"k"}`), want: map[string][]string{
+				"list": nil, "search": nil, "open": {codex}, "attention": nil, "status": {"3"}}},
+		{name: "a control line with a field this release does not know loads and applies", as: "carol",
+			act: futureLine(claude), want: map[string][]string{
+				"list": {claude}, "search": {claude}, "open": {claude, codex}, "attention": {claude}, "status": {"3"}}},
+		{name: "a private session with two authors hides from the first", as: "bob",
+			act:  then(act("bob", "set_visibility", `{"session_id":"`+claude+`","visibility":"private"}`), intrude("carol", "claude_code", "ca401")),
+			want: map[string][]string{"list": nil, "search": nil, "open": {codex}, "attention": nil, "status": {"4"}}},
+		{name: "a private session with two authors hides from the second", as: "carol",
+			want: map[string][]string{"list": nil, "search": nil, "open": {codex}, "attention": nil, "status": {"4"}}},
+		{name: "another tenant's line in a session hides it from its tenant", as: "alice",
+			act:  intrude("bob", "codex", "b0b"),
+			want: map[string][]string{"list": nil, "search": nil, "attention": nil, "status": {"1"}}},
+		{name: "and from the tenant that pushed the line, link or not", as: "carol", want: carolSees},
+		{name: "the pushing tenant cannot trace it", as: "carol",
+			act: act("carol", "get_trace", `{"session_id":"`+codex+`"}`), actErr: "session not found", want: carolSees},
+		{name: "the pushing tenant cannot delete it", as: "carol",
+			act: act("carol", "delete_session", `{"session_id":"`+codex+`"}`), actErr: "session not found", want: carolSees},
+		{name: "the pushing author cannot change its visibility", as: "carol",
+			act: act("bob", "set_visibility", `{"session_id":"`+codex+`","visibility":"team"}`), actErr: "session not found", want: carolSees},
+		{name: "the first tenant cannot delete it either", as: "carol",
+			act: act("alice", "delete_session", `{"session_id":"`+codex+`"}`), actErr: "session not found", want: carolSees},
 	} {
 		if step.act != nil {
 			err := step.act()

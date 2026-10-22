@@ -10,6 +10,23 @@ Related specs: [wire](wire.md) (how data gets in), [events](events.md) (what the
 
 Every request carries `Authorization: Bearer <token>`. A missing or unknown token is `401 unauthorized` (`internal/auth/auth.go:24-33`). The caller's author comes from the token and is what a tool sees as the caller (`internal/auth/auth.go:39-42`).
 
+## Tenancy
+
+Each token entry names a tenant, `default` when it names none, and every author no token entry names is in `default` too, so a `default` token reads those authors' sessions (`internal/auth/auth.go:106-116`). This is the owner's call, not an oversight.
+
+The cache derives `session_authors(session_id, author)` in each converge: every author of a lake row that carries one of the session's event uids, whether or not that row won (`internal/cache/index_session_authors.go`). A session id comes from the pushed file, so any author can put lines in any session; the rules below read only this relation, never which author pushed one event (`internal/query/scope.go`).
+
+| Read or act | Allowed when |
+|---|---|
+| list, search, `file_attention`, `open`, `get_trace`, `annotate` | every author of the session is in the caller's tenant |
+| `open`, `get_trace` or `annotate` by exact id of a `link` session | the session has exactly one author |
+| a `private` session | the caller is its only author |
+| `set_visibility`, `delete_session` | every author is in the caller's tenant, and the caller is the only author or holds `admin` |
+
+A session whose authors sit in two tenants is no one's: no read shows it and no control tool finds it. That covers a line pushed into another tenant's session and an exact copy of its lines, which can win the cache's per-uid dedup and move the rows to the copier's author. A single `default` tenant filters nothing, as before.
+
+The control tools append each record under a key bound to the action, session, visibility and the client's `request_key` (`internal/query/controls_tools.go`), so only an exact retry reports `duplicate`. Control records ignore fields a later build added and record the build that wrote them; malformed JSON or a missing required field still stops `serve` from starting, since a skipped delete would show a deleted session (`internal/query/controls.go`).
+
 ## Request rules
 
 The server answers these before it looks at the JSON-RPC body, in this order (`internal/mcp/mcp.go:119-172`). Each failure is an HTTP status with the body `{"error":"<message>"}` (`internal/mcp/mcp.go:395-399`).

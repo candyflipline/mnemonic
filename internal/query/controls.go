@@ -2,13 +2,13 @@ package query
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -38,20 +38,33 @@ const (
 )
 
 // controlRecord is one raw line of a control source. The actor is the
-// source's author, from its path.
+// source's author, from its path; Writer is the build that appended it. A
+// field this build does not know is one a later build added, and is ignored.
 type controlRecord struct {
 	SessionID  string        `json:"session_id"`
 	Action     controlAction `json:"action"`
 	Visibility visibility    `json:"visibility,omitempty"`
 	TS         time.Time     `json:"ts"`
 	RequestKey string        `json:"request_key"`
+	Writer     string        `json:"writer,omitempty"`
 }
+
+var writer = func() string {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	for _, s := range bi.Settings {
+		if s.Key == "vcs.revision" {
+			return s.Value
+		}
+	}
+	return bi.Main.Version
+}()
 
 func parseControl(line []byte) (controlRecord, error) {
 	var r controlRecord
-	dec := json.NewDecoder(bytes.NewReader(line))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&r); err != nil {
+	if err := json.Unmarshal(line, &r); err != nil {
 		return r, err
 	}
 	switch {
@@ -148,7 +161,7 @@ func (c *Controls) loadSource(manifest string) error {
 func (c *Controls) record(st *store.Store, author string, r controlRecord) (duplicate bool, err error) {
 	c.write.Lock()
 	defer c.write.Unlock()
-	r.TS = time.Now().UTC()
+	r.TS, r.Writer = time.Now().UTC(), writer
 	line, err := json.Marshal(r)
 	if err != nil {
 		return false, err
