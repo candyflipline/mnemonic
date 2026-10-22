@@ -28,7 +28,7 @@ func (fakeParser) Harness() string { return "test-fake" }
 
 func (fakeParser) Parse(r io.Reader, src normalize.SourceMeta, from normalize.State, emit func(*schema.Event) error) (normalize.State, error) {
 	sc := bufio.NewScanner(r)
-	lineNo := from.LineNo
+	lineNo, ts := from.LineNo, from.RecordTSHint
 	for sc.Scan() {
 		lineNo++
 		line := strings.TrimSpace(sc.Text())
@@ -43,6 +43,7 @@ func (fakeParser) Parse(r io.Reader, src normalize.SourceMeta, from normalize.St
 		if err != nil {
 			return from, err
 		}
+		ts = parts[2]
 		if err := emit(&schema.Event{
 			EventUID:          parts[0],
 			EventVersion:      version,
@@ -59,7 +60,7 @@ func (fakeParser) Parse(r io.Reader, src normalize.SourceMeta, from normalize.St
 			return from, err
 		}
 	}
-	return normalize.State{LineNo: lineNo}, sc.Err()
+	return normalize.State{LineNo: lineNo, RecordTSHint: ts}, sc.Err()
 }
 
 func init() { normalize.Register(fakeParser{}) }

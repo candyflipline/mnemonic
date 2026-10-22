@@ -465,12 +465,12 @@ func lakeMtime(key layout.Key, dataDir string) int64 {
 	return ms
 }
 
-// resume returns cp and true when it belongs to this binary and source and
-// raw still extends it: the window ending at its ZstSize hashes the same, and
+// resume returns cp and true when it belongs to this binary and source, its
+// State is not Provisional, and raw still extends it: the window ending at its ZstSize hashes the same, and
 // a zstd frame starts at ZstSize unless raw ends there. Otherwise it returns
 // the zero checkpoint, a parse from the start.
 func resume(raw *os.File, src manifest, want, cp checkpoint) (checkpoint, bool) {
-	if !cp.sameSource(want) || cp.ZstSize > src.ZstSize {
+	if !cp.sameSource(want) || cp.ZstSize > src.ZstSize || cp.State.Provisional() {
 		return checkpoint{}, false
 	}
 	if sum, err := windowSHA256(raw, cp.ZstSize); err != nil || sum != cp.WindowSHA256 {

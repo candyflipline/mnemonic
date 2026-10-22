@@ -77,6 +77,7 @@ func TestGoldens(t *testing.T) {
 
 var outputs = map[int]string{
 	1: "86abac583cac7670c73428bd75331551c46e1459292091a644158c1ac5bf6c77",
+	2: "86abac583cac7670c73428bd75331551c46e1459292091a644158c1ac5bf6c77",
 }
 
 func TestVersionNamesOutput(t *testing.T) {

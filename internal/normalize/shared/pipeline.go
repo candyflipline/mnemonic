@@ -47,6 +47,7 @@ type RecordParams struct {
 
 type NormalizedRecord struct {
 	Events      []*EventRow
+	RecordTS    string
 	SessionHint string
 	ModelHint   string
 	CwdHint     string
@@ -101,6 +102,7 @@ func NormalizeRecord(rec JSON, src Source, p RecordParams) NormalizedRecord {
 	}
 	return NormalizedRecord{
 		Events:      partials.Events,
+		RecordTS:    recordTS,
 		SessionHint: sessionID,
 		ModelHint:   ResolveModelHint(partials.Events, harness, fallback),
 		CwdHint:     cwd,

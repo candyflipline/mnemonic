@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"io"
+	"strings"
 
 	"github.com/candyflipline/mnemonic/internal/normalize"
 	"github.com/candyflipline/mnemonic/internal/schema"
@@ -13,13 +14,49 @@ import (
 // line_no is the 1-based line index and source_offset the byte offset of the
 // line start, both counted over every line including the blank and
 // invalid-JSON ones that get skipped — the offset advances before any skip so
-// later lines keep their true positions. Session, model and cwd hints thread
-// from one line's outcome into the next and out through the returned State;
-// only a reader or emit failure fails the file.
+// later lines keep their true positions. Session, model, cwd and record
+// timestamp hints thread from one line's outcome into the next and out through
+// the returned State; while no line has carried a timestamp, lines are held
+// until one does and take it. Only a reader or emit failure fails the file.
 func ParseJSONL(r io.Reader, src normalize.SourceMeta, from normalize.State, s Source, emit func(*schema.Event) error) (normalize.State, error) {
 	br := bufio.NewReader(r)
-	sessionHint, modelHint, cwdHint := from.SessionHint, from.ModelHint, from.CwdHint
-	offset, lineNo := from.Offset, from.LineNo
+	st := from
+	type line struct {
+		rec            JSON
+		lineNo, offset uint64
+	}
+	var held []line
+	normalizeLine := func(l line) error {
+		out := NormalizeRecord(l.rec, s, RecordParams{
+			SourceName:   src.SourceName,
+			SourceFile:   src.SourceFile,
+			SourceLineNo: l.lineNo,
+			SourceOffset: l.offset,
+			SessionHint:  st.SessionHint,
+			ModelHint:    st.ModelHint,
+			CwdHint:      st.CwdHint,
+			RecordTSHint: st.RecordTSHint,
+		})
+		st.SessionHint, st.ModelHint, st.CwdHint = out.SessionHint, out.ModelHint, out.CwdHint
+		if _, ok := ParseRecordTS(out.RecordTS); ok {
+			st.RecordTSHint = out.RecordTS
+		}
+		for i := range out.Events {
+			if err := emit(&out.Events[i].Event); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	release := func() error {
+		for _, l := range held {
+			if err := normalizeLine(l); err != nil {
+				return err
+			}
+		}
+		held = nil
+		return nil
+	}
 	for {
 		raw, err := br.ReadBytes('\n')
 		if err != nil && err != io.EOF {
@@ -28,35 +65,33 @@ func ParseJSONL(r io.Reader, src normalize.SourceMeta, from normalize.State, s S
 		if len(raw) == 0 {
 			break
 		}
-		lineNo++
-		startOffset := offset
-		offset += uint64(len(raw))
+		st.LineNo++
+		l := line{lineNo: st.LineNo, offset: st.Offset}
+		st.Offset += uint64(len(raw))
 		trimmed := bytes.TrimSpace(raw)
 		if len(trimmed) == 0 {
 			continue
 		}
-		rec, err := DecodeJSON(trimmed)
-		if err != nil {
+		if l.rec, err = DecodeJSON(trimmed); err != nil {
 			continue
 		}
-		out := NormalizeRecord(rec, s, RecordParams{
-			SourceName:   src.SourceName,
-			SourceFile:   src.SourceFile,
-			SourceLineNo: lineNo,
-			SourceOffset: startOffset,
-			SessionHint:  sessionHint,
-			ModelHint:    modelHint,
-			CwdHint:      cwdHint,
-		})
-		sessionHint, modelHint, cwdHint = out.SessionHint, out.ModelHint, out.CwdHint
-		for i := range out.Events {
-			if err := emit(&out.Events[i].Event); err != nil {
+		if st.RecordTSHint == "" {
+			ts := s.RecordTS(l.rec)
+			if _, ok := ParseRecordTS(ts); !ok {
+				held = append(held, l)
+				continue
+			}
+			st.RecordTSHint = strings.TrimSpace(ts)
+			if err := release(); err != nil {
 				return from, err
 			}
 		}
+		if err := normalizeLine(l); err != nil {
+			return from, err
+		}
 	}
-	return normalize.State{
-		LineNo: lineNo, Offset: offset,
-		SessionHint: sessionHint, ModelHint: modelHint, CwdHint: cwdHint,
-	}, nil
+	if err := release(); err != nil {
+		return from, err
+	}
+	return st, nil
 }

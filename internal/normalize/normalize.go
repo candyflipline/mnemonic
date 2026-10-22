@@ -8,7 +8,7 @@ import (
 
 // Version names the parsers' output. Lake files parsed under another
 // Version are parsed again.
-const Version = 1
+const Version = 2
 
 type SourceMeta struct {
 	SourceName string
@@ -17,16 +17,24 @@ type SourceMeta struct {
 }
 
 // State is where a parse stopped: the next line's number and byte offset and
-// the hints the next line inherits. The zero State is the start of a file,
-// and parsing a file's tail from the State its head ended in yields the rows
-// a whole-file parse gives those tail lines.
+// the hints the next line inherits. RecordTSHint is the last record timestamp
+// read, which a line without one takes; lines before the first timestamp take
+// that first one. The zero State is the start of a file, and parsing a file's
+// tail from the State its head ended in yields the rows a whole-file parse
+// gives those tail lines, unless the State is Provisional.
 type State struct {
-	LineNo      uint64 `json:"line_no"`
-	Offset      uint64 `json:"offset"`
-	SessionHint string `json:"session_hint"`
-	ModelHint   string `json:"model_hint"`
-	CwdHint     string `json:"cwd_hint"`
+	LineNo       uint64 `json:"line_no"`
+	Offset       uint64 `json:"offset"`
+	SessionHint  string `json:"session_hint"`
+	ModelHint    string `json:"model_hint"`
+	CwdHint      string `json:"cwd_hint"`
+	RecordTSHint string `json:"record_ts_hint"`
 }
+
+// Provisional reports that lines were read but none carried a record
+// timestamp, so the rows emitted for them take the first timestamp of lines
+// not read yet: a resumed parse cannot yield a whole-file parse's rows.
+func (s State) Provisional() bool { return s.LineNo > 0 && s.RecordTSHint == "" }
 
 type Parser interface {
 	Harness() string
