@@ -163,6 +163,7 @@ func TestQueryRefusals(t *testing.T) {
 		{"SELECT * FROM glob('/*')", feb, `table function "glob" is not allowed`},
 		{"SELECT * FROM query('SELECT 1')", feb, `table function "query" is not allowed`},
 		{"SELECT getenv('HOME')", feb, `function "getenv" is not allowed`},
+		{"SELECT levenshtein(a.text_content, b.text_content) FROM events a, events b", feb, `function "levenshtein" is not allowed`},
 		{"SELECT pg_catalog.getenv('HOME')", feb, `function "pg_catalog.getenv" is not allowed`},
 		{"SELECT (SELECT count(*) FROM read_parquet('x'))", feb, `table function "read_parquet" is not allowed`},
 		{"SELECT * FROM main.events", feb, `table "main.events" must be named without a schema` + views},

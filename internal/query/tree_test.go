@@ -44,8 +44,13 @@ func TestBuildTreeKeepsCycles(t *testing.T) {
 		},
 		"cycle-with-a-hanger-on": {
 			[]*traceSpan{span("c", "a", 1), span("a", "b", 5), span("b", "a", 3)},
-			`[{"c":[]},{"a":[{"b":[]}]}]`,
-			traceTotals{Spans: 3, Tokens: traceTokens{Input: 6}},
+			`[{"a":[{"c":[]},{"b":[]}]}]`,
+			traceTotals{Spans: 3, Tokens: traceTokens{Input: 5}},
+		},
+		"earliest-span-hangs-off-the-cycle": {
+			[]*traceSpan{span("c", "b", 1), span("a", "b", 5), span("b", "a", 9)},
+			`[{"b":[{"c":[]},{"a":[]}]}]`,
+			traceTotals{Spans: 3, Tokens: traceTokens{Input: 9}},
 		},
 	} {
 		roots, totals := buildTree(tc.spans)

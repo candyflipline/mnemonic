@@ -15,8 +15,10 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"os"
 	"slices"
 	"sync/atomic"
+	"time"
 
 	colllogs "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colltrace "go.opentelemetry.io/proto/otlp/collector/trace/v1"
@@ -102,6 +104,10 @@ func (r *Receiver) handler(newReq func() proto.Message, convert func(proto.Messa
 			fail(w, media, http.StatusTooManyRequests, "too many requests are being decoded; retry")
 			return
 		}
+		if err := http.NewResponseController(w).SetReadDeadline(time.Now().Add(otlpReadTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			fail(w, media, http.StatusInternalServerError, err.Error())
+			return
+		}
 		body, code, err := readBody(w, req)
 		if err != nil {
 			fail(w, media, code, err.Error())
@@ -141,6 +147,10 @@ func (r *Receiver) handler(newReq func() proto.Message, convert func(proto.Messa
 	})
 }
 
+var otlpReadTimeout = 30 * time.Second
+
+var errReadTimeout = errors.New("request body did not arrive in time")
+
 // readBody returns the request body, gunzipped when sent gzip-encoded, and
 // refuses either form above MaxBody with 413.
 func readBody(w http.ResponseWriter, req *http.Request) ([]byte, int, error) {
@@ -150,6 +160,9 @@ func readBody(w http.ResponseWriter, req *http.Request) ([]byte, int, error) {
 	case "gzip":
 		zr, err := gzip.NewReader(src)
 		if err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				return nil, http.StatusRequestTimeout, errReadTimeout
+			}
 			return nil, http.StatusBadRequest, fmt.Errorf("gzip: %w", err)
 		}
 		defer zr.Close()
@@ -162,6 +175,8 @@ func readBody(w http.ResponseWriter, req *http.Request) ([]byte, int, error) {
 	switch {
 	case errors.As(err, &tooBig) || len(body) > MaxBody:
 		return nil, http.StatusRequestEntityTooLarge, fmt.Errorf("request body above %d bytes", MaxBody)
+	case errors.Is(err, os.ErrDeadlineExceeded):
+		return nil, http.StatusRequestTimeout, errReadTimeout
 	case err != nil:
 		return nil, http.StatusBadRequest, fmt.Errorf("read body: %w", err)
 	}

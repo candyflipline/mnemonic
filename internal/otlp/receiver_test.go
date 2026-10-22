@@ -1,6 +1,7 @@
 package otlp_test
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -8,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -448,4 +450,36 @@ func TestReceiverRows(t *testing.T) {
 			t.Fatalf("after release: status %d", status)
 		}
 	})
+}
+
+func TestStalledBodyTimesOutAndFreesSlot(t *testing.T) {
+	otlp.SetReadTimeout(200 * time.Millisecond)
+	t.Cleanup(func() { otlp.SetReadTimeout(30 * time.Second) })
+	_, _, ts := startServer(t, map[string]string{"tok": "chris"}, false)
+
+	var conns []net.Conn
+	for range otlp.DecodeSlots {
+		conn, err := net.Dial("tcp", strings.TrimPrefix(ts.URL, "http://"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { conn.Close() })
+		conn.SetDeadline(time.Now().Add(5 * time.Second))
+		io.WriteString(conn, "POST /v1/traces HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer tok\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n{\"resourceSpans\":[")
+		conns = append(conns, conn)
+	}
+	for _, conn := range conns {
+		res, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		if err != nil {
+			t.Fatalf("stalled upload got no response: %v", err)
+		}
+		res.Body.Close()
+		if res.StatusCode != http.StatusRequestTimeout {
+			t.Fatalf("stalled upload got status %d, want 408", res.StatusCode)
+		}
+	}
+	status, _, out := postJSON(t, ts, "/v1/traces", "tok", strings.NewReader(tracesJSON))
+	if status != 200 {
+		t.Fatalf("request after the stalls got %d: %s", status, out)
+	}
 }
