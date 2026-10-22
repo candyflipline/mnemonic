@@ -24,6 +24,7 @@ type Part struct {
 	hotB, hotOff              []byte
 	faTri, faTrip             []byte
 	lightB, heavyB            []byte
+	lightD, heavyD            []byte
 	fc                        *frameCache
 	maps                      [][]byte
 	nSessions, nTurns, nTerms int
@@ -67,6 +68,9 @@ func mmapFile(path string) ([]byte, error) {
 
 // OpenPartDir opens a part dir.
 func OpenPartDir(dir string) (*Part, error) {
+	if pb, err := os.ReadFile(filepath.Join(dir, deltaFile)); err == nil {
+		return openDelta(dir, pb)
+	}
 	mb, err := os.ReadFile(filepath.Join(dir, "meta.json"))
 	if err != nil {
 		return nil, err
@@ -115,6 +119,16 @@ func (st *Part) Close() {
 			syscall.Munmap(m)
 		}
 	}
+}
+
+// segments reads a log held as an image and the delta appended after it.
+type segments struct{ image, delta []byte }
+
+func (s segments) ReadAt(p []byte, off int64) (int, error) {
+	if n := int64(len(s.image)); off >= n {
+		return bytes.NewReader(s.delta).ReadAt(p, off-n)
+	}
+	return bytes.NewReader(s.image).ReadAt(p, off)
 }
 
 func (st *Part) docRec(d int) []byte { return st.docs[d*docWidth : (d+1)*docWidth] }
@@ -212,7 +226,7 @@ func (st *Part) row(d int) (*Row, error) {
 	idx := int(binary.LittleEndian.Uint16(rec[8:]))
 	rows, ok := st.fc.light[k]
 	if !ok {
-		recs, _, err := readFrame(bytes.NewReader(st.lightB), int64(k.frame), st.scratch)
+		recs, _, err := readFrame(segments{st.lightB, st.lightD}, int64(k.frame), st.scratch)
 		if err != nil {
 			return nil, err
 		}
@@ -243,7 +257,7 @@ func (st *Part) heavyOf(r *Row) (string, string, error) {
 	recs, ok := st.fc.heavy[k]
 	if !ok {
 		var err error
-		recs, _, err = readFrame(bytes.NewReader(st.heavyB), int64(r.HeavyFrame), nil)
+		recs, _, err = readFrame(segments{st.heavyB, st.heavyD}, int64(r.HeavyFrame), nil)
 		if err != nil {
 			return "", "", err
 		}
