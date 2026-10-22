@@ -5,22 +5,29 @@
 # Exits non-zero if any fails. The caller holds heavy.lock:
 #   lockf -k /Users/user/xstock-scratch/heavy.lock nice -n 15 env GOMAXPROCS=4 GOMEMLIMIT=900MiB arena/e2e/run.sh
 # KEEP=1 keeps the temp dir; ONLY="c d" runs those steps. ARENA and SRC override the fixture and the
-# transcripts the seed reads.
+# transcripts the seed reads. BIN_DIR=<dir holding a, e2e, seed> skips the build. LOG_DIR keeps the logs
+# and du.txt outside the temp dir. ENVLABEL names the host and corpus in the 2e line. WAIT_UP_S,
+# WAIT_EXIT_S and PREWARM_WAIT_S (seconds) and E2E_TIMEOUT (a duration) stretch the waits for a big corpus.
 set -u -o pipefail
 exec 3>&1 1>&2
 
-REPO=$(cd "$(dirname "$0")/../.." && pwd)
 ARENA=${ARENA:-/Users/user/loyal/mnemonic-harness/arena-fixture}
 SRC=${SRC:-/Users/user/.claude/jobs/47d8265e/tmp/sample2}
 BUILD_LOCK=${BUILD_LOCK:-/Users/user/xstock-scratch/build.lock}
 export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-900MiB}
-EXPECT=126
 TENANT=e2e
 TTFB=50ms
 
+for set in golden hidden; do
+	[ -s "$ARENA/$set/calls.jsonl" ] || { echo "$ARENA/$set/calls.jsonl missing or empty" >&2; exit 2; }
+done
+EXPECT=$(cat "$ARENA/golden/calls.jsonl" "$ARENA/hidden/calls.jsonl" | grep -c .)
+ENVLABEL=${ENVLABEL:-Mac, fixture}
+export WAIT_UP_S=${WAIT_UP_S:-30} WAIT_EXIT_S=${WAIT_EXIT_S:-45} PREWARM_WAIT_S=${PREWARM_WAIT_S:-120}
+
 T=$(mktemp -d "${TMPDIR:-/tmp}/e2e.XXXXXX")
-BIN=$T/bin
-LOGS=$T/log
+BIN=${BIN_DIR:-$T/bin}
+LOGS=${LOG_DIR:-$T/log}
 mkdir -p "$BIN" "$LOGS"
 FAILED=0
 PIDS=""
@@ -36,10 +43,19 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 
 build() {
+	local REPO
+	REPO=$(cd "$(dirname "$0")/../.." && pwd) || return 1
 	(cd "$REPO" && lockf -k "$BUILD_LOCK" nice -n 15 env GOMAXPROCS=4 GOFLAGS=-p=2 CGO_ENABLED=0 go build -o "$1" "$2")
 }
 
 for target in a e2e seed; do
+	if [ -n "${BIN_DIR:-}" ]; then
+		[ -x "$BIN/$target" ] || {
+			echo "$BIN/$target is not an executable" >&2
+			exit 2
+		}
+		continue
+	fi
 	build "$BIN/$target" "./arena/$target" || {
 		echo "build $target failed" >&2
 		exit 1
@@ -62,8 +78,20 @@ why() {
 	echo "${m:-no log}"
 }
 
+kb() { du -sk "$@" 2>/dev/null | awk '{s+=$1} END{print s+0}'; }
+
+# step_du S appends the disk each dir of step S holds, in KiB, to $LOGS/du.txt before it is dropped.
+step_du() {
+	local d
+	for d in "$T"/2"$1"*; do
+		[ -d "$d" ] || continue
+		echo "$(basename "$d") store_kb=$(kb "$d/store") root_kb=$(kb "$d/root") local_kb=$(kb "$d/local") cache_kb=$(kb "$d"/cache-r*)" >>"$LOGS/du.txt"
+	done
+}
+
 # retire_step S stops what the step started and drops its dirs, so a run's disk use is one step's.
 retire_step() {
+	step_du "$1"
 	for p in $PIDS; do kill -9 "$p" 2>/dev/null; done
 	for p in $PIDS; do wait "$p" 2>/dev/null; done
 	PIDS=""
@@ -101,11 +129,11 @@ s2b() {
 
 manifests_at() { ls "$1/t/$TENANT/m" | grep -c "^$(printf %016x "$2")-"; }
 
-# wait_exit PID waits up to 45 s for PID to exit and sets RC to its status.
+# wait_exit PID waits up to WAIT_EXIT_S (45) s for PID to exit and sets RC to its status.
 wait_exit() {
 	local n=0
 	RC=none
-	while [ $n -lt 90 ] && ! dead "$1"; do
+	while [ $n -lt $((WAIT_EXIT_S * 2)) ] && ! dead "$1"; do
 		sleep 0.5
 		n=$((n + 1))
 	done
@@ -238,7 +266,7 @@ s2e_at() {
 		wait_up "${RPID[$i]}" "127.0.0.1:${RPORT[$i]}" || E2E_OK=0
 	done
 	n=0
-	while [ $n -lt 240 ]; do
+	while [ $n -lt $((PREWARM_WAIT_S * 2)) ]; do
 		[ -n "$(prewarm_ms "$LOGS/2e$label-r1.log")" ] && [ -n "$(prewarm_ms "$LOGS/2e$label-r2.log")" ] && [ -n "$(prewarm_ms "$LOGS/2e$label-r3.log")" ] && break
 		sleep 0.5
 		n=$((n + 1))
@@ -277,7 +305,7 @@ s2e_at() {
 }
 
 s2e() {
-	local ok=1 line="Mac, fixture, partial rung, 3 readers, cold = fresh cache and -prewarm=false; get_ingest_status is keeper-answered so its 0 is by design;"
+	local ok=1 line="$ENVLABEL, partial rung, 3 readers, cold = fresh cache and -prewarm=false; get_ingest_status is keeper-answered so its 0 is by design;"
 	for ttfb in "$TTFB" ""; do
 		s2e_at "$ttfb"
 		[ "$E2E_OK" = 1 ] || ok=0
