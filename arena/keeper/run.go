@@ -52,6 +52,7 @@ type Keeper struct {
 	uploaded map[string]PartRef
 	doomed   map[obj.Key]time.Time
 	scanned  bool
+	takenAt  time.Time
 
 	mu      sync.RWMutex
 	head    Head
@@ -259,6 +260,8 @@ func (k *Keeper) commit(ctx context.Context, l local) error {
 	}
 	if prev.Gen == k.gen {
 		k.doom(manifestKey(k.cfg.Tenant, prev.Gen, prev.Seq), notBefore, live)
+	} else {
+		k.takenAt = notBefore
 	}
 	k.uploaded = map[string]PartRef{}
 	k.install(next, hot, l)
@@ -323,7 +326,8 @@ func (k *Keeper) install(m Manifest, hot []PartRef, l local) {
 // sweep deletes the doomed objects whose notBefore has passed and that the
 // committed manifest does not name, after validating the gen. Once per gen it
 // first dooms every older object the committed manifest does not name, which
-// is how a crashed keeper's garbage goes.
+// is how a crashed keeper's garbage goes; it shares the takeover commit's
+// notBefore so no part is due before a manifest that names it.
 func (k *Keeper) sweep(ctx context.Context, now time.Time) error {
 	m := k.head.Manifest
 	if m.Gen != k.gen {
@@ -331,7 +335,6 @@ func (k *Keeper) sweep(ctx context.Context, now time.Time) error {
 	}
 	live := liveKeys(m)
 	if !k.scanned {
-		notBefore := now.Add(k.cfg.GrantTTL + deleteSlack)
 		for _, prefix := range []obj.Key{manifestPrefix(k.cfg.Tenant), partPrefix(k.cfg.Tenant)} {
 			es, err := k.s.List(ctx, prefix)
 			if err != nil {
@@ -339,7 +342,7 @@ func (k *Keeper) sweep(ctx context.Context, now time.Time) error {
 			}
 			for _, e := range es {
 				if g, ok := keyGen(k.cfg.Tenant, e.Key); ok && g < k.gen {
-					k.doom(e.Key, notBefore, live)
+					k.doom(e.Key, k.takenAt, live)
 				}
 			}
 		}
@@ -386,19 +389,20 @@ func (k *Keeper) Read(fn func(Head) error) error {
 	return fn(k.head)
 }
 
-// Wait returns once the committed (gen, seq) is above (g, s), or ctx ends.
-func (k *Keeper) Wait(ctx context.Context, g Gen, s Seq) {
+// Wait reports whether the committed (gen, seq) rose above (g, s) before ctx
+// ended.
+func (k *Keeper) Wait(ctx context.Context, g Gen, s Seq) bool {
 	for {
 		k.mu.RLock()
 		m, ch := k.head.Manifest, k.changed
 		k.mu.RUnlock()
 		if m.Gen > g || (m.Gen == g && m.Seq > s) {
-			return
+			return true
 		}
 		select {
 		case <-ch:
 		case <-ctx.Done():
-			return
+			return false
 		}
 	}
 }

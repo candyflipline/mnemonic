@@ -6,7 +6,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -114,19 +113,18 @@ func awaitServe(ctx context.Context, storeURI string, errc chan error) error {
 	if serve == "" {
 		return nil
 	}
-	su, err := url.Parse(serve)
-	if err != nil {
-		return err
-	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		c, err := net.DialTimeout("tcp", su.Host, time.Second)
+		resp, err := http.Get(strings.TrimSuffix(serve, "/") + "/stats")
 		if err == nil {
-			c.Close()
-			return nil
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return nil
+			}
+			err = fmt.Errorf("%s", resp.Status)
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("keep: store serve %s: %w", su.Host, err)
+			return fmt.Errorf("keep: store serve %s: %w", serve, err)
 		}
 		select {
 		case err := <-errc:
@@ -191,15 +189,19 @@ func (ks keepServer) view(h keeper.Head) (route.View, error) {
 func (ks keepServer) serveView(w http.ResponseWriter, r *http.Request) {
 	if after := r.URL.Query().Get("after"); after != "" {
 		gs, ss, ok := strings.Cut(after, "-")
-		g, err1 := strconv.ParseUint(gs, 10, 64)
-		s, err2 := strconv.ParseUint(ss, 10, 64)
-		if !ok || err1 != nil || err2 != nil {
-			http.Error(w, "after must be <gen>-<seq>", http.StatusBadRequest)
+		g, err1 := strconv.ParseUint(gs, 16, 64)
+		s, err2 := strconv.ParseUint(ss, 16, 64)
+		if !ok || len(gs) != 16 || len(ss) != 16 || err1 != nil || err2 != nil {
+			http.Error(w, "after must be %016x-%016x gen-seq", http.StatusBadRequest)
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-		ks.k.Wait(ctx, keeper.Gen(g), keeper.Seq(s))
+		newer := ks.k.Wait(ctx, keeper.Gen(g), keeper.Seq(s))
 		cancel()
+		if !newer {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 	}
 	var v route.View
 	err := ks.k.Read(func(h keeper.Head) (err error) {
