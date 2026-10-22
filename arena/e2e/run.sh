@@ -4,7 +4,7 @@
 # exactly five lines on stdout, 2a: to 2e:, and everything else on stderr.
 # Exits non-zero if any fails. The caller holds heavy.lock:
 #   lockf -k /Users/user/xstock-scratch/heavy.lock nice -n 15 env GOMAXPROCS=4 GOMEMLIMIT=900MiB arena/e2e/run.sh
-# KEEP=1 keeps the temp dir. ARENA and SRC override the fixture and the
+# KEEP=1 keeps the temp dir; ONLY="c d" runs those steps. ARENA and SRC override the fixture and the
 # transcripts the seed reads.
 set -u -o pipefail
 exec 3>&1 1>&2
@@ -57,8 +57,8 @@ fail() {
 
 why() {
 	local m
-	m=$(grep -h -m1 '^panic:' "$LOGS"/"$1"-*.log 2>/dev/null | head -1)
-	[ -z "$m" ] && m=$(tail -n 1 "$LOGS/$1-keeper.log" 2>/dev/null | cut -c1-160)
+	m=$(grep -h -m1 -E 'panic|lane L[0-9]' "$LOGS"/"$1"-*.log 2>/dev/null | head -1 | cut -c1-120)
+	[ -z "$m" ] && m=$(tail -n 1 "$LOGS/$1-keeper.log" 2>/dev/null | cut -c1-120)
 	echo "${m:-no log}"
 }
 
@@ -91,35 +91,87 @@ s2b() {
 	if [ $ok = 1 ]; then emit "2b: PASS $line"; else fail 2b "$line ($(why 2b))"; fi
 }
 
-s2c() {
-	local store=$T/2c/store root=$T/2c/root k1 k1_port g1 g2 out rc=none n
-	"$BIN/seed" -src "$SRC" -half "$root" >/dev/null || { fail 2c "seed -half failed"; return; }
-	cluster_up 2c "$store" "$root" "" || { fail 2c "cluster did not start ($(why 2c))"; return; }
-	k1=$KPID
-	k1_port=$KPORT
-	"$E2E" ingest -keeper "http://127.0.0.1:$k1_port" || { fail 2c "first keeper ingest failed ($(why 2c))"; return; }
-	out=$("$E2E" manifest -dir "$store" -tenant "$TENANT") || { fail 2c "first keeper manifest check failed: $out"; return; }
-	g1=$(field "$out" gen)
-	start_keeper 2c2 "$store" "$root" "" "$READERS" || { fail 2c "second keeper did not start ($(why 2c2))"; return; }
-	"$E2E" ingest -keeper "http://127.0.0.1:$KPORT" || { fail 2c "second keeper ingest failed ($(why 2c2))"; return; }
-	out=$("$E2E" manifest -dir "$store" -tenant "$TENANT") || { fail 2c "second keeper manifest check failed: $out"; return; }
-	g2=$(field "$out" gen)
-	[ "${g2:-0}" -gt "${g1:-0}" ] || { fail 2c "second keeper did not take a higher gen ($g1 then $g2)"; return; }
-	"$BIN/seed" -src "$SRC" -rest "$root" >/dev/null || { fail 2c "seed -rest failed"; return; }
-	"$E2E" ingest -keeper "http://127.0.0.1:$k1_port" || echo "stale keeper refused the ingest" >&2
-	n=0
-	while [ $n -lt 90 ] && ! dead "$k1"; do
+manifests_at() { ls "$1/t/$TENANT/m" | grep -c "^$(printf %016x "$2")-"; }
+
+# wait_exit PID waits up to 45 s for PID to exit and sets RC to its status.
+wait_exit() {
+	local n=0
+	RC=none
+	while [ $n -lt 90 ] && ! dead "$1"; do
 		sleep 0.5
 		n=$((n + 1))
 	done
-	if dead "$k1"; then
-		wait "$k1"
-		rc=$?
+	if dead "$1"; then
+		wait "$1"
+		RC=$?
 	fi
-	"$E2E" ingest -keeper "http://127.0.0.1:$KPORT" || { fail 2c "second keeper ingest after the stale commit failed ($(why 2c2))"; return; }
-	out=$("$E2E" manifest -dir "$store" -tenant "$TENANT" -gen "$g2") || { fail 2c "after the stale keeper: $out"; return; }
-	local line="stale keeper gen $g1 exit status $rc, latest manifest stays gen $g2, 0 named objects missing"
-	if [ "$rc" = 3 ]; then emit "2c: PASS $line"; else fail 2c "$line, want exit status 3 ($(why 2c))"; fi
+}
+
+# stale_commit: keeper A (gen g1) commits the half root, keeper B takes over, then more raw arrives and A is asked to ingest.
+stale_commit() {
+	local store=$T/2c/store root=$T/2c/root a g1 g2 out before
+	"$BIN/seed" -src "$SRC" -half "$root" >/dev/null || { STALE="seed -half failed"; return 1; }
+	start_keeper 2c "$store" "$root" "" "" || { STALE="first keeper did not start ($(why 2c))"; return 1; }
+	a=$KPID
+	local a_port=$KPORT
+	"$E2E" ingest -keeper "http://127.0.0.1:$a_port" || { STALE="first keeper ingest failed ($(why 2c))"; return 1; }
+	out=$("$E2E" manifest -dir "$store" -tenant "$TENANT") || { STALE="first manifest: $out"; return 1; }
+	g1=$(field "$out" gen)
+	start_keeper 2c2 "$store" "$root" "" "" || { STALE="second keeper did not start ($(why 2c2))"; return 1; }
+	"$E2E" ingest -keeper "http://127.0.0.1:$KPORT" || { STALE="second keeper ingest failed ($(why 2c2))"; return 1; }
+	out=$("$E2E" manifest -dir "$store" -tenant "$TENANT") || { STALE="second manifest: $out"; return 1; }
+	g2=$(field "$out" gen)
+	[ "${g2:-0}" -gt "${g1:-0}" ] || { STALE="second keeper did not take a higher gen ($g1 then $g2)"; return 1; }
+	before=$(manifests_at "$store" "$g1")
+	"$BIN/seed" -src "$SRC" -rest "$root" >/dev/null || { STALE="seed -rest failed"; return 1; }
+	"$E2E" ingest -keeper "http://127.0.0.1:$a_port" || echo "stale keeper refused the ingest" >&2
+	wait_exit "$a"
+	"$E2E" ingest -keeper "http://127.0.0.1:$KPORT" || { STALE="second keeper ingest after the stale commit failed ($(why 2c2))"; return 1; }
+	out=$("$E2E" manifest -dir "$store" -tenant "$TENANT" -gen "$g2") || { STALE="after the stale keeper: $out"; return 1; }
+	[ "$(manifests_at "$store" "$g1")" = "$before" ] || { STALE="the stale keeper's commit landed a gen $g1 manifest"; return 1; }
+	[ "$RC" = 3 ] || { STALE="stale keeper exit status $RC, want 3 ($(why 2c))"; return 1; }
+	STALE="commit: gen $g1 keeper exit 3, no gen $g1 manifest after the takeover"
+}
+
+# stale_delete: keeper A (gen g1, grants of 6 s, cycles only when asked) commits twice, so its first manifest is queued for deletion; keeper B takes over before it is due; asked to cycle once it is due, A's delete must be refused.
+stale_delete() {
+	local store=$T/2cd/store root=$T/2cd/root a out g1 g2 seq=0 n=0
+	"$BIN/seed" -src "$SRC" -half "$root" >/dev/null || { STALE="seed -half failed"; return 1; }
+	start_keeper 2cd "$store" "$root" "" "" "-grant-ttl 6s -delete-slack 0s -interval 1h" || { STALE="delete keeper A did not start ($(why 2cd))"; return 1; }
+	a=$KPID
+	local a_port=$KPORT
+	"$E2E" ingest -keeper "http://127.0.0.1:$a_port" >/dev/null || { STALE="delete keeper A ingest failed ($(why 2cd))"; return 1; }
+	"$BIN/seed" -src "$SRC" -rest "$root" >/dev/null || { STALE="seed -rest failed"; return 1; }
+	while [ "${seq:-0}" -lt 2 ] && [ $n -lt 5 ]; do
+		out=$("$E2E" ingest -keeper "http://127.0.0.1:$a_port") || { STALE="delete keeper A second ingest failed ($(why 2cd))"; return 1; }
+		seq=$(field "$out" seq)
+		n=$((n + 1))
+	done
+	[ "${seq:-0}" -ge 2 ] || { STALE="delete keeper A never reached seq 2"; return 1; }
+	g1=$(field "$out" gen)
+	start_keeper 2cd2 "$store" "$root" "" "" || { STALE="delete keeper B did not start ($(why 2cd2))"; return 1; }
+	out=$("$E2E" ingest -keeper "http://127.0.0.1:$KPORT") || { STALE="delete keeper B ingest failed ($(why 2cd2))"; return 1; }
+	g2=$(field "$out" gen)
+	[ "${g2:-0}" -gt "${g1:-0}" ] || { STALE="delete keeper B did not take a higher gen ($g1 then $g2)"; return 1; }
+	"$E2E" ingest -keeper "http://127.0.0.1:$a_port" || echo "stale keeper refused the ingest" >&2
+	wait_exit "$a"
+	grep -q 'keep: delete refused' "$LOGS/2cd-keeper.log" || { STALE="no 'delete refused' line in keeper A's log (exit $RC)"; return 1; }
+	[ "$RC" = 3 ] || { STALE="delete keeper A exit status $RC, want 3"; return 1; }
+	[ -e "$store/t/$TENANT/m/$(printf %016x "$g1")-$(printf %016x 1).json" ] || { STALE="the manifest keeper A queued for deletion is gone"; return 1; }
+	out=$("$E2E" manifest -dir "$store" -tenant "$TENANT" -gen "$g2") || { STALE="after the refused delete: $out"; return 1; }
+	STALE="delete: gen $g1 keeper's due delete refused, exit 3, its queued manifest still there"
+}
+
+s2c() {
+	local c d
+	stale_commit && c=1 || c=0
+	local cmsg=$STALE
+	stale_delete && d=1 || d=0
+	if [ $c = 1 ] && [ $d = 1 ]; then
+		emit "2c: PASS stale keeper $cmsg; stale keeper $STALE; latest manifest stays the new keeper's, 0 named objects missing"
+	else
+		[ $c = 0 ] && fail 2c "stale commit: $cmsg" || fail 2c "stale delete: $STALE"
+	fi
 }
 
 s2d() {
@@ -183,9 +235,7 @@ s2e() {
 	if [ $ok = 1 ]; then emit "2e: PASS $line"; else fail 2e "$line ($(why 2e))"; fi
 }
 
-s2a
-s2b
-s2c
-s2d
-s2e
+for s in a b c d e; do
+	case " ${ONLY:-a b c d e} " in *" $s "*) "s2$s" ;; esac
+done
 exit $FAILED
