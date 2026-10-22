@@ -13,7 +13,7 @@ import (
 )
 
 // SpanDerivation returns one SELECT that yields spans rows, every column of
-// schema.SpansDDL but tenant, by name, from the events that match where: the
+// schema.SpansDDL, by name, from the events that match where: the
 // rows of one harness in the sessions being rebuilt, with event_order and
 // turn_seq already current.
 type SpanDerivation func(where string) string
@@ -50,7 +50,7 @@ func deriveSpans(inS string) []string {
 	stmts := []string{"DELETE FROM spans WHERE " + inS}
 	for _, h := range spanHarnesses() {
 		where := "(" + inS + ") AND contains(lake_file, " + sqlStr("/harness="+h+"/") + ")"
-		stmts = append(stmts, "INSERT INTO spans BY NAME SELECT 'default' AS tenant, * FROM ("+spanDerivations[h](where)+")")
+		stmts = append(stmts, "INSERT INTO spans BY NAME SELECT * FROM ("+spanDerivations[h](where)+")")
 	}
 	return stmts
 }

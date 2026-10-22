@@ -31,7 +31,6 @@ var spanStatuses = []SpanStatus{SpanOK, SpanError}
 // same after every re-parse; ParentSpanID is "" at the session root. Cost is
 // nil when the source reports none.
 type Span struct {
-	Tenant           string
 	SessionID        string
 	SpanID           string
 	ParentSpanID     string
@@ -50,7 +49,6 @@ type Span struct {
 }
 
 var SpansDDL = `CREATE TABLE IF NOT EXISTS spans (
-  tenant VARCHAR NOT NULL,
   session_id VARCHAR NOT NULL,
   span_id VARCHAR NOT NULL,
   parent_span_id VARCHAR NOT NULL,

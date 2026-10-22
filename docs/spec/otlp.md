@@ -11,13 +11,13 @@ Related specs: [wire](wire.md), [events](events.md), [spans](spans.md), [mcp](mc
 | traces | `POST /v1/traces` | `ExportTraceServiceRequest` |
 | logs | `POST /v1/logs` | `ExportLogsServiceRequest` |
 
-The paths are the OTLP/HTTP defaults; the logs path is `/v1/logs`, and `/v1development/` is the path of the profiles signal only (OTLP spec, "OTLP/HTTP Request"). Metrics are not accepted. Both routes sit behind the same bearer-token middleware as the push store (`internal/server/server.go:45-46`); an exporter sets `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer <token>`. The author a request writes as is the token's author (`internal/otlp/receiver.go:119`).
+The paths are the OTLP/HTTP defaults; the logs path is `/v1/logs`, and `/v1development/` is the path of the profiles signal only (OTLP spec, "OTLP/HTTP Request"). Metrics are not accepted. Both routes sit behind the same bearer-token middleware as the push store (`internal/server/server.go:45-46`); an exporter sets `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer <token>`. The author a request writes as is the token's author (`internal/otlp/receiver.go:122`).
 
-The handler (`internal/otlp/receiver.go:90-142`):
+The handler (`internal/otlp/receiver.go:91-145`):
 
 - Content types are `application/json` and `application/x-protobuf`; anything else is 415. The response uses the request's content type.
 - `Content-Encoding: gzip` is accepted; any other encoding is 415 and a body that is not gzip is 400.
-- The body, compressed or decompressed, is capped at 64 MiB (`MaxBody`, `internal/otlp/receiver.go:37`); above that the answer is 413 (`readBody`, `internal/otlp/receiver.go:146-169`).
+- The body, compressed or decompressed, is capped at 64 MiB (`MaxBody`, `internal/otlp/receiver.go:38`); above that the answer is 413 (`readBody`, `internal/otlp/receiver.go:153-181`).
 - At most two requests (`DecodeSlots`, `internal/otlp/receiver.go:44`) are read, decoded and converted at once, because a body is held several times over while it is bytes, JSON, proto and records. A third request is answered 429 with `Retry-After: 1` before its body is read; OTLP exporters retry 429.
 - An undecodable body is 400. Every 4xx and 5xx body is a `google.rpc.Status` in the request's content type.
 - A failed store write is 503, which OTLP exporters retry; the spec retries only 429, 502, 503 and 504.
@@ -25,7 +25,7 @@ The handler (`internal/otlp/receiver.go:90-142`):
 
 ### JSON encoding
 
-OTLP/JSON writes `traceId`, `spanId` and `parentSpanId` as hex, and `protojson` reads `bytes` as base64. `idsToBase64` rewrites those three fields (camelCase or snake_case) to base64 before decoding (`internal/otlp/receiver.go:203-240`); a non-hex id is a 400. 64-bit integers may be decimal strings or numbers, and enums integers or names, both through `protojson`. Unknown fields are ignored.
+OTLP/JSON writes `traceId`, `spanId` and `parentSpanId` as hex, and `protojson` reads `bytes` as base64. `idsToBase64` rewrites those three fields (camelCase or snake_case) to base64 before decoding (`internal/otlp/receiver.go:211-252`); a non-hex id is a 400. 64-bit integers may be decimal strings or numbers, and enums integers or names, both through `protojson`. Unknown fields are ignored.
 
 ### Partial success
 
@@ -33,9 +33,9 @@ A span is rejected when its trace id is not 16 non-zero bytes or its span id is 
 
 ## What is stored
 
-The receiver appends the accepted records as JSON lines to a server-owned source through `store.Append` (`internal/store/append.go`). The source is per author, per `service.name` and per UTC day, named `otlp/<service>/<yyyy-mm-dd>` (`store.Today`, `internal/otlp/receiver.go:129`); `service.name` is lowercased and any character outside `a-z 0-9 . - _` becomes `_`, with `unknown_service` when it is missing (`internal/otlp/convert.go:167-184`). A client PUT naming harness `otlp` is refused with 403 (`internal/store/store.go:150`).
+The receiver appends the accepted records as JSON lines to a server-owned source through `store.Append` (`internal/store/append.go`). The source is per author, per `service.name` and per UTC day, named `otlp/<service>/<yyyy-mm-dd>` (`store.Today`, `internal/otlp/receiver.go:132`); `service.name` is lowercased and any character outside `a-z 0-9 . - _` becomes `_`, with `unknown_service` when it is missing (`internal/otlp/convert.go:167-184`). A client PUT naming harness `otlp` is refused with 403 (`internal/store/store.go:150`).
 
-The request key is the sha256 of the decompressed body (`internal/otlp/receiver.go:100`), so an exporter's retry of the same body appends nothing, also across midnight (`store.Append` checks the previous day).
+The receiver passes `store.Append` no request key (`internal/otlp/receiver.go:132`), so nothing is recorded in the day's manifest and a request costs no more than its own lines, however many an exporter sends in a day. An exporter's retry of the same body is appended again, and the cache keeps one `events` row for it, because an `event_uid` is the same for every export of a span by that author (`internal/normalize/otlp/otlp.go:99`) and the cache keeps one row per `event_uid` (`internal/cache/index.go:233`). Spans derive from `events`, so a retry does not double a trace's totals.
 
 One line per record (`Record`, `internal/otlp/record.go:19`):
 

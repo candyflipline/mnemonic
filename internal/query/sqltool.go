@@ -251,7 +251,7 @@ func sqlScopeDDL(f SessionFilter, catalog string, from, to time.Time) []string {
 		"CREATE TEMP TABLE " + sqlScopeTable + " AS SELECT s.session_id FROM " + main + "sessions s WHERE " + pred,
 		"CREATE TEMP VIEW events AS SELECT * EXCLUDE (" + internalEventColumns + ") FROM " + main + "events WHERE " + published +
 			" AND event_ts >= " + lo + " AND event_ts < " + hi + " AND " + inScope,
-		"CREATE TEMP VIEW spans AS SELECT * EXCLUDE (tenant) FROM " + main + "spans WHERE start_time >= " + lo + " AND start_time < " + hi + " AND " + inScope,
+		"CREATE TEMP VIEW spans AS SELECT * FROM " + main + "spans WHERE start_time >= " + lo + " AND start_time < " + hi + " AND " + inScope,
 		"CREATE TEMP VIEW sessions AS SELECT * FROM " + main + "sessions WHERE first_event_time < " + hi + " AND last_event_time >= " + lo + " AND " + inScope,
 		"CREATE TEMP VIEW turns AS SELECT * FROM " + main + "turns WHERE " + inScope +
 			" AND session_id IN (SELECT session_id FROM " + main + "sessions WHERE first_event_time < " + hi + " AND last_event_time >= " + lo + ")",

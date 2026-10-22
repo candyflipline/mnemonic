@@ -8,11 +8,10 @@ Related specs: [events](events.md), [wire](wire.md), [mcp](mcp.md), [otlp](otlp.
 
 ## The spans relation
 
-`spans` is a table in `cache/index.duckdb` (`internal/schema/spans.go:52-70`). One row per span.
+`spans` is a table in `cache/index.duckdb` (`internal/schema/spans.go:51-68`). One row per span. It has no tenant column: whose session a span belongs to comes from `session_authors`, which every read filters on (`internal/query/scope.go:86-88`).
 
 | Column | Type | Meaning |
 |---|---|---|
-| `tenant` | VARCHAR | the owner of the data; today the constant `default` (`internal/cache/index_spans.go:53`) |
 | `session_id` | VARCHAR | the [event](events.md) `session_id` |
 | `span_id` | VARCHAR | first 16 hex characters of `sha256` over the span's source key. It is the same after every re-parse. |
 | `parent_span_id` | VARCHAR | the parent's `span_id`; `""` on the session root |
@@ -41,13 +40,13 @@ A `span_id` is `substr(sha256(concat_ws(U+001F, parts...)), 1, 16)` in lowercase
 
 ### When spans are built
 
-Spans for a session are deleted and rebuilt whenever the session's events change. The step that recomputes `event_order` and `turn_seq` queues each session it touched in `pending_spans` once (`internal/cache/index.go:706-751`), and `Converge` derives the queued sessions' spans in a transaction of their own after the events batch, so a failure costs spans, never events (`internal/cache/index.go:297`, `internal/cache/index_spans.go:78-106`). A derivation sees only the events of one harness, matched by the `harness=<h>` segment of the lake path (`internal/cache/index_spans.go:48-56`). A harness with no derivation has no spans; today `claude-code` (`internal/cache/index_spans_claudecode.go:3`), `codex` (`internal/cache/index_spans_codex.go:4`), `cursor` (`internal/cache/index_spans_cursor.go:3`), `pi-coding-agent` (`internal/cache/index_spans_pi.go:4`) and `prime-agent` (`internal/cache/index_spans_primeagent.go:3`) have one.
+Spans for a session are deleted and rebuilt whenever the session's events change. The step that recomputes `event_order` and `turn_seq` queues each session it touched in `pending_spans` once (`internal/cache/index.go:774`), and `Converge` derives the queued sessions' spans in a transaction of their own after the events batch, so a failure costs spans, never events (`internal/cache/index.go:313`, `internal/cache/index_spans.go:78-106`). A derivation sees only the events of one harness, matched by the `harness=<h>` segment of the lake path (`internal/cache/index_spans.go:48-56`). A harness with no derivation has no spans; today `claude-code` (`internal/cache/index_spans_claudecode.go:3`), `codex` (`internal/cache/index_spans_codex.go:4`), `cursor` (`internal/cache/index_spans_cursor.go:3`), `pi-coding-agent` (`internal/cache/index_spans_pi.go:4`) and `prime-agent` (`internal/cache/index_spans_primeagent.go:3`) and `otlp` (`internal/cache/index_spans_otlp.go:3`) have one.
 
-The index records a fingerprint of all derivations. When the set changes, the next `Converge` re-derives every session's spans without a full rebuild (`internal/cache/index_spans.go:58-63`, `internal/cache/index_spans.go:82-91`, called at `internal/cache/index.go:297`).
+The index records a fingerprint of all derivations. When the set changes, the next `Converge` re-derives every session's spans without a full rebuild (`internal/cache/index_spans.go:58-63`, `internal/cache/index_spans.go:82-91`, called at `internal/cache/index.go:313`).
 
 ### Writing a derivation
 
-A derivation is registered per harness name with `cache.RegisterSpans(harness, derive)` from an `init` (`internal/cache/index_spans.go:23-26`). `derive(where)` returns one `SELECT` that yields every column of the table except `tenant`, matched by name; `where` selects the events of the sessions being rebuilt, with `event_order` and `turn_seq` already current (`internal/cache/index_spans.go:15-19`). The `events` table in the index has no `payload_json`, so a derivation reads values from columns ([events](events.md)).
+A derivation is registered per harness name with `cache.RegisterSpans(harness, derive)` from an `init` (`internal/cache/index_spans.go:23-26`). `derive(where)` returns one `SELECT` that yields every column of the table, matched by name; `where` selects the events of the sessions being rebuilt, with `event_order` and `turn_seq` already current (`internal/cache/index_spans.go:15-19`). The `events` table in the index has no `payload_json`, so a derivation reads values from columns ([events](events.md)).
 
 ### claude-code tree
 
@@ -83,7 +82,7 @@ An annotation is one append-only line of JSON (`internal/schema/annotations.go:1
 
 ### The annotations relation
 
-The index holds a table `annotations`, rebuilt from the lake files of each changed annotation source (`internal/schema/annotations.go:146-159`, `internal/cache/index_annotations.go:29-50`).
+The index holds a table `annotations`, rebuilt from the lake files of each changed annotation source (`internal/schema/annotations.go:146-159`, `internal/cache/index_annotations.go:56-102`). It has one row per `annotation_id`: the same annotation appended on two days, which the store's one-day look-back does not merge, is indexed once, from the first lake file the index applied that holds it (`internal/cache/index_annotations.go:82-85`).
 
 | Column | Type | From |
 |---|---|---|

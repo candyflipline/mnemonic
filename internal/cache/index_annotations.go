@@ -50,7 +50,8 @@ func (ix *Index) applyAnnotations(ctx context.Context, c *sql.Conn, bs [][]chang
 }
 
 // applyAnnotationBatch replaces the annotations rows of every changed lake
-// file with the file's rows, in one transaction with its lake_files and
+// file with the file's rows, except an annotation_id another file already
+// holds or an earlier row of the batch took, so one id is one row, in one transaction with its lake_files and
 // sources rows. These files never reach lake_rows, events or postings.
 func applyAnnotationBatch(ctx context.Context, c *sql.Conn, dataDir string, changes []change) error {
 	var all, present []lakeFile
@@ -79,7 +80,9 @@ func applyAnnotationBatch(ctx context.Context, c *sql.Conn, dataDir string, chan
   author,
   cast(json_extract_string(payload_json, '$.ts') AS TIMESTAMPTZ) AT TIME ZONE 'UTC',
   filename, file_row_number
-FROM `+parquetSource(present))
+FROM `+parquetSource(present)+`
+WHERE event_uid NOT IN (SELECT annotation_id FROM annotations)
+QUALIFY row_number() OVER (PARTITION BY event_uid ORDER BY filename, file_row_number) = 1`)
 	}
 	stmts = append(stmts, "DELETE FROM lake_files WHERE path IN "+inAll)
 	for _, f := range present {
