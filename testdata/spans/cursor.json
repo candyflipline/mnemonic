@@ -1,0 +1,47 @@
+[
+  {
+    "span_id": "f2087e1a8c548ba7",
+    "parent_span_id": "",
+    "kind": "invoke_agent",
+    "name": "cursor",
+    "status": "ok",
+    "start": "2026-02-16T12:00:10.000",
+    "end": "2026-02-16T12:00:14.000",
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0,
+    "first_event": "ed021cd6",
+    "last_event": "a15e193c"
+  },
+  {
+    "span_id": "288ef1ed5bf85a1d",
+    "parent_span_id": "f2087e1a8c548ba7",
+    "kind": "turn",
+    "name": "turn 1",
+    "status": "ok",
+    "start": "2026-02-16T12:00:10.000",
+    "end": "2026-02-16T12:00:14.000",
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0,
+    "first_event": "ed021cd6",
+    "last_event": "a15e193c"
+  },
+  {
+    "span_id": "c8595d8da4a8557c",
+    "parent_span_id": "288ef1ed5bf85a1d",
+    "kind": "execute_tool",
+    "name": "Read",
+    "status": "ok",
+    "start": "2026-02-16T12:00:11.000",
+    "end": "2026-02-16T12:00:12.000",
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0,
+    "first_event": "63420f91",
+    "last_event": "0b0cadb2"
+  }
+]
