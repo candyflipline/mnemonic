@@ -3,8 +3,12 @@ package config
 import (
 	"fmt"
 	"regexp"
+	"slices"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/candyflipline/mnemonic/internal/auth"
+	"github.com/candyflipline/mnemonic/internal/wire"
 )
 
 var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -24,6 +28,7 @@ func LoadServer(path string) (Server, error) {
 		return Server{}, fmt.Errorf("%s: at least one [[tokens]] entry is required", path)
 	}
 	seen := map[string]string{}
+	tenantOf := map[string]string{}
 	for i, t := range cfg.Tokens {
 		if t.Author == "" {
 			return Server{}, fmt.Errorf("%s: tokens[%d]: author must be set", path, i)
@@ -35,6 +40,33 @@ func LoadServer(path string) (Server, error) {
 			return Server{}, fmt.Errorf("%s: tokens[%d]: sha256 already used by %s", path, i, prev)
 		}
 		seen[t.SHA256] = t.Author
+		tenant := t.Tenant
+		if tenant == "" {
+			tenant = auth.DefaultTenant
+		} else if !wire.ValidSegment(tenant) {
+			return Server{}, fmt.Errorf("%s: tokens[%d] (%s): tenant %q must be lowercase letters, digits, '.', '_' or '-'", path, i, t.Author, tenant)
+		}
+		if prev, ok := tenantOf[t.Author]; ok && prev != tenant {
+			return Server{}, fmt.Errorf("%s: tokens[%d]: author %s is in tenant %s and %s; an author sits in one tenant", path, i, t.Author, prev, tenant)
+		}
+		tenantOf[t.Author] = tenant
+		if t.Scopes != nil && len(t.Scopes) == 0 {
+			return Server{}, fmt.Errorf("%s: tokens[%d] (%s): scopes is empty; omit it for the default", path, i, t.Author)
+		}
+		for _, s := range t.Scopes {
+			if !slices.Contains(auth.Scopes[:], s) {
+				return Server{}, fmt.Errorf("%s: tokens[%d] (%s): unknown scope %q; scopes are %v", path, i, t.Author, s, auth.Scopes)
+			}
+		}
 	}
 	return cfg, nil
+}
+
+// Identities is the token table LoadServer validated.
+func (s Server) Identities() auth.Tokens {
+	byHash := make(map[string]auth.Token, len(s.Tokens))
+	for _, t := range s.Tokens {
+		byHash[t.SHA256] = auth.Token{Tenant: t.Tenant, Author: t.Author, Scopes: t.Scopes}
+	}
+	return auth.NewTokens(byHash)
 }

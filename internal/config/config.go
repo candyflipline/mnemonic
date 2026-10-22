@@ -2,6 +2,8 @@
 // client and the server's config. Validation happens here, once.
 package config
 
+import "github.com/candyflipline/mnemonic/internal/auth"
+
 // Client is ~/.mnemonic/config.toml.
 //
 //	server  = "https://mnemonic.example"
@@ -51,6 +53,8 @@ var DefaultSources = []SourceGlob{
 //	listen   = "127.0.0.1:8740"
 //	[[tokens]]
 //	author = "chris"; sha256 = "<auth.Hash(token)>"
+//	tenant = "acme"            # optional, default "default"; an author sits in one tenant
+//	scopes = ["read", "push"]  # optional, the default; "annotate" and "admin" opt in
 type Server struct {
 	DataDir string       `toml:"data_dir"`
 	Listen  string       `toml:"listen"`
@@ -58,6 +62,8 @@ type Server struct {
 }
 
 type TokenEntry struct {
-	Author string `toml:"author"`
-	SHA256 string `toml:"sha256"`
+	Author string       `toml:"author"`
+	SHA256 string       `toml:"sha256"`
+	Tenant string       `toml:"tenant"`
+	Scopes []auth.Scope `toml:"scopes"`
 }

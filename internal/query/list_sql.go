@@ -64,6 +64,13 @@ func lsSelectPage(ctx context.Context, db *sql.DB, a *lsArgs, cursor *lsCursor) 
 		aggregates += ",\n    " + lsArgMax("nullif(source_name, '')") + " AS latest_source_name"
 		having = append(having, "latest_source_name = "+sqlQuote(*a.Source))
 	}
+	f, err := Sessions(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	if p := f.Listed("session_id"); p != "" {
+		having = append(having, p)
+	}
 	cmp := ">"
 	if a.Sort == lsSortDesc {
 		cmp = "<"

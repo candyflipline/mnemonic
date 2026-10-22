@@ -22,6 +22,7 @@ type searchQuery struct {
 	eventTypes []string
 	harness    *string
 	sourceName *string
+	listed     string
 }
 
 type searchHit struct {
@@ -69,6 +70,11 @@ func searchMcpEvents(ctx context.Context, db *sql.DB, q searchQuery) (*searchRes
 		return nil, err
 	}
 	defer tx.Rollback()
+	f, err := Sessions(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	q.listed = f.Listed("session_id")
 	fetchLimit := q.nHits + 1
 	rows, err := searchMcpCandidates(ctx, tx, q, terms, fetchLimit)
 	if err != nil {
@@ -185,6 +191,9 @@ func candidateSQL(q searchQuery, terms []string, limit int) string {
 	if q.sourceName != nil {
 		scope = append(scope, "source_name = "+sqlQuote(*q.sourceName))
 	}
+	if q.listed != "" {
+		scope = append(scope, q.listed)
+	}
 	if len(scope) > 0 {
 		filters = append(filters, "p.doc IN (SELECT doc FROM events WHERE "+strings.Join(scope, " AND ")+")")
 	}
@@ -260,6 +269,9 @@ func scopeExistsFor(ctx context.Context, tx *sql.Tx, q searchQuery) (bool, error
 	s := "SELECT count(*) FROM events WHERE " + published + " AND session_id = " + sqlQuote(q.sessionID)
 	if q.turnOK {
 		s += " AND turn_seq = " + strconv.Itoa(int(q.turnSeq))
+	}
+	if q.listed != "" {
+		s += " AND " + q.listed
 	}
 	var n int64
 	if err := tx.QueryRowContext(ctx, s).Scan(&n); err != nil {

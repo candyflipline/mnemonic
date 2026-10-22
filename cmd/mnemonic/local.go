@@ -77,7 +77,7 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 	}
 
 	author, machine := localIdentity()
-	srv, err := server.New(opts.dataDir, map[string]string{auth.Hash(tok): author})
+	srv, err := server.New(opts.dataDir, auth.Authors(map[string]string{auth.Hash(tok): author}))
 	if err != nil {
 		return err
 	}

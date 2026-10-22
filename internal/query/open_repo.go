@@ -208,9 +208,17 @@ func loadSessionScan(ctx context.Context, db *sql.DB, sessionID string, opts sca
        e.source_name, e.harness, e.inference_provider,
        t.event_order, t.turn_seq
 FROM trace t LEFT JOIN events e ON e.event_uid = t.event_uid AND e.session_id = %SID% AND e.%PUB%
-WHERE t.session_id = %SID% AND t.%PUB%
+WHERE t.session_id = %SID% AND t.%PUB%%SCOPE%
 ORDER BY t.event_order`
-	q := strings.NewReplacer("%SID%", sqlQuote(sessionID), "%PUB%", published).Replace(scanSQL)
+	f, err := Sessions(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	scope := ""
+	if p := f.Opened("t.session_id"); p != "" {
+		scope = " AND " + p
+	}
+	q := strings.NewReplacer("%SID%", sqlQuote(sessionID), "%PUB%", published, "%SCOPE%", scope).Replace(scanSQL)
 	rows, err := db.QueryContext(ctx, q)
 	if err != nil {
 		return nil, err

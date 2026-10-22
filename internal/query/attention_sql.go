@@ -22,6 +22,7 @@ type faQuery struct {
 	SourceName      string
 	MutationsOnly   bool
 	MaxRows         int
+	listed          SessionFilter
 }
 
 type faTouch struct {
@@ -56,6 +57,10 @@ func faTouches(ctx context.Context, db *sql.DB, q faQuery) ([]faTouch, error) {
 	}
 	if q.ProjectScope && q.NormalizedPID == "" {
 		return []faTouch{}, nil
+	}
+	var err error
+	if q.listed, err = Sessions(ctx, db); err != nil {
+		return nil, err
 	}
 	limitPlus := q.MaxRows + 1
 	touches, err := faExact(ctx, db, q, limitPlus)
@@ -101,6 +106,9 @@ func faFilters(prefix string, q faQuery) []string {
 	}
 	if q.MutationsOnly {
 		clauses = append(clauses, "lower("+toolName+") NOT IN ("+faReadToolNames+")")
+	}
+	if p := q.listed.Listed(prefix + "session_id"); p != "" {
+		clauses = append(clauses, p)
 	}
 	return clauses
 }

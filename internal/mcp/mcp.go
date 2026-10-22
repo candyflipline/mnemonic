@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/candyflipline/mnemonic/internal/auth"
 	"github.com/candyflipline/mnemonic/internal/query"
 )
 
@@ -115,8 +116,14 @@ type rpcResponse struct {
 	Error   *rpcErrorObj `json:"error,omitempty"`
 }
 
+// Handler serves MCP to requests whose ctx carries an auth.Identity, the one
+// every tool's reads are scoped to; any other request is 401.
 func Handler(db *sql.DB, lookup func(name string) (query.Tool, bool)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := auth.From(r.Context()); !ok {
+			statusError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", "POST")
 			w.WriteHeader(http.StatusMethodNotAllowed)

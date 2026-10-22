@@ -49,10 +49,15 @@ type stGroupRow struct {
 }
 
 func stReadSources(ctx context.Context, db *sql.DB) (stStatusRead, error) {
+	f, err := Sessions(ctx, db)
+	if err != nil {
+		return stStatusRead{}, err
+	}
+	where := " WHERE " + and("harness <> "+sqlQuote(controlHarness), f.Authors("author"))
 	rows, err := db.QueryContext(ctx,
 		"SELECT author, machine_id, max(updated_ms), count(*), coalesce(sum(size), 0),"+
 			" count(*) FILTER (WHERE events > 0), coalesce(sum(size) FILTER (WHERE events > 0), 0)"+
-			" FROM sources GROUP BY author, machine_id ORDER BY author, machine_id")
+			" FROM sources"+where+" GROUP BY author, machine_id ORDER BY author, machine_id")
 	if err != nil {
 		return stStatusRead{}, err
 	}
