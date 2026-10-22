@@ -239,11 +239,7 @@ func (ks keepServer) serveCall(w http.ResponseWriter, r *http.Request) {
 				viewErr = err
 				return err
 			}
-			readers := []route.Reader{ks.local}
-			if rung == route.Partial {
-				readers = append(readers, ks.readers...)
-			}
-			rep.Data, rep.Text, err = route.Do(r.Context(), v, readers, rung, body.Tool, body.Args)
+			rep.Data, rep.Text, err = ks.do(r.Context(), h, v, rung, body.Tool, body.Args)
 			return err
 		})
 	}
@@ -264,6 +260,14 @@ func (ks keepServer) serveCall(w http.ResponseWriter, r *http.Request) {
 		rep.Error = err.Error()
 	}
 	writeJSON(w, rep)
+}
+
+func (ks keepServer) do(ctx context.Context, h keeper.Head, v route.View, rung route.Rung, tool string, args json.RawMessage) (json.RawMessage, string, error) {
+	readers := []route.Reader{ks.local}
+	if rung == route.Partial {
+		readers = append(readers, ks.readers...)
+	}
+	return route.Do(ctx, v, readers, rung, tool, args)
 }
 
 func (ks keepServer) serveIngest(w http.ResponseWriter, r *http.Request) {
