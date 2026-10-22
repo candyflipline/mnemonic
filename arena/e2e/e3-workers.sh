@@ -82,7 +82,7 @@ stage oracle-build-2 run_go "$BIN_DIR/oracle" build -raw "$ARENA/raw" -root "$WO
 stage gen-and-masks oracle_masks 2>"$LOG/gen.log" || die gen-and-masks
 rm -rf "$WORK/oracle2"
 
-ENVLABEL="loyal-workers, real corpus" E2E_TIMEOUT=${E3_TIMEOUT:-3h} WAIT_UP_S=${E3_WAIT_UP_S:-900} WAIT_EXIT_S=${E3_WAIT_EXIT_S:-600} \
+ENVLABEL=${E3_ENVLABEL:-loyal-workers, real corpus} E2E_TIMEOUT=${E3_TIMEOUT:-3h} WAIT_UP_S=${E3_WAIT_UP_S:-900} WAIT_EXIT_S=${E3_WAIT_EXIT_S:-600} \
 	PREWARM_WAIT_S=${E3_PREWARM_WAIT_S:-1800} GOMEMLIMIT=$CLUSTER_MEM \
 	ARENA="$ARENA" SRC="$SRC" BIN_DIR="$BIN_DIR" LOG_DIR="$LOG/e2e" TMPDIR="$WORK/tmp" \
 	stage run.sh "$HERE/run.sh" >"$LOG/lines.txt" 2>"$LOG/run.stderr"
@@ -101,7 +101,7 @@ peak() {
 echo "---- the five lines"
 cat "$LOG/lines.txt"
 echo "---- stages"
-cat "$LOG/stages.txt"
+cat "$LOG/stages.txt" "$LOG/e2e/steps.txt" 2>/dev/null
 echo "---- du"
 du -sh "$RAWDIR" "$SRC" "$ARENA/raw" "$WORK/oracle" "$WORK/oracle/raw" "$WORK/oracle/events" "$WORK/oracle/cache" "$LOG" 2>/dev/null | sed "s#$WORK/##"
 echo "per step, KiB (the object store, the keeper root of 2c/2d, the keeper local dir, the reader caches), as each step ended:"

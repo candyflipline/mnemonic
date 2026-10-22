@@ -316,7 +316,9 @@ s2e() {
 }
 
 for s in a b c d e; do
+	t0=$SECONDS
 	case " ${ONLY:-a b c d e} " in *" $s "*) "s2$s" ;; esac
 	retire_step "$s"
+	echo "2$s took $((SECONDS - t0))s" | tee -a "$LOGS/steps.txt"
 done
 exit $FAILED
