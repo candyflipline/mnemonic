@@ -3,8 +3,18 @@
 package route
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"slices"
+	"sort"
+	"sync"
 
 	"github.com/candyflipline/mnemonic/arena/keeper"
 )
@@ -19,6 +29,10 @@ const (
 // LocalID is the ID of the keeper's in-process reader; Local parts go only to
 // it.
 const LocalID = "local"
+
+// PhaseWhole is the phase that answers a whole tool call over the request's
+// parts; every other phase is one step of a scattered tool.
+const PhaseWhole = "whole"
 
 type Reader interface {
 	ID() string
@@ -55,12 +69,42 @@ type CallResponse struct {
 
 // Owner ranks readerIDs for partID by rendezvous hash, owner first.
 func Owner(partID string, readerIDs []string) []string {
-	panic("lane L4")
+	type scored struct {
+		id    string
+		score uint64
+	}
+	s := make([]scored, len(readerIDs))
+	for i, id := range readerIDs {
+		sum := sha256.Sum256([]byte(id + "\x00" + partID))
+		s[i] = scored{id, binary.BigEndian.Uint64(sum[:8])}
+	}
+	sort.Slice(s, func(i, j int) bool {
+		if s[i].score != s[j].score {
+			return s[i].score > s[j].score
+		}
+		return s[i].id < s[j].id
+	})
+	out := make([]string, len(s))
+	for i := range s {
+		out[i] = s[i].id
+	}
+	return out
 }
 
 // Do answers one tool call over v at rung.
 func Do(ctx context.Context, v View, readers []Reader, rung Rung, tool string, args json.RawMessage) (json.RawMessage, string, error) {
-	panic("lane L4")
+	switch rung {
+	case Whole:
+		i := slices.IndexFunc(readers, func(r Reader) bool { return r.ID() == LocalID })
+		if i < 0 {
+			return nil, "", errors.New("route: no local reader for the whole rung")
+		}
+		resp, err := readers[i].Call(ctx, CallRequest{Tenant: v.Tenant, Parts: v.Parts, Tool: tool, Args: args, Phase: PhaseWhole})
+		return resp.Data, resp.Text, err
+	case Partial:
+		return partial(ctx, v, readers, tool, args)
+	}
+	return nil, "", fmt.Errorf("route: unknown rung %d", rung)
 }
 
 // scatter sends every Local part to the reader whose ID is LocalID and every
@@ -68,10 +112,112 @@ func Do(ctx context.Context, v View, readers []Reader, rung Rung, tool string, a
 // CallRequest per reader carrying that reader's parts. On a reader error it
 // reassigns that reader's parts to their next rank and retries once.
 func scatter(ctx context.Context, v View, readers []Reader, tool, phase string, args, stats json.RawMessage) ([]CallResponse, error) {
-	panic("lane L4")
+	byID := make(map[string]Reader, len(readers))
+	var remote []string
+	for _, r := range readers {
+		byID[r.ID()] = r
+		if r.ID() != LocalID {
+			remote = append(remote, r.ID())
+		}
+	}
+	rank := make(map[string][]string, len(v.Parts))
+	assign := map[string][]GrantedPart{}
+	for _, p := range v.Parts {
+		rk := []string{LocalID}
+		if !p.Local {
+			rk = Owner(p.ID, remote)
+		}
+		if len(rk) == 0 || byID[rk[0]] == nil {
+			return nil, fmt.Errorf("route: no reader for part %s", p.ID)
+		}
+		rank[p.ID] = rk
+		assign[rk[0]] = append(assign[rk[0]], p)
+	}
+	call := func(round map[string][]GrantedPart) ([]CallResponse, map[string]error) {
+		ids := make([]string, 0, len(round))
+		for id := range round {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		out := make([]CallResponse, len(ids))
+		errs := make([]error, len(ids))
+		var wg sync.WaitGroup
+		for i, id := range ids {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				out[i], errs[i] = byID[id].Call(ctx, CallRequest{Tenant: v.Tenant, Parts: round[id], Tool: tool, Args: args, Phase: phase, Stats: stats})
+			}()
+		}
+		wg.Wait()
+		var ok []CallResponse
+		failed := map[string]error{}
+		for i, id := range ids {
+			if errs[i] != nil {
+				failed[id] = fmt.Errorf("reader %s: %w", id, errs[i])
+			} else {
+				ok = append(ok, out[i])
+			}
+		}
+		return ok, failed
+	}
+	resps, failed := call(assign)
+	if len(failed) == 0 {
+		return resps, nil
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	retry := map[string][]GrantedPart{}
+	for id, ferr := range failed {
+		for _, p := range assign[id] {
+			rk := rank[p.ID]
+			next := slices.IndexFunc(rk[slices.Index(rk, id)+1:], func(c string) bool { _, bad := failed[c]; return !bad })
+			if next < 0 {
+				return nil, ferr
+			}
+			to := rk[slices.Index(rk, id)+1+next]
+			retry[to] = append(retry[to], p)
+		}
+	}
+	more, failed := call(retry)
+	for _, ferr := range failed {
+		return nil, ferr
+	}
+	return append(resps, more...), nil
+}
+
+type httpReader struct {
+	id, base string
+	client   *http.Client
 }
 
 // HTTPReader is a Reader that calls the reader server at baseURL.
 func HTTPReader(id, baseURL string) Reader {
-	panic("lane L4")
+	return &httpReader{id: id, base: baseURL, client: &http.Client{}}
+}
+
+func (h *httpReader) ID() string { return h.id }
+
+func (h *httpReader) Call(ctx context.Context, req CallRequest) (CallResponse, error) {
+	var resp CallResponse
+	body, err := json.Marshal(req)
+	if err != nil {
+		return resp, err
+	}
+	hr, err := http.NewRequestWithContext(ctx, http.MethodPost, h.base+"/v1/call", bytes.NewReader(body))
+	if err != nil {
+		return resp, err
+	}
+	hr.Header.Set("Content-Type", "application/json")
+	res, err := h.client.Do(hr)
+	if err != nil {
+		return resp, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+		return resp, fmt.Errorf("%s: %s", res.Status, bytes.TrimSpace(msg))
+	}
+	return resp, json.NewDecoder(res.Body).Decode(&resp)
 }
