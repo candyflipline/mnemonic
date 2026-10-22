@@ -5,7 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
+	"io/fs"
 	"slices"
 	"strings"
 	"time"
@@ -73,7 +73,9 @@ func (src ServerSource) validate() error {
 // Append adds lines, whole lines each ending in '\n', to the server-owned
 // source src, creating it when missing, and wakes converge. requestKey makes
 // it idempotent: a key already applied to src, or to the day before it,
-// changes nothing and reports duplicate. The manifest is written last and
+// changes nothing and reports duplicate. It holds the day before's key lock and
+// then src's, always in that order, so a retry across midnight cannot miss a
+// key still in flight on the day before. The manifest is written last and
 // records the applied keys, so a crash before it leaves the key unapplied and
 // the retry truncates the torn frame and writes it again.
 func (s *Store) Append(src ServerSource, requestKey string, lines []byte) (_ wire.Source, duplicate bool, _ error) {
@@ -88,15 +90,21 @@ func (s *Store) Append(src ServerSource, requestKey string, lines []byte) (_ wir
 	}
 	prev := src
 	prev.Day = src.Day.AddDate(0, 0, -1)
-	if m, err := readManifest(prev.key().Manifest(s.DataDir)); err == nil && slices.Contains(m.Applied, requestKey) {
-		return m.Source, true, nil
-	}
+	defer s.lockKey(prev.key())()
 	k := src.key()
 	defer s.lockKey(k)()
 
+	switch pm, err := readManifest(prev.key().Manifest(s.DataDir)); {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		return wire.Source{}, false, err
+	case slices.Contains(pm.Applied, requestKey):
+		return pm.Source, true, nil
+	}
+
 	m, err := readManifest(k.Manifest(s.DataDir))
 	switch {
-	case os.IsNotExist(err):
+	case errors.Is(err, fs.ErrNotExist):
 		zst, err := writeZst(k.Raw(s.DataDir), lines)
 		if err != nil {
 			return wire.Source{}, false, err

@@ -1,8 +1,12 @@
 package store
 
 import (
+	"errors"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -92,5 +96,53 @@ func TestAppendServerSource(t *testing.T) {
 	}
 	if raw := rawOf(t, dir, k1); raw != "a\nb\nc\n" {
 		t.Fatalf("raw after refused PUTs = %q", raw)
+	}
+}
+
+func TestAppendAcrossMidnightCommitsOnce(t *testing.T) {
+	st := &Store{DataDir: t.TempDir()}
+	day1 := time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)
+	yesterday := ServerSource{Author: "chris", Harness: "annotation", Day: day1}
+	today := ServerSource{Author: "chris", Harness: "annotation", Day: day1.AddDate(0, 0, 1)}
+
+	unlock := st.lockKey(yesterday.key())
+	type result struct {
+		dup bool
+		err error
+	}
+	done := make(chan result)
+	go func() {
+		_, dup, err := st.Append(today, "req", []byte("x\n"))
+		done <- result{dup, err}
+	}()
+	time.Sleep(50 * time.Millisecond)
+	inFlight := manifestBody{Source: wire.Source{SrcID: yesterday.key().SrcID, Harness: "annotation", SourceName: yesterday.name()}, Applied: []string{"req"}}
+	if err := writeManifest(yesterday.key().Manifest(st.DataDir), inFlight); err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+	got := <-done
+	if got.err != nil || !got.dup {
+		t.Fatalf("retry on the next day: dup=%v err=%v, want dup=true", got.dup, got.err)
+	}
+	if _, err := readManifest(today.key().Manifest(st.DataDir)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("request committed to the next day's source as well: %v", err)
+	}
+}
+
+func TestAppendFailsOnUnreadablePreviousManifest(t *testing.T) {
+	st := &Store{DataDir: t.TempDir()}
+	day1 := time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)
+	prev := ServerSource{Author: "chris", Harness: "annotation", Day: day1}
+	m := prev.key().Manifest(st.DataDir)
+	if err := os.MkdirAll(filepath.Dir(m), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(m, []byte("{torn"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src := ServerSource{Author: "chris", Harness: "annotation", Day: day1.AddDate(0, 0, 1)}
+	if _, _, err := st.Append(src, "k1", []byte("x\n")); err == nil {
+		t.Fatal("Append succeeded with an unreadable previous-day manifest, want an error")
 	}
 }
