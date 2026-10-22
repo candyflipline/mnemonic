@@ -6,14 +6,14 @@ func init() { RegisterSpans("claude-code", claudeCodeSpans) }
 // form one turn span per turn_seq; a sidechain's agent_run_id is an
 // invoke_agent under the tool call its rows name in parent_tool_call_id, else
 // under the root; each request_id is a chat span under its subagent or turn;
-// each tool_call_id is an execute_tool span under the chat that requested it,
-// else under the tool call named by parent_tool_call_id. Every row of a
+// each tool_call_id is an execute_tool span under the chat of its tool_call
+// row, else under the tool call named by parent_tool_call_id. Every row of a
 // request carries the request's usage, so a chat's tokens are the max over
 // its rows; the root, a turn and a subagent carry the sum over the chats
 // below them.
 func claudeCodeSpans(where string) string {
 	return `WITH ev AS (
-  SELECT session_id, event_uid, event_order, event_time, turn_seq,
+  SELECT session_id, event_uid, event_order, event_time, turn_seq, event_kind,
     coalesce(nullif(request_id, ''), nullif(trace_id, '')) AS req,
     nullif(tool_call_id, '') AS call, nullif(parent_tool_call_id, '') AS parent_call,
     tool_name, tool_error,
@@ -33,12 +33,13 @@ agent AS (
 chat AS (
   SELECT session_id, req, ` + spanID("'chat'", "session_id", "req") + ` AS span_id,
     max(model) AS model, max(sub) AS sub, min(turn_seq) FILTER (WHERE sub IS NULL) AS turn_seq,
-    max(input_tokens) AS input_tokens, max(output_tokens) AS output_tokens,
-    max(cache_read_tokens) AS cache_read_tokens, max(cache_write_tokens) AS cache_write_tokens, ` + spanBounds + `
+    coalesce(max(input_tokens), 0) AS input_tokens, coalesce(max(output_tokens), 0) AS output_tokens,
+    coalesce(max(cache_read_tokens), 0) AS cache_read_tokens, coalesce(max(cache_write_tokens), 0) AS cache_write_tokens, ` + spanBounds + `
   FROM ev WHERE req IS NOT NULL GROUP BY session_id, req),
 tool AS (
   SELECT session_id, call, ` + spanID("'tool'", "session_id", "call") + ` AS span_id,
-    max(tool_name) AS name, max(tool_error) AS tool_error, max(req) AS req, max(sub) AS sub,
+    max(tool_name) AS name, max(tool_error) AS tool_error, max(sub) AS sub,
+    arg_min(req, event_order) FILTER (WHERE event_kind = 'tool_call') AS req,
     max(parent_call) FILTER (WHERE parent_call <> call) AS parent_call,
     min(turn_seq) FILTER (WHERE sub IS NULL) AS turn_seq, ` + spanBounds + `
   FROM ev WHERE call IS NOT NULL GROUP BY session_id, call),
