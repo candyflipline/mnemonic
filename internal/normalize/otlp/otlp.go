@@ -19,7 +19,7 @@ type Parser struct{}
 
 func (Parser) Harness() string { return otlp.Harness }
 
-func (Parser) Version() int { return 1 }
+func (Parser) Version() int { return 2 }
 
 func init() { normalize.Register(Parser{}) }
 
