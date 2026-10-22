@@ -51,10 +51,17 @@ var DefaultSources = []SourceGlob{
 //	listen   = "127.0.0.1:8740"
 //	[[tokens]]
 //	author = "chris"; sha256 = "<auth.Hash(token)>"
+//	[otlp]
+//	store_content = false    # keep OTLP message and tool content
 type Server struct {
 	DataDir string       `toml:"data_dir"`
 	Listen  string       `toml:"listen"`
 	Tokens  []TokenEntry `toml:"tokens"`
+	OTLP    OTLP         `toml:"otlp"`
+}
+
+type OTLP struct {
+	StoreContent bool `toml:"store_content"`
 }
 
 type TokenEntry struct {

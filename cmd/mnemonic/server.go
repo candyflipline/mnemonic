@@ -46,6 +46,7 @@ func serve(args []string) error {
 		return err
 	}
 	defer srv.Close()
+	srv.StoreOTLPContent(cfg.OTLP.StoreContent)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	looped := make(chan struct{})

@@ -15,6 +15,7 @@ import (
 	"github.com/candyflipline/mnemonic/internal/lake"
 	"github.com/candyflipline/mnemonic/internal/mcp"
 	_ "github.com/candyflipline/mnemonic/internal/normalize/all"
+	"github.com/candyflipline/mnemonic/internal/otlp"
 	"github.com/candyflipline/mnemonic/internal/query"
 	"github.com/candyflipline/mnemonic/internal/store"
 )
@@ -24,6 +25,7 @@ type Server struct {
 	ix      *cache.Index
 	wake    chan struct{}
 	handler http.Handler
+	otlp    *otlp.Receiver
 }
 
 // New opens the cache under dataDir and mounts the store and MCP behind
@@ -37,15 +39,22 @@ func New(dataDir string, authors map[string]string) (*Server, error) {
 	wake := make(chan struct{}, 1)
 	st := &store.Store{DataDir: dataDir, Wake: wake}
 	tools := mcp.Handler(ix.DB(), query.Lookup)
+	rcv := otlp.NewReceiver(st)
 	mux := http.NewServeMux()
 	mux.Handle("/v1/", auth.Middleware(authors)(st.Handler()))
+	mux.Handle("POST /v1/traces", auth.Middleware(authors)(rcv.Traces()))
+	mux.Handle("POST /v1/logs", auth.Middleware(authors)(rcv.Logs()))
 	mux.Handle("/mcp", auth.Middleware(authors)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tools.ServeHTTP(w, r.WithContext(store.WithStore(r.Context(), st)))
 	})))
-	return &Server{dataDir: dataDir, ix: ix, wake: wake, handler: mux}, nil
+	return &Server{dataDir: dataDir, ix: ix, wake: wake, handler: mux, otlp: rcv}, nil
 }
 
 func (s *Server) Handler() http.Handler { return s.handler }
+
+// StoreOTLPContent sets whether OTLP message and tool content is stored; it
+// is off until set.
+func (s *Server) StoreOTLPContent(on bool) { s.otlp.SetStoreContent(on) }
 
 func (s *Server) Close() error { return s.ix.Close() }
 
