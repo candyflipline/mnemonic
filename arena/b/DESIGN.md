@@ -24,6 +24,8 @@ Staged files/directories use ordinary fsync. The manifest uses File.Sync before
 rename and parent-directory Sync afterward: on Darwin these are full device-cache
 flush barriers. Parser state advances with every referenced segment, never alone. Monotone append
 versions preserve the existing lake's replacement rule across process restarts.
+Equal-version winners prefer live sources, then newer ingest stamps, then source
+file order. Compaction preserves those stamps; format v4 reparses older stores.
 
 ## Query memory and structures
 
@@ -46,13 +48,13 @@ fence every 16 terms lives in the arena. No per-segment file descriptor stays op
 
 The heap retains source manifests, segment/session lookup entries, codecs, and a
 payload cache capped at 8 MiB of decoded wire bytes. Sample measurements after
-GC: startup heap 0.59 MB, warm heap 11.8 MB, versus 32.0/43.2 MB before this change.
-The metadata/index view maps about 31 MB here, in addition to mapped heavy files.
+GC: startup heap 0.73 MB, warm heap 11.9 MB, versus 32.0/43.2 MB before this change.
+The metadata/index view maps about 32 MB here, in addition to mapped heavy files.
 This unlinked scratch backing consumes disk while batch is alive; it is additional
 to the directory-byte score. Virtual mappings are not live Go heap. After 300 ms
 idle, synchronous page invalidation and GC release reclaimable resident pages;
-queries fault them back on demand. Checker idle RSS fell from 98.0 to about 43 MB.
-The largest public cases after idle took 45 ms for search and 63 ms for open;
+queries fault them back on demand. Checker idle RSS fell from 98.0 to 26-43 MB.
+The largest public cases after idle took 47 ms for search and 59 ms for open;
 responses remained identical. Warm checker timings do not include that cold cost.
 
 - `search_sessions`: exact global BM25 from segment postings and mapped columns.
@@ -65,7 +67,7 @@ responses remained identical. Warm checker timings do not include that cold cost
   frames and the original navigation/content/cursor logic.
 - `list_sessions`: mapped per-session rollups, sorted by update time and ID;
   binary cursor seeks with the original filters and labels. Built once per
-  snapshot; p50 fell from 3,165 to 27 microseconds.
+  snapshot; p50 fell from 3,165 to 21-33 microseconds.
 - `get_ingest_status`: source manifest counters and original status derivation.
 
 ## Ingest profile and parser scope
@@ -78,7 +80,7 @@ filesystem changes between ingests. Only files inside this lane are modified.
 Compressed input and heavy output are buffered; offsets are tracked directly.
 The ASCII scanner preserves lowercasing, length limits and token frequencies.
 All five tools pass public, hidden, incremental and three-kill recovery checks.
-Clean ingest improved from 6.12 to 2.30 seconds. macOS full flushes and serialized
+Clean ingest improved from 6.12 to 2.30-3.49 seconds. macOS full flushes and serialized
 parse/write work were additional wall-time costs after removing repeated probes.
 
 ## Recovery and freshness
@@ -106,6 +108,8 @@ UID/session sorts and reconstructs the view, O(N log N) work and O(N) mapped
 space. Mapped working-set RSS depends on access and OS reclamation; the sample
 heap result is not a measured 500x RSS guarantee. Persisted portable columns and
 incremental view publication would remove the full startup/reload rebuild.
+At unchanged sample density, 500x implies roughly 16 GB of derived files plus
+16 GB of runtime view backing; that is a disk extrapolation, not an RSS forecast.
 
 Merges combine eight consecutive intervals of one source at the same tier.
 Total input files are capped at 2 MiB; after three promotions a segment never
@@ -120,10 +124,10 @@ metadata bytes per group and O(S squared / 16) over a clean many-source build.
 A checkpoint journal remains necessary at production scale. Merge planning
 inspects only the changed source's segments, but is not yet an indexed planner.
 
-Peak ingest memory is O(two segment budgets + codecs + bounded in-flight
-records + source manifest), independent of total event count for fixed source
-count and record size. Each writer queues at most eight events. The sample peak
-is about 181 MB. The required 900 MiB Go soft limit remains enabled in runs;
+Peak ingest memory is O(two segment budgets + codecs + in-flight records +
+source manifest + decoded merge postings). The 2 MiB merge cap bounds compressed
+input, not its decoded footprint. Each writer queues at most eight events. The sample peak
+is about 188 MB. The required 900 MiB Go soft limit remains enabled in runs;
 it is not a hard RSS ceiling. The parser accepts unbounded single raw lines, so
 there is no unconditional sub-1-GB bound for arbitrary inputs. Production needs
 an explicit oversized-record policy and a measured bound before adoption.

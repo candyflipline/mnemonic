@@ -112,6 +112,7 @@ func TestStore(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer codecs.close()
+		codecs.ingestedNS = 42
 		w := newSourceWriter(dir, codecs, 0, 1)
 		for i := 0; i < 8; i++ {
 			ev := schema.Event{EventUID: fmt.Sprintf("uid%d", 7-i), SessionID: "session", SourceName: "codex", Harness: "codex", EventVersion: 1, SourceOffset: uint64(i), RecordTS: "2026-01-01T00:00:00Z", TextContent: fmt.Sprintf("alpha beta %d", i), ActorKind: "user", EventKind: "message"}
@@ -176,6 +177,7 @@ func TestStore(t *testing.T) {
 			t.Fatal(err)
 		}
 		hf.Close()
+		codecs.ingestedNS = 99
 		merged, err := compactSourceSegments(dir, names, codecs)
 		if err != nil {
 			t.Fatal(err)
@@ -205,7 +207,7 @@ func TestStore(t *testing.T) {
 		if !reflect.DeepEqual(before, after) || textBefore != textAfter {
 			t.Fatal("compaction changed search output")
 		}
-		if len(fresh.events) != 8 {
+		if len(fresh.events) != 8 || fresh.events[0].IngestedNS != 42 {
 			t.Fatal("compaction dropped events")
 		}
 		heavy, err := fresh.heavyFor(fresh.eventByUID("uid0"))
@@ -254,6 +256,59 @@ func TestStore(t *testing.T) {
 		again, err := compactSourceSegments(dir, merged, codecs)
 		if err != nil || !reflect.DeepEqual(again, merged) {
 			t.Fatal("compaction was not idempotent")
+		}
+	})
+	t.Run("winner_ties", func(t *testing.T) {
+		type row struct {
+			key, machine, label string
+			version             uint64
+			stamp               int64
+		}
+		for _, tc := range []struct {
+			name, want string
+			rows       []row
+		}{
+			{"version", "arch", []row{{"a", "live", "live", 9, 20}, {"z", "archive-ch", "arch", 10, 1}}},
+			{"live_over_archive", "live", []row{{"a", "live", "live", 10, 1}, {"z", "archive-ch", "arch", 10, 20}}},
+			{"newer_ingest", "new", []row{{"a", "live", "old", 10, 1}, {"z", "live", "new", 10, 20}}},
+			{"source_file_order", "first", []row{{"a", "live", "first", 10, 20}, {"z", "live", "last", 10, 20}}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				dir := t.TempDir()
+				codecs, err := newSegmentCodecs()
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer codecs.close()
+				m, _ := readManifest(dir)
+				for _, r := range tc.rows {
+					codecs.ingestedNS = r.stamp
+					w, err := newSegmentWriter(dir, codecs)
+					if err != nil {
+						t.Fatal(err)
+					}
+					ev := schema.Event{EventUID: "same", SessionID: "session", SourceName: r.label, EventVersion: r.version, RecordTS: "2026-01-01T00:00:00Z", TextContent: "shared alpha", ActorKind: "user", EventKind: "message"}
+					if err = w.emit(&ev); err != nil {
+						t.Fatal(err)
+					}
+					name, err := w.finish()
+					if err != nil {
+						t.Fatal(err)
+					}
+					m.Sources[r.key] = Checkpoint{Machine: r.machine, Segments: []string{name}, Events: 1}
+				}
+				if err = atomicManifest(dir, m); err != nil {
+					t.Fatal(err)
+				}
+				db, err := loadStore(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer db.Close()
+				if len(db.events) != 1 || db.events[0].SourceName != tc.want {
+					t.Fatalf("winner count=%d source=%q want=%q", len(db.events), db.events[0].SourceName, tc.want)
+				}
+			})
 		}
 	})
 	t.Run("dictionary_fences", func(t *testing.T) {

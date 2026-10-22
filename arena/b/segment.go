@@ -31,6 +31,8 @@ type heavyBlock struct {
 	bytes  int
 }
 type segment struct {
+	sourceKey   string
+	archive     bool
 	filter      [256]uint64
 	filterReady bool
 	pathIndex
@@ -64,6 +66,7 @@ type segmentWriter struct {
 }
 
 type segmentCodecs struct {
+	ingestedNS  int64
 	meta, block *zstd.Encoder
 	plain       bytes.Buffer
 	compressed  []byte
@@ -126,6 +129,7 @@ func (w *segmentWriter) abort() {
 }
 func (w *segmentWriter) emit(ev *schema.Event) error {
 	e := packEvent(ev)
+	e.IngestedNS = w.codecs.ingestedNS
 	var payload struct {
 		Emission uint32  `json:"moraine_emission_index"`
 		IO       *toolIO `json:"moraine_tool_io"`

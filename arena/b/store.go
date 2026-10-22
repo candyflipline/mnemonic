@@ -20,11 +20,12 @@ import (
 	"github.com/candyflipline/mnemonic/arena/b/normalize"
 	_ "github.com/candyflipline/mnemonic/arena/b/normalize/all"
 	"github.com/candyflipline/mnemonic/arena/b/normalize/shared"
+	"github.com/candyflipline/mnemonic/internal/layout"
 	"github.com/candyflipline/mnemonic/internal/wire"
 	"github.com/klauspost/compress/zstd"
 )
 
-const storeVersion = 3
+const storeVersion = 4
 
 // CONTRACT-NOTES requires a deterministic stamp after all real records.
 // It affects ordering; oracle wall-clock values at these positions are masked.
@@ -51,13 +52,13 @@ type event struct {
 	HeavyIndex  uint32
 	segment     *segment
 	Columns
-	Time, Timestamp int64
-	Emission        uint32
-	Order           uint64
-	Turn, Ordinal   uint32
-	Length          uint32
-	Flags           uint16
-	IO              *toolIO
+	Time, Timestamp, IngestedNS int64
+	Emission                    uint32
+	Order                       uint64
+	Turn, Ordinal               uint32
+	Length                      uint32
+	Flags                       uint16
+	IO                          *toolIO
 }
 type toolIO struct {
 	Input         string `json:"input_json"`
@@ -185,6 +186,7 @@ func ingest(root, dir string) error {
 	if e != nil {
 		return e
 	}
+	ingestedNS := time.Now().UnixNano()
 	var codecs []*segmentCodecs
 	pool := make(chan *segmentCodecs, 2)
 	type pendingSource struct {
@@ -300,6 +302,7 @@ func ingest(root, dir string) error {
 					f.Close()
 					return err
 				}
+				c.ingestedNS = ingestedNS
 				codecs = append(codecs, c)
 				pool <- c
 			}
@@ -452,7 +455,7 @@ func loadSnapshot(dir string) (_ *Store, loadErr error) {
 	count := 0
 	for _, k := range keys {
 		for _, name := range m.Sources[k].Segments {
-			sg := &segment{path: filepath.Join(dir, name)}
+			sg := &segment{path: filepath.Join(dir, name), sourceKey: k, archive: m.Sources[k].Machine == layout.ArchiveMachine}
 			db.segments = append(db.segments, sg)
 			f, err := os.Open(filepath.Join(sg.path, "meta.zst"))
 			if err != nil {
@@ -505,14 +508,27 @@ func loadSnapshot(dir string) (_ *Store, loadErr error) {
 		}
 	}
 	all = all[:count]
-	// Sort stable source order only for equal-version winners, then compact in
-	// place. No resident UID hash table or per-event heap allocation is needed.
+	// Select the highest version, then prefer live over archive, newer ingest,
+	// and the lexically first source file. Stable same-source ties retain the
+	// last physical row, matching the lake's per-source winner reduction.
 	sort.SliceStable(all, func(i, j int) bool {
 		a, b := all[i], all[j]
 		if a.EventUID != b.EventUID {
 			return a.EventUID < b.EventUID
 		}
-		return a.EventVersion < b.EventVersion
+		if a.EventVersion != b.EventVersion {
+			return a.EventVersion < b.EventVersion
+		}
+		if a.segment.archive != b.segment.archive {
+			return a.segment.archive
+		}
+		if a.IngestedNS != b.IngestedNS {
+			return a.IngestedNS < b.IngestedNS
+		}
+		if a.segment.sourceKey != b.segment.sourceKey {
+			return a.segment.sourceKey > b.segment.sourceKey
+		}
+		return false
 	})
 	live := 0
 	for i := 0; i < len(all); {
