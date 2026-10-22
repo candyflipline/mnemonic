@@ -8,15 +8,15 @@ Related specs: [events](events.md) (what the server makes of the lines), [spans]
 
 ## Authentication
 
-Every `/v1/*` request carries `Authorization: Bearer <token>`. The server stores only `sha256(token)` as lowercase hex (`internal/auth/auth.go:17`) and maps it to an author. A missing or unknown token is `401 unauthorized` (`internal/auth/auth.go:24-33`). The author a request writes as is the token's author, never a field of the request (`internal/auth/auth.go:1-3`, `internal/store/store.go:104`).
+Every `/v1/*` request carries `Authorization: Bearer <token>`. The server stores only `sha256(token)` as lowercase hex (`internal/auth/auth.go:120-123`) and maps it to an author. A missing or unknown token is `401 unauthorized` (`internal/auth/auth.go:143`), and a known token without the scope the route needs is `403 token lacks scope <scope>` (`internal/auth/auth.go:149`). The author a request writes as is the token's author, never a field of the request (`internal/auth/auth.go:1-3`, `internal/store/store.go:104`).
 
 ## Identifiers
 
 | Name | Rule | Source |
 |---|---|---|
 | segment | `[a-z0-9._-]+`, and not `.` or `..`. Used for machine, harness and src_id. | `internal/wire/wire.go:15-19` |
-| machine | a segment naming the sending host; the producer chooses it. A name reserved for server-owned sources is refused with 403 (see below). | `internal/store/store.go:150-153` |
-| harness | a segment naming the parser that reads the source, such as `claude-code` or `codex`. A harness with no registered parser is stored but not parsed. | `internal/lake/lake.go:130-133` |
+| machine | a segment naming the sending host; the producer chooses it. A machine or harness reserved for server-owned sources is refused with 403 (see below). | `internal/store/store.go:150-153` |
+| harness | a segment naming the parser that reads the source, such as `claude-code` or `codex`. A harness with no registered parser is stored but not parsed. `annotation`, `otlp` and `control` are reserved for server-owned sources and refused with 403 (see below). | `internal/lake/lake.go:130-133` |
 | src_id | first 16 hex characters of `sha256(path)`, where `path` is the absolute path of the file on the producer. The same path always yields the same src_id. | `internal/wire/wire.go:21-26` |
 | head_hash | lowercase hex `sha256` of the source's first line, newline included, cut to the first 65536 bytes. It identifies the content: a file rewritten from the top changes it. | `internal/wire/wire.go:13`, `internal/wire/wire.go:28-36` |
 
@@ -74,7 +74,7 @@ The server checks in this order (`internal/store/store.go:100-163`):
 3. `offset` missing, not an integer, or negative: `400 bad offset`.
 4. `head_hash`, `source_name` or `path` missing: `400 missing query parameter`.
 5. Empty body at `offset` 0, or a non-empty body that does not end in `\n`: `400 body must be non-empty whole lines`.
-6. The reserved machine: `403`.
+6. The reserved machine, or a reserved harness (`annotation`, `otlp`, `control`) on any machine: `403`.
 7. `offset` is 0: replace (below).
 8. `offset` is above 0: append (below).
 
@@ -100,8 +100,8 @@ A producer that appends only, never rewrites, and computes its own head hash can
 
 ## Sources owned by the server
 
-Some sources are written by the server itself, such as those fed by [OTLP](otlp.md) or by annotations. They live under a machine name reserved for server-owned sources. A client PUT that names it is refused with `403 machine is reserved for server-owned sources` (`internal/store/store.go:150-153`), so no producer can write there. The reserved names are fixed by the server and may grow; treat any machine or harness your server documents as server-owned as unavailable to you.
+Some sources are written by the server itself, such as those fed by [OTLP](otlp.md) or by annotations. They live under a machine name reserved for server-owned sources. A client PUT that names that machine, or one of the harnesses `annotation`, `otlp` and `control` on any machine, is refused with `403 machine or harness is reserved for server-owned sources` (`internal/store/store.go:150-153`, `internal/store/append.go:24`), so no producer can write there. The reserved names are fixed by the server and may grow; treat any machine or harness your server documents as server-owned as unavailable to you.
 
 ## What the server does next
 
-Each stored change wakes the parser loop, which reads the raw file, runs the harness's parser and writes [events](events.md) as parquet under `events/author=A/machine=M/harness=H/<src_id>.parquet` (`internal/layout/layout.go:1-9`), then converges them into the index MCP reads. A producer does not take part in that. A parser fix re-parses every source from raw, so the raw lines are the durable thing: send them as the harness wrote them.
+Each stored change wakes the parser loop, which reads the raw file, runs the harness's parser and writes [events](events.md) as parquet under `events/author=A/machine=M/harness=H/<src_id>.parquet` (`internal/layout/layout.go:1-9`), then converges them into the index MCP reads. A producer does not take part in that. A parser fix re-parses that harness's sources from raw, and no other's, so the raw lines are the durable thing: send them as the harness wrote them.

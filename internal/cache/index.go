@@ -572,6 +572,7 @@ func applyWinners(ctx context.Context, c *sql.Conn, flagsSQL, inBatch string, st
 QUALIFY row_number() OVER (PARTITION BY event_uid ORDER BY ` + winnerOrder + `) = 1`,
 		`CREATE OR REPLACE TEMP TABLE cur AS SELECT doc, event_uid, lake_file, lake_row, row_hash, session_id, doc_len
 FROM events WHERE rowid IN (SELECT rowid FROM events SEMI JOIN aff USING (uid_key))`,
+		"CREATE OR REPLACE TEMP TABLE qa AS SELECT DISTINCT session_id FROM cur WHERE session_id IS NOT NULL",
 		"DROP TABLE old", "DROP TABLE aff",
 		`CREATE OR REPLACE TEMP TABLE keep AS SELECT c.event_uid, min(c.doc) AS doc
 FROM cur c JOIN win w USING (event_uid) WHERE c.row_hash = w.row_hash GROUP BY c.event_uid`,
@@ -654,7 +655,11 @@ FROM win w ANTI JOIN keep k USING (event_uid)`,
 	if err := reorder(ctx, c, st); err != nil {
 		return err
 	}
-	return execAll(ctx, c, []string{"DROP TABLE del", "DROP TABLE mv", "DROP TABLE ins", "DROP TABLE s"})
+	return execAll(ctx, c, []string{
+		`INSERT INTO pending_session_authors SELECT session_id FROM (
+  SELECT session_id FROM s UNION SELECT session_id FROM qa) q
+WHERE NOT EXISTS (SELECT 1 FROM pending_session_authors p WHERE p.session_id = q.session_id)`,
+		"DROP TABLE del", "DROP TABLE mv", "DROP TABLE ins", "DROP TABLE s", "DROP TABLE qa"})
 }
 
 func deleteDocs(in string) []string {
@@ -767,7 +772,6 @@ FROM events WHERE `+inS+` GROUP BY session_id, turn_seq`,
   max(CASE WHEN payload_type = 'task_complete' THEN 1 ELSE 0 END)
 FROM events WHERE `+inS+` GROUP BY session_id`)
 	stmts = append(stmts, "INSERT INTO pending_spans SELECT DISTINCT session_id FROM s WHERE NOT EXISTS (SELECT 1 FROM pending_spans p WHERE p.session_id = s.session_id)")
-	stmts = append(stmts, "INSERT INTO pending_session_authors SELECT DISTINCT session_id FROM s WHERE NOT EXISTS (SELECT 1 FROM pending_session_authors p WHERE p.session_id = s.session_id)")
 	return execAll(ctx, c, append(stmts, "DROP TABLE ord"))
 }
 

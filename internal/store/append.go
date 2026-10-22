@@ -71,9 +71,12 @@ func (src ServerSource) validate() error {
 }
 
 // Append adds lines, whole lines each ending in '\n', to the server-owned
-// source src, creating it when missing, and wakes converge. requestKey makes
-// it idempotent: a key already applied to src, or to the day before it,
-// changes nothing and reports duplicate. It holds the day before's key lock and
+// source src, creating it when missing, and wakes converge. A non-empty
+// requestKey makes it idempotent: a key already applied to src, or to the day
+// before it, changes nothing and reports duplicate. An empty requestKey means
+// no dedup: the lines are appended and nothing is recorded in Applied, for a
+// caller whose events dedup on their own uid and whose volume would grow the
+// manifest without bound. It holds the day before's key lock and
 // then src's, always in that order, so a retry across midnight cannot miss a
 // key still in flight on the day before. The manifest is written last and
 // records the applied keys, so a crash before it leaves the key unapplied and
@@ -81,9 +84,6 @@ func (src ServerSource) validate() error {
 func (s *Store) Append(src ServerSource, requestKey string, lines []byte) (_ wire.Source, duplicate bool, _ error) {
 	if err := src.validate(); err != nil {
 		return wire.Source{}, false, err
-	}
-	if requestKey == "" {
-		return wire.Source{}, false, errors.New("store: request key is required")
 	}
 	if len(lines) == 0 || lines[len(lines)-1] != '\n' {
 		return wire.Source{}, false, errors.New("store: body must be non-empty whole lines")
@@ -98,7 +98,7 @@ func (s *Store) Append(src ServerSource, requestKey string, lines []byte) (_ wir
 	case errors.Is(err, fs.ErrNotExist):
 	case err != nil:
 		return wire.Source{}, false, err
-	case slices.Contains(pm.Applied, requestKey):
+	case requestKey != "" && slices.Contains(pm.Applied, requestKey):
 		return pm.Source, true, nil
 	}
 
@@ -124,7 +124,7 @@ func (s *Store) Append(src ServerSource, requestKey string, lines []byte) (_ wir
 		}
 	case err != nil:
 		return wire.Source{}, false, err
-	case slices.Contains(m.Applied, requestKey):
+	case requestKey != "" && slices.Contains(m.Applied, requestKey):
 		return m.Source, true, nil
 	default:
 		zst, err := appendZst(k.Raw(s.DataDir), m.ZstSize, lines)
@@ -135,7 +135,9 @@ func (s *Store) Append(src ServerSource, requestKey string, lines []byte) (_ wir
 		m.UpdatedMs = max(time.Now().UnixMilli(), m.UpdatedMs+1)
 		m.ZstSize = zst
 	}
-	m.Applied = append(m.Applied, requestKey)
+	if requestKey != "" {
+		m.Applied = append(m.Applied, requestKey)
+	}
 	if err := writeManifest(k.Manifest(s.DataDir), *m); err != nil {
 		return wire.Source{}, false, err
 	}

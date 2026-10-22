@@ -188,7 +188,7 @@ func TestReceiver(t *testing.T) {
 			if status, _, _ := post(c.body); status != 200 {
 				t.Fatalf("repeat: status %d", status)
 			}
-			if got := rawOf(t, key.Raw(dir)); got != want {
+			if got := rawOf(t, key.Raw(dir)); got != want+want {
 				t.Fatalf("raw after the repeated request:\n%s", got)
 			}
 

@@ -6,7 +6,6 @@ package otlp
 import (
 	"bytes"
 	"compress/gzip"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -120,8 +119,6 @@ func (r *Receiver) handler(newReq func() proto.Message, convert func(proto.Messa
 		}
 		b, resp := convert(msg, r.storeContent.Load())
 
-		sum := sha256.Sum256(body)
-		key := hex.EncodeToString(sum[:])
 		author := auth.Author(req.Context())
 		for service, recs := range b.byService {
 			if len(recs) == 0 {
@@ -132,7 +129,7 @@ func (r *Receiver) handler(newReq func() proto.Message, convert func(proto.Messa
 				fail(w, media, http.StatusInternalServerError, "encode: "+err.Error())
 				return
 			}
-			if _, _, err := r.st.Append(store.Today(author, Harness, service), key, lines); err != nil {
+			if _, _, err := r.st.Append(store.Today(author, Harness, service), "", lines); err != nil {
 				fail(w, media, http.StatusServiceUnavailable, "store: "+err.Error())
 				return
 			}
