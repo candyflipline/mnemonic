@@ -11,7 +11,7 @@ Related specs: [wire](wire.md), [spans](spans.md) (a tree derived from these col
 | Place | What | Source |
 |---|---|---|
 | lake | one parquet per source, `events/author=A/machine=M/harness=H/<src_id>.parquet`, plus `<src_id>.tail.parquet` for rows appended since | `internal/layout/layout.go:1-9` |
-| index | the `events` table of `cache/index.duckdb`, which is what MCP reads | `internal/cache/sql.go:80-98` |
+| index | the `events` table of `cache/index.duckdb`, which is what MCP reads | `internal/cache/sql.go:80-102` |
 
 The lake stamps three columns onto every parsed row, so the parquet has the 57 parser columns below plus these (`internal/lake/lake.go:621-628`):
 
@@ -23,7 +23,7 @@ The lake stamps three columns onto every parsed row, so the parquet has the 57 p
 
 When two rows share an `event_uid` the one with the highest `event_version` wins (`internal/lake/lake.go:321-322`, `internal/cache/index.go:217`).
 
-The index adds columns of its own: `doc`, `lake_file`, `lake_row`, `event_time`, `event_order`, `turn_seq`, `event_ordinal` and a few derived ones (`internal/cache/sql.go:80-98`). The index does not keep `payload_json` or `token_usage_json`; read those from the parquet (`internal/cache/sql.go:78`). The ordering columns:
+The index adds columns of its own: `doc`, `lake_file`, `lake_row`, `event_time`, `event_order`, `turn_seq`, `event_ordinal` and a few derived ones (`internal/cache/sql.go:80-102`). The index does not keep `payload_json` or `token_usage_json`; read those from the parquet (`internal/cache/sql.go:78`). The ordering columns:
 
 | Column | Meaning |
 |---|---|
