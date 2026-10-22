@@ -25,7 +25,18 @@ start_keeper() {
 		>"$LOGS/$name-keeper.log" 2>&1 &
 	KPID=$!
 	track "$KPID"
-	"$E2E" wait -addr "127.0.0.1:$KPORT" -timeout 30s
+	wait_up "$KPID" "127.0.0.1:$KPORT"
+}
+
+# wait_up PID ADDR waits up to 30 s for ADDR, and fails at once if PID exits.
+wait_up() {
+	local n=0
+	while [ $n -lt 30 ]; do
+		"$E2E" wait -addr "$2" -timeout 1s 2>/dev/null && return 0
+		dead "$1" && return 1
+		n=$((n + 1))
+	done
+	return 1
 }
 
 # start_reader NAME I starts reader rI on RPORT[I] with an empty cache dir and sets RPID[I].
@@ -51,7 +62,7 @@ cluster_up() {
 		start_reader "$name" "$i"
 	done
 	for i in 1 2 3; do
-		"$E2E" wait -addr "127.0.0.1:${RPORT[$i]}" -timeout 30s || return 1
+		wait_up "${RPID[$i]}" "127.0.0.1:${RPORT[$i]}" || return 1
 	done
 }
 

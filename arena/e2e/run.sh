@@ -168,7 +168,7 @@ s2e() {
 			start_reader 2e "$i"
 		done
 		for i in 1 2 3; do
-			"$E2E" wait -addr "127.0.0.1:${RPORT[$i]}" -timeout 30s || ok=0
+			wait_up "${RPID[$i]}" "127.0.0.1:${RPORT[$i]}" || ok=0
 		done
 		stable_stats "$stats_url"
 		pre=$("$E2E" stats -url "$stats_url")
