@@ -14,21 +14,19 @@ import (
 	"strings"
 )
 
-type loc struct {
-	src   uint16
-	idx   uint16
-	frame uint64
-}
-
 type built struct {
 	row *Row
-	loc loc
-	seq int64
+	src uint16
 }
+
+// partFormat is hashed into every part ID, so a store built by an older layout
+// rebuilds its parts instead of opening them.
+const partFormat = 2
 
 // fingerprint names the set of checkpoints an index was built from.
 func fingerprint(cks []ckpt) string {
 	h := sha256.New()
+	fmt.Fprintf(h, "format %d\n", partFormat)
 	for _, c := range cks {
 		fmt.Fprintf(h, "%s %d %d %d %d\n", c.Key, c.Gen, c.LightLen, c.HeavyLen, c.Rows)
 	}
@@ -40,8 +38,6 @@ type indexMeta struct {
 	Docs        int      `json:"docs"`
 	ScoredDocs  uint64   `json:"scored_docs"`
 	TotalLen    uint64   `json:"total_len"`
-	Sources     []string `json:"sources"`
-	Gens        []int    `json:"gens"`
 	Harnesses   []string `json:"harnesses"`
 	SourceNames []string `json:"source_names"`
 	Sessions    int      `json:"sessions"`
@@ -57,19 +53,17 @@ func loadSourceRows(store string, si int, c ckpt) ([]built, error) {
 	defer f.Close()
 	var out []built
 	var scratch []byte
-	var seq int64
 	for off := int64(0); off < c.LightLen; {
 		recs, next, err := readFrame(f, off, scratch)
 		if err != nil {
 			return nil, err
 		}
-		for i, rec := range recs {
+		for _, rec := range recs {
 			r := new(Row)
 			if _, err := r.decode(rec); err != nil {
 				return nil, err
 			}
-			out = append(out, built{row: r, loc: loc{src: uint16(si), idx: uint16(i), frame: uint64(off)}, seq: seq})
-			seq++
+			out = append(out, built{row: r, src: uint16(si)})
 		}
 		off = next
 	}
@@ -189,11 +183,26 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 		delete(bySession, sid)
 	}
 
+	if heavy.err != nil {
+		return heavy.err
+	}
 	dir := partDir + ".tmp"
 	os.RemoveAll(dir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
+	lightF, err := openLog(filepath.Join(dir, "light"), 0)
+	if err != nil {
+		return err
+	}
+	defer lightF.Close()
+	heavyF, err := openLog(filepath.Join(dir, "heavy"), 0)
+	if err != nil {
+		return err
+	}
+	defer heavyF.Close()
+	lw := &frameWriter{f: lightF, target: lightFrame, enc: encoder}
+	hw := &frameWriter{f: heavyF, target: heavyFrame, enc: heavyEncoder}
 
 	n := len(docs)
 	docCol := make([]byte, n*docWidth)
@@ -207,7 +216,21 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 	tfs := map[string]uint32{}
 	var hot, hotOff []byte
 	for d, b := range docs {
-		r := b.row
+		hrec, err := heavy.record(b)
+		if err != nil {
+			return err
+		}
+		hf, hi, err := hw.add(hrec)
+		if err != nil {
+			return err
+		}
+		own := *b.row
+		own.HeavyFrame, own.HeavyIdx = uint64(hf), uint64(hi)
+		r := &own
+		lf, li, err := lw.add(r.append(nil))
+		if err != nil {
+			return err
+		}
 		hotOff = binary.LittleEndian.AppendUint64(hotOff, uint64(len(hot)))
 		hot = hotRow(*r).append(hot)
 		hotOff = binary.LittleEndian.AppendUint64(hotOff, textHash(r.Text))
@@ -221,9 +244,8 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 			}
 		}
 		rec := docCol[d*docWidth : (d+1)*docWidth]
-		binary.LittleEndian.PutUint64(rec[0:], b.loc.frame)
-		binary.LittleEndian.PutUint16(rec[8:], b.loc.idx)
-		binary.LittleEndian.PutUint16(rec[10:], b.loc.src)
+		binary.LittleEndian.PutUint64(rec[0:], uint64(lf))
+		binary.LittleEndian.PutUint16(rec[8:], uint16(li))
 		binary.LittleEndian.PutUint16(rec[12:], uint16(searchFlags(r)))
 		rec[14] = byte(harnesses.id(r.Harness))
 		rec[15] = byte(sourceNames.id(r.SourceName))
@@ -253,8 +275,11 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 		}
 	}
 
-	if heavy.err != nil {
-		return heavy.err
+	if err := hw.flush(); err != nil {
+		return err
+	}
+	if err := lw.flush(); err != nil {
+		return err
 	}
 	if err := writeLs(dir, lsRecs); err != nil {
 		return err
@@ -371,10 +396,6 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 
 	meta := indexMeta{Fingerprint: fp, Docs: n, ScoredDocs: scoredDocs, TotalLen: totalLen,
 		Harnesses: harnesses.list, SourceNames: sourceNames.list, Sessions: len(sessions), Turns: len(turns), Terms: len(terms)}
-	for _, c := range cks {
-		meta.Sources = append(meta.Sources, c.Key)
-		meta.Gens = append(meta.Gens, c.Gen)
-	}
 	mb, _ := json.Marshal(meta)
 	if err := os.WriteFile(filepath.Join(dir, "meta.json"), mb, 0o644); err != nil {
 		return err
@@ -526,16 +547,22 @@ func tokenize(text string, emit func(string)) int {
 	return n
 }
 
-// heavyReader reads payload_json of rows at build, one frame at a time.
+// heavyReader reads the heavy records of rows at build from the source logs,
+// decoding a few frames at a time.
 type heavyReader struct {
 	files []*os.File
-	key   frameKey
-	recs  [][]byte
+	recs  map[heavyKey][][]byte
+	order []heavyKey
 	err   error
 }
 
+type heavyKey struct {
+	src   uint16
+	frame uint64
+}
+
 func newHeavyReader(store string, cks []ckpt) *heavyReader {
-	h := &heavyReader{key: frameKey{frame: ^uint64(0)}}
+	h := &heavyReader{recs: map[heavyKey][][]byte{}}
 	for _, c := range cks {
 		f, err := os.Open(logPath(store, c.Key, c.Gen, "heavy"))
 		if err != nil && h.err == nil {
@@ -546,20 +573,40 @@ func newHeavyReader(store string, cks []ckpt) *heavyReader {
 	return h
 }
 
-func (h *heavyReader) payload(b built) string {
+// record is the heavy record of b: payload_json then token_usage_json, each a
+// uvarint length and its bytes.
+func (h *heavyReader) record(b built) ([]byte, error) {
 	if h.err != nil {
-		return ""
+		return nil, h.err
 	}
-	k := frameKey{src: b.loc.src, frame: b.row.HeavyFrame}
-	if k != h.key {
-		recs, _, err := readFrame(h.files[k.src], int64(k.frame), nil)
+	k := heavyKey{src: b.src, frame: b.row.HeavyFrame}
+	recs, ok := h.recs[k]
+	if !ok {
+		var err error
+		recs, _, err = readFrame(h.files[k.src], int64(k.frame), nil)
 		if err != nil {
 			h.err = err
-			return ""
+			return nil, err
 		}
-		h.key, h.recs = k, recs
+		h.recs[k] = recs
+		h.order = append(h.order, k)
+		if len(h.order) > 16 {
+			delete(h.recs, h.order[0])
+			h.order = h.order[1:]
+		}
 	}
-	rec := h.recs[b.row.HeavyIdx]
+	if int(b.row.HeavyIdx) >= len(recs) {
+		h.err = fmt.Errorf("heavy index past frame")
+		return nil, h.err
+	}
+	return recs[b.row.HeavyIdx], nil
+}
+
+func (h *heavyReader) payload(b built) string {
+	rec, err := h.record(b)
+	if err != nil {
+		return ""
+	}
 	l, n := binary.Uvarint(rec)
 	return string(rec[n : n+int(l)])
 }
