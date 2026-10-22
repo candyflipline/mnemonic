@@ -57,6 +57,9 @@ var DefaultSources = []SourceGlob{
 //	scopes = ["read", "push"]  # optional, the default; "annotate" and "admin" opt in
 //	[otlp]
 //	store_content = false    # keep OTLP message and tool content
+//
+// An author no token entry names is in the "default" tenant, so every
+// default-tenant token reads what such an author's data holds.
 type Server struct {
 	DataDir string       `toml:"data_dir"`
 	Listen  string       `toml:"listen"`
