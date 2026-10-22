@@ -283,11 +283,15 @@ func TestStore(t *testing.T) {
 			t.Fatalf("fences=%d, want 5", len(keys))
 		}
 		sg := &segment{terms: keys, postings: raw, mapping: make([]uint32, 65)}
+		sg.buildFilter()
 		for i := range sg.mapping {
 			sg.mapping[i] = uint32(i)
 		}
 		for i := 0; i < 65; i++ {
 			count := 0
+			if !sg.mayContain(termHash([]byte(fmt.Sprintf("prefix%02d", i)))) {
+				t.Fatal("term filter lost a dictionary entry")
+			}
 			sg.each(sg.lookup(fmt.Sprintf("prefix%02d", i)), func(doc, tf uint32) {
 				count++
 				if doc != uint32(i) || tf != 3 {

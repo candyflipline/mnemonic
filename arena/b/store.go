@@ -45,6 +45,7 @@ type Manifest struct {
 	Sources         map[string]Checkpoint
 }
 type event struct {
+	uidStorage  [64]byte
 	TextHash    uint64
 	HeavyOffset uint64
 	HeavyIndex  uint32
@@ -77,6 +78,7 @@ type sessionStats struct {
 	Complete   bool
 }
 type Store struct {
+	rowsArena         mappedArena
 	listRows          []lsItem
 	manifest          Manifest
 	directory         string
@@ -404,6 +406,7 @@ func (db *Store) Close() {
 	if db.decoder != nil {
 		db.decoder.Close()
 	}
+	db.rowsArena.close()
 	db.arena.close()
 }
 func loadStore(dir string) (*Store, error) {
@@ -432,7 +435,7 @@ func loadSnapshot(dir string) (_ *Store, loadErr error) {
 	if e != nil {
 		return nil, e
 	}
-	db := &Store{manifest: m, sessions: map[string][]*event{}, stats: map[string]*sessionStats{}, decoder: decoder, heavyCache: map[heavyKey]heavyBlock{}, arena: mappedArena{dir: dir}}
+	db := &Store{manifest: m, sessions: map[string][]*event{}, stats: map[string]*sessionStats{}, decoder: decoder, heavyCache: map[heavyKey]heavyBlock{}, arena: mappedArena{dir: dir}, rowsArena: mappedArena{dir: dir}}
 	defer func() {
 		if loadErr != nil {
 			db.Close()
@@ -445,7 +448,7 @@ func loadSnapshot(dir string) (_ *Store, loadErr error) {
 		capacity += cp.Events
 	}
 	sort.Strings(keys)
-	all := mappedSlice[*event](&db.arena, int(capacity))
+	all := mappedSlice[*event](&db.rowsArena, int(capacity))
 	count := 0
 	for _, k := range keys {
 		for _, name := range m.Sources[k].Segments {
@@ -480,17 +483,18 @@ func loadSnapshot(dir string) (_ *Store, loadErr error) {
 					return nil, fmt.Errorf("metadata exceeds manifest event count")
 				}
 				ev.segment = sg
-				all[count] = db.arena.event(&ev, intern)
+				all[count] = db.arena.event(&ev, intern, &db.rowsArena)
 				count++
 			}
 			zr.Close()
 			f.Close()
-			sg.pending = freezeSlice(&db.arena, all[start:count])
+			sg.pending = freezeSlice(&db.rowsArena, all[start:count])
 			sg.terms, sg.postings, err = loadTerms(filepath.Join(sg.path, "terms"))
 			if err != nil {
 				return nil, err
 			}
-			sg.terms = freezeSlice(&db.arena, sg.terms)
+			sg.buildFilter()
+			sg.terms = freezeSlice(&db.rowsArena, sg.terms)
 			for i := range sg.terms {
 				sg.terms[i].term = db.arena.text(sg.terms[i].term)
 			}
@@ -521,7 +525,7 @@ func loadSnapshot(dir string) (_ *Store, loadErr error) {
 		i = j
 	}
 	db.events = all[:live]
-	ordered := freezeSlice(&db.arena, db.events)
+	ordered := freezeSlice(&db.rowsArena, db.events)
 	sort.Slice(ordered, func(i, j int) bool {
 		a, b := ordered[i], ordered[j]
 		if a.SessionID != b.SessionID {
@@ -529,7 +533,7 @@ func loadSnapshot(dir string) (_ *Store, loadErr error) {
 		}
 		return eventLess(a, b)
 	})
-	turnRecords := mappedSlice[turnRecord](&db.arena, live)
+	turnRecords := mappedSlice[turnRecord](&db.rowsArena, live)
 	turnCount := 0
 	for start := 0; start < len(ordered); {
 		end := start + 1
@@ -540,7 +544,7 @@ func loadSnapshot(dir string) (_ *Store, loadErr error) {
 		es := ordered[start:end]
 		db.sessions[sid] = es
 		users := uint32(0)
-		ss := &mappedSlice[sessionStats](&db.arena, 1)[0]
+		ss := &mappedSlice[sessionStats](&db.rowsArena, 1)[0]
 		ss.Start = es[0].Time
 		ss.End = es[len(es)-1].Time
 		for i, ev := range es {
@@ -559,7 +563,7 @@ func loadSnapshot(dir string) (_ *Store, loadErr error) {
 		db.stats[sid] = ss
 		start = end
 	}
-	byTurn := freezeSlice(&db.arena, ordered)
+	byTurn := freezeSlice(&db.rowsArena, ordered)
 	sort.Slice(byTurn, func(i, j int) bool {
 		a, b := byTurn[i], byTurn[j]
 		if a.SessionID != b.SessionID {
@@ -599,7 +603,7 @@ func loadSnapshot(dir string) (_ *Store, loadErr error) {
 		}
 	}
 	for _, sg := range db.segments {
-		sg.mapping = mappedSlice[uint32](&db.arena, len(sg.pending))
+		sg.mapping = mappedSlice[uint32](&db.rowsArena, len(sg.pending))
 		for i, ev := range sg.pending {
 			j := sort.Search(len(db.events), func(j int) bool { return db.events[j].EventUID >= ev.EventUID })
 			if j < len(db.events) && db.events[j] == ev {
@@ -611,10 +615,10 @@ func loadSnapshot(dir string) (_ *Store, loadErr error) {
 	}
 	db.buildPaths()
 	db.buildListRollups()
-	db.scoreValues = mappedSlice[float64](&db.arena, len(db.events))
-	db.scoreStamps = mappedSlice[uint32](&db.arena, len(db.events))
-	db.scoreTouched = mappedSlice[uint32](&db.arena, len(db.events))[:0]
-	db.postingScratch = mappedSlice[posting](&db.arena, len(db.events))[:0]
+	db.scoreValues = mappedSlice[float64](&db.rowsArena, len(db.events))
+	db.scoreStamps = mappedSlice[uint32](&db.rowsArena, len(db.events))
+	db.scoreTouched = mappedSlice[uint32](&db.rowsArena, len(db.events))[:0]
+	db.postingScratch = mappedSlice[posting](&db.rowsArena, len(db.events))[:0]
 	return db, nil
 }
 func eventLess(a, b *event) bool {

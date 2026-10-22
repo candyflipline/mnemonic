@@ -28,6 +28,8 @@ versions preserve the existing lake's replacement rule across process restarts.
 ## Query memory and structures
 
 The query process streams metadata into process-local file-backed mmap arenas.
+Fixed rows/UID bytes and large variable strings use separate mappings to reduce
+cold-page traffic. A fixed 2 KiB per-segment term filter avoids negative lookups.
 Temporary arena files are unlinked immediately; mappings own their lifetime.
 Their Go pointers are process-local, never serialized as a reusable file format.
 All string data and embedded pointers refer to mapped storage, except segment
@@ -44,13 +46,13 @@ fence every 16 terms lives in the arena. No per-segment file descriptor stays op
 
 The heap retains source manifests, segment/session lookup entries, codecs, and a
 payload cache capped at 8 MiB of decoded wire bytes. Sample measurements after
-GC: startup heap 0.49 MB, warm heap 11.7 MB, versus 32.0/43.2 MB before this change.
+GC: startup heap 0.59 MB, warm heap 11.8 MB, versus 32.0/43.2 MB before this change.
 The metadata/index view maps about 31 MB here, in addition to mapped heavy files.
 This unlinked scratch backing consumes disk while batch is alive; it is additional
 to the directory-byte score. Virtual mappings are not live Go heap. After 300 ms
 idle, synchronous page invalidation and GC release reclaimable resident pages;
 queries fault them back on demand. Checker idle RSS fell from 98.0 to about 43 MB.
-The largest public cases after idle took 49 ms for search and 85 ms for open;
+The largest public cases after idle took 45 ms for search and 63 ms for open;
 responses remained identical. Warm checker timings do not include that cold cost.
 
 - `search_sessions`: exact global BM25 from segment postings and mapped columns.
@@ -76,7 +78,7 @@ filesystem changes between ingests. Only files inside this lane are modified.
 Compressed input and heavy output are buffered; offsets are tracked directly.
 The ASCII scanner preserves lowercasing, length limits and token frequencies.
 All five tools pass public, hidden, incremental and three-kill recovery checks.
-Clean ingest improved from 6.12 to 2.36 seconds. macOS full flushes and serialized
+Clean ingest improved from 6.12 to 2.30 seconds. macOS full flushes and serialized
 parse/write work were additional wall-time costs after removing repeated probes.
 
 ## Recovery and freshness

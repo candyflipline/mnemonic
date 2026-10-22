@@ -62,9 +62,15 @@ func (a *mappedArena) text(s string) string {
 	copy(b, s)
 	return unsafe.String(&b[0], len(b))
 }
-func (a *mappedArena) event(src *event, intern map[string]string) *event {
-	dst := &mappedSlice[event](a, 1)[0]
+func (a *mappedArena) event(src *event, intern map[string]string, rows *mappedArena) *event {
+	dst := &mappedSlice[event](rows, 1)[0]
 	*dst = *src
+	if len(src.EventUID) <= len(dst.uidStorage) {
+		copy(dst.uidStorage[:], src.EventUID)
+		dst.EventUID = unsafe.String(&dst.uidStorage[0], len(src.EventUID))
+	} else {
+		dst.EventUID = a.text(src.EventUID)
+	}
 	clone := func(p *string) {
 		if v, ok := intern[*p]; ok {
 			*p = v
@@ -76,14 +82,14 @@ func (a *mappedArena) event(src *event, intern map[string]string) *event {
 	}
 	// High-cardinality content is copied directly; the small interner is scoped
 	// to one segment so ingest-sized dictionaries cannot survive query startup.
-	for _, p := range []*string{&dst.EventUID, &dst.ItemID, &dst.ToolCallID, &dst.TextPreview, &dst.PayloadJSON, &dst.RepoRelPath} {
+	for _, p := range []*string{&dst.ItemID, &dst.ToolCallID, &dst.TextPreview, &dst.PayloadJSON, &dst.RepoRelPath} {
 		*p = a.text(*p)
 	}
 	for _, p := range []*string{&dst.SessionID, &dst.SourceName, &dst.Harness, &dst.InferenceProvider, &dst.SourceFile, &dst.EventKind, &dst.ActorKind, &dst.PayloadType, &dst.OpStatus, &dst.ToolName, &dst.ToolPhase, &dst.EndpointKind, &dst.ProjectID, &dst.WorktreeRoot, &dst.Cwd} {
 		clone(p)
 	}
 	if src.IO != nil {
-		dst.IO = &mappedSlice[toolIO](a, 1)[0]
+		dst.IO = &mappedSlice[toolIO](rows, 1)[0]
 		*dst.IO = *src.IO
 		for _, p := range []*string{&dst.IO.Input, &dst.IO.InputPreview, &dst.IO.OutputPreview, &dst.IO.Project, &dst.IO.Path, &dst.IO.Root} {
 			*p = a.text(*p)
@@ -160,6 +166,9 @@ func (db *Store) releaseIdlePages() {
 			return
 		}
 		syscall.Syscall(syscall.SYS_MSYNC, uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), syscall.MS_SYNC|syscall.MS_INVALIDATE)
+	}
+	for _, b := range db.rowsArena.blocks {
+		release(b)
 	}
 	for _, b := range db.arena.blocks {
 		release(b)

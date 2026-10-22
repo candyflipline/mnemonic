@@ -31,6 +31,8 @@ type heavyBlock struct {
 	bytes  int
 }
 type segment struct {
+	filter      [256]uint64
+	filterReady bool
 	pathIndex
 	path     string
 	heavy    []byte

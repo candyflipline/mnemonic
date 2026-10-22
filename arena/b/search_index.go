@@ -53,8 +53,12 @@ func searchMcpEvents(_ context.Context, db *Store, q searchQuery) (*searchResult
 	db.scoreTouched = db.scoreTouched[:0]
 	avg := math.Max(1, float64(db.totalLength)/math.Max(1, float64(db.docs)))
 	for _, t := range terms {
+		hash := termHash([]byte(t))
 		all := db.postingScratch[:0]
 		for _, sg := range db.segments {
+			if sg.filterReady && !sg.mayContain(hash) {
+				continue
+			}
 			sg.each(sg.lookup(t), func(doc, tf uint32) { all = append(all, posting{doc, tf}) })
 		}
 		df := float64(len(all))
