@@ -102,8 +102,6 @@ func (st *Part) touchOf(d int, r *Row) faTouch {
 	}
 }
 
-// faLists is one reader's exact and suffix touches, each sorted and cut to
-// MaxRows+1; faTouchLess is total, so the global top rows are in the union.
 type faLists struct {
 	Exact  []faTouch `json:"exact"`
 	Suffix []faTouch `json:"suffix"`
@@ -116,7 +114,6 @@ func (db *DB) faTouches(q faQuery) ([]faTouch, error) {
 	})
 }
 
-// faGather merges the lists gather collects, calling it only when q can match.
 func faGather(q faQuery, gather func() ([]faLists, error)) ([]faTouch, error) {
 	if q.Rel == "" {
 		return nil, argErrorf("file_attention requires a non-empty path tail")

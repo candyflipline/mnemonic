@@ -53,17 +53,12 @@ func textHash(s string) uint64 {
 	return h.Sum64()
 }
 
-// searchStats is BM25's corpus statistics: df per sorted query term, summed
-// over every part, and the scored doc count and length the part metas carry.
 type searchStats struct {
 	DF       []float64 `json:"df"`
 	Docs     uint64    `json:"docs"`
 	TotalLen uint64    `json:"len"`
 }
 
-// scoredHits is one reader's hits at or above its own limit-th score, ties
-// kept. Dropped holds the scores of hits that produced no row, which still
-// count toward the cut.
 type scoredHits struct {
 	rows    []*mcpRow
 	dropped []float64
@@ -173,8 +168,6 @@ func (db *DB) scoreHits(q searchQuery, sorted []string, s searchStats) (scoredHi
 	return res, nil
 }
 
-// mergeHits applies the global cut over every reader's hits, then sorts,
-// dedupes and limits. It is exact because a session lives in one part.
 func mergeHits(q searchQuery, from []scoredHits) *searchResult {
 	limit := q.nHits + 1
 	res := &searchResult{scopeExists: !q.sessionOK}

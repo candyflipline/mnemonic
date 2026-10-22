@@ -266,9 +266,6 @@ func (db *DB) lsCandidates(a *lsArgs, cursor *lsCursor) ([]lsCand, error) {
 	return out, nil
 }
 
-// lsCand is a page candidate with its microsecond sort key. Each reader
-// keeps its first Limit+1 by (us, id), a total order, so the page is in the
-// union.
 type lsCand struct {
 	Item lsItem `json:"item"`
 	Us   int64  `json:"us"`

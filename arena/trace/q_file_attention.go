@@ -28,9 +28,6 @@ func (fileAttention) Call(db *DB, args json.RawMessage) (any, string, error) {
 	return c.answer(touches)
 }
 
-// faCall is a parsed file_attention call: the query the parts answer, and
-// what the answer needs around it. The tail and roots resolve on this
-// process's filesystem, so a router builds it and readers get only q.
 type faCall struct {
 	a        *faArgs
 	tail     faTail

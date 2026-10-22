@@ -6,9 +6,8 @@ import (
 	"fmt"
 )
 
-// Fan scatters one phase of a call to the readers that own the view's parts,
-// or only the part holding session when session is set, and returns each
-// reader's phase answer. A view with no such part gives no answers.
+// Fan scatters one phase to the readers owning the view's parts, or only the
+// part holding session when it is set, and returns their phase answers.
 type Fan func(phase string, stats json.RawMessage, session string) ([]json.RawMessage, error)
 
 // Corpus is BM25's corpus size summed over every part of a view.
@@ -85,9 +84,7 @@ func searchScorePhase(db *DB, args, stats json.RawMessage) (any, error) {
 	return hitsToWire(h), nil
 }
 
-// SearchPartial gathers df per term from every reader, sends the global
-// stats back so each scores with the single-process idf and norm, then
-// merges with the global cut.
+// SearchPartial is search_sessions at rung Partial: df, then score, then the global cut.
 func SearchPartial(args json.RawMessage, c Corpus, fan Fan) (json.RawMessage, string, error) {
 	a, q, sorted, err := searchPlan(args)
 	if err != nil {
@@ -141,8 +138,7 @@ func faPhase(db *DB, _, stats json.RawMessage) (any, error) {
 	return db.faLists(q)
 }
 
-// AttentionPartial resolves the path here, sends readers the query, and
-// merges their exact and suffix lists as one process would.
+// AttentionPartial is file_attention at rung Partial.
 func AttentionPartial(args json.RawMessage, _ Corpus, fan Fan) (json.RawMessage, string, error) {
 	c, err := newFaCall(args)
 	if err != nil {
@@ -177,7 +173,7 @@ func lsPhase(db *DB, args, _ json.RawMessage) (any, error) {
 	return db.lsCandidates(a, cursor)
 }
 
-// ListPartial merges every reader's first Limit+1 candidates, then pages.
+// ListPartial is list_sessions at rung Partial.
 func ListPartial(args json.RawMessage, _ Corpus, fan Fan) (json.RawMessage, string, error) {
 	a, err := lsParseArgs(args)
 	if err != nil {
@@ -204,8 +200,6 @@ func ListPartial(args json.RawMessage, _ Corpus, fan Fan) (json.RawMessage, stri
 	return encodeAnswer(lsAnswer(a, page))
 }
 
-// openWire is one reader's open answer. Data travels as a string so any
-// transport re-escaping leaves its bytes as Call encoded them.
 type openWire struct {
 	Found bool   `json:"found"`
 	Data  string `json:"data,omitempty"`
@@ -241,9 +235,7 @@ func openPhase(db *DB, args, _ json.RawMessage) (any, error) {
 	return w, nil
 }
 
-// OpenPartial asks the owner of the target's session, or every reader for an
-// event ID, which names no session. With no owner the answer is the one an
-// empty index gives.
+// OpenPartial is open at rung Partial, answered by the owner of the target's session.
 func OpenPartial(args json.RawMessage, _ Corpus, fan Fan) (json.RawMessage, string, error) {
 	a, err := parseOpenArgs(args)
 	if err != nil {

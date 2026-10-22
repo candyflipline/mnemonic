@@ -275,7 +275,6 @@ func lsCursorOf(a *lsArgs) (*lsCursor, error) {
 	return c, nil
 }
 
-// lsQueryPage pages the candidates gather collects from every part.
 func lsQueryPage(a *lsArgs, gather func(*lsCursor) ([]lsCand, error)) (*lsPage, error) {
 	cursor, err := lsCursorOf(a)
 	if err != nil {
