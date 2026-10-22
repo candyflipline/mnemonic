@@ -28,10 +28,15 @@ type Server struct {
 	otlp    *otlp.Receiver
 }
 
-// New opens the cache under dataDir and mounts the store and MCP behind
-// auth, with authors mapping auth.Hash(token) to author. MCP tools find the
-// store with store.From on their ctx.
-func New(dataDir string, authors map[string]string) (*Server, error) {
+// New opens the cache under dataDir, loads the session controls from raw,
+// and mounts the store (push scope) and MCP (read scope) behind tokens. MCP
+// tools find the store with store.From and the controls with
+// query.WithControls on their ctx.
+func New(dataDir string, tokens auth.Tokens) (*Server, error) {
+	ctl, err := query.LoadControls(dataDir)
+	if err != nil {
+		return nil, err
+	}
 	ix, err := cache.Open(dataDir, cache.Options{MemoryLimit: "1GB", FlagsSQL: query.SearchFlagsSQL()})
 	if err != nil {
 		return nil, err
@@ -41,11 +46,11 @@ func New(dataDir string, authors map[string]string) (*Server, error) {
 	tools := mcp.Handler(ix.DB(), query.Lookup)
 	rcv := otlp.NewReceiver(st)
 	mux := http.NewServeMux()
-	mux.Handle("/v1/", auth.Middleware(authors)(st.Handler()))
-	mux.Handle("POST /v1/traces", auth.Middleware(authors)(rcv.Traces()))
-	mux.Handle("POST /v1/logs", auth.Middleware(authors)(rcv.Logs()))
-	mux.Handle("/mcp", auth.Middleware(authors)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tools.ServeHTTP(w, r.WithContext(store.WithStore(r.Context(), st)))
+	mux.Handle("/v1/", tokens.Require(auth.Push)(st.Handler()))
+	mux.Handle("POST /v1/traces", tokens.Require(auth.Push)(rcv.Traces()))
+	mux.Handle("POST /v1/logs", tokens.Require(auth.Push)(rcv.Logs()))
+	mux.Handle("/mcp", tokens.Require(auth.Read)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tools.ServeHTTP(w, r.WithContext(query.WithControls(store.WithStore(r.Context(), st), ctl)))
 	})))
 	return &Server{dataDir: dataDir, ix: ix, wake: wake, handler: mux, otlp: rcv}, nil
 }

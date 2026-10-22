@@ -36,12 +36,7 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
-	authors := make(map[string]string, len(cfg.Tokens))
-	for _, t := range cfg.Tokens {
-		authors[t.SHA256] = t.Author
-	}
-
-	srv, err := server.New(cfg.DataDir, authors)
+	srv, err := server.New(cfg.DataDir, cfg.Identities())
 	if err != nil {
 		return err
 	}

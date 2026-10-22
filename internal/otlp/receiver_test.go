@@ -133,7 +133,7 @@ func TestReceiver(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
-			srv, err := server.New(dir, map[string]string{auth.Hash("tok"): "chris"})
+			srv, err := server.New(dir, auth.Authors(map[string]string{auth.Hash("tok"): "chris"}))
 			if err != nil {
 				t.Fatal(err)
 			}
