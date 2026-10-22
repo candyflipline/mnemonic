@@ -1,4 +1,4 @@
-package main
+package trace
 
 import (
 	"encoding/json"
@@ -132,7 +132,7 @@ func lsParseArgs(raw json.RawMessage) (*lsArgs, error) {
 	}
 	a.StartDatetime = strings.TrimSpace(*in.start)
 	a.EndDatetime = strings.TrimSpace(*in.end)
-	var aerr *ArgError
+	var aerr *argError
 	if a.StartUnixMs, a.StartDatetime, aerr = qParseOptionalDatetime("start_datetime", a.StartDatetime); aerr != nil {
 		return nil, aerr
 	}

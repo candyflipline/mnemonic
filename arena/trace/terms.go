@@ -1,4 +1,4 @@
-package main
+package trace
 
 import (
 	"bytes"
@@ -58,7 +58,7 @@ func filterProbes(t string) [3]uint32 {
 	return out
 }
 
-func (st *Store) postingsOf(term string) []byte {
+func (st *Part) postingsOf(term string) []byte {
 	for _, bit := range filterProbes(term) {
 		if st.termFilter[bit>>3]&(1<<(bit&7)) == 0 {
 			return nil

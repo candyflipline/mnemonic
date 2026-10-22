@@ -1,4 +1,4 @@
-package main
+package trace
 
 import (
 	"bytes"
@@ -7,11 +7,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/candyflipline/mnemonic/internal/layout"
 	"github.com/candyflipline/mnemonic/internal/normalize"
@@ -390,4 +396,188 @@ func readFrame(r io.ReaderAt, off int64, scratch []byte) ([][]byte, int64, error
 		b = b[k+int(l):]
 	}
 	return recs, off + 8 + clen, nil
+}
+
+func Ingest(root, store string, quiet time.Duration, settleAll bool) error {
+	debug.SetGCPercent(25)
+	if err := os.MkdirAll(srcDir(store), 0o755); err != nil {
+		return err
+	}
+	sources, err := listSources(root)
+	if err != nil {
+		return err
+	}
+	work := make(chan source)
+	var wg sync.WaitGroup
+	for range runtime.GOMAXPROCS(0) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for s := range work {
+				if _, err := ingestSource(root, store, s); err != nil {
+					fmt.Fprintf(os.Stderr, "ingest: %s: %v\n", s.mpath, err)
+				}
+			}
+		}()
+	}
+	for _, s := range sources {
+		work <- s
+	}
+	close(work)
+	wg.Wait()
+	newest := int64(0)
+	for _, s := range sources {
+		newest = max(newest, s.src.UpdatedMs)
+	}
+	var cks []ckpt
+	var srcs []stSource
+	for _, s := range sources {
+		row := stSource{Author: s.key.Author, Machine: s.key.Machine, UpdatedMs: s.src.UpdatedMs, Size: s.src.Size}
+		if c, ok := readCkpt(store, sourceKey(s.key)); ok {
+			if c.hot() && (settleAll || s.src.UpdatedMs <= newest-quiet.Milliseconds()) {
+				c.ColdZst = c.ZstSize
+				b, _ := json.Marshal(c)
+				if err := writeFileAtomic(ckptPath(store, c.Key), b); err != nil {
+					return err
+				}
+			}
+			cks = append(cks, c)
+			row.Events = c.Rows
+		}
+		srcs = append(srcs, row)
+	}
+	parts := planParts(cks)
+	ids := make([]string, 0, len(parts))
+	if err := os.MkdirAll(filepath.Join(store, "parts"), 0o755); err != nil {
+		return err
+	}
+	for _, members := range parts {
+		id := fingerprint(members)
+		if _, err := os.Stat(partDir(store, id)); err != nil {
+			if err := buildIndex(store, members, id, partDir(store, id)); err != nil {
+				return err
+			}
+		}
+		ids = append(ids, id)
+	}
+	mb, _ := json.Marshal(manifestFile{Parts: ids, Sources: srcs})
+	if cur, err := os.ReadFile(filepath.Join(store, "CURRENT")); err == nil && bytes.Equal(cur, mb) {
+		return nil
+	}
+	if err := writeFileAtomic(filepath.Join(store, "CURRENT"), mb); err != nil {
+		return err
+	}
+	gcParts(store, ids)
+	return gcLogs(store, cks)
+}
+
+// planParts groups sources that share a session into one component, so a
+// session and every event version that can compete for its uids live in one
+// part. A component with a hot source is a part of its own, rebuilt on each of
+// its appends; the settled ones go to partShards cold parts by a hash of their
+// least session id, rewritten only when a component settles into or leaves one.
+func planParts(cks []ckpt) [][]ckpt {
+	parent := make([]int, len(cks))
+	for i := range parent {
+		parent[i] = i
+	}
+	var find func(int) int
+	find = func(i int) int {
+		for parent[i] != i {
+			parent[i] = parent[parent[i]]
+			i = parent[i]
+		}
+		return i
+	}
+	owner := map[string]int{}
+	for i, c := range cks {
+		for _, s := range c.Sessions {
+			if j, ok := owner[s]; ok {
+				parent[find(i)] = find(j)
+			} else {
+				owner[s] = i
+			}
+		}
+	}
+	least := map[int]string{}
+	hot := map[int]bool{}
+	for i, c := range cks {
+		r := find(i)
+		k := c.Key
+		if len(c.Sessions) > 0 {
+			k = c.Sessions[0]
+		}
+		if cur, ok := least[r]; !ok || k < cur {
+			least[r] = k
+		}
+		hot[r] = hot[r] || c.hot()
+	}
+	cold := map[uint32][]ckpt{}
+	hotParts := map[string][]ckpt{}
+	for i, c := range cks {
+		r := find(i)
+		if hot[r] {
+			hotParts[least[r]] = append(hotParts[least[r]], c)
+			continue
+		}
+		h := fnv.New32a()
+		h.Write([]byte(least[r]))
+		s := h.Sum32() % partShards
+		cold[s] = append(cold[s], c)
+	}
+	keys := make([]uint32, 0, len(cold))
+	for k := range cold {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	out := make([][]ckpt, 0, len(keys)+len(hotParts))
+	for _, k := range keys {
+		out = append(out, cold[k])
+	}
+	hk := make([]string, 0, len(hotParts))
+	for k := range hotParts {
+		hk = append(hk, k)
+	}
+	slices.Sort(hk)
+	for _, k := range hk {
+		out = append(out, hotParts[k])
+	}
+	return out
+}
+
+const partShards = 256
+
+// gcParts removes part dirs the manifest does not name, and any half-built
+// part a killed build left behind.
+func gcParts(store string, keep []string) {
+	want := map[string]bool{}
+	for _, id := range keep {
+		want[id] = true
+	}
+	ents, _ := os.ReadDir(filepath.Join(store, "parts"))
+	for _, e := range ents {
+		if !want[e.Name()] {
+			os.RemoveAll(filepath.Join(store, "parts", e.Name()))
+		}
+	}
+}
+
+// gcLogs removes log generations no checkpoint names.
+func gcLogs(store string, cks []ckpt) error {
+	keep := map[string]bool{}
+	for _, c := range cks {
+		keep[filepath.Base(logPath(store, c.Key, c.Gen, "light"))] = true
+		keep[filepath.Base(logPath(store, c.Key, c.Gen, "heavy"))] = true
+		keep[filepath.Base(ckptPath(store, c.Key))] = true
+	}
+	ents, err := os.ReadDir(srcDir(store))
+	if err != nil {
+		return err
+	}
+	for _, e := range ents {
+		if !keep[e.Name()] {
+			os.Remove(filepath.Join(srcDir(store), e.Name()))
+		}
+	}
+	return nil
 }

@@ -1,4 +1,4 @@
-package main
+package trace
 
 import (
 	"encoding/binary"
@@ -66,7 +66,7 @@ func (db *DB) search(q searchQuery) (*searchResult, error) {
 		parts = nil
 		res.scopeExists = false
 		if ok {
-			parts = []*Store{st}
+			parts = []*Part{st}
 		}
 	}
 	sorted := slices.Clone(terms)
@@ -91,7 +91,7 @@ func (db *DB) search(q searchQuery) (*searchResult, error) {
 	}
 	norm := math.Max(avg, 1.0)
 	type hit struct {
-		st    *Store
+		st    *Part
 		d     int
 		score float64
 	}
@@ -155,7 +155,7 @@ func (db *DB) search(q searchQuery) (*searchResult, error) {
 
 // score sums BM25 over this part's postings for the docs q's filters and
 // scope pass, and reports whether q's session or turn scope exists here.
-func (st *Store) score(q searchQuery, terms []string, idf []float64, norm float64) (map[int]float64, bool) {
+func (st *Part) score(q searchQuery, terms []string, idf []float64, norm float64) (map[int]float64, bool) {
 	exists := true
 	lo, hi := 0, st.meta.Docs
 	if q.sessionOK {
@@ -222,7 +222,7 @@ func (st *Store) score(q searchQuery, terms []string, idf []float64, norm float6
 	return acc, exists
 }
 
-func (st *Store) hitRow(d int, s float64) (*mcpRow, bool, error) {
+func (st *Part) hitRow(d int, s float64) (*mcpRow, bool, error) {
 	r, th, err := st.hot(d)
 	if err != nil {
 		return nil, false, err

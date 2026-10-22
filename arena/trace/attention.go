@@ -1,4 +1,4 @@
-package main
+package trace
 
 import (
 	"bytes"
@@ -90,7 +90,7 @@ func faTimeOK(ms int64, sourceName string, q faQuery) bool {
 	return true
 }
 
-func (st *Store) touchOf(d int, r *Row) faTouch {
+func (st *Part) touchOf(d int, r *Row) faTouch {
 	ms := timeMs(r)
 	seq := st.turnSeq(d)
 	s := st.session(st.sessionOf(d))
@@ -138,7 +138,7 @@ func sortTouches(t []faTouch) {
 	sort.SliceStable(t, func(i, j int) bool { return faTouchLess(&t[i], &t[j]) })
 }
 
-func (st *Store) faExactTouches(q faQuery) ([]faTouch, error) {
+func (st *Part) faExactTouches(q faQuery) ([]faTouch, error) {
 	var out []faTouch
 	b := st.faExact
 	for len(b) > 0 {
@@ -226,7 +226,7 @@ func jstr(m map[string]json.RawMessage, key string) string {
 	return jsonExtractString(v)
 }
 
-func (st *Store) faSuffixTouches(q faQuery, compiled **faRegexps) ([]faTouch, error) {
+func (st *Part) faSuffixTouches(q faQuery, compiled **faRegexps) ([]faTouch, error) {
 	rel := q.Rel
 	runs := []string{}
 	for _, run := range faLiteralRun.FindAllString(rel, -1) {

@@ -1,4 +1,4 @@
-package main
+package trace
 
 import (
 	"crypto/sha256"
@@ -24,7 +24,7 @@ func qFormatDateTime(t time.Time) string {
 	return t.UTC().Format("2006-01-02 15:04:05.000")
 }
 
-func qParseOptionalDatetime(field, input string) (int64, string, *ArgError) {
+func qParseOptionalDatetime(field, input string) (int64, string, *argError) {
 	trimmed := strings.TrimSpace(input)
 	if trimmed == "" {
 		return 0, "", nil
@@ -39,7 +39,7 @@ func qParseOptionalDatetime(field, input string) (int64, string, *ArgError) {
 	return ms, trimmed, nil
 }
 
-func qValidateMillisecondPrecision(field, input string) *ArgError {
+func qValidateMillisecondPrecision(field, input string) *argError {
 	timeStart := strings.IndexByte(input, 'T')
 	if timeStart < 0 {
 		timeStart = strings.IndexByte(input, 't')
@@ -66,7 +66,7 @@ func qValidateMillisecondPrecision(field, input string) *ArgError {
 }
 
 // qParseExplicitTimezone: the wrapped parse error text is Go's, not chrono's.
-func qParseExplicitTimezone(field, input string) (int64, *ArgError) {
+func qParseExplicitTimezone(field, input string) (int64, *argError) {
 	if input == "" {
 		return 0, argErrorf("%s must be a non-empty RFC 3339 datetime", field)
 	}
@@ -104,7 +104,7 @@ func isDigits(s string) bool {
 	return true
 }
 
-func qNonEmptyFilter(field, raw string, present bool) (*string, *ArgError) {
+func qNonEmptyFilter(field, raw string, present bool) (*string, *argError) {
 	if !present {
 		return nil, nil
 	}

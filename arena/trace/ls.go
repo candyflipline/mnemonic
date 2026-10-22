@@ -1,4 +1,4 @@
-package main
+package trace
 
 import (
 	"encoding/json"
@@ -177,7 +177,7 @@ func writeLs(dir string, recs []lsRec) error {
 	return os.WriteFile(filepath.Join(dir, "ls.json"), b, 0o644)
 }
 
-func (st *Store) lsRecs() ([]lsRec, error) {
+func (st *Part) lsRecs() ([]lsRec, error) {
 	if st.ls != nil {
 		return st.ls, nil
 	}

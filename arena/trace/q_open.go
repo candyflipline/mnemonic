@@ -1,4 +1,4 @@
-package main
+package trace
 
 import (
 	"encoding/base64"
@@ -686,7 +686,7 @@ func openResultText(request, data map[string]any) string {
 	return header + "\n\n" + strings.Join(body, "\n")
 }
 
-func OpenErrorText(code, message string) string {
+func openErrorText(code, message string) string {
 	if code == "" {
 		code = "error"
 	}

@@ -1,4 +1,4 @@
-package main
+package trace
 
 import (
 	"encoding/json"
@@ -19,7 +19,7 @@ type manifestFile struct {
 // session's events, turns and rollups live in exactly one part; only BM25's
 // corpus statistics are summed across parts.
 type DB struct {
-	parts      []*Store
+	parts      []*Part
 	sessPart   map[string]int
 	scoredDocs uint64
 	totalLen   uint64
@@ -37,7 +37,7 @@ func readManifest(store string) (manifestFile, error) {
 
 func partDir(store, id string) string { return filepath.Join(store, "parts", id) }
 
-func openDB(store string) (*DB, error) {
+func OpenDB(store string) (*DB, error) {
 	m, err := readManifest(store)
 	if err != nil {
 		return nil, err
@@ -59,15 +59,15 @@ func openDB(store string) (*DB, error) {
 	return db, nil
 }
 
-func (db *DB) close() {
+func (db *DB) Close() {
 	for _, st := range db.parts {
 		st.close()
 	}
 }
 
-// currentStamp names the CURRENT file batch last opened: every commit renames
+// CurrentStamp names the CURRENT file batch last opened: every commit renames
 // a new inode into place.
-func currentStamp(store string) (uint64, bool) {
+func CurrentStamp(store string) (uint64, bool) {
 	fi, err := os.Stat(filepath.Join(store, "CURRENT"))
 	if err != nil {
 		return 0, false
@@ -79,7 +79,7 @@ func currentStamp(store string) (uint64, bool) {
 	return st.Ino, true
 }
 
-func (db *DB) part(sessionID string) (*Store, bool) {
+func (db *DB) part(sessionID string) (*Part, bool) {
 	i, ok := db.sessPart[sessionID]
 	if !ok {
 		return nil, false

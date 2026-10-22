@@ -1,4 +1,4 @@
-package main
+package trace
 
 import (
 	"encoding/binary"
@@ -10,9 +10,9 @@ import (
 	"syscall"
 )
 
-// Store is a read-only view of one committed index plus the source logs it
+// Part is a read-only view of one committed index plus the source logs it
 // points into.
-type Store struct {
+type Part struct {
 	dir                       string
 	meta                      indexMeta
 	docs, sessions, sessStr   []byte
@@ -44,7 +44,7 @@ func newFrameCache() *frameCache {
 }
 
 type frameKey struct {
-	part  *Store
+	part  *Part
 	src   uint16
 	frame uint64
 }
@@ -65,8 +65,8 @@ func mmapFile(path string) ([]byte, error) {
 	return syscall.Mmap(int(f.Fd()), 0, int(fi.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
 }
 
-func openPart(store, dir string, fc *frameCache) (*Store, error) {
-	st := &Store{dir: dir, fc: fc}
+func openPart(store, dir string, fc *frameCache) (*Part, error) {
+	st := &Part{dir: dir, fc: fc}
 	mb, err := os.ReadFile(filepath.Join(dir, "meta.json"))
 	if err != nil {
 		return nil, err
@@ -103,7 +103,7 @@ func openPart(store, dir string, fc *frameCache) (*Store, error) {
 	return st, nil
 }
 
-func (st *Store) close() {
+func (st *Part) close() {
 	for _, m := range st.maps {
 		if len(m) > 0 {
 			syscall.Munmap(m)
@@ -114,20 +114,20 @@ func (st *Store) close() {
 	}
 }
 
-func (st *Store) docRec(d int) []byte { return st.docs[d*docWidth : (d+1)*docWidth] }
+func (st *Part) docRec(d int) []byte { return st.docs[d*docWidth : (d+1)*docWidth] }
 
-func (st *Store) flags(d int) uint16 { return binary.LittleEndian.Uint16(st.docRec(d)[12:]) }
-func (st *Store) harnessOf(d int) string {
+func (st *Part) flags(d int) uint16 { return binary.LittleEndian.Uint16(st.docRec(d)[12:]) }
+func (st *Part) harnessOf(d int) string {
 	return st.meta.Harnesses[st.docRec(d)[14]]
 }
-func (st *Store) sourceNameOf(d int) string {
+func (st *Part) sourceNameOf(d int) string {
 	return st.meta.SourceNames[st.docRec(d)[15]]
 }
-func (st *Store) sessionOf(d int) int  { return int(binary.LittleEndian.Uint32(st.docRec(d)[16:])) }
-func (st *Store) turnSeq(d int) uint32 { return binary.LittleEndian.Uint32(st.docRec(d)[20:]) }
-func (st *Store) ordinal(d int) uint32 { return binary.LittleEndian.Uint32(st.docRec(d)[24:]) }
-func (st *Store) docLen(d int) uint32  { return binary.LittleEndian.Uint32(st.docRec(d)[28:]) }
-func (st *Store) timeMsOf(d int) int64 { return int64(binary.LittleEndian.Uint64(st.docRec(d)[32:])) }
+func (st *Part) sessionOf(d int) int  { return int(binary.LittleEndian.Uint32(st.docRec(d)[16:])) }
+func (st *Part) turnSeq(d int) uint32 { return binary.LittleEndian.Uint32(st.docRec(d)[20:]) }
+func (st *Part) ordinal(d int) uint32 { return binary.LittleEndian.Uint32(st.docRec(d)[24:]) }
+func (st *Part) docLen(d int) uint32  { return binary.LittleEndian.Uint32(st.docRec(d)[28:]) }
+func (st *Part) timeMsOf(d int) int64 { return int64(binary.LittleEndian.Uint64(st.docRec(d)[32:])) }
 
 const sessWidth = 32
 
@@ -138,7 +138,7 @@ type sessInfo struct {
 	completed   bool
 }
 
-func (st *Store) session(i int) sessInfo {
+func (st *Part) session(i int) sessInfo {
 	b := st.sessions[i*sessWidth:]
 	so := binary.LittleEndian.Uint32(b[24:])
 	se := binary.LittleEndian.Uint32(st.sessions[st.nSessions*sessWidth:])
@@ -155,7 +155,7 @@ func (st *Store) session(i int) sessInfo {
 	}
 }
 
-func (st *Store) sessionIndex(id string) (int, bool) {
+func (st *Part) sessionIndex(id string) (int, bool) {
 	i := sort.Search(st.nSessions, func(i int) bool { return st.session(i).id >= id })
 	if i < st.nSessions && st.session(i).id == id {
 		return i, true
@@ -163,7 +163,7 @@ func (st *Store) sessionIndex(id string) (int, bool) {
 	return 0, false
 }
 
-func (st *Store) sessionRange(id string) (int, int, bool) {
+func (st *Part) sessionRange(id string) (int, int, bool) {
 	i, ok := st.sessionIndex(id)
 	if !ok {
 		return 0, 0, false
@@ -180,7 +180,7 @@ type turnInfo struct {
 	terminal  int
 }
 
-func (st *Store) turn(session int, seq uint32) (turnInfo, bool) {
+func (st *Part) turn(session int, seq uint32) (turnInfo, bool) {
 	at := func(i int) (uint32, uint32) {
 		b := st.turns[i*turnWidth:]
 		return binary.LittleEndian.Uint32(b), binary.LittleEndian.Uint32(b[4:])
@@ -203,7 +203,7 @@ func (st *Store) turn(session int, seq uint32) (turnInfo, bool) {
 	}, true
 }
 
-func (st *Store) row(d int) (*Row, error) {
+func (st *Part) row(d int) (*Row, error) {
 	rec := st.docRec(d)
 	k := frameKey{part: st, src: binary.LittleEndian.Uint16(rec[10:]), frame: binary.LittleEndian.Uint64(rec[0:])}
 	idx := int(binary.LittleEndian.Uint16(rec[8:]))
@@ -235,7 +235,7 @@ func (st *Store) row(d int) (*Row, error) {
 }
 
 // heavyOf returns payload_json and token_usage_json of row r from source src.
-func (st *Store) heavyOf(src uint16, r *Row) (string, string, error) {
+func (st *Part) heavyOf(src uint16, r *Row) (string, string, error) {
 	k := frameKey{part: st, src: src, frame: r.HeavyFrame}
 	recs, ok := st.fc.heavy[k]
 	if !ok {
@@ -267,7 +267,7 @@ func (st *Store) heavyOf(src uint16, r *Row) (string, string, error) {
 	return out[0], out[1], nil
 }
 
-func (st *Store) hydrate(r *navRow) error {
+func (st *Part) hydrate(r *navRow) error {
 	row, err := st.row(r.doc)
 	if err != nil {
 		return err
@@ -281,7 +281,7 @@ func (st *Store) hydrate(r *navRow) error {
 	return nil
 }
 
-func (st *Store) hydrateKept(sc *sessionScan) error {
+func (st *Part) hydrateKept(sc *sessionScan) error {
 	var rows []*navRow
 	if sc.target != nil {
 		rows = append(rows, sc.target)
@@ -329,7 +329,7 @@ func navRowOf(r *Row, d int, turnSeq uint32) navRow {
 	}
 }
 
-func (st *Store) sessionOfUID(uid string) (string, bool, error) {
+func (st *Part) sessionOfUID(uid string) (string, bool, error) {
 	h := uidHash(uid)
 	n := len(st.uids) / 12
 	at := func(i int) uint64 { return binary.LittleEndian.Uint64(st.uids[i*12:]) }
@@ -349,7 +349,7 @@ func (st *Store) sessionOfUID(uid string) (string, bool, error) {
 
 // hot decodes doc d's hot record (see hotRow) and returns it with the hash of
 // its text_content.
-func (st *Store) hot(d int) (*Row, uint64, error) {
+func (st *Part) hot(d int) (*Row, uint64, error) {
 	lo := binary.LittleEndian.Uint64(st.hotOff[d*16:])
 	th := binary.LittleEndian.Uint64(st.hotOff[d*16+8:])
 	hi := binary.LittleEndian.Uint64(st.hotOff[(d+1)*16:])
@@ -363,7 +363,7 @@ func (st *Store) hot(d int) (*Row, uint64, error) {
 // faCandidates returns the ascending fa.blob entries that hold every
 // trigram of needle, a superset of the entries containing it; ok is false
 // when needle is too short to narrow anything.
-func (st *Store) faCandidates(needle []byte) ([]int, bool) {
+func (st *Part) faCandidates(needle []byte) ([]int, bool) {
 	if len(needle) < 3 {
 		return nil, false
 	}

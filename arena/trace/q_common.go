@@ -1,7 +1,8 @@
-package main
+package trace
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"slices"
@@ -31,8 +32,8 @@ func sqlQuote(s string) string {
 
 var b64RawURL = base64.RawURLEncoding
 
-func argErrorf(format string, args ...any) *ArgError {
-	return &ArgError{Msg: fmt.Sprintf(format, args...)}
+func argErrorf(format string, args ...any) *argError {
+	return &argError{Msg: fmt.Sprintf(format, args...)}
 }
 
 type idKind string
@@ -549,3 +550,46 @@ func jsonAsFloat64(v any) float64 {
 		return 0
 	}
 }
+
+func lsObjectFields(raw json.RawMessage, allowed ...string) (map[string]json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		return nil, err
+	}
+	for key := range fields {
+		ok := false
+		for _, a := range allowed {
+			if key == a {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return nil, argErrorf("unknown field %q", key)
+		}
+	}
+	return fields, nil
+}
+
+func stringAt(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	s, _ := m[key].(string)
+	return s
+}
+
+func intAt(m map[string]any, key string) int {
+	n, _ := intAtOK(m, key)
+	return n
+}
+
+func intAtOK(m map[string]any, key string) (int, bool) {
+	if m == nil {
+		return 0, false
+	}
+	n, ok := m[key].(int)
+	return n, ok
+}
+
+func sprintf(format string, args ...any) string { return fmt.Sprintf(format, args...) }
