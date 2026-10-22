@@ -40,11 +40,13 @@ func (c Config) checkEvery() time.Duration {
 }
 
 // Head is what the keeper serves: its committed manifest, the hot parts that
-// stay on its disk, and every local part open by ID.
+// stay on its disk, every local part open by ID, and the source rows of the
+// manifest, which get_ingest_status reads.
 type Head struct {
 	Manifest Manifest
 	Hot      []PartRef
 	Parts    map[string]*trace.Part
+	status   *trace.DB
 }
 
 type Keeper struct {
@@ -70,6 +72,7 @@ type local struct {
 	parts   []trace.LocalPart
 	sources json.RawMessage
 	open    map[string]*trace.Part
+	status  *trace.DB
 	stamp   uint64
 }
 
@@ -96,7 +99,11 @@ func Take(ctx context.Context, s obj.Store, cfg Config) (*Keeper, error) {
 		doomed:   map[obj.Key]time.Time{},
 		changed:  make(chan struct{}),
 	}
-	k.head.Store(&Head{Manifest: m})
+	status, err := trace.SourcesDB(m.Sources)
+	if err != nil {
+		return nil, err
+	}
+	k.head.Store(&Head{Manifest: m, status: status})
 	k.checked.Store(&claimed)
 	return k, nil
 }
@@ -191,7 +198,11 @@ func (k *Keeper) readLocal(stamp uint64) (local, error) {
 	if err != nil {
 		return local{}, err
 	}
-	l := local{parts: parts, sources: sources, open: map[string]*trace.Part{}, stamp: stamp}
+	status, err := trace.SourcesDB(sources)
+	if err != nil {
+		return local{}, err
+	}
+	l := local{parts: parts, sources: sources, open: map[string]*trace.Part{}, status: status, stamp: stamp}
 	for _, lp := range parts {
 		if p, ok := k.head.Load().Parts[lp.ID]; ok {
 			l.open[lp.ID] = p
@@ -317,7 +328,7 @@ func (k *Keeper) doom(key obj.Key, notBefore time.Time, live map[obj.Key]bool) {
 func (k *Keeper) install(m Manifest, hot []PartRef, l local) {
 	k.mu.Lock()
 	old, oldChanged := *k.head.Load(), k.changed
-	k.head.Store(&Head{Manifest: m, Hot: hot, Parts: l.open})
+	k.head.Store(&Head{Manifest: m, Hot: hot, Parts: l.open, status: l.status})
 	k.stamp = l.stamp
 	moved := m.Gen != old.Manifest.Gen || m.Seq != old.Manifest.Seq
 	if moved {
@@ -429,15 +440,8 @@ func (k *Keeper) Wait(ctx context.Context, g Gen, s Seq) bool {
 	}
 }
 
-// IngestStatus answers get_ingest_status from the local store's committed
-// sources, between cycles.
+// IngestStatus answers get_ingest_status from the source rows of the head
+// the last install made, the snapshot every Read serves. It holds no lock.
 func (k *Keeper) IngestStatus(args json.RawMessage) (json.RawMessage, string, error) {
-	k.cycle.Lock()
-	defer k.cycle.Unlock()
-	db, err := trace.OpenDB(k.cfg.Local)
-	if err != nil {
-		return nil, "", err
-	}
-	defer db.Close()
-	return trace.Call(db, "get_ingest_status", args)
+	return trace.Call(k.head.Load().status, "get_ingest_status", args)
 }
