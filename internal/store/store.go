@@ -25,7 +25,8 @@ import (
 // tail, never stored data.
 type manifestBody struct {
 	wire.Source
-	ZstSize int64 `json:"zst_size"`
+	ZstSize int64    `json:"zst_size"`
+	Applied []string `json:"applied,omitempty"`
 }
 
 type Store struct {
@@ -143,6 +144,11 @@ func (s *Store) servePut(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(body) > 0 && body[len(body)-1] != '\n' {
 		http.Error(w, "body must be non-empty whole lines", http.StatusBadRequest)
+		return
+	}
+
+	if machine == ServerMachine {
+		http.Error(w, "machine is reserved for server-owned sources", http.StatusForbidden)
 		return
 	}
 
