@@ -24,7 +24,11 @@ S/CURRENT                                       JSON {parts, sources}, tmp+fsync
 - **Part** (`build.go`). Fixed-width little-endian arrays, all mmapped:
   - `docs`: 40 B per event, in session window order.
   - `sessions`, `turns`, and `uids` (fnv64 to doc).
-  - `terms` and `postings`.
+  - `terms`, `terms.idx`, `terms.filter` and `postings`. Terms are sorted and
+    front-coded in blocks of 16, each entry carrying its postings offset and
+    length; `terms.idx` holds each block's start, and `terms.filter` is a
+    2 KiB bloom filter (3 probes), so a part without a query term costs three
+    bit tests and no dictionary page.
   - `hot`: an uncompressed hit record per doc plus a text_content hash. A
     search or file_attention hit reads one record, never a log frame.
   - `fa.exact`, `fa.tio`, `fa.blob`, and the `fa.tri` trigram index.
@@ -64,16 +68,21 @@ Store for the arena raw (22 MB, 70 sources, 17.7k events): logs 29.7 MB and
      leaves either the old checkpoint (the junk tail is cut on the next run),
      or the new checkpoint over synced logs.
 2. **Plan.** Union-find joins sources that share a session id.
-   - Each component goes to shard `fnv32(least session id) % 256`.
-   - A part is that shard's sources. Its name is the fingerprint of their
-     checkpoints (key, gen, lengths, rows).
+   - A component with a hot source is a **hot part** of its own.
+   - A settled component goes to the **cold part** of shard
+     `fnv32(least session id) % 256`, with the other settled components there.
+   - A part's name is the fingerprint of its sources' checkpoints (key, gen,
+     lengths, rows), so a settled source moving cold changes no name but its
+     shard's.
 3. **Build only what is missing.** A part dir that exists is complete:
    it is built in `<id>.tmp`, fsynced, then renamed. Unchanged parts are
    reused; a killed build leaves a `.tmp` that GC removes.
    - Within a part, winners are: the highest version per uid within a source,
      then version desc and lake path across sources. Then come session order,
      turn_seq, ordinals and rollups.
-4. **Commit.** `CURRENT` is rewritten (tmp+fsync+rename) only if its bytes
+4. **Commit.** Every rename of a checkpoint, part or `CURRENT` fsyncs the
+   parent directory before (so the entries of new logs or part files are
+   durable first) and after. `CURRENT` is rewritten (tmp+fsync+rename) only if its bytes
    changed, which makes ingest idempotent. After that, GC removes the part
    dirs and log generations the new state does not name. A batch still
    reading keeps its open files.
@@ -85,10 +94,40 @@ session. Every version that competes for a uid is then in the same part. If a
 uid ever spans sessions, cross-part winners would not be resolved; nothing
 checks for this.
 
+## Hot and cold
+
+A source is **hot** while its checkpoint has grown since it last settled:
+`zst_size != cold_zst` in the checkpoint. It **settles** at the first ingest
+where its manifest `updated_ms` is at least `-quiet` (default 15 min) behind
+the newest `updated_ms` in the root, or at any ingest run with `-settle`.
+Settling writes `cold_zst = zst_size` into the checkpoint (tmp, fsync,
+rename).
+
+- The clock is the server's receive stamp in the raw manifests, never the
+  ingest's wall clock. The layout is then a function of raw, the checkpoints
+  and the flags, and a re-run with nothing new changes nothing.
+- Settling is sticky: a plain run after `-settle` keeps everything cold.
+- A settled source that is appended to again is hot again. Its component
+  leaves its cold part, which is rebuilt once without it, and becomes a hot
+  part. When it goes quiet, the cold part is rebuilt once more with it.
+- A fresh or re-parsed source starts hot (`cold_zst` 0) and settles in the
+  same run when it is already quiet, so a full rebuild lands mostly cold.
+- Results do not depend on the layout. Winners stay inside one component,
+  BM25 sums per-part stats, and every merge sorts on score, time and uid.
+  The checker's root has one `updated_ms` for every source, so every source
+  stays hot there (70 single-component parts). A `-settle` store answers
+  the 63 public calls identically (scratch run).
+
+So an append rebuilds only its component's hot part, and a cold part is
+rewritten only when a component settles into it or leaves it.
+
 ## Freshness
 
-`batch` serves the `CURRENT` it opened, fresh as of the last `ingest`. An append
-costs a parse of its new zst frames plus a rebuild of its one part.
+`batch` stats `CURRENT` before every call. When its inode changed, it opens
+the new manifest, then unmaps and closes the old parts. Calls run one at a
+time, so no call is in flight across the swap. If the open fails, for
+example because a later ingest removed a part in between, the old snapshot
+keeps serving and the next call retries.
 
 ## Rejected alternatives
 
@@ -108,14 +147,27 @@ costs a parse of its new zst frames plus a rebuild of its one part.
 ## At 500x (8.8M events, 20 GB raw)
 
 - **Merge policy.** There are no merges: a part is replaced whole. 256 fixed
-  shards make about 34k events per part.
-  - An ingest touching m sources rebuilds at most m parts.
-  - Each rebuild reads that part's light logs (about 16 MB) and writes its
-    index (about 60 MB). These sizes are scaled from 8.2 MB of light and
-    30.7 MB of parts here (inferred).
-  - So write amplification is fixed per touched part, not per appended byte.
-    A 1 KB append costs about 60 MB of writes. That is the price of skipping
-    tombstones.
+  cold shards make about 34k events per part, plus one hot part per active
+  component.
+  - An append rebuilds only its component's hot part: O(that session), not
+    O(shard).
+  - A cold shard is rewritten once when a component settles into it and once
+    when a settled one wakes up. Each rewrite reads the shard's light logs
+    (about 16 MB) and writes its index (about 60 MB), scaled from 8.2 MB of
+    light and 30.7 MB of parts here (inferred).
+  - Measured here with every source in one 17.7k-event cold shard
+    (`partShards = 1`, about half a 500x shard) and 20 appends of 83 B to
+    25 KB to one source: before, each append that adds an event writes
+    23.2 MB at 136 to 158 MB RSS (20 appends, 301.7 MB). After, the first
+    append writes 23.3 MB at 132 MB RSS (its component leaves the shard),
+    then 237 to 268 KB at 22 to 25 MB RSS (20 appends, 26.5 MB). Appends that
+    end mid-line write about 7 KB (log and checkpoint only). At 256 shards
+    this sample puts the source alone in its shard, so before and after both
+    write 3.3 MB over the 20 appends.
+  - Not bounded: a long active session rebuilds its whole hot part on every
+    append; a component that joins a hot source to a large settled one is hot
+    as a whole; many sessions settling in one ingest rewrite that many cold
+    shards; hot parts add to the part count search fans out over.
   - Changing `partShards` re-plans everything once. When parts outgrow the
     budget, double it. Resharding is not automated.
 - **Peak ingest RSS.** The bound is 4 parse workers plus one part build.
@@ -143,8 +195,10 @@ costs a parse of its new zst frames plus a rebuild of its one part.
   - It grows with sessions and parts, not events. Each part costs two fds per source and 15 mappings, so 256 parts means
     about 3.8k mappings.
 - **Latency.**
-  - search fans out over 256 dictionaries per term, and exhaustive BM25 on
-    common terms needs block-max WAND.
+  - search fans out over 256 cold and the hot dictionaries per term. The
+    term filter skips a part that lacks the term with three bit tests; on
+    this sample's 70 parts it bought no measured search speed (p50/p99
+    166/778 µs before, 174/919 µs after, on a loaded machine) and 2.1 MB of
+    store. Exhaustive BM25 on common terms needs block-max WAND.
   - file_attention's trigram intersection stays small. Its cost moves to the
     per-candidate JSON and regex work.
-- Directory fsync after renames is missing: needed for power loss, not kill -9.
