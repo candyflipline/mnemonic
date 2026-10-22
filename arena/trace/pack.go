@@ -21,9 +21,7 @@ const (
 )
 
 // packIndex is the footer of a packed part: every member's place in the blob.
-// Store is the dir whose source logs the part's docs point into.
 type packIndex struct {
-	Store   string       `json:"store"`
 	Members []packMember `json:"members"`
 }
 
@@ -49,16 +47,12 @@ func (p *packWriter) Write(b []byte) (int, error) {
 // Pack writes the part dir as one blob: each file at a 4 KiB-aligned offset,
 // then the JSON index, its length as u64 LE, and the magic.
 func Pack(partDir string, w io.Writer) (sha256hex string, size int64, err error) {
-	abs, err := filepath.Abs(partDir)
-	if err != nil {
-		return "", 0, err
-	}
-	ents, err := os.ReadDir(abs)
+	ents, err := os.ReadDir(partDir)
 	if err != nil {
 		return "", 0, err
 	}
 	pw := &packWriter{w: w, h: sha256.New()}
-	idx := packIndex{Store: filepath.Dir(filepath.Dir(abs))}
+	var idx packIndex
 	for _, e := range ents {
 		if !e.Type().IsRegular() {
 			return "", 0, fmt.Errorf("pack %s: %s is not a regular file", partDir, e.Name())
@@ -69,7 +63,7 @@ func Pack(partDir string, w io.Writer) (sha256hex string, size int64, err error)
 			}
 		}
 		off := pw.n
-		f, err := os.Open(filepath.Join(abs, e.Name()))
+		f, err := os.Open(filepath.Join(partDir, e.Name()))
 		if err != nil {
 			return "", 0, err
 		}
@@ -100,7 +94,7 @@ func OpenPacked(path string) (*Part, error) {
 	if err != nil {
 		return nil, err
 	}
-	members, store, err := readPackIndex(blob)
+	members, err := readPackIndex(blob)
 	if err != nil {
 		if len(blob) > 0 {
 			syscall.Munmap(blob)
@@ -119,7 +113,7 @@ func OpenPacked(path string) (*Part, error) {
 		syscall.Munmap(blob)
 		return nil, err
 	}
-	st, err := openPart(store, meta, member, member)
+	st, err := openPart(meta, member, member)
 	st.maps = [][]byte{blob}
 	if err != nil {
 		st.Close()
@@ -128,26 +122,26 @@ func OpenPacked(path string) (*Part, error) {
 	return st, nil
 }
 
-func readPackIndex(blob []byte) (map[string][]byte, string, error) {
+func readPackIndex(blob []byte) (map[string][]byte, error) {
 	tl := int64(8 + len(packMagic))
 	end := int64(len(blob)) - tl
 	if end < 0 || !bytes.Equal(blob[end+8:], []byte(packMagic)) {
-		return nil, "", fmt.Errorf("not a packed part")
+		return nil, fmt.Errorf("not a packed part")
 	}
 	il := int64(binary.LittleEndian.Uint64(blob[end:]))
 	if il < 0 || il > end {
-		return nil, "", fmt.Errorf("index length %d out of range", il)
+		return nil, fmt.Errorf("index length %d out of range", il)
 	}
 	var idx packIndex
 	if err := json.Unmarshal(blob[end-il:end], &idx); err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	members := make(map[string][]byte, len(idx.Members))
 	for _, m := range idx.Members {
 		if m.Off < 0 || m.Size < 0 || m.Off%packAlign != 0 || m.Off+m.Size > end-il {
-			return nil, "", fmt.Errorf("member %s out of range", m.Name)
+			return nil, fmt.Errorf("member %s out of range", m.Name)
 		}
 		members[m.Name] = blob[m.Off : m.Off+m.Size : m.Off+m.Size]
 	}
-	return members, idx.Store, nil
+	return members, nil
 }
