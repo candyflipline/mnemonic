@@ -110,6 +110,14 @@ func ListParts(store string) ([]LocalPart, json.RawMessage, error) {
 	out := make([]LocalPart, 0, len(m.Parts))
 	for _, id := range m.Parts {
 		dir := partDir(store, id)
+		d, ok, err := readDelta(dir)
+		if err != nil {
+			return nil, nil, err
+		}
+		if ok {
+			out = append(out, LocalPart{ID: id, Dir: dir, Hot: slices.Contains(m.Hot, id), Sessions: d.Sessions, ScoredDocs: d.ScoredDocs, TotalLen: d.TotalLen})
+			continue
+		}
 		st, err := OpenPartDir(dir)
 		if err != nil {
 			return nil, nil, err

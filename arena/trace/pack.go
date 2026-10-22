@@ -113,7 +113,7 @@ func OpenPacked(path string) (*Part, error) {
 		syscall.Munmap(blob)
 		return nil, err
 	}
-	st, err := openPart(meta, member, member)
+	st, err := openPart(meta, member)
 	st.maps = [][]byte{blob}
 	if err != nil {
 		st.Close()
