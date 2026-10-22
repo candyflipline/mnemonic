@@ -747,7 +747,7 @@ FROM events WHERE `+inS+` GROUP BY session_id, turn_seq`,
   cast(count(*) FILTER (WHERE actor_kind = 'assistant' AND event_kind = 'message') AS UBIGINT),
   max(CASE WHEN payload_type = 'task_complete' THEN 1 ELSE 0 END)
 FROM events WHERE `+inS+` GROUP BY session_id`)
-	stmts = append(stmts, "INSERT INTO pending_spans SELECT session_id FROM s")
+	stmts = append(stmts, "INSERT INTO pending_spans SELECT DISTINCT session_id FROM s WHERE NOT EXISTS (SELECT 1 FROM pending_spans p WHERE p.session_id = s.session_id)")
 	return execAll(ctx, c, append(stmts, "DROP TABLE ord"))
 }
 

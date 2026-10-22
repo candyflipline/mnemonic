@@ -138,15 +138,50 @@ func TestHarnessSpanTrees(t *testing.T) {
 				t.Fatalf("%d tool_call_ids, %d execute_tool spans", calls, tools)
 			}
 
-			if _, err := ix.DB().Exec("UPDATE meta SET spans_fingerprint = ''"); err != nil {
+			if _, err := ix.DB().Exec("DELETE FROM spans; UPDATE meta SET spans_fingerprint = ''"); err != nil {
 				t.Fatal(err)
 			}
 			ix.Close()
 			ix = open()
 			defer ix.Close()
+			if n := len(spanRows(t, ix)); n != 0 {
+				t.Fatalf("%d spans before the re-derive, want 0", n)
+			}
+			if _, err := ix.Converge(context.Background(), RetryFailed); err != nil {
+				t.Fatal(err)
+			}
 			if again := spanRows(t, ix); !reflect.DeepEqual(again, got) {
 				t.Fatalf("spans changed on re-derive:\n%v\nwas:\n%v", again, got)
 			}
 		})
+	}
+}
+
+func TestReorderQueuesEachSessionOnce(t *testing.T) {
+	ix, err := Open(t.TempDir(), Options{MemoryLimit: "1GB", FlagsSQL: "0::USMALLINT"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ix.Close()
+	ctx := context.Background()
+	c, err := ix.DB().Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.ExecContext(ctx, "CREATE TEMP TABLE s AS SELECT unnest(['a', 'b']) AS session_id"); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if err := reorder(ctx, c, &ConvergeStats{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var queued, distinct int
+	if err := c.QueryRowContext(ctx, "SELECT count(*), count(DISTINCT session_id) FROM pending_spans").Scan(&queued, &distinct); err != nil {
+		t.Fatal(err)
+	}
+	if queued != 2 || distinct != 2 {
+		t.Fatalf("pending_spans holds %d rows for %d sessions after three reorders, want 2 and 2", queued, distinct)
 	}
 }
