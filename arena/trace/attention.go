@@ -102,36 +102,67 @@ func (st *Part) touchOf(d int, r *Row) faTouch {
 	}
 }
 
+// faLists is one reader's exact and suffix touches, each sorted and cut to
+// MaxRows+1; faTouchLess is total, so the global top rows are in the union.
+type faLists struct {
+	Exact  []faTouch `json:"exact"`
+	Suffix []faTouch `json:"suffix"`
+}
+
 func (db *DB) faTouches(q faQuery) ([]faTouch, error) {
+	return faGather(q, func() ([]faLists, error) {
+		l, err := db.faLists(q)
+		return []faLists{l}, err
+	})
+}
+
+// faGather merges the lists gather collects, calling it only when q can match.
+func faGather(q faQuery, gather func() ([]faLists, error)) ([]faTouch, error) {
 	if q.Rel == "" {
 		return nil, argErrorf("file_attention requires a non-empty path tail")
 	}
 	if q.ProjectScope && q.NormalizedPID == "" {
 		return []faTouch{}, nil
 	}
-	limitPlus := q.MaxRows + 1
-	var exact, suffix []faTouch
+	lists, err := gather()
+	if err != nil {
+		return nil, err
+	}
+	var all faLists
+	for _, l := range lists {
+		all.Exact, all.Suffix = append(all.Exact, l.Exact...), append(all.Suffix, l.Suffix...)
+	}
+	all = all.top(q.MaxRows + 1)
+	return faMergeTouches(append(all.Exact, all.Suffix...), q.MaxRows+1), nil
+}
+
+func (l faLists) top(n int) faLists {
+	sortTouches(l.Exact)
+	if len(l.Exact) > n {
+		l.Exact = l.Exact[:n]
+	}
+	sortTouches(l.Suffix)
+	if len(l.Suffix) > n {
+		l.Suffix = l.Suffix[:n]
+	}
+	return l
+}
+
+func (db *DB) faLists(q faQuery) (faLists, error) {
+	var l faLists
 	var compiled *faRegexps
 	for _, st := range db.parts {
 		e, err := st.faExactTouches(q)
 		if err != nil {
-			return nil, err
+			return l, err
 		}
 		s, err := st.faSuffixTouches(q, &compiled)
 		if err != nil {
-			return nil, err
+			return l, err
 		}
-		exact, suffix = append(exact, e...), append(suffix, s...)
+		l.Exact, l.Suffix = append(l.Exact, e...), append(l.Suffix, s...)
 	}
-	sortTouches(exact)
-	if len(exact) > limitPlus {
-		exact = exact[:limitPlus]
-	}
-	sortTouches(suffix)
-	if len(suffix) > limitPlus {
-		suffix = suffix[:limitPlus]
-	}
-	return faMergeTouches(append(exact, suffix...), limitPlus), nil
+	return l.top(q.MaxRows + 1), nil
 }
 
 func sortTouches(t []faTouch) {

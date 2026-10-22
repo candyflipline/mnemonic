@@ -24,17 +24,28 @@ var tools = map[string]handler{
 
 // Call runs one MCP tool over db, as batch answers a line.
 func Call(db *DB, tool string, args json.RawMessage) (json.RawMessage, string, error) {
-	v, text, err := dispatch(db, tool, args)
+	return encodeAnswer(dispatch(db, tool, args))
+}
+
+func encodeAnswer(v any, text string, err error) (json.RawMessage, string, error) {
 	if v == nil {
 		return nil, text, err
 	}
+	b, merr := encodeJSON(v)
+	if merr != nil {
+		return nil, text, merr
+	}
+	return b, text, err
+}
+
+func encodeJSON(v any) (json.RawMessage, error) {
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)
 	enc.SetEscapeHTML(false)
-	if merr := enc.Encode(v); merr != nil {
-		return nil, text, merr
+	if err := enc.Encode(v); err != nil {
+		return nil, err
 	}
-	return bytes.TrimSuffix(b.Bytes(), []byte("\n")), text, err
+	return bytes.TrimSuffix(b.Bytes(), []byte("\n")), nil
 }
 
 func dispatch(db *DB, tool string, args json.RawMessage) (data any, text string, err error) {

@@ -53,24 +53,47 @@ func textHash(s string) uint64 {
 	return h.Sum64()
 }
 
-func (db *DB) search(q searchQuery) (*searchResult, error) {
+// searchStats is BM25's corpus statistics: df per sorted query term, summed
+// over every part, and the scored doc count and length the part metas carry.
+type searchStats struct {
+	DF       []float64 `json:"df"`
+	Docs     uint64    `json:"docs"`
+	TotalLen uint64    `json:"len"`
+}
+
+// scoredHits is one reader's hits at or above its own limit-th score, ties
+// kept. Dropped holds the scores of hits that produced no row, which still
+// count toward the cut.
+type scoredHits struct {
+	rows    []*mcpRow
+	dropped []float64
+	exists  bool
+}
+
+func searchTerms(q searchQuery) ([]string, error) {
 	terms := tokenizeQuery(q.query, bm25MaxQueryTerms)
 	if len(terms) == 0 {
 		return nil, argErrorf("query has no searchable terms (tokens shorter than 2 characters are excluded)")
 	}
-	limit := q.nHits + 1
-	res := &searchResult{scopeExists: true}
-	parts := db.parts
-	if q.sessionOK {
-		st, ok := db.part(q.sessionID)
-		parts = nil
-		res.scopeExists = false
-		if ok {
-			parts = []*Part{st}
-		}
-	}
 	sorted := slices.Clone(terms)
 	slices.Sort(sorted)
+	return sorted, nil
+}
+
+func (db *DB) search(q searchQuery) (*searchResult, error) {
+	sorted, err := searchTerms(q)
+	if err != nil {
+		return nil, err
+	}
+	stats := searchStats{DF: db.termDF(sorted), Docs: db.scoredDocs, TotalLen: db.totalLen}
+	h, err := db.scoreHits(q, sorted, stats)
+	if err != nil {
+		return nil, err
+	}
+	return mergeHits(q, []scoredHits{h}), nil
+}
+
+func (db *DB) termDF(sorted []string) []float64 {
 	df := make([]float64, len(sorted))
 	for _, st := range db.parts {
 		for i, t := range sorted {
@@ -80,14 +103,36 @@ func (db *DB) search(q searchQuery) (*searchResult, error) {
 			}
 		}
 	}
-	docs := float64(db.scoredDocs)
+	return df
+}
+
+func searchCut(scores []float64, limit int) float64 {
+	if len(scores) > limit {
+		sort.Float64s(scores)
+		return scores[len(scores)-limit]
+	}
+	return slices.Min(scores)
+}
+
+func (db *DB) scoreHits(q searchQuery, sorted []string, s searchStats) (scoredHits, error) {
+	limit := q.nHits + 1
+	res := scoredHits{exists: !q.sessionOK}
+	parts := db.parts
+	if q.sessionOK {
+		st, ok := db.part(q.sessionID)
+		parts = nil
+		if ok {
+			parts = []*Part{st}
+		}
+	}
+	docs := float64(s.Docs)
 	avg := 0.0
-	if db.scoredDocs > 0 {
-		avg = float64(db.totalLen) / float64(db.scoredDocs)
+	if s.Docs > 0 {
+		avg = float64(s.TotalLen) / float64(s.Docs)
 	}
 	idf := make([]float64, len(sorted))
 	for i := range sorted {
-		idf[i] = math.Log(1.0 + ((math.Max(docs, df[i]) - df[i] + 0.5) / (df[i] + 0.5)))
+		idf[i] = math.Log(1.0 + ((math.Max(docs, s.DF[i]) - s.DF[i] + 0.5) / (s.DF[i] + 0.5)))
 	}
 	norm := math.Max(avg, 1.0)
 	type hit struct {
@@ -98,7 +143,7 @@ func (db *DB) search(q searchQuery) (*searchResult, error) {
 	var hits []hit
 	for _, st := range parts {
 		acc, exists := st.score(q, sorted, idf, norm)
-		res.scopeExists = res.scopeExists || exists
+		res.exists = res.exists || exists
 		for d, s := range acc {
 			hits = append(hits, hit{st, d, s})
 		}
@@ -110,23 +155,46 @@ func (db *DB) search(q searchQuery) (*searchResult, error) {
 	for i, h := range hits {
 		scores[i] = h.score
 	}
-	cut := 0.0
-	if len(scores) > limit {
-		sort.Float64s(scores)
-		cut = scores[len(scores)-limit]
-	} else {
-		cut = slices.Min(scores)
-	}
-	var rows []*mcpRow
+	cut := searchCut(scores, limit)
 	for _, h := range hits {
 		if h.score < cut {
 			continue
 		}
 		x, ok, err := h.st.hitRow(h.d, h.score)
 		if err != nil {
-			return nil, err
+			return res, err
 		}
 		if ok {
+			res.rows = append(res.rows, x)
+		} else {
+			res.dropped = append(res.dropped, h.score)
+		}
+	}
+	return res, nil
+}
+
+// mergeHits applies the global cut over every reader's hits, then sorts,
+// dedupes and limits. It is exact because a session lives in one part.
+func mergeHits(q searchQuery, from []scoredHits) *searchResult {
+	limit := q.nHits + 1
+	res := &searchResult{scopeExists: !q.sessionOK}
+	var scores []float64
+	var all []*mcpRow
+	for _, h := range from {
+		res.scopeExists = res.scopeExists || h.exists
+		scores = append(scores, h.dropped...)
+		for _, x := range h.rows {
+			scores = append(scores, x.rawScore)
+		}
+		all = append(all, h.rows...)
+	}
+	if len(scores) == 0 {
+		return res
+	}
+	cut := searchCut(scores, limit)
+	var rows []*mcpRow
+	for _, x := range all {
+		if x.rawScore >= cut {
 			rows = append(rows, x)
 		}
 	}
@@ -150,7 +218,7 @@ func (db *DB) search(q searchQuery) (*searchResult, error) {
 		rows = rows[:q.nHits]
 	}
 	res.hits = mapMcpRowsToHits(rows)
-	return res, nil
+	return res
 }
 
 // score sums BM25 over this part's postings for the docs q's filters and

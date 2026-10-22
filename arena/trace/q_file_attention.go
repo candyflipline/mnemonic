@@ -17,11 +17,32 @@ const (
 )
 
 func (fileAttention) Call(db *DB, args json.RawMessage) (any, string, error) {
-	a, err := faParseArgs(args)
+	c, err := newFaCall(args)
 	if err != nil {
 		return nil, "", err
 	}
-	request := faCanonicalRequest(a)
+	touches, err := db.faTouches(c.q)
+	if err != nil {
+		return nil, "", err
+	}
+	return c.answer(touches)
+}
+
+// faCall is a parsed file_attention call: the query the parts answer, and
+// what the answer needs around it. The tail and roots resolve on this
+// process's filesystem, so a router builds it and readers get only q.
+type faCall struct {
+	a        *faArgs
+	tail     faTail
+	warnings []string
+	q        faQuery
+}
+
+func newFaCall(args json.RawMessage) (*faCall, error) {
+	a, err := faParseArgs(args)
+	if err != nil {
+		return nil, err
+	}
 
 	warnings := []string{}
 	tail := faResolveTail(a.Path)
@@ -65,15 +86,15 @@ func (fileAttention) Call(db *DB, args json.RawMessage) (any, string, error) {
 		MutationsOnly:   a.MutationsOnly,
 		MaxRows:         faScanCap,
 	}
-	touches, err := db.faTouches(q)
-	if err != nil {
-		return nil, "", err
-	}
-	data := faBuildData(a, &tail, touches, &warnings)
+	return &faCall{a: a, tail: tail, warnings: warnings, q: q}, nil
+}
+
+func (c *faCall) answer(touches []faTouch) (any, string, error) {
+	data := faBuildData(c.a, &c.tail, touches, &c.warnings)
 	payload := map[string]any{
-		"request":  request,
+		"request":  faCanonicalRequest(c.a),
 		"data":     data,
-		"warnings": warnings,
+		"warnings": c.warnings,
 	}
 	return data, faText(payload), nil
 }
