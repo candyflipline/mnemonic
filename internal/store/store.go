@@ -147,8 +147,8 @@ func (s *Store) servePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if machine == ServerMachine {
-		http.Error(w, "machine is reserved for server-owned sources", http.StatusForbidden)
+	if machine == ServerMachine || isServerHarness(harness) {
+		http.Error(w, "machine or harness is reserved for server-owned sources", http.StatusForbidden)
 		return
 	}
 
