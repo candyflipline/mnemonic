@@ -24,6 +24,10 @@ var ErrUnchecked = errors.New("keeper: the gen has not been checked recently; re
 
 var ErrDeleteSlack = errors.New("keeper: DeleteSlack is below the 3s floor")
 
+// rescanEvery is how often sweep lists m/ and p/ again for older-gen objects, so
+// a part a stale keeper uploads after a scan is doomed within one interval.
+const rescanEvery = 10 * time.Minute
+
 // MinDeleteSlack is the least DeleteSlack for which 2*checkEvery stays below it
 // with checkEvery at its 1s floor.
 const MinDeleteSlack = 3 * time.Second
@@ -62,11 +66,11 @@ type Keeper struct {
 	lost    atomic.Bool
 	checked atomic.Pointer[time.Time]
 
-	cycle    sync.Mutex
-	uploaded map[string]PartRef
-	doomed   map[obj.Key]time.Time
-	scanned  bool
-	takenAt  time.Time
+	cycle     sync.Mutex
+	uploaded  map[string]PartRef
+	doomed    map[obj.Key]time.Time
+	scannedAt time.Time
+	takenAt   time.Time
 
 	mu      sync.RWMutex
 	head    atomic.Pointer[Head]
@@ -360,17 +364,22 @@ func (k *Keeper) install(m Manifest, hot []PartRef, l local) {
 }
 
 // sweep deletes the doomed objects whose notBefore has passed and that the
-// committed manifest does not name, after validating the gen. Once per gen it
-// first dooms every older object the committed manifest does not name, which
-// is how a crashed keeper's garbage goes; it shares the takeover commit's
-// notBefore so no part is due before a manifest that names it.
+// committed manifest does not name, after validating the gen. At its first run
+// and every rescanEvery after, it first dooms every older object the committed
+// manifest does not name, which is how a crashed or stale keeper's garbage goes.
+// The first scan shares the takeover commit's notBefore so no part is due before
+// a manifest that names it; a rescan dooms at now plus the retire margin.
 func (k *Keeper) sweep(ctx context.Context, now time.Time) error {
 	m := k.head.Load().Manifest
 	if m.Gen != k.gen {
 		return nil
 	}
 	live := liveKeys(m)
-	if !k.scanned {
+	if k.scannedAt.IsZero() || now.Sub(k.scannedAt) >= rescanEvery {
+		notBefore := now.Add(k.cfg.GrantTTL + k.cfg.DeleteSlack)
+		if k.scannedAt.IsZero() {
+			notBefore = k.takenAt
+		}
 		for _, prefix := range []obj.Key{manifestPrefix(k.cfg.Tenant), partPrefix(k.cfg.Tenant)} {
 			es, err := k.s.List(ctx, prefix)
 			if err != nil {
@@ -378,11 +387,11 @@ func (k *Keeper) sweep(ctx context.Context, now time.Time) error {
 			}
 			for _, e := range es {
 				if g, ok := keyGen(k.cfg.Tenant, e.Key); ok && g < k.gen {
-					k.doom(e.Key, k.takenAt, live)
+					k.doom(e.Key, notBefore, live)
 				}
 			}
 		}
-		k.scanned = true
+		k.scannedAt = now
 	}
 	var manifests, parts []obj.Key
 	for key, t := range k.doomed {
