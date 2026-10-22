@@ -12,24 +12,24 @@ Related specs: [events](events.md), [wire](wire.md), [mcp](mcp.md), [otlp](otlp.
 
 | Column | Type | Meaning |
 |---|---|---|
-| `tenant` | VARCHAR | the owner of the data; today the constant `default` (`internal/cache/index_spans.go:50`) |
+| `tenant` | VARCHAR | the owner of the data; today the constant `default` (`internal/cache/index_spans.go:53`) |
 | `session_id` | VARCHAR | the [event](events.md) `session_id` |
 | `span_id` | VARCHAR | first 16 hex characters of `sha256` over the span's source key. It is the same after every re-parse. |
 | `parent_span_id` | VARCHAR | the parent's `span_id`; `""` on the session root |
 | `kind` | ENUM | `invoke_agent`, `chat`, `execute_tool` or `turn` (`internal/schema/spans.go:8-18`) |
 | `name` | VARCHAR | a label for display |
-| `start_time`, `end_time` | TIMESTAMP | the smallest and largest `event_time` of the span's events (`internal/cache/index_spans.go:31-34`) |
+| `start_time`, `end_time` | TIMESTAMP | the smallest and largest `event_time` of the span's events (`internal/cache/index_spans.go:34-37`) |
 | `status` | ENUM | `ok` or `error` (`internal/schema/spans.go:20-27`) |
 | `model` | VARCHAR | the model of a `chat` span, `""` otherwise |
 | `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens` | UBIGINT | token counts; see the claude-code rules below |
 | `cost` | DOUBLE | null when the source reports none. The claude-code derivation always leaves it null. |
 | `first_event_uid`, `last_event_uid` | VARCHAR | the `event_uid` of the span's first and last event in `event_order` |
 
-The kinds follow the OpenTelemetry GenAI operation names: `invoke_agent` for an agent run, `chat` for a model request, `execute_tool` for a tool call, and `turn` for one user prompt and everything that follows it (`internal/schema/spans.go:8`).
+The kinds follow the OpenTelemetry GenAI operation names: `invoke_agent` for an agent run, `chat` for a model request, `execute_tool` for a tool call, and `turn` for one user prompt and everything that follows it (`internal/schema/spans.go:9`).
 
 ### Span ids
 
-A `span_id` is `substr(sha256(concat_ws(U+001F, parts...)), 1, 16)` in lowercase hex, where the parts are the span's source key (`internal/cache/index_spans.go:25-28`). For claude-code the key is a tag followed by ids from the events (`internal/cache/index_spans_claudecode.go:24-40`):
+A `span_id` is `substr(sha256(concat_ws(U+001F, parts...)), 1, 16)` in lowercase hex, where the parts are the span's source key (`internal/cache/index_spans.go:28-32`). For claude-code the key is a tag followed by ids from the events (`internal/cache/index_spans_claudecode.go:24-40`):
 
 | Span | Key parts |
 |---|---|
@@ -41,17 +41,17 @@ A `span_id` is `substr(sha256(concat_ws(U+001F, parts...)), 1, 16)` in lowercase
 
 ### When spans are built
 
-Spans for a session are deleted and rebuilt whenever the session's events change, in the same step that recomputes `event_order` and `turn_seq` (`internal/cache/index.go:703-748`). A derivation sees only the events of one harness, matched by the `harness=<h>` segment of the lake path (`internal/cache/index_spans.go:46-52`). A harness with no derivation has no spans; today only `claude-code` has one (`internal/cache/index_spans_claudecode.go:3`).
+Spans for a session are deleted and rebuilt whenever the session's events change. The step that recomputes `event_order` and `turn_seq` queues each session it touched in `pending_spans` once (`internal/cache/index.go:706-751`), and `Converge` derives the queued sessions' spans in a transaction of their own after the events batch, so a failure costs spans, never events (`internal/cache/index.go:297`, `internal/cache/index_spans.go:78-106`). A derivation sees only the events of one harness, matched by the `harness=<h>` segment of the lake path (`internal/cache/index_spans.go:48-56`). A harness with no derivation has no spans; today `claude-code` (`internal/cache/index_spans_claudecode.go:3`), `codex` (`internal/cache/index_spans_codex.go:4`), `cursor` (`internal/cache/index_spans_cursor.go:3`), `pi-coding-agent` (`internal/cache/index_spans_pi.go:4`) and `prime-agent` (`internal/cache/index_spans_primeagent.go:3`) have one.
 
-The index records a fingerprint of all derivations. When the set changes, opening the index re-derives every session's spans without a full rebuild (`internal/cache/index_spans.go:54-83`).
+The index records a fingerprint of all derivations. When the set changes, the next `Converge` re-derives every session's spans without a full rebuild (`internal/cache/index_spans.go:58-63`, `internal/cache/index_spans.go:82-91`, called at `internal/cache/index.go:297`).
 
 ### Writing a derivation
 
-A derivation is registered per harness name with `cache.RegisterSpans(harness, derive)` from an `init` (`internal/cache/index_spans.go:18-23`). `derive(where)` returns one `SELECT` that yields every column of the table except `tenant`, matched by name; `where` selects the events of the sessions being rebuilt, with `event_order` and `turn_seq` already current (`internal/cache/index_spans.go:12-17`). The `events` table in the index has no `payload_json`, so a derivation reads values from columns ([events](events.md)).
+A derivation is registered per harness name with `cache.RegisterSpans(harness, derive)` from an `init` (`internal/cache/index_spans.go:23-26`). `derive(where)` returns one `SELECT` that yields every column of the table except `tenant`, matched by name; `where` selects the events of the sessions being rebuilt, with `event_order` and `turn_seq` already current (`internal/cache/index_spans.go:15-19`). The `events` table in the index has no `payload_json`, so a derivation reads values from columns ([events](events.md)).
 
 ### claude-code tree
 
-`internal/cache/index_spans_claudecode.go:5-13` states the rules and `TestClaudeCodeSpanTree` (`internal/cache/index_spans_test.go:11`) pins them.
+`internal/cache/index_spans_claudecode.go:5-13` states the rules and `TestClaudeCodeSpanTree` (`internal/cache/index_spans_test.go:15`) pins them.
 
 - The session is the root `invoke_agent`, named `claude-code`, with no parent.
 - Each `turn_seq` of the main thread (rows with `is_substream = 0`) is a `turn` span named `turn N`, under the root.
@@ -79,11 +79,11 @@ An annotation is one append-only line of JSON (`internal/schema/annotations.go:1
 | `source` | one of `human`, `scorer`, `ci` |
 | `ts` | required RFC 3339 timestamp |
 
-`ParseAnnotation` rejects a line that breaks any rule, and unknown keys inside `value` (`internal/schema/annotations.go:83-107`, `internal/schema/annotations.go:122-144`). The author is not in the line; it is the author of the source the line was appended to, so a caller can annotate only as itself (`internal/schema/annotations.go:110-111`).
+`ParseAnnotation` rejects a line that breaks any rule, and unknown keys inside `value` (`internal/schema/annotations.go:83-108`, `internal/schema/annotations.go:122-144`). The author is not in the line; it is the author of the source the line was appended to, so a caller can annotate only as itself (`internal/schema/annotations.go:110-111`).
 
 ### The annotations relation
 
-The index holds a table `annotations`, rebuilt from the lake files of each changed annotation source (`internal/schema/annotations.go:146-159`, `internal/cache/index_annotations.go:28-49`).
+The index holds a table `annotations`, rebuilt from the lake files of each changed annotation source (`internal/schema/annotations.go:146-159`, `internal/cache/index_annotations.go:29-50`).
 
 | Column | Type | From |
 |---|---|---|
@@ -97,10 +97,10 @@ The index holds a table `annotations`, rebuilt from the lake files of each chang
 | `ts` | TIMESTAMP | `ts`, as UTC |
 | `lake_file`, `lake_row` | VARCHAR, UBIGINT | where the row came from |
 
-Annotations never enter `events`, the search index, `sessions` or `turns` (`internal/cache/index_annotations.go:28-30`).
+Annotations never enter `events`, the search index, `sessions` or `turns` (`internal/cache/index_annotations.go:18-27`, `internal/cache/index_annotations.go:52-54`).
 
 ### How an annotation reaches the server
 
-Annotations are written to sources the server owns, not pushed by a client (see "Sources owned by the server" in [wire](wire.md)). The raw lines of such a source are annotation JSON, one per line, in a source whose harness is `annotation`. Its parser follows this row contract (`internal/schema/annotations.go:9-22`): one event per line, with `event_uid` the annotation `id`, `session_id` the target session and `payload_json` the annotation as JSON. The harness name `annotation` and the right to write it are reserved for server-owned sources.
+Annotations are written to sources the server owns, not pushed by a client (see "Sources owned by the server" in [wire](wire.md)). The raw lines of such a source are annotation JSON, one per line, in a source whose harness is `annotation`. Its parser follows this row contract (`internal/schema/annotations.go:12-22`): one event per line, with `event_uid` the annotation `id`, `session_id` the target session and `payload_json` the annotation as JSON. The harness name `annotation` and the right to write it are reserved for server-owned sources.
 
 The tool that writes annotations is defined by the change that adds it and, like every tool, appears in `tools/list` ([mcp](mcp.md)); this page defines only the data.

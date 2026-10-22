@@ -16,7 +16,7 @@ Every `/v1/*` request carries `Authorization: Bearer <token>`. The server stores
 |---|---|---|
 | segment | `[a-z0-9._-]+`, and not `.` or `..`. Used for machine, harness and src_id. | `internal/wire/wire.go:15-19` |
 | machine | a segment naming the sending host; the producer chooses it. A name reserved for server-owned sources is refused with 403 (see below). | `internal/store/store.go:150-153` |
-| harness | a segment naming the parser that reads the source, such as `claude-code` or `codex`. A harness with no registered parser is stored but not parsed. | `internal/lake/lake.go:58`, `internal/lake/lake.go:132` |
+| harness | a segment naming the parser that reads the source, such as `claude-code` or `codex`. A harness with no registered parser is stored but not parsed. | `internal/lake/lake.go:130-133` |
 | src_id | first 16 hex characters of `sha256(path)`, where `path` is the absolute path of the file on the producer. The same path always yields the same src_id. | `internal/wire/wire.go:21-26` |
 | head_hash | lowercase hex `sha256` of the source's first line, newline included, cut to the first 65536 bytes. It identifies the content: a file rewritten from the top changes it. | `internal/wire/wire.go:13`, `internal/wire/wire.go:28-36` |
 
@@ -26,7 +26,7 @@ The head hash is taken over the redacted first line, because redacted bytes are 
 
 A source is a sequence of lines, each ending in `\n`. The producer sends whole lines only and redacts secrets before sending; the server does not redact. The reference client reads the file, cuts it at each `\n`, runs the redactor over each line, and drops a trailing partial line until its newline arrives (`internal/push/scan.go:19-32`). A redaction that changes no secret returns the line byte for byte (`internal/redact/redact.go:1-8`).
 
-The offsets in this protocol count redacted bytes (`internal/wire/wire.go:38-39`), except `raw_end`, which counts the producer's own unredacted bytes.
+The offsets in this protocol count redacted bytes (`internal/wire/wire.go:45`), except `raw_end`, which counts the producer's own unredacted bytes.
 
 ## GET /v1/manifest?machine=M
 
@@ -89,12 +89,12 @@ Append (`internal/store/store.go:212-251`):
 
 ### How the reference client uses it
 
-For each local file (`internal/push/push.go:231-252`):
+For each local file (`internal/push/push.go:231-245`):
 
 - If the server has no entry, its `head_hash` differs from the file's, or the file's redacted length is below the server's `size`, send everything at `offset=0`.
 - If the redacted length equals `size`, there is nothing to send.
 - Otherwise find the line boundary at byte `size` in the redacted file and send the rest at `offset=size`. When `size` falls inside a line, which happens when redaction re-encoded it, there is no safe seam and the client replaces.
-- After a `409`, take the answer's `size` and `head_hash` and try once more; a second `409` is an error (`internal/push/push.go:163-171`).
+- After a `409`, take the answer's `size` and `head_hash` and try once more; a second `409` is an error (`internal/push/push.go:166-172`).
 
 A producer that appends only, never rewrites, and computes its own head hash can ignore all of this except: ask for the manifest, send `offset=size` with the same `head_hash`, and on `409` start over at `offset=0`.
 
