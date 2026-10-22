@@ -211,44 +211,79 @@ s2d() {
 	if [ $ok = 1 ]; then emit "2d: PASS $line"; else fail 2d "$line ($(why 2d))"; fi
 }
 
-stable_stats() {
-	local url=$1 prev cur n=0
-	prev=$("$E2E" stats -url "$url")
-	while [ $n -lt 20 ]; do
-		sleep 1
-		cur=$("$E2E" stats -url "$url")
-		[ "$cur" = "$prev" ] && return 0
-		prev=$cur
+# prewarm_parts LOG prints the number of parts a reader prewarmed.
+prewarm_parts() { sed -n 's/.*prewarmed \([0-9]*\) parts in .*/\1/p' "$1" | head -1; }
+
+# prewarm_ms LOG prints the join prewarm wall time a reader logged.
+prewarm_ms() { sed -n 's/.*prewarmed [0-9]* parts in \([0-9]*\)ms since joining.*/\1/p' "$1" | head -1; }
+
+# s2e_at TTFB runs one cluster behind a file store with that first-byte delay ("" is none) and sets E2E_OK, E2E_TOTAL and E2E_LINE.
+# The join prewarm is measured with default readers. Each tool is then measured with fresh readers started -prewarm=false, so its first calls fetch on demand and the same calls again are warm.
+s2e_at() {
+	local ttfb=$1 label=${1:-0} stats_url tool base0 pre out i n ms max_ms=0 cold warm tools split=""
+	E2E_OK=1
+	E2E_TOTAL=0
+	E2E_LINE="ttfb=${label}:"
+	cluster_up "2e$label" "$T/2e$label/store" "$ARENA/raw" "$ttfb" "" || { E2E_OK=0; E2E_LINE="$E2E_LINE cluster did not start ($(why "2e$label"))"; return; }
+	"$E2E" ingest -keeper "http://127.0.0.1:$KPORT" || { E2E_OK=0; E2E_LINE="$E2E_LINE ingest failed"; return; }
+	stats_url="http://127.0.0.1:$SPORT/stats"
+	tools=$("$E2E" tools -arena "$ARENA") || { E2E_OK=0; E2E_LINE="$E2E_LINE no tools"; return; }
+	kill_readers
+	base0=$("$E2E" stats -url "$stats_url")
+	for i in 1 2 3; do
+		start_reader "2e$label" "$i"
+	done
+	for i in 1 2 3; do
+		wait_up "${RPID[$i]}" "127.0.0.1:${RPORT[$i]}" || E2E_OK=0
+	done
+	n=0
+	while [ $n -lt 240 ]; do
+		[ -n "$(prewarm_ms "$LOGS/2e$label-r1.log")" ] && [ -n "$(prewarm_ms "$LOGS/2e$label-r2.log")" ] && [ -n "$(prewarm_ms "$LOGS/2e$label-r3.log")" ] && break
+		sleep 0.5
 		n=$((n + 1))
 	done
+	for i in 1 2 3; do
+		ms=$(prewarm_ms "$LOGS/2e$label-r$i.log")
+		[ -z "$ms" ] && { E2E_OK=0; ms=0; }
+		[ "$ms" -gt "$max_ms" ] && max_ms=$ms
+		split="$split${split:+/}$(prewarm_parts "$LOGS/2e$label-r$i.log")"
+	done
+	pre=$("$E2E" stats -url "$stats_url")
+	E2E_LINE="$E2E_LINE join prewarm $(($(field "$pre" bytes) - $(field "$base0" bytes)))B/$(($(field "$pre" requests) - $(field "$base0" requests)))req/${max_ms}ms (3 readers in parallel, parts per reader $split);"
+	for tool in $tools; do
+		kill_readers
+		for i in 1 2 3; do
+			start_reader "2e$label" "$i" -prewarm=false
+		done
+		for i in 1 2 3; do
+			wait_up "${RPID[$i]}" "127.0.0.1:${RPORT[$i]}" || E2E_OK=0
+		done
+		out=$(drive -rung partial -tool "$tool" -passes 2 -stats "$stats_url") || E2E_OK=0
+		cold=$(sed -n 1p <<<"$out")
+		warm=$(sed -n 2p <<<"$out")
+		E2E_TOTAL=$((E2E_TOTAL + $(field "$cold" total)))
+		E2E_LINE="$E2E_LINE $tool cold $(field "$cold" bytes)B/$(field "$cold" requests)req p50 $(field "$cold" p50_ms)ms (fetching calls $(field "$cold" fetched_calls) of $(field "$cold" total), their p50 $(field "$cold" fetched_p50_ms)ms max $(field "$cold" fetched_max_ms)ms) warm $(field "$warm" bytes)B/$(field "$warm" requests)req p50 $(field "$warm" p50_ms)ms;"
+		if [ "$tool" = get_ingest_status ]; then
+			[ "$(field "$cold" requests)" = 0 ] || E2E_OK=0
+		else
+			[ "$(field "$cold" requests)" -gt 0 ] 2>/dev/null || E2E_OK=0
+			[ "$(field "$cold" bytes)" -gt 0 ] 2>/dev/null || E2E_OK=0
+		fi
+		[ "$(field "$warm" requests)" = 0 ] && [ "$(field "$warm" bytes)" = 0 ] || E2E_OK=0
+	done
+	[ "$E2E_TOTAL" = "$EXPECT" ] || E2E_OK=0
+	kill_readers
 }
 
 s2e() {
-	local stats_url tool base0 pre out ok=1 total=0 line="Mac, fixture, ttfb=$TTFB, partial rung:" tools cold warm
-	cluster_up 2e "$T/2e/store" "$ARENA/raw" "$TTFB" || { fail 2e "cluster did not start ($(why 2e))"; return; }
-	"$E2E" ingest -keeper "http://127.0.0.1:$KPORT" || { fail 2e "ingest failed ($(why 2e))"; return; }
-	stats_url="http://127.0.0.1:$SPORT/stats"
-	tools=$("$E2E" tools -arena "$ARENA") || { fail 2e "no tools"; return; }
-	for tool in $tools; do
-		kill_readers
-		base0=$("$E2E" stats -url "$stats_url")
-		for i in 1 2 3; do
-			start_reader 2e "$i"
-		done
-		for i in 1 2 3; do
-			wait_up "${RPID[$i]}" "127.0.0.1:${RPORT[$i]}" || ok=0
-		done
-		stable_stats "$stats_url"
-		pre=$("$E2E" stats -url "$stats_url")
-		out=$(drive -rung partial -tool "$tool" -passes 2 -stats "$stats_url") || ok=0
-		cold=$(sed -n 1p <<<"$out")
-		warm=$(sed -n 2p <<<"$out")
-		total=$((total + $(field "$cold" total)))
-		line="$line $tool prewarm $(($(field "$pre" bytes) - $(field "$base0" bytes)))B/$(($(field "$pre" requests) - $(field "$base0" requests)))req"
-		line="$line cold $(field "$cold" bytes)B/$(field "$cold" requests)req/$(field "$cold" p50_ms)ms warm $(field "$warm" bytes)B/$(field "$warm" requests)req/$(field "$warm" p50_ms)ms;"
+	local ok=1 line="Mac, fixture, partial rung, 3 readers, cold = fresh cache and -prewarm=false; get_ingest_status is keeper-answered so its 0 is by design;"
+	for ttfb in "$TTFB" ""; do
+		s2e_at "$ttfb"
+		[ "$E2E_OK" = 1 ] || ok=0
+		line="$line $E2E_LINE"
+		retire_step e
 	done
-	[ "$total" = "$EXPECT" ] || ok=0
-	if [ $ok = 1 ]; then emit "2e: PASS $line"; else fail 2e "$line ($(why 2e))"; fi
+	if [ $ok = 1 ]; then emit "2e: PASS $line"; else fail 2e "$line ($(why 2e0))"; fi
 }
 
 for s in a b c d e; do

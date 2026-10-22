@@ -26,6 +26,7 @@ func runRead(args []string) error {
 	dir := fs.String("cache", "", "blob cache dir")
 	keeper := fs.String("keeper", "", "keeper base URL")
 	readers := fs.String("readers", "", "comma-separated reader IDs")
+	prewarm := fs.Bool("prewarm", true, "fetch the owned parts when a view arrives; false fetches each part on the first call that needs it")
 	fs.Parse(args)
 	ids := strings.Split(*readers, ",")
 	if *id == "" || *dir == "" || *keeper == "" || !contains(ids, *id) {
@@ -46,7 +47,9 @@ func runRead(args []string) error {
 		<-ctx.Done()
 		srv.Shutdown(context.Background())
 	}()
-	go prewarmLoop(ctx, cache, *keeper, *id, ids)
+	if *prewarm {
+		go prewarmLoop(ctx, cache, *keeper, *id, ids, time.Now())
+	}
 	log.Printf("read %s: listening on %s", *id, ln.Addr())
 	if err := srv.Serve(ln); err != http.ErrServerClosed {
 		return err
@@ -65,7 +68,7 @@ func contains(ids []string, id string) bool {
 
 // prewarmLoop long-polls the keeper's views and fetches the cold parts this
 // reader owns as each one arrives.
-func prewarmLoop(ctx context.Context, cache *reader.Cache, keeper, id string, ids []string) {
+func prewarmLoop(ctx context.Context, cache *reader.Cache, keeper, id string, ids []string, joined time.Time) {
 	after := ""
 	for ctx.Err() == nil {
 		v, err := nextView(ctx, keeper, after)
@@ -86,7 +89,9 @@ func prewarmLoop(ctx context.Context, cache *reader.Cache, keeper, id string, id
 		}
 		if err := cache.Prewarm(ctx, v.Tenant, own); err != nil {
 			log.Printf("read %s: prewarm %s: %v", id, after, err)
+			continue
 		}
+		log.Printf("read %s: prewarmed %d parts in %dms since joining", id, len(own), time.Since(joined).Milliseconds())
 	}
 }
 
