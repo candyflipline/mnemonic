@@ -35,6 +35,13 @@ const LocalID = "local"
 // parts; every other phase is one step of a scattered tool.
 const PhaseWhole = "whole"
 
+// InfraError is a scattered phase that got no answer: the router validates a
+// tool's arguments before it scatters, so a phase never returns the tool's own
+// error.
+type InfraError struct{ error }
+
+func (e InfraError) Unwrap() error { return e.error }
+
 type Reader interface {
 	ID() string
 	Call(ctx context.Context, req CallRequest) (CallResponse, error)

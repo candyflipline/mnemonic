@@ -49,7 +49,7 @@ func partial(ctx context.Context, v View, readers []Reader, tool string, args js
 		}
 		resps, err := scatter(ctx, w, readers, tool, phase, args, stats)
 		if err != nil {
-			return nil, err
+			return nil, InfraError{err}
 		}
 		out := make([]json.RawMessage, len(resps))
 		for i, r := range resps {
