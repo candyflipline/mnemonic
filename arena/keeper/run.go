@@ -24,6 +24,10 @@ var ErrUnchecked = errors.New("keeper: the gen has not been checked recently; re
 
 var ErrDeleteSlack = errors.New("keeper: DeleteSlack is below the 3s floor")
 
+// rescanEvery is how often sweep lists m/ and p/ again for older-gen objects, so
+// a part a stale keeper uploads after a scan is doomed within one interval.
+const rescanEvery = 10 * time.Minute
+
 // MinDeleteSlack is the least DeleteSlack for which 2*checkEvery stays below it
 // with checkEvery at its 1s floor.
 const MinDeleteSlack = 3 * time.Second
@@ -53,6 +57,7 @@ type Head struct {
 	Hot      []PartRef
 	Parts    map[string]*trace.Part
 	status   *trace.DB
+	epoch    uint64
 }
 
 type Keeper struct {
@@ -62,16 +67,27 @@ type Keeper struct {
 	lost    atomic.Bool
 	checked atomic.Pointer[time.Time]
 
-	cycle    sync.Mutex
-	uploaded map[string]PartRef
-	doomed   map[obj.Key]time.Time
-	scanned  bool
-	takenAt  time.Time
+	cycle     sync.Mutex
+	uploaded  map[string]PartRef
+	doomed    map[obj.Key]time.Time
+	scannedAt time.Time
+	takenAt   time.Time
 
-	mu      sync.RWMutex
+	mu      sync.Mutex
 	head    atomic.Pointer[Head]
 	stamp   uint64
 	changed chan struct{}
+	pins    map[uint64]int
+	limbo   []dropped
+
+	closePart func(*trace.Part)
+}
+
+// dropped is a part an install left out of the head it made; heads up to epoch
+// may still serve it.
+type dropped struct {
+	p     *trace.Part
+	epoch uint64
 }
 
 type local struct {
@@ -101,12 +117,14 @@ func Take(ctx context.Context, s obj.Store, cfg Config) (*Keeper, error) {
 		return nil, err
 	}
 	k := &Keeper{
-		cfg:      cfg,
-		s:        s,
-		gen:      g,
-		uploaded: map[string]PartRef{},
-		doomed:   map[obj.Key]time.Time{},
-		changed:  make(chan struct{}),
+		cfg:       cfg,
+		s:         s,
+		gen:       g,
+		uploaded:  map[string]PartRef{},
+		doomed:    map[obj.Key]time.Time{},
+		changed:   make(chan struct{}),
+		pins:      map[uint64]int{},
+		closePart: (*trace.Part).Close,
 	}
 	status, err := trace.SourcesDB(m.Sources)
 	if err != nil {
@@ -235,7 +253,7 @@ func (k *Keeper) readLocal(stamp uint64) (local, error) {
 func (k *Keeper) closeNew(open map[string]*trace.Part) {
 	for id, p := range open {
 		if k.head.Load().Parts[id] != p {
-			p.Close()
+			k.closePart(p)
 		}
 	}
 }
@@ -342,35 +360,69 @@ func (k *Keeper) doom(key obj.Key, notBefore time.Time, live map[obj.Key]bool) {
 func (k *Keeper) install(m Manifest, hot []PartRef, l local) {
 	k.mu.Lock()
 	old, oldChanged := *k.head.Load(), k.changed
-	k.head.Store(&Head{Manifest: m, Hot: hot, Parts: l.open, status: l.status})
+	k.head.Store(&Head{Manifest: m, Hot: hot, Parts: l.open, status: l.status, epoch: old.epoch + 1})
 	k.stamp = l.stamp
 	moved := m.Gen != old.Manifest.Gen || m.Seq != old.Manifest.Seq
 	if moved {
 		k.changed = make(chan struct{})
 	}
+	for id, p := range old.Parts {
+		if l.open[id] != p {
+			k.limbo = append(k.limbo, dropped{p, old.epoch})
+		}
+	}
+	free := k.reap()
 	k.mu.Unlock()
 	if moved {
 		close(oldChanged)
 	}
-	for id, p := range old.Parts {
-		if l.open[id] != p {
-			p.Close()
+	k.closeAll(free)
+}
+
+// reap takes out of limbo the parts no pinned head can still serve: those
+// dropped at an epoch below every pinned one. k.mu is held.
+func (k *Keeper) reap() []*trace.Part {
+	oldest := ^uint64(0)
+	for e := range k.pins {
+		oldest = min(oldest, e)
+	}
+	var free []*trace.Part
+	keep := k.limbo[:0]
+	for _, d := range k.limbo {
+		if d.epoch < oldest {
+			free = append(free, d.p)
+		} else {
+			keep = append(keep, d)
 		}
+	}
+	clear(k.limbo[len(keep):])
+	k.limbo = keep
+	return free
+}
+
+func (k *Keeper) closeAll(ps []*trace.Part) {
+	for _, p := range ps {
+		k.closePart(p)
 	}
 }
 
 // sweep deletes the doomed objects whose notBefore has passed and that the
-// committed manifest does not name, after validating the gen. Once per gen it
-// first dooms every older object the committed manifest does not name, which
-// is how a crashed keeper's garbage goes; it shares the takeover commit's
-// notBefore so no part is due before a manifest that names it.
+// committed manifest does not name, after validating the gen. At its first run
+// and every rescanEvery after, it first dooms every older object the committed
+// manifest does not name, which is how a crashed or stale keeper's garbage goes.
+// The first scan shares the takeover commit's notBefore so no part is due before
+// a manifest that names it; a rescan dooms at now plus the retire margin.
 func (k *Keeper) sweep(ctx context.Context, now time.Time) error {
 	m := k.head.Load().Manifest
 	if m.Gen != k.gen {
 		return nil
 	}
 	live := liveKeys(m)
-	if !k.scanned {
+	if k.scannedAt.IsZero() || now.Sub(k.scannedAt) >= rescanEvery {
+		notBefore := now.Add(k.cfg.GrantTTL + k.cfg.DeleteSlack)
+		if k.scannedAt.IsZero() {
+			notBefore = k.takenAt
+		}
 		for _, prefix := range []obj.Key{manifestPrefix(k.cfg.Tenant), partPrefix(k.cfg.Tenant)} {
 			es, err := k.s.List(ctx, prefix)
 			if err != nil {
@@ -378,11 +430,11 @@ func (k *Keeper) sweep(ctx context.Context, now time.Time) error {
 			}
 			for _, e := range es {
 				if g, ok := keyGen(k.cfg.Tenant, e.Key); ok && g < k.gen {
-					k.doom(e.Key, k.takenAt, live)
+					k.doom(e.Key, notBefore, live)
 				}
 			}
 		}
-		k.scanned = true
+		k.scannedAt = now
 	}
 	var manifests, parts []obj.Key
 	for key, t := range k.doomed {
@@ -418,15 +470,29 @@ func (k *Keeper) sweep(ctx context.Context, now time.Time) error {
 	return nil
 }
 
-// Read calls fn with the head, which stays open until fn returns. It refuses
-// once the last good gen check is older than 2*checkEvery.
+// Read calls fn with the head, which stays open until fn returns. The head is
+// pinned, not locked: fn runs with no lock held, so a slow fn delays neither a
+// commit nor another Read, and a part the commit drops closes after the last
+// Read that saw it. It refuses once the last good gen check is older than
+// 2*checkEvery.
 func (k *Keeper) Read(fn func(Head) error) error {
-	k.mu.RLock()
-	defer k.mu.RUnlock()
 	if err := k.admit(); err != nil {
 		return err
 	}
-	return fn(*k.head.Load())
+	k.mu.Lock()
+	h := *k.head.Load()
+	k.pins[h.epoch]++
+	k.mu.Unlock()
+	defer func() {
+		k.mu.Lock()
+		if k.pins[h.epoch]--; k.pins[h.epoch] == 0 {
+			delete(k.pins, h.epoch)
+		}
+		free := k.reap()
+		k.mu.Unlock()
+		k.closeAll(free)
+	}()
+	return fn(h)
 }
 
 // admit is the one gate every call passes: ErrLost once a newer keeper claimed
@@ -450,9 +516,9 @@ func (k *Keeper) Parts() map[string]*trace.Part { return k.head.Load().Parts }
 // ended.
 func (k *Keeper) Wait(ctx context.Context, g Gen, s Seq) bool {
 	for {
-		k.mu.RLock()
+		k.mu.Lock()
 		m, ch := k.head.Load().Manifest, k.changed
-		k.mu.RUnlock()
+		k.mu.Unlock()
 		if m.Gen > g || (m.Gen == g && m.Seq > s) {
 			return true
 		}
