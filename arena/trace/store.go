@@ -14,7 +14,6 @@ import (
 // Part is a read-only view of one committed index. Its light and heavy logs
 // hold the frames of its own docs, so it needs nothing outside its members.
 type Part struct {
-	read                      func(name string) ([]byte, error)
 	meta                      indexMeta
 	docs, sessions, sessStr   []byte
 	turns, uids               []byte
@@ -29,6 +28,7 @@ type Part struct {
 	nSessions, nTurns, nTerms int
 	scratch                   []byte
 	ls                        []lsRec
+	lsB                       []byte
 }
 
 // frameCache holds the last decoded light and heavy frames of every part of
@@ -78,7 +78,7 @@ func OpenPartDir(dir string) (*Part, error) {
 			maps = append(maps, b)
 		}
 		return b, err
-	}, func(name string) ([]byte, error) { return os.ReadFile(filepath.Join(dir, name)) })
+	}, nil)
 	st.maps = maps
 	if err != nil {
 		st.Close()
@@ -87,8 +87,8 @@ func OpenPartDir(dir string) (*Part, error) {
 	return st, nil
 }
 
-func openPart(meta []byte, load, read func(name string) ([]byte, error)) (*Part, error) {
-	st := &Part{read: read, fc: newFrameCache()}
+func openPart(meta []byte, load, _ func(name string) ([]byte, error)) (*Part, error) {
+	st := &Part{fc: newFrameCache()}
 	if err := json.Unmarshal(meta, &st.meta); err != nil {
 		return st, err
 	}
@@ -96,7 +96,7 @@ func openPart(meta []byte, load, read func(name string) ([]byte, error)) (*Part,
 		"turns": &st.turns, "uids": &st.uids, "terms": &st.terms, "terms.idx": &st.termIdx, "terms.filter": &st.termFilter, "postings": &st.postings,
 		"fa.exact": &st.faExact, "fa.tio": &st.faTio, "fa.blob": &st.faBlob,
 		"hot": &st.hotB, "hot.off": &st.hotOff, "fa.tri": &st.faTri, "fa.trip": &st.faTrip,
-		"light": &st.lightB, "heavy": &st.heavyB} {
+		"light": &st.lightB, "heavy": &st.heavyB, "ls.json": &st.lsB} {
 		b, err := load(name)
 		if err != nil {
 			return st, err
