@@ -11,6 +11,7 @@ package keeper
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -186,6 +187,25 @@ func Claim(ctx context.Context, s obj.Store, tenant string) (Gen, error) {
 		}
 		return top + 1, err
 	}
+}
+
+var ErrNotExclusive = errors.New("keeper: the object store does not enforce exclusive create (If-None-Match: *)")
+
+// probeExclusive creates a fresh key outside g/, m/ and p/ exclusively twice;
+// the second create must fail with ErrExists.
+func probeExclusive(ctx context.Context, s obj.Store, tenant string) error {
+	key := obj.Key("t/" + tenant + "/x/probe-" + rand.Text())
+	if err := s.PutExclusive(ctx, key, bytes.NewReader(nil), 0); err != nil {
+		return err
+	}
+	err := s.PutExclusive(ctx, key, bytes.NewReader(nil), 0)
+	switch {
+	case errors.Is(err, obj.ErrExists):
+		err = nil
+	case err == nil:
+		err = ErrNotExclusive
+	}
+	return errors.Join(err, s.Delete(ctx, []obj.Key{key}))
 }
 
 // Current reports whether gen is still the highest claimed gen.

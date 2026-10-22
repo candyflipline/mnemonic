@@ -15,6 +15,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/candyflipline/mnemonic/arena/keeper"
 )
@@ -192,9 +193,10 @@ type httpReader struct {
 	client   *http.Client
 }
 
-// HTTPReader is a Reader that calls the reader server at baseURL.
-func HTTPReader(id, baseURL string) Reader {
-	return &httpReader{id: id, base: baseURL, client: &http.Client{}}
+// HTTPReader is a Reader that calls the reader server at baseURL; a call
+// that has not answered within timeout fails, so scatter fails it over.
+func HTTPReader(id, baseURL string, timeout time.Duration) Reader {
+	return &httpReader{id: id, base: baseURL, client: &http.Client{Timeout: timeout}}
 }
 
 func (h *httpReader) ID() string { return h.id }

@@ -20,7 +20,7 @@ import (
 
 var ErrLost = errors.New("keeper: a newer keeper claimed the tenant")
 
-const checkEvery = 30 * time.Second
+var ErrUnchecked = errors.New("keeper: the gen has not been checked recently; refusing to grant")
 
 type Config struct {
 	Tenant      string
@@ -32,6 +32,13 @@ type Config struct {
 	DeleteSlack time.Duration
 }
 
+// checkEvery keeps 2*checkEvery, the longest Read serves after the last good
+// check, below DeleteSlack, the margin a successor's deletes leave past the
+// last grant.
+func (c Config) checkEvery() time.Duration {
+	return min(max(c.DeleteSlack/3, time.Second), 30*time.Second)
+}
+
 // Head is what the keeper serves: its committed manifest, the hot parts that
 // stay on its disk, and every local part open by ID.
 type Head struct {
@@ -41,10 +48,11 @@ type Head struct {
 }
 
 type Keeper struct {
-	cfg  Config
-	s    obj.Store
-	gen  Gen
-	lost atomic.Bool
+	cfg     Config
+	s       obj.Store
+	gen     Gen
+	lost    atomic.Bool
+	checked atomic.Pointer[time.Time]
 
 	cycle    sync.Mutex
 	uploaded map[string]PartRef
@@ -65,9 +73,13 @@ type local struct {
 	stamp   uint64
 }
 
-// Take claims the next gen, then reads the latest manifest; the first commit
-// is the first Cycle.
+// Take checks that s enforces exclusive create, claims the next gen, then
+// reads the latest manifest; the first commit is the first Cycle.
 func Take(ctx context.Context, s obj.Store, cfg Config) (*Keeper, error) {
+	if err := probeExclusive(ctx, s, cfg.Tenant); err != nil {
+		return nil, err
+	}
+	claimed := time.Now()
 	g, err := Claim(ctx, s, cfg.Tenant)
 	if err != nil {
 		return nil, err
@@ -85,6 +97,7 @@ func Take(ctx context.Context, s obj.Store, cfg Config) (*Keeper, error) {
 		changed:  make(chan struct{}),
 	}
 	k.head.Store(&Head{Manifest: m})
+	k.checked.Store(&claimed)
 	return k, nil
 }
 
@@ -92,6 +105,7 @@ func (k *Keeper) Gen() Gen { return k.gen }
 
 // check fails with ErrLost once a higher gen is claimed, and keeps failing.
 func (k *Keeper) check(ctx context.Context) (Gen, error) {
+	start := time.Now()
 	top, err := highestGen(ctx, k.s, k.cfg.Tenant)
 	if err != nil && !k.lost.Load() {
 		return 0, err
@@ -100,16 +114,17 @@ func (k *Keeper) check(ctx context.Context) (Gen, error) {
 		k.lost.Store(true)
 		return top, ErrLost
 	}
+	k.checked.Store(&start)
 	return top, nil
 }
 
-// Run cycles every interval and checks the gen every 30 s until ctx ends or
-// the gen is lost.
+// Run cycles every interval and checks the gen every checkEvery until ctx
+// ends or the gen is lost.
 func (k *Keeper) Run(ctx context.Context, every time.Duration) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	go func() {
-		t := time.NewTicker(checkEvery)
+		t := time.NewTicker(k.cfg.checkEvery())
 		defer t.Stop()
 		for {
 			select {
@@ -378,13 +393,17 @@ func (k *Keeper) sweep(ctx context.Context, now time.Time) error {
 	return nil
 }
 
-// Read calls fn with the head, which stays open until fn returns.
+// Read calls fn with the head, which stays open until fn returns. It refuses
+// once the last good gen check is older than 2*checkEvery.
 func (k *Keeper) Read(fn func(Head) error) error {
 	if k.lost.Load() {
 		return ErrLost
 	}
 	k.mu.RLock()
 	defer k.mu.RUnlock()
+	if time.Since(*k.checked.Load()) > 2*k.cfg.checkEvery() {
+		return ErrUnchecked
+	}
 	return fn(*k.head.Load())
 }
 
