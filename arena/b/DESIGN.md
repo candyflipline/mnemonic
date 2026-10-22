@@ -80,7 +80,7 @@ filesystem changes between ingests. Only files inside this lane are modified.
 Compressed input and heavy output are buffered; offsets are tracked directly.
 The ASCII scanner preserves lowercasing, length limits and token frequencies.
 All five tools pass public, hidden, incremental and three-kill recovery checks.
-Clean ingest improved from 6.12 to 2.30-3.49 seconds. macOS full flushes and serialized
+Clean ingest improved from 6.12 to 2.16-3.49 seconds. macOS full flushes and serialized
 parse/write work were additional wall-time costs after removing repeated probes.
 
 ## Recovery and freshness
