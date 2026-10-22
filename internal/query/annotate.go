@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/candyflipline/mnemonic/internal/auth"
 	"github.com/candyflipline/mnemonic/internal/schema"
@@ -58,11 +59,11 @@ func parseAnnotateArgs(raw json.RawMessage) (a annotateArgs, session string, val
 		a.Source = schema.SourceHuman
 	}
 	switch {
-	case strings.TrimSpace(a.Name) == "" || len(a.Name) > annotationNameMax:
+	case strings.TrimSpace(a.Name) == "" || utf8.RuneCountInString(a.Name) > annotationNameMax:
 		return a, "", value, argErrorf("name must be 1 to %d characters", annotationNameMax)
 	case !slices.Contains([]schema.AnnotationSource{schema.SourceHuman, schema.SourceScorer, schema.SourceCI}, a.Source):
 		return a, "", value, argErrorf("source must be human, scorer or ci")
-	case len(a.RequestID) > requestIDMax:
+	case utf8.RuneCountInString(a.RequestID) > requestIDMax:
 		return a, "", value, argErrorf("request_id must be at most %d characters", requestIDMax)
 	}
 	set := 0
@@ -78,12 +79,12 @@ func parseAnnotateArgs(raw json.RawMessage) (a annotateArgs, session string, val
 	case a.Number != nil:
 		value = schema.Number(*a.Number)
 	case a.Label != nil:
-		if *a.Label == "" || len(*a.Label) > annotationLabelMax {
+		if *a.Label == "" || utf8.RuneCountInString(*a.Label) > annotationLabelMax {
 			return a, "", value, argErrorf("label must be 1 to %d characters", annotationLabelMax)
 		}
 		value = schema.Label(*a.Label)
 	default:
-		if *a.Text == "" || len(*a.Text) > annotationTextMax {
+		if *a.Text == "" || utf8.RuneCountInString(*a.Text) > annotationTextMax {
 			return a, "", value, argErrorf("text must be 1 to %d characters", annotationTextMax)
 		}
 		value = schema.Text(*a.Text)
@@ -91,18 +92,18 @@ func parseAnnotateArgs(raw json.RawMessage) (a annotateArgs, session string, val
 	return a, id.session, value, nil
 }
 
-// annotationKey is the idempotency key of an annotate call: the client's
-// request_id, else the hash of the annotation without its timestamp.
+// annotationKey is the idempotency key of an annotate call: the hash of the
+// annotation without its timestamp, plus the client's request_id when it gave
+// one. An exact retry repeats the key; a different annotation under the same
+// request_id gets its own key, so the store never mistakes it for the first.
 func annotationKey(a annotateArgs, session string, value schema.Value) (string, error) {
-	if a.RequestID != "" {
-		return a.RequestID, nil
-	}
 	b, err := json.Marshal(struct {
-		Target schema.Target           `json:"target"`
-		Name   string                  `json:"name"`
-		Value  schema.Value            `json:"value"`
-		Source schema.AnnotationSource `json:"source"`
-	}{schema.Target{SessionID: session, SpanID: a.SpanID}, a.Name, value, a.Source})
+		Target    schema.Target           `json:"target"`
+		Name      string                  `json:"name"`
+		Value     schema.Value            `json:"value"`
+		Source    schema.AnnotationSource `json:"source"`
+		RequestID string                  `json:"request_id,omitempty"`
+	}{schema.Target{SessionID: session, SpanID: a.SpanID}, a.Name, value, a.Source, a.RequestID})
 	if err != nil {
 		return "", err
 	}

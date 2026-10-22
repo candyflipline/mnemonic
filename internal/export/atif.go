@@ -88,6 +88,9 @@ type Metrics struct {
 // eventRow is one published events row, the input of the mapping below.
 type eventRow struct {
 	EventTime       time.Time
+	RequestID       string
+	TraceID         string
+	ItemID          string
 	EventKind       string
 	ActorKind       string
 	ToolCallID      string
@@ -101,15 +104,27 @@ type eventRow struct {
 	CacheWrite      uint64
 }
 
-const atifEventsSQL = `SELECT event_time, event_kind, actor_kind, tool_call_id, tool_name,
+const atifEventsSQL = `SELECT event_time, coalesce(request_id, ''), coalesce(trace_id, ''), coalesce(item_id, ''), event_kind, actor_kind, tool_call_id, tool_name,
   text_content, coalesce(tool_io_input_json, ''), model,
   input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
 FROM events WHERE session_id = ? AND event_order IS NOT NULL ORDER BY event_order`
 
+// ErrSessionNotFound is what an export answers for a session the cache does
+// not know and for one in hidden, so the two cannot be told apart.
+var ErrSessionNotFound = errors.New("session not found")
+
+func notFound(sessionID string) error {
+	return fmt.Errorf("export: %w: %q", ErrSessionNotFound, sessionID)
+}
+
 // ATIF builds one session's trajectory from the cache. Only published rows
 // take part (`event_order IS NOT NULL`, internal/query/query.go:21), in
-// event_order. The harness of the first event names the agent.
-func ATIF(ctx context.Context, db *sql.DB, sessionID string) (*Trajectory, error) {
+// event_order. The harness of the first event names the agent. A session in
+// hidden (deleted, per the server's session controls) is not found.
+func ATIF(ctx context.Context, db *sql.DB, sessionID string, hidden map[string]bool) (*Trajectory, error) {
+	if hidden[sessionID] {
+		return nil, notFound(sessionID)
+	}
 	rows, err := db.QueryContext(ctx, atifEventsSQL, sessionID)
 	if err != nil {
 		return nil, err
@@ -119,7 +134,7 @@ func ATIF(ctx context.Context, db *sql.DB, sessionID string) (*Trajectory, error
 	harness := ""
 	for rows.Next() {
 		var r eventRow
-		if err := rows.Scan(&r.EventTime, &r.EventKind, &r.ActorKind, &r.ToolCallID, &r.ToolName,
+		if err := rows.Scan(&r.EventTime, &r.RequestID, &r.TraceID, &r.ItemID, &r.EventKind, &r.ActorKind, &r.ToolCallID, &r.ToolName,
 			&r.TextContent, &r.ToolIOInputJSON, &r.Model,
 			&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWrite); err != nil {
 			return nil, err
@@ -133,7 +148,7 @@ func ATIF(ctx context.Context, db *sql.DB, sessionID string) (*Trajectory, error
 		`SELECT harness FROM events WHERE session_id = $1 AND event_order IS NOT NULL ORDER BY event_order LIMIT 1`,
 		sessionID).Scan(&harness); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("export: session %q not found in the cache", sessionID)
+			return nil, notFound(sessionID)
 		}
 		return nil, err
 	}
@@ -142,8 +157,8 @@ func ATIF(ctx context.Context, db *sql.DB, sessionID string) (*Trajectory, error
 
 // MarshalATIF builds the trajectory and returns its JSON, but only once the
 // ported validator accepts it; a failed rule comes back as the error.
-func MarshalATIF(ctx context.Context, db *sql.DB, sessionID string) ([]byte, error) {
-	t, err := ATIF(ctx, db, sessionID)
+func MarshalATIF(ctx context.Context, db *sql.DB, sessionID string, hidden map[string]bool) ([]byte, error) {
+	t, err := ATIF(ctx, db, sessionID, hidden)
 	if err != nil {
 		return nil, err
 	}
@@ -157,9 +172,28 @@ func MarshalATIF(ctx context.Context, db *sql.DB, sessionID string) ([]byte, err
 	return b, nil
 }
 
-// buildTrajectory maps events to steps: one step per user message, per run of
-// assistant rows (message, reasoning, tool_call), and per system/meta row; a
-// tool result joins the step whose tool_calls carry its tool_call_id.
+// requestKey names the model request an assistant row belongs to, the way the
+// spans derivations name a chat (internal/cache/index_spans_claudecode.go:
+// request_id, else trace_id; the pi family: the record id in item_id). It is
+// "" for harnesses whose rows carry no request boundary (codex, cursor), whose
+// assistant runs stay one step.
+func requestKey(harness string, ev eventRow) string {
+	switch harness {
+	case "claude-code":
+		if ev.RequestID != "" {
+			return ev.RequestID
+		}
+		return ev.TraceID
+	case "pi-coding-agent", "prime-agent":
+		return ev.ItemID
+	}
+	return ""
+}
+
+// buildTrajectory maps events to steps: one step per user message, per model
+// request within a run of assistant rows (message, reasoning, tool_call), and
+// per system/meta row; a tool result joins the step whose tool_calls carry its
+// tool_call_id.
 func buildTrajectory(sessionID, harness string, evs []eventRow) *Trajectory {
 	t := &Trajectory{
 		SchemaVersion: SchemaVersion,
@@ -167,6 +201,7 @@ func buildTrajectory(sessionID, harness string, evs []eventRow) *Trajectory {
 		Agent:         Agent{Name: harness, Version: strconv.Itoa(normalize.Version)},
 	}
 	var cur *Step
+	curReq := ""
 	flush := func() {
 		if cur == nil {
 			return
@@ -175,13 +210,20 @@ func buildTrajectory(sessionID, harness string, evs []eventRow) *Trajectory {
 			cur.Metrics = nil
 		}
 		t.Steps = append(t.Steps, *cur)
-		cur = nil
+		cur, curReq = nil, ""
 	}
 	for _, ev := range evs {
 		switch {
 		case ev.ActorKind == "assistant" && isAssistantKind(ev.EventKind):
+			req := requestKey(harness, ev)
+			if cur != nil && req != "" && curReq != "" && req != curReq {
+				flush()
+			}
 			if cur == nil {
 				cur = &Step{Source: "agent", Timestamp: isoMillis(ev.EventTime)}
+			}
+			if curReq == "" {
+				curReq = req
 			}
 			absorbAssistant(cur, ev)
 		case ev.ActorKind == "tool":
@@ -242,8 +284,8 @@ func isAssistantKind(kind string) bool {
 
 // absorbAssistant folds one assistant row into its step: reasoning rows feed
 // reasoning_content, message rows the message, tool_call rows the tool_calls,
-// and every row carries the request's usage, so each token column keeps the
-// max over the step's rows (the rule the spans derivation states,
+// and every row of one request carries that request's usage, so each token
+// column keeps the max over the step's rows (the rule the spans derivation states,
 // internal/cache/index_spans_claudecode.go:10-13).
 func absorbAssistant(s *Step, ev eventRow) {
 	switch ev.EventKind {

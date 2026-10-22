@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"strconv"
 	"time"
 )
@@ -108,12 +107,17 @@ func intAttr(key string, value uint64) otlpAttr {
 // OTLP builds the ExportTraceServiceRequest of one session from its spans,
 // ordered by start time. The trace id is derived from the session id, a
 // span's id is its spans.span_id (16 hex chars, 8 bytes), and the root keeps
-// no parentSpanId.
-func OTLP(ctx context.Context, db *sql.DB, sessionID string) (*otlpRequest, error) {
+// no parentSpanId. Only chat spans carry gen_ai.usage.*: the spans relation
+// rolls usage up onto invoke_agent and turn spans, so a sum over the trace
+// would count it twice. A session in hidden is not found.
+func OTLP(ctx context.Context, db *sql.DB, sessionID string, hidden map[string]bool) (*otlpRequest, error) {
+	if hidden[sessionID] {
+		return nil, notFound(sessionID)
+	}
 	if ok, err := sessionExists(ctx, db, sessionID); err != nil {
 		return nil, err
 	} else if !ok {
-		return nil, fmt.Errorf("export: session %q not found in the cache", sessionID)
+		return nil, notFound(sessionID)
 	}
 	rows, err := db.QueryContext(ctx, `SELECT span_id, parent_span_id, kind, name,
   start_time, end_time, status, model, input_tokens, output_tokens
@@ -150,9 +154,11 @@ FROM spans WHERE session_id = ? ORDER BY start_time, span_id`, sessionID)
 		if model != "" {
 			s.Attributes = append(s.Attributes, strAttr("gen_ai.request.model", model))
 		}
-		s.Attributes = append(s.Attributes,
-			intAttr("gen_ai.usage.input_tokens", inputTokens),
-			intAttr("gen_ai.usage.output_tokens", outTokens))
+		if kind == "chat" {
+			s.Attributes = append(s.Attributes,
+				intAttr("gen_ai.usage.input_tokens", inputTokens),
+				intAttr("gen_ai.usage.output_tokens", outTokens))
+		}
 		spans = append(spans, s)
 	}
 	if err := rows.Err(); err != nil {

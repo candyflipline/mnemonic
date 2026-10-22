@@ -40,35 +40,43 @@ type AnnotationOut struct {
 	TS     time.Time       `json:"ts"`
 }
 
+// SessionError is a session the dataset skipped, with why.
+type SessionError struct {
+	SessionID string
+	Err       error
+}
+
 // Dataset returns the sessions matching the annotation, at most perTask per
 // task, newest first. A task is the cwd of the session's first published
-// event.
-func Dataset(ctx context.Context, db *sql.DB, f AnnotationFilter, perTask int) ([]DatasetRow, error) {
+// event. Sessions in hidden are left out. A session that fails validation does
+// not count toward its task's cap and comes back in skipped; Dataset errs only
+// when every matching session failed.
+func Dataset(ctx context.Context, db *sql.DB, f AnnotationFilter, perTask int, hidden map[string]bool) (rows []DatasetRow, skipped []SessionError, err error) {
 	if f.Name == "" {
-		return nil, fmt.Errorf("export: --annotation needs a name")
+		return nil, nil, fmt.Errorf("export: --annotation needs a name")
 	}
 	if perTask < 1 {
-		return nil, fmt.Errorf("export: --per-task must be at least 1")
+		return nil, nil, fmt.Errorf("export: --per-task must be at least 1")
 	}
 	sessions, err := annotatedSessions(ctx, db, f)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	tasks := map[string]int{}
-	var rows []DatasetRow
 	for _, s := range sessions {
-		if tasks[s.task] >= perTask {
+		if hidden[s.id] || tasks[s.task] >= perTask {
 			continue
 		}
-		tasks[s.task]++
-		atif, err := MarshalATIF(ctx, db, s.id)
+		atif, err := MarshalATIF(ctx, db, s.id, hidden)
 		if err != nil {
-			return nil, err
+			skipped = append(skipped, SessionError{s.id, err})
+			continue
 		}
 		anns, err := sessionAnnotations(ctx, db, s.id)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
+		tasks[s.task]++
 		rows = append(rows, DatasetRow{
 			SessionID:   s.id,
 			Harness:     s.harness,
@@ -77,7 +85,10 @@ func Dataset(ctx context.Context, db *sql.DB, f AnnotationFilter, perTask int) (
 			ATIF:        atif,
 		})
 	}
-	return rows, nil
+	if len(rows) == 0 && len(skipped) > 0 {
+		return nil, skipped, fmt.Errorf("export: every matching session failed (%d)", len(skipped))
+	}
+	return rows, skipped, nil
 }
 
 type sessionKey struct {
