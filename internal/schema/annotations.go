@@ -143,7 +143,7 @@ func ParseAnnotation(line []byte) (Annotation, error) {
 	return a, nil
 }
 
-var AnnotationsDDL = `CREATE TABLE annotations (
+var AnnotationsDDL = `CREATE TABLE IF NOT EXISTS annotations (
   annotation_id VARCHAR NOT NULL,
   target_session_id VARCHAR NOT NULL,
   target_span_id VARCHAR,

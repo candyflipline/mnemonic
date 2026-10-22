@@ -49,7 +49,7 @@ type Span struct {
 	LastEventUID     string
 }
 
-var SpansDDL = `CREATE TABLE spans (
+var SpansDDL = `CREATE TABLE IF NOT EXISTS spans (
   tenant VARCHAR NOT NULL,
   session_id VARCHAR NOT NULL,
   span_id VARCHAR NOT NULL,

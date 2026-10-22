@@ -8,10 +8,11 @@ import (
 	"strings"
 
 	"github.com/candyflipline/mnemonic/internal/schema"
+	"github.com/candyflipline/mnemonic/internal/store"
 )
 
 func isAnnotationFile(path string) bool {
-	return strings.Contains(filepath.ToSlash(path), "/harness="+schema.AnnotationHarness+"/")
+	return strings.Contains(filepath.ToSlash(path), "/machine="+store.ServerMachine+"/harness="+schema.AnnotationHarness+"/")
 }
 
 func splitAnnotations(changes []change) (events, annotations []change) {
@@ -25,13 +26,33 @@ func splitAnnotations(changes []change) (events, annotations []change) {
 	return events, annotations
 }
 
-// applyAnnotations replaces the annotations rows of every changed lake file
-// with the file's rows, in one transaction with its lake_files and sources
-// rows. These files never reach lake_rows, events or postings.
-func applyAnnotations(ctx context.Context, c *sql.Conn, dataDir string, changes []change) (int, error) {
-	if len(changes) == 0 {
-		return 0, nil
+// applyAnnotations applies each batch with applyAnnotationBatch and holds a
+// failed batch's files back the way apply does.
+func (ix *Index) applyAnnotations(ctx context.Context, c *sql.Conn, bs [][]change) (int, []error) {
+	var n int
+	var errs []error
+	for _, b := range bs {
+		err := applyAnnotationBatch(ctx, c, ix.dataDir, b)
+		for _, ch := range b {
+			if err != nil {
+				ix.failed[ch.file.path] = ch.file
+			} else {
+				delete(ix.failed, ch.file.path)
+			}
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("annotations from %s: %w", b[0].file.path, err))
+			continue
+		}
+		n += len(b)
 	}
+	return n, errs
+}
+
+// applyAnnotationBatch replaces the annotations rows of every changed lake
+// file with the file's rows, in one transaction with its lake_files and
+// sources rows. These files never reach lake_rows, events or postings.
+func applyAnnotationBatch(ctx context.Context, c *sql.Conn, dataDir string, changes []change) error {
 	var all, present []lakeFile
 	var paths []string
 	for _, ch := range changes {
@@ -43,7 +64,7 @@ func applyAnnotations(ctx context.Context, c *sql.Conn, dataDir string, changes 
 	}
 	rows, err := numRows(ctx, c, paths)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	inAll := "(" + strings.Join(quotePaths(all), ", ") + ")"
 	stmts := []string{"BEGIN", "DELETE FROM annotations WHERE lake_file IN " + inAll}
@@ -67,12 +88,12 @@ FROM `+parquetSource(present))
 	}
 	srcStmts, err := sourceRows(dataDir, changes)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	stmts = append(append(stmts, srcStmts...), "COMMIT")
 	if err := execAll(ctx, c, stmts); err != nil {
 		c.ExecContext(context.Background(), "ROLLBACK")
-		return 0, err
+		return err
 	}
-	return len(changes), nil
+	return nil
 }

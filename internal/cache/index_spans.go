@@ -5,8 +5,11 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
 // SpanDerivation returns one SELECT that yields spans rows, every column of
@@ -52,32 +55,52 @@ func deriveSpans(inS string) []string {
 	return stmts
 }
 
-// spansFingerprint names the registered derivations, so an index built under
-// other ones re-derives every session's spans on Open.
+// spansFingerprint names the registered derivations, so an index whose
+// spans were derived under other ones derives them all again.
 func spansFingerprint() string {
 	sum := sha256.Sum256([]byte(strings.Join(deriveSpans("true"), "\n")))
 	return hex.EncodeToString(sum[:])
 }
 
-func rederiveSpans(ctx context.Context, db *sql.DB) error {
+const pendingSpansDDL = "CREATE TABLE IF NOT EXISTS pending_spans (session_id VARCHAR)"
+
+// spansDDL adds what spans and annotations need to an index of any age;
+// every statement is a no-op when already applied.
+func spansDDL() []string {
+	return []string{
+		pendingSpansDDL,
+		schema.SpansDDL,
+		schema.AnnotationsDDL,
+		"ALTER TABLE meta ADD COLUMN IF NOT EXISTS spans_fingerprint VARCHAR DEFAULT ''",
+	}
+}
+
+// convergeSpans derives the spans of every session reorder queued in
+// pending_spans, or of every session when the registered derivations changed,
+// in a transaction of its own: a failure costs spans, never events, and the
+// queue is retried next cycle.
+func convergeSpans(ctx context.Context, c *sql.Conn) error {
 	var have string
-	if err := db.QueryRowContext(ctx, "SELECT spans_fingerprint FROM meta").Scan(&have); err != nil {
+	if err := c.QueryRowContext(ctx, "SELECT spans_fingerprint FROM meta").Scan(&have); err != nil {
 		return err
 	}
 	want := spansFingerprint()
-	if have == want {
-		return nil
+	stmts := []string{"BEGIN"}
+	if have != want {
+		stmts = append(append(stmts, deriveSpans("true")...), "UPDATE meta SET spans_fingerprint = "+sqlStr(want))
+	} else {
+		var n int64
+		if err := c.QueryRowContext(ctx, "SELECT count(*) FROM pending_spans").Scan(&n); err != nil || n == 0 {
+			return err
+		}
+		stmts = append(append(stmts, "CREATE OR REPLACE TEMP TABLE sp AS SELECT DISTINCT session_id FROM pending_spans"),
+			deriveSpans("session_id IN (SELECT session_id FROM sp)")...)
+		stmts = append(stmts, "DROP TABLE sp")
 	}
-	c, err := db.Conn(ctx)
-	if err != nil {
-		return err
-	}
-	defer c.Close()
-	stmts := append(append([]string{"BEGIN"}, deriveSpans("true")...),
-		"UPDATE meta SET spans_fingerprint = "+sqlStr(want), "COMMIT")
-	if err := execAll(ctx, c, stmts); err != nil {
+	if err := execAll(ctx, c, append(stmts, "DELETE FROM pending_spans", "COMMIT")); err != nil {
 		c.ExecContext(context.Background(), "ROLLBACK")
-		return err
+		c.ExecContext(context.Background(), "DROP TABLE IF EXISTS temp.sp")
+		return fmt.Errorf("spans: %w", err)
 	}
 	return nil
 }

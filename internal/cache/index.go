@@ -18,7 +18,7 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-const indexVersion = 8
+const indexVersion = 7
 
 const (
 	queryThreads    = "2"
@@ -94,13 +94,11 @@ func Open(dataDir string, o Options) (*Index, error) {
 			return nil, err
 		}
 		if db != nil {
-			if _, err := db.Exec(pendingSessionsDDL); err != nil {
-				db.Close()
-				return nil, err
-			}
-			if err := rederiveSpans(context.Background(), db); err != nil {
-				db.Close()
-				return nil, err
+			for _, stmt := range append([]string{pendingSessionsDDL}, spansDDL()...) {
+				if _, err := db.Exec(stmt); err != nil {
+					db.Close()
+					return nil, err
+				}
 			}
 			return &Index{db: db, dataDir: dataDir, flags: o.FlagsSQL, failed: map[string]lakeFile{}}, nil
 		}
@@ -137,9 +135,9 @@ func Open(dataDir string, o Options) (*Index, error) {
 	defer c.Close()
 	stmts := append([]string{"BEGIN"}, indexDDL()...)
 	stmts = append(stmts,
-		"INSERT INTO meta VALUES ("+strconv.Itoa(indexVersion)+", "+sqlStr(o.FlagsSQL)+", "+sqlStr(spansFingerprint())+")",
-		"INSERT INTO corpus VALUES (0, 0, 0)",
-		"COMMIT")
+		"INSERT INTO meta VALUES ("+strconv.Itoa(indexVersion)+", "+sqlStr(o.FlagsSQL)+")",
+		"INSERT INTO corpus VALUES (0, 0, 0)")
+	stmts = append(append(stmts, spansDDL()...), "COMMIT")
 	if err := execAll(ctx, c, stmts); err != nil {
 		db.Close()
 		return nil, err
@@ -176,7 +174,7 @@ func (ix *Index) Close() error { return ix.db.Close() }
 
 func indexDDL() []string {
 	return append([]string{
-		"CREATE TABLE meta (version INTEGER NOT NULL, flags_sql VARCHAR NOT NULL, spans_fingerprint VARCHAR NOT NULL)",
+		"CREATE TABLE meta (version INTEGER NOT NULL, flags_sql VARCHAR NOT NULL)",
 		"CREATE TABLE corpus (docs UBIGINT NOT NULL, total_len UBIGINT NOT NULL, next_doc UINTEGER NOT NULL)",
 		"CREATE TABLE lake_files (path VARCHAR NOT NULL, size UBIGINT NOT NULL, mtime_ns BIGINT NOT NULL, rows UBIGINT NOT NULL)",
 		`CREATE TABLE lake_rows (lake_file VARCHAR NOT NULL, lake_row UBIGINT NOT NULL, event_uid VARCHAR,
@@ -188,8 +186,6 @@ func indexDDL() []string {
   total_turns UINTEGER, total_events UBIGINT, tool_calls UBIGINT, tool_results UBIGINT,
   user_messages UBIGINT, assistant_messages UBIGINT, completed INTEGER NOT NULL)`,
 		sourcesDDL,
-		schema.SpansDDL,
-		schema.AnnotationsDDL,
 		pendingSessionsDDL,
 		indexTraceDDL,
 	}, postingsDDL()...)
@@ -246,7 +242,6 @@ func (ix *Index) Converge(ctx context.Context, f Failed) (st ConvergeStats, err 
 	if err != nil {
 		return ConvergeStats{}, err
 	}
-	changes, annotations := splitAnnotations(changes)
 	var fresh, held []change
 	failed := map[string]lakeFile{}
 	for _, ch := range changes {
@@ -258,6 +253,8 @@ func (ix *Index) Converge(ctx context.Context, f Failed) (st ConvergeStats, err 
 		}
 	}
 	ix.failed = failed
+	fresh, freshAnnotations := splitAnnotations(fresh)
+	held, heldAnnotations := splitAnnotations(held)
 	fresh, errs := ix.countRows(ctx, c, fresh)
 	var cerrs []error
 	if f == RetryFailed {
@@ -289,9 +286,15 @@ func (ix *Index) Converge(ctx context.Context, f Failed) (st ConvergeStats, err 
 		st.add(rst)
 		errs = append(append(errs, cerrs...), rerrs...)
 	}
-	n, err := applyAnnotations(ctx, c, ix.dataDir, annotations)
+	n, aerrs := ix.applyAnnotations(ctx, c, bySource(freshAnnotations))
 	st.Files += n
-	if err != nil {
+	errs = append(errs, aerrs...)
+	if f == RetryFailed {
+		n, aerrs := ix.applyAnnotations(ctx, c, bySource(heldAnnotations))
+		st.Files += n
+		errs = append(errs, aerrs...)
+	}
+	if err := convergeSpans(ctx, c); err != nil {
 		errs = append(errs, err)
 	}
 	if err := syncManifests(ctx, c, ix.dataDir); err != nil {
@@ -744,7 +747,7 @@ FROM events WHERE `+inS+` GROUP BY session_id, turn_seq`,
   cast(count(*) FILTER (WHERE actor_kind = 'assistant' AND event_kind = 'message') AS UBIGINT),
   max(CASE WHEN payload_type = 'task_complete' THEN 1 ELSE 0 END)
 FROM events WHERE `+inS+` GROUP BY session_id`)
-	stmts = append(stmts, deriveSpans(inS)...)
+	stmts = append(stmts, "INSERT INTO pending_spans SELECT session_id FROM s")
 	return execAll(ctx, c, append(stmts, "DROP TABLE ord"))
 }
 
