@@ -21,6 +21,29 @@ import (
 //go:embed tools.json
 var toolsJSON []byte
 
+//go:embed tools_ext.json
+var toolsExtJSON []byte
+
+var toolsList = appendTools(toolsJSON, toolsExtJSON)
+
+// appendTools is the tools array base followed by the entries of ext, each
+// entry's bytes unchanged.
+func appendTools(base, ext []byte) json.RawMessage {
+	var entries []json.RawMessage
+	if err := json.Unmarshal(ext, &entries); err != nil {
+		panic("mcp: tools_ext.json: " + err.Error())
+	}
+	if len(entries) == 0 {
+		return base
+	}
+	end := bytes.LastIndexByte(base, ']')
+	out := append([]byte(nil), base[:end]...)
+	for _, e := range entries {
+		out = append(append(out, ','), e...)
+	}
+	return append(out, ']')
+}
+
 var Version = "dev"
 
 // The protocol versions the upstream MCP 0.7.x speaks; a requested version
@@ -266,7 +289,7 @@ func unstructuredToolError(text string) toolResult {
 }
 
 func toolsListResult() map[string]json.RawMessage {
-	return map[string]json.RawMessage{"tools": toolsJSON}
+	return map[string]json.RawMessage{"tools": toolsList}
 }
 
 func initializeResult(params map[string]any) map[string]any {

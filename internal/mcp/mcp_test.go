@@ -121,9 +121,14 @@ func TestToolsListServesToolsJSONVerbatim(t *testing.T) {
 	payload := decode(t, resp)
 	result, _ := payload["result"].(map[string]any)
 	tools, _ := result["tools"].([]any)
-	if len(tools) != 5 {
-		t.Fatalf("tools/list returned %d tools, want 5", len(tools))
+	var ext []any
+	if err := json.Unmarshal(toolsExtJSON, &ext); err != nil {
+		t.Fatal(err)
 	}
+	if len(tools) != 5+len(ext) {
+		t.Fatalf("tools/list returned %d tools, want %d", len(tools), 5+len(ext))
+	}
+	tools = tools[:5]
 
 	var wantTools []any
 	if err := json.Unmarshal(toolsJSON, &wantTools); err != nil {
