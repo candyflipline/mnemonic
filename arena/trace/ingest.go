@@ -53,7 +53,12 @@ type ckpt struct {
 	Machine    string          `json:"machine"`
 	Sessions   []string        `json:"sessions"`
 	ColdZst    int64           `json:"cold_zst"`
+	Layout     int             `json:"layout"`
 }
+
+// logLayout is the shape of the rows a log holds. Layout 1 numbers a row's
+// version by its place in its source, where the parser stamped the wall clock.
+const logLayout = 1
 
 // hot reports whether the source grew since it last settled into a cold part.
 func (c ckpt) hot() bool { return c.ZstSize != c.ColdZst }
@@ -204,12 +209,12 @@ func ingestSource(root, store string, s source) (bool, error) {
 		end = fi.Size()
 	}
 	want := ckpt{Key: key, Parser: normalize.Version, Harness: s.src.Harness, SourceName: s.src.SourceName,
-		SourceFile: s.src.Path, Author: s.key.Author, Machine: s.key.Machine,
+		SourceFile: s.src.Path, Author: s.key.Author, Machine: s.key.Machine, Layout: logLayout,
 		Path: filepath.ToSlash(s.key.Events("")) /* lake path order */}
 	prev, has := readCkpt(store, key)
 	resumed := false
 	if has && prev.Parser == want.Parser && prev.Harness == want.Harness && prev.SourceName == want.SourceName &&
-		prev.SourceFile == want.SourceFile && prev.ZstSize <= end {
+		prev.SourceFile == want.SourceFile && prev.Layout == want.Layout && prev.ZstSize <= end {
 		if sum, err := windowSHA(raw, prev.ZstSize); err == nil && sum == prev.WindowSHA {
 			resumed = true
 			if prev.ZstSize < end {
@@ -258,6 +263,7 @@ func ingestSource(root, store string, s source) (bool, error) {
 	state, err := parser.Parse(zr, normalize.SourceMeta{SourceName: s.src.SourceName, Harness: s.src.Harness, SourceFile: s.src.Path},
 		from.State, func(ev *schema.Event) error {
 			r := rowFrom(ev)
+			r.Version = uint64(rows)
 			sessions[r.Session] = true
 			var heavy []byte
 			heavy = appendStr(heavy, ev.PayloadJSON)

@@ -93,7 +93,7 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 		for _, i := range local {
 			b := rows[i]
 			w, ok := win[b.row.UID]
-			if !ok || b.row.Version > w.b.row.Version || (b.row.Version == w.b.row.Version && c.Path < w.path) {
+			if !ok || c.Path < w.path {
 				win[b.row.UID] = &winner{b: b, path: c.Path}
 			}
 		}
