@@ -18,6 +18,10 @@ import (
 // Deviation from validator.py: errors raised by the models' trajectory-level
 // validators (step-id sequencing, tool-call references) carry the location of
 // the offending field, where Pydantic reports them at the root.
+//
+// Known gap, kept on purpose: Pydantic's lax mode coerces, and this port does
+// not. An int field rejects 1.0, true and "1" here where Pydantic accepts
+// them, and a bool field rejects 0 and 1. The export never emits those shapes.
 
 // ValidateJSON validates one ATIF document, given as JSON bytes.
 func ValidateJSON(b []byte) []string {
@@ -140,6 +144,9 @@ func jsonKind(val any) string {
 // literal reports a failed Literal match, in validator.py:191-197's shape with
 // pydantic's message for a Literal violation.
 func (v *validator) literal(loc string, want []string, val any) {
+	if val == nil {
+		val = "None"
+	}
 	v.addf(loc, "Input should be %s, got '%v'", quoteJoin(want), val)
 }
 
@@ -209,13 +216,14 @@ func (v *validator) trajectory(doc any) {
 	}
 	v.extraForbid("", obj, trajectoryKeys)
 
-	if sv, ok := obj["schema_version"]; ok && sv != nil {
+	// schema_version defaults to ATIF-v1.8 when absent, but a present null is
+	// not a Literal member (m-trajectory.py:15-28).
+	if sv, ok := obj["schema_version"]; ok {
 		s, isStr := sv.(string)
 		if !isStr || !slices.Contains(schemaVersions, s) {
-			v.literal("schema_version", schemaVersions, sv) // m-trajectory.py:15-28
+			v.literal("schema_version", schemaVersions, sv)
 		}
 	}
-	// schema_version defaults to ATIF-v1.8 when absent (m-trajectory.py:26).
 
 	if s, ok := obj["session_id"]; ok && s != nil {
 		v.wantString("session_id", s)
@@ -318,7 +326,7 @@ func (v *validator) step(loc string, doc any) {
 	if val, present := obj["source"]; !present || val == nil {
 		v.missing(where + ".source") // m-step.py:26-29
 	} else if v.wantString(where+".source", val) {
-		source = val.(string)
+		source, _ = val.(string)
 		hasSource = slices.Contains(stepSources, source)
 		if !hasSource {
 			v.literal(where+".source", stepSources, val) // m-step.py:26
@@ -453,7 +461,7 @@ func (v *validator) toolCallReferences(steps []any) {
 			if !ok {
 				continue
 			}
-			if id, ok := m["source_call_id"].(string); ok && id != "" && !ids[id] {
+			if id, ok := m["source_call_id"].(string); ok && !ids[id] {
 				stepNo := 0
 				if n, ok := obj["step_id"].(json.Number); ok {
 					stepNo, _ = strconv.Atoi(n.String())
@@ -609,14 +617,18 @@ func (v *validator) embeddedSubagents(loc string, doc any) {
 			v.wantObject(where, s)
 			continue
 		}
-		tid, _ := obj["trajectory_id"].(string)
-		if tid == "" {
-			name, _ := obj["agent"].(map[string]any)["name"].(string)
+		// Only a missing or null trajectory_id is "required"; an empty string
+		// is present (m-trajectory.py:146-148).
+		if tid, ok := obj["trajectory_id"].(string); ok {
+			if seen[tid] {
+				v.addf(where+".trajectory_id", "trajectory_id '%s' is not unique within subagent_trajectories", tid)
+			}
+			seen[tid] = true
+		} else if obj["trajectory_id"] == nil {
+			agent, _ := obj["agent"].(map[string]any)
+			name, _ := agent["name"].(string)
 			v.addf(where+".trajectory_id", "trajectory_id is required for embedded subagents (agent.name=%q)", name)
-		} else if seen[tid] {
-			v.addf(where+".trajectory_id", "trajectory_id '%s' is not unique within subagent_trajectories", tid)
 		}
-		seen[tid] = true
 		v.trajectory(s)
 	}
 }

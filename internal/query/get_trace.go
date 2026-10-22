@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/candyflipline/mnemonic/internal/schema"
@@ -146,20 +147,47 @@ FROM spans WHERE session_id = `+sqlQuote(session)+scope+` ORDER BY start_time, k
 }
 
 // buildTree nests spans under their parents; a span whose parent is not in
-// the session is a root. Roots carry the sums of what is beneath them, so
-// the totals are the roots' sums.
+// the session is a root. A span the roots do not reach sits on a parent cycle
+// (or hangs off one): the first such span in order becomes an extra root with
+// its parent link cut, and so on until every span is in the tree once. Roots
+// carry the sums of what is beneath them, so the totals are the roots' sums.
 func buildTree(spans []*traceSpan) ([]*traceSpan, traceTotals) {
 	byID := make(map[string]*traceSpan, len(spans))
 	for _, s := range spans {
 		byID[s.SpanID] = s
 	}
 	roots := []*traceSpan{}
+	kids := make(map[*traceSpan][]*traceSpan, len(spans))
 	for _, s := range spans {
 		if p, ok := byID[s.parent]; ok && s.parent != "" && p != s {
-			p.Children = append(p.Children, s)
+			kids[p] = append(kids[p], s)
 		} else {
 			roots = append(roots, s)
 		}
+	}
+	reached := make(map[*traceSpan]bool, len(spans))
+	var walk func(*traceSpan)
+	walk = func(s *traceSpan) {
+		if reached[s] {
+			return
+		}
+		reached[s] = true
+		s.Children = append(s.Children, kids[s]...)
+		for _, c := range kids[s] {
+			walk(c)
+		}
+	}
+	for _, r := range roots {
+		walk(r)
+	}
+	for _, s := range spans {
+		if reached[s] {
+			continue
+		}
+		p := byID[s.parent]
+		kids[p] = slices.DeleteFunc(kids[p], func(c *traceSpan) bool { return c == s })
+		roots = append(roots, s)
+		walk(s)
 	}
 	t := traceTotals{Spans: len(spans)}
 	for _, r := range roots {

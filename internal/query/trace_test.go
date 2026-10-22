@@ -3,8 +3,6 @@ package query_test
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/candyflipline/mnemonic/internal/auth"
@@ -141,11 +140,11 @@ func TestTraceAnnotateRoundTrip(t *testing.T) {
 	if _, msg := call("bob", "get_trace", `{"session_id":"`+claudeSession+`"}`); msg != "session not found" {
 		t.Fatalf("get_trace of another tenant's session: %q", msg)
 	}
-	sum := sha256.Sum256([]byte("alice\x00r1"))
-	wantID := hex.EncodeToString(sum[:16])
+	const wantID = "326b831e21317c1de7f925b2d199f764"
+	const wantKey = "9d1f735ba24066cb31c2010adf442c9ff68d334bc2f5c3183c946bb33d401f65"
 	for i, wantDup := range []string{"false", "true"} {
 		data, msg := call("alice", "annotate", args)
-		want := `{"annotation_id":"` + wantID + `","session_id":"` + claudeSession + `","span_id":"` + chatSpan + `","name":"correctness","request_key":"r1","duplicate":` + wantDup + `}`
+		want := `{"annotation_id":"` + wantID + `","session_id":"` + claudeSession + `","span_id":"` + chatSpan + `","name":"correctness","request_key":"` + wantKey + `","duplicate":` + wantDup + `}`
 		if msg != "" || data != want {
 			t.Fatalf("annotate %d: %s %q, want %s", i, data, msg, want)
 		}
@@ -185,4 +184,14 @@ func TestTraceAnnotateRoundTrip(t *testing.T) {
 		t.Fatalf("parser marker after the sweep: %q %v", b, err)
 	}
 	check("after the sweep")
+
+	reused := `{"session_id":"` + claudeSession + `","span_id":"` + chatSpan + `","name":"correctness","number":0.9,"source":"scorer","request_id":"r1"}`
+	data, msg := call("alice", "annotate", reused)
+	if msg != "" || !strings.Contains(data, `"duplicate":false`) || strings.Contains(data, wantID) {
+		t.Fatalf("a different annotation under a reused request_id: %s %q, want a new annotation, not a duplicate", data, msg)
+	}
+	cycle()
+	if got := strings.Count(trace(""), `"name":"correctness"`); got != 2 {
+		t.Fatalf("annotations after the reused request_id = %d, want 2", got)
+	}
 }

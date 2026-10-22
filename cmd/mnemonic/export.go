@@ -20,7 +20,14 @@ import (
 func init() { commands["export"] = exportCmd }
 
 const exportUsage = `usage: mnemonic export atif|otlp --data-dir D --session S [--out F]
-       mnemonic export dataset --data-dir D --annotation N[=V] --per-task K [--out F]`
+       mnemonic export dataset --data-dir D --annotation N[=V] --per-task K [--include-private] [--out F]
+
+export runs on the server's data dir and sees every author. It honours the
+session controls there: a deleted session is refused ("session not found") by
+atif and otlp and skipped by dataset, and dataset also skips private sessions
+unless --include-private is given. A session that fails ATIF validation is
+skipped by dataset with its id and error on stderr; dataset fails only when
+every matching session did.`
 
 // exportCmd writes sessions out of the cache: one ATIF trajectory or OTLP
 // trace per session, or a JSONL dataset filtered by annotation.
@@ -39,6 +46,7 @@ func exportCmd(args []string) error {
 	session := fs.String("session", "", "session id (atif, otlp)")
 	annotation := fs.String("annotation", "", "name[=value] to filter sessions by (dataset)")
 	perTask := fs.Int("per-task", 3, "at most this many sessions per task (dataset)")
+	includePrivate := fs.Bool("include-private", false, "also export private sessions (dataset)")
 	out := fs.String("out", "", "output file (default stdout)")
 	if err := fs.Parse(rest); err != nil {
 		return err
@@ -63,6 +71,14 @@ func exportCmd(args []string) error {
 		return errors.New("export: --session is required")
 	}
 
+	controls, err := query.LoadControls(*dataDir)
+	if err != nil {
+		return err
+	}
+	// A named session is the operator's choice, so only a dataset sweep skips
+	// private ones.
+	hidden := controls.ExportHidden(kind != "dataset" || *includePrivate)
+
 	ix, err := cache.Open(*dataDir, cache.Options{MemoryLimit: "1GB", FlagsSQL: query.SearchFlagsSQL()})
 	if err != nil {
 		return err
@@ -77,12 +93,12 @@ func exportCmd(args []string) error {
 	var body []byte
 	switch kind {
 	case "atif":
-		if body, err = export.MarshalATIF(ctx, db, sessionID); err == nil {
+		if body, err = export.MarshalATIF(ctx, db, sessionID, hidden); err == nil {
 			body = indent(body)
 		}
 	case "otlp":
 		var doc any
-		if doc, err = export.OTLP(ctx, db, sessionID); err == nil {
+		if doc, err = export.OTLP(ctx, db, sessionID, hidden); err == nil {
 			body, err = json.MarshalIndent(doc, "", "  ")
 		}
 	case "dataset":
@@ -90,7 +106,10 @@ func exportCmd(args []string) error {
 		if parseErr != nil {
 			return parseErr
 		}
-		rows, dsErr := export.Dataset(ctx, db, f, *perTask)
+		rows, skipped, dsErr := export.Dataset(ctx, db, f, *perTask, hidden)
+		for _, s := range skipped {
+			fmt.Fprintf(os.Stderr, "export: skipped session %s: %v\n", s.SessionID, s.Err)
+		}
 		if dsErr != nil {
 			return dsErr
 		}

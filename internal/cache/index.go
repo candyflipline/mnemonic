@@ -74,13 +74,10 @@ func Open(dataDir string, o Options) (*Index, error) {
 	if o.FlagsSQL == "" || o.MemoryLimit == "" {
 		return nil, errors.New("cache.Open: MemoryLimit and FlagsSQL are required")
 	}
+	if err := os.MkdirAll(layout.CacheDir(dataDir), 0o755); err != nil {
+		return nil, err
+	}
 	spill := filepath.Join(layout.CacheDir(dataDir), "index-spill")
-	if err := os.RemoveAll(spill); err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(spill, 0o755); err != nil {
-		return nil, err
-	}
 	path := IndexPath(dataDir)
 	config := url.Values{
 		"threads":                  {queryThreads},
@@ -94,6 +91,10 @@ func Open(dataDir string, o Options) (*Index, error) {
 			return nil, err
 		}
 		if db != nil {
+			if err := freshSpill(spill); err != nil {
+				db.Close()
+				return nil, err
+			}
 			for _, stmt := range append([]string{pendingSessionsDDL}, spansDDL()...) {
 				if _, err := db.Exec(stmt); err != nil {
 					db.Close()
@@ -126,6 +127,10 @@ func Open(dataDir string, o Options) (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := freshSpill(spill); err != nil {
+		db.Close()
+		return nil, err
+	}
 	ctx := context.Background()
 	c, err := db.Conn(ctx)
 	if err != nil {
@@ -143,6 +148,17 @@ func Open(dataDir string, o Options) (*Index, error) {
 		return nil, err
 	}
 	return &Index{db: db, dataDir: dataDir, flags: o.FlagsSQL, failed: map[string]lakeFile{}}, nil
+}
+
+// freshSpill empties the spill directory of a previous process and recreates
+// it. It runs only once Open holds the DuckDB file lock: before that the
+// directory may belong to a serve that is running, which a second process
+// (an export) must not disturb on its way to failing at the lock.
+func freshSpill(spill string) error {
+	if err := os.RemoveAll(spill); err != nil {
+		return err
+	}
+	return os.MkdirAll(spill, 0o755)
 }
 
 func openCurrent(dsn, flagsSQL string) (*sql.DB, error) {
