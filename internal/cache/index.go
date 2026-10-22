@@ -18,7 +18,7 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-const indexVersion = 7
+const indexVersion = 8
 
 const (
 	queryThreads    = "2"
@@ -98,6 +98,10 @@ func Open(dataDir string, o Options) (*Index, error) {
 				db.Close()
 				return nil, err
 			}
+			if err := rederiveSpans(context.Background(), db); err != nil {
+				db.Close()
+				return nil, err
+			}
 			return &Index{db: db, dataDir: dataDir, flags: o.FlagsSQL, failed: map[string]lakeFile{}}, nil
 		}
 		old, err := filepath.Glob(path + ".*.broken*")
@@ -133,7 +137,7 @@ func Open(dataDir string, o Options) (*Index, error) {
 	defer c.Close()
 	stmts := append([]string{"BEGIN"}, indexDDL()...)
 	stmts = append(stmts,
-		"INSERT INTO meta VALUES ("+strconv.Itoa(indexVersion)+", "+sqlStr(o.FlagsSQL)+")",
+		"INSERT INTO meta VALUES ("+strconv.Itoa(indexVersion)+", "+sqlStr(o.FlagsSQL)+", "+sqlStr(spansFingerprint())+")",
 		"INSERT INTO corpus VALUES (0, 0, 0)",
 		"COMMIT")
 	if err := execAll(ctx, c, stmts); err != nil {
@@ -172,7 +176,7 @@ func (ix *Index) Close() error { return ix.db.Close() }
 
 func indexDDL() []string {
 	return append([]string{
-		"CREATE TABLE meta (version INTEGER NOT NULL, flags_sql VARCHAR NOT NULL)",
+		"CREATE TABLE meta (version INTEGER NOT NULL, flags_sql VARCHAR NOT NULL, spans_fingerprint VARCHAR NOT NULL)",
 		"CREATE TABLE corpus (docs UBIGINT NOT NULL, total_len UBIGINT NOT NULL, next_doc UINTEGER NOT NULL)",
 		"CREATE TABLE lake_files (path VARCHAR NOT NULL, size UBIGINT NOT NULL, mtime_ns BIGINT NOT NULL, rows UBIGINT NOT NULL)",
 		`CREATE TABLE lake_rows (lake_file VARCHAR NOT NULL, lake_row UBIGINT NOT NULL, event_uid VARCHAR,
@@ -184,6 +188,8 @@ func indexDDL() []string {
   total_turns UINTEGER, total_events UBIGINT, tool_calls UBIGINT, tool_results UBIGINT,
   user_messages UBIGINT, assistant_messages UBIGINT, completed INTEGER NOT NULL)`,
 		sourcesDDL,
+		schema.SpansDDL,
+		schema.AnnotationsDDL,
 		pendingSessionsDDL,
 		indexTraceDDL,
 	}, postingsDDL()...)
@@ -240,6 +246,7 @@ func (ix *Index) Converge(ctx context.Context, f Failed) (st ConvergeStats, err 
 	if err != nil {
 		return ConvergeStats{}, err
 	}
+	changes, annotations := splitAnnotations(changes)
 	var fresh, held []change
 	failed := map[string]lakeFile{}
 	for _, ch := range changes {
@@ -281,6 +288,11 @@ func (ix *Index) Converge(ctx context.Context, f Failed) (st ConvergeStats, err 
 		rst, rerrs := ix.apply(ctx, c, bySource(held))
 		st.add(rst)
 		errs = append(append(errs, cerrs...), rerrs...)
+	}
+	n, err := applyAnnotations(ctx, c, ix.dataDir, annotations)
+	st.Files += n
+	if err != nil {
+		errs = append(errs, err)
 	}
 	if err := syncManifests(ctx, c, ix.dataDir); err != nil {
 		errs = append(errs, err)
@@ -731,9 +743,9 @@ FROM events WHERE `+inS+` GROUP BY session_id, turn_seq`,
   cast(count(*) FILTER (WHERE actor_kind = 'user' AND event_kind = 'message') AS UBIGINT),
   cast(count(*) FILTER (WHERE actor_kind = 'assistant' AND event_kind = 'message') AS UBIGINT),
   max(CASE WHEN payload_type = 'task_complete' THEN 1 ELSE 0 END)
-FROM events WHERE `+inS+` GROUP BY session_id`,
-		"DROP TABLE ord")
-	return execAll(ctx, c, stmts)
+FROM events WHERE `+inS+` GROUP BY session_id`)
+	stmts = append(stmts, deriveSpans(inS)...)
+	return execAll(ctx, c, append(stmts, "DROP TABLE ord"))
 }
 
 func dropTemps(c *sql.Conn) {
