@@ -14,7 +14,10 @@ import (
 	"github.com/candyflipline/mnemonic/arena/trace"
 )
 
-const dbEntries = 4
+const (
+	dbEntries     = 4
+	resolveFanout = 4
+)
 
 // handler is the one place phase semantics live. Calls are serialized because
 // a Part's scratch buffer and a DB's frame cache are not safe for concurrent use.
@@ -30,12 +33,9 @@ type dbEntry struct {
 }
 
 func (h *handler) call(ctx context.Context, req route.CallRequest) (route.CallResponse, error) {
-	parts := make([]*trace.Part, len(req.Parts))
-	for i, p := range req.Parts {
-		var err error
-		if parts[i], err = h.resolve(ctx, req.Tenant, p); err != nil {
-			return route.CallResponse{}, err
-		}
+	parts, err := h.resolveAll(ctx, req)
+	if err != nil {
+		return route.CallResponse{}, err
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -50,6 +50,42 @@ func (h *handler) call(ctx context.Context, req route.CallRequest) (route.CallRe
 	}
 	ph, err := trace.RunPhase(db, req.Tool, req.Phase, args, stats)
 	return route.CallResponse{Phase: ph}, err
+}
+
+// resolveAll resolves req's parts, resolveFanout at a time, in request order;
+// the first error cancels the rest and is the one returned.
+func (h *handler) resolveAll(ctx context.Context, req route.CallRequest) ([]*trace.Part, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	parts := make([]*trace.Part, len(req.Parts))
+	sem := make(chan struct{}, resolveFanout)
+	var (
+		wg    sync.WaitGroup
+		once  sync.Once
+		first error
+	)
+	for i, p := range req.Parts {
+		if ctx.Err() != nil {
+			break
+		}
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			tp, err := h.resolve(ctx, req.Tenant, p)
+			if err != nil {
+				once.Do(func() { first = err; cancel() })
+				return
+			}
+			parts[i] = tp
+		}()
+	}
+	wg.Wait()
+	if first == nil {
+		first = ctx.Err()
+	}
+	return parts, first
 }
 
 // db returns the DB over exactly these parts, in this order, building it once
