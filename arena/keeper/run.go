@@ -22,6 +22,12 @@ var ErrLost = errors.New("keeper: a newer keeper claimed the tenant")
 
 var ErrUnchecked = errors.New("keeper: the gen has not been checked recently; refusing to grant")
 
+var ErrDeleteSlack = errors.New("keeper: DeleteSlack is below the 3s floor")
+
+// MinDeleteSlack is the least DeleteSlack for which 2*checkEvery stays below it
+// with checkEvery at its 1s floor.
+const MinDeleteSlack = 3 * time.Second
+
 type Config struct {
 	Tenant      string
 	Root        string
@@ -34,17 +40,19 @@ type Config struct {
 
 // checkEvery keeps 2*checkEvery, the longest Read serves after the last good
 // check, below DeleteSlack, the margin a successor's deletes leave past the
-// last grant.
+// last grant; Take refuses a DeleteSlack under MinDeleteSlack.
 func (c Config) checkEvery() time.Duration {
-	return min(max(c.DeleteSlack/3, time.Second), 30*time.Second)
+	return min(c.DeleteSlack/3, 30*time.Second)
 }
 
 // Head is what the keeper serves: its committed manifest, the hot parts that
-// stay on its disk, and every local part open by ID.
+// stay on its disk, every local part open by ID, and the source rows of the
+// manifest, which get_ingest_status reads.
 type Head struct {
 	Manifest Manifest
 	Hot      []PartRef
 	Parts    map[string]*trace.Part
+	status   *trace.DB
 }
 
 type Keeper struct {
@@ -70,12 +78,16 @@ type local struct {
 	parts   []trace.LocalPart
 	sources json.RawMessage
 	open    map[string]*trace.Part
+	status  *trace.DB
 	stamp   uint64
 }
 
 // Take checks that s enforces exclusive create, claims the next gen, then
 // reads the latest manifest; the first commit is the first Cycle.
 func Take(ctx context.Context, s obj.Store, cfg Config) (*Keeper, error) {
+	if cfg.DeleteSlack < MinDeleteSlack {
+		return nil, fmt.Errorf("%w: got %s, want at least %s (raise -delete-slack)", ErrDeleteSlack, cfg.DeleteSlack, MinDeleteSlack)
+	}
 	if err := probeExclusive(ctx, s, cfg.Tenant); err != nil {
 		return nil, err
 	}
@@ -96,7 +108,11 @@ func Take(ctx context.Context, s obj.Store, cfg Config) (*Keeper, error) {
 		doomed:   map[obj.Key]time.Time{},
 		changed:  make(chan struct{}),
 	}
-	k.head.Store(&Head{Manifest: m})
+	status, err := trace.SourcesDB(m.Sources)
+	if err != nil {
+		return nil, err
+	}
+	k.head.Store(&Head{Manifest: m, status: status})
 	k.checked.Store(&claimed)
 	return k, nil
 }
@@ -118,9 +134,14 @@ func (k *Keeper) check(ctx context.Context) (Gen, error) {
 	return top, nil
 }
 
-// Run cycles every interval and checks the gen every checkEvery until ctx
-// ends or the gen is lost.
+// Run checks the gen once, then cycles every interval and checks it every
+// checkEvery until ctx ends or the gen is lost.
 func (k *Keeper) Run(ctx context.Context, every time.Duration) error {
+	if _, err := k.check(ctx); errors.Is(err, ErrLost) {
+		return err
+	} else if err != nil {
+		fmt.Fprintln(os.Stderr, "keep: check:", err)
+	}
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	go func() {
@@ -191,7 +212,11 @@ func (k *Keeper) readLocal(stamp uint64) (local, error) {
 	if err != nil {
 		return local{}, err
 	}
-	l := local{parts: parts, sources: sources, open: map[string]*trace.Part{}, stamp: stamp}
+	status, err := trace.SourcesDB(sources)
+	if err != nil {
+		return local{}, err
+	}
+	l := local{parts: parts, sources: sources, open: map[string]*trace.Part{}, status: status, stamp: stamp}
 	for _, lp := range parts {
 		if p, ok := k.head.Load().Parts[lp.ID]; ok {
 			l.open[lp.ID] = p
@@ -317,7 +342,7 @@ func (k *Keeper) doom(key obj.Key, notBefore time.Time, live map[obj.Key]bool) {
 func (k *Keeper) install(m Manifest, hot []PartRef, l local) {
 	k.mu.Lock()
 	old, oldChanged := *k.head.Load(), k.changed
-	k.head.Store(&Head{Manifest: m, Hot: hot, Parts: l.open})
+	k.head.Store(&Head{Manifest: m, Hot: hot, Parts: l.open, status: l.status})
 	k.stamp = l.stamp
 	moved := m.Gen != old.Manifest.Gen || m.Seq != old.Manifest.Seq
 	if moved {
@@ -396,15 +421,25 @@ func (k *Keeper) sweep(ctx context.Context, now time.Time) error {
 // Read calls fn with the head, which stays open until fn returns. It refuses
 // once the last good gen check is older than 2*checkEvery.
 func (k *Keeper) Read(fn func(Head) error) error {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	if err := k.admit(); err != nil {
+		return err
+	}
+	return fn(*k.head.Load())
+}
+
+// admit is the one gate every call passes: ErrLost once a newer keeper claimed
+// the tenant, ErrUnchecked once the last good gen check is older than
+// 2*checkEvery.
+func (k *Keeper) admit() error {
 	if k.lost.Load() {
 		return ErrLost
 	}
-	k.mu.RLock()
-	defer k.mu.RUnlock()
 	if time.Since(*k.checked.Load()) > 2*k.cfg.checkEvery() {
 		return ErrUnchecked
 	}
-	return fn(*k.head.Load())
+	return nil
 }
 
 // Parts is every local part by ID; a part stays open while a Read that saw it
@@ -429,15 +464,12 @@ func (k *Keeper) Wait(ctx context.Context, g Gen, s Seq) bool {
 	}
 }
 
-// IngestStatus answers get_ingest_status from the local store's committed
-// sources, between cycles.
+// IngestStatus answers get_ingest_status from the source rows of the head
+// the last install made, the snapshot every Read serves, under the same gate
+// as Read. It holds no lock.
 func (k *Keeper) IngestStatus(args json.RawMessage) (json.RawMessage, string, error) {
-	k.cycle.Lock()
-	defer k.cycle.Unlock()
-	db, err := trace.OpenDB(k.cfg.Local)
-	if err != nil {
+	if err := k.admit(); err != nil {
 		return nil, "", err
 	}
-	defer db.Close()
-	return trace.Call(db, "get_ingest_status", args)
+	return trace.Call(k.head.Load().status, "get_ingest_status", args)
 }

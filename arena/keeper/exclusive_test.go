@@ -21,10 +21,10 @@ func TestTakeRefusesStoreWithoutExclusiveCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Take(ctx, putIgnoresExclusive{s}, Config{Tenant: "acme"}); !errors.Is(err, ErrNotExclusive) {
+	if _, err := Take(ctx, putIgnoresExclusive{s}, Config{Tenant: "acme", DeleteSlack: MinDeleteSlack}); !errors.Is(err, ErrNotExclusive) {
 		t.Fatalf("Take on a store that ignores If-None-Match = %v, want ErrNotExclusive", err)
 	}
-	k, err := Take(ctx, s, Config{Tenant: "acme"})
+	k, err := Take(ctx, s, Config{Tenant: "acme", DeleteSlack: MinDeleteSlack})
 	if err != nil {
 		t.Fatalf("Take on an exclusive store: %v", err)
 	}
