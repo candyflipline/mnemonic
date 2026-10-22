@@ -17,7 +17,8 @@ type Store struct {
 	meta                      indexMeta
 	docs, sessions, sessStr   []byte
 	turns, uids               []byte
-	terms, termsOff, postings []byte
+	terms, termIdx, postings  []byte
+	termFilter                []byte
 	faExact, faTio, faBlob    []byte
 	hotB, hotOff              []byte
 	faTri, faTrip             []byte
@@ -74,7 +75,7 @@ func openPart(store, dir string, fc *frameCache) (*Store, error) {
 		return nil, err
 	}
 	for name, dst := range map[string]*[]byte{"docs": &st.docs, "sessions": &st.sessions, "sessions.str": &st.sessStr,
-		"turns": &st.turns, "uids": &st.uids, "terms": &st.terms, "terms.off": &st.termsOff, "postings": &st.postings,
+		"turns": &st.turns, "uids": &st.uids, "terms": &st.terms, "terms.idx": &st.termIdx, "terms.filter": &st.termFilter, "postings": &st.postings,
 		"fa.exact": &st.faExact, "fa.tio": &st.faTio, "fa.blob": &st.faBlob,
 		"hot": &st.hotB, "hot.off": &st.hotOff, "fa.tri": &st.faTri, "fa.trip": &st.faTrip} {
 		b, err := mmapFile(filepath.Join(dir, name))

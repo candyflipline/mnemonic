@@ -9,30 +9,6 @@ import (
 	"strings"
 )
 
-func (st *Store) termAt(i int) (string, uint64, uint64) {
-	b := st.termsOff[i*12:]
-	so := binary.LittleEndian.Uint32(b)
-	po := binary.LittleEndian.Uint64(b[4:])
-	se := binary.LittleEndian.Uint32(b[12:])
-	pe := binary.LittleEndian.Uint64(b[16:])
-	return string(st.terms[so:se]), po, pe
-}
-
-func (st *Store) postingsOf(term string) []byte {
-	i := sort.Search(st.nTerms, func(i int) bool {
-		t, _, _ := st.termAt(i)
-		return t >= term
-	})
-	if i >= st.nTerms {
-		return nil
-	}
-	t, po, pe := st.termAt(i)
-	if t != term {
-		return nil
-	}
-	return st.postings[po:pe]
-}
-
 func searchFlags(r *Row) int {
 	class, payload, actor := r.EventKind, r.PayloadType, strings.ToLower(r.ActorKind)
 	inSet := func(v string, set ...string) bool { return slices.Contains(set, v) }

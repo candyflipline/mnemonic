@@ -320,12 +320,11 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 		terms = append(terms, t)
 	}
 	sort.Strings(terms)
-	var dictB, postB []byte
-	var dictOff []byte
-	for _, t := range terms {
-		dictOff = binary.LittleEndian.AppendUint32(dictOff, uint32(len(dictB)))
-		dictOff = binary.LittleEndian.AppendUint64(dictOff, uint64(len(postB)))
-		dictB = append(dictB, t...)
+	var postB []byte
+	offs := make([]uint64, len(terms))
+	lens := make([]uint64, len(terms))
+	for i, t := range terms {
+		offs[i] = uint64(len(postB))
 		ps := postings[t]
 		postB = binary.AppendUvarint(postB, uint64(len(ps)))
 		prev := uint64(0)
@@ -335,11 +334,11 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 			postB = binary.AppendUvarint(postB, p&0xffff)
 			prev = d
 		}
+		lens[i] = uint64(len(postB)) - offs[i]
 		delete(postings, t)
 	}
-	dictOff = binary.LittleEndian.AppendUint32(dictOff, uint32(len(dictB)))
-	dictOff = binary.LittleEndian.AppendUint64(dictOff, uint64(len(postB)))
-	for name, b := range map[string][]byte{"terms": dictB, "terms.off": dictOff, "postings": postB} {
+	dictB, termIdx, termFilter := encodeTerms(terms, offs, lens)
+	for name, b := range map[string][]byte{"terms": dictB, "terms.idx": termIdx, "terms.filter": termFilter, "postings": postB} {
 		if err := os.WriteFile(filepath.Join(dir, name), b, 0o644); err != nil {
 			return err
 		}
