@@ -32,6 +32,7 @@ type ClientRedaction struct {
 
 var DefaultSources = []SourceGlob{
 	{"claude-code", "claude", "~/.claude/projects/**/*.jsonl"},
+	{"claude-code", "claude-glm", "~/.claude-glm/projects/**/*.jsonl"},
 	{"codex", "codex", "~/.codex/sessions/**/*.jsonl"},
 	{"cursor", "cursor", "~/.cursor/projects/*/agent-transcripts/**/*.jsonl"},
 	{"claude-code", "claude-cowork", "~/Library/Application Support/Claude/local-agent-mode-sessions/**/.claude/projects/**/*.jsonl"},
