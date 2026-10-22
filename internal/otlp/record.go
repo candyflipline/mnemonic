@@ -11,12 +11,15 @@ import (
 
 // Record is one stored line of the otlp source: a span or a log record, with
 // its resource and scope, as the receiver kept it after the content gate.
+// Author is the token's author, which the receiver stamps and the parser
+// cannot learn from the source name.
 // Times are Unix nanoseconds as decimal strings, the way OTLP JSON writes
 // them. Attribute values are JSON scalars, arrays and objects; integers keep
 // every digit.
 type Record struct {
 	Signal        string         `json:"signal"`
 	SessionID     string         `json:"session_id"`
+	Author        string         `json:"author"`
 	TraceID       string         `json:"trace_id,omitempty"`
 	SpanID        string         `json:"span_id,omitempty"`
 	ParentSpanID  string         `json:"parent_span_id,omitempty"`
@@ -139,14 +142,16 @@ const (
 	OpLog  = "log"
 )
 
-// SpanUID is the event_uid of a span: the same for every export of it, in
-// any request, so a repeat collapses to one event.
-func SpanUID(traceID, spanID string) string {
-	sum := sha256.Sum256([]byte("otlp|span|" + traceID + "|" + spanID))
+// SpanUID is the event_uid of a span: the same for every export of it by one
+// author, in any request, so a repeat collapses to one event, and different
+// for every other author, whose span of the same ids is another event.
+func SpanUID(author, traceID, spanID string) string {
+	sum := sha256.Sum256([]byte("otlp|span|" + author + "|" + traceID + "|" + spanID))
 	return hex.EncodeToString(sum[:])
 }
 
-// LogUID is the event_uid of a log record: the hash of its stored line.
+// LogUID is the event_uid of a log record: the hash of its stored line, which
+// carries the author.
 func LogUID(line []byte) string {
 	h := sha256.New()
 	h.Write([]byte("otlp|log|"))

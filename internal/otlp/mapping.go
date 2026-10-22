@@ -1,6 +1,10 @@
 package otlp
 
-import "github.com/candyflipline/mnemonic/internal/schema"
+import (
+	"encoding/json"
+
+	"github.com/candyflipline/mnemonic/internal/schema"
+)
 
 const (
 	ServiceName           = "service.name"
@@ -61,58 +65,40 @@ func KindOf(r *Record) schema.SpanKind {
 	return spanNameKinds[r.Name]
 }
 
-// Gate names attributes dropped before anything is stored unless the server
-// sets otlp.store_content. Prefix gates also match name + ".". In limits the
-// gate to records (spans, span events, log events) whose name, without a
-// claude_code. or codex. prefix, is listed; Name "*" drops every attribute of
-// such a record but event.name.
-type Gate struct {
-	Name   string
-	Prefix bool
-	In     []string
-	Source string
+// allowed is every attribute key kept when the server does not set
+// otlp.store_content: the keys the parser and the span derivation read, which
+// are the key lists above, and the few resource, scope and error-type keys
+// below. Any other key, whatever its name suggests, is dropped from the
+// resource, the span, its events and the log record before anything is stored.
+var allowed = keySet(
+	[]string{
+		ServiceName, EventNameKey, OperationName, OpenInferenceSpanKind, "duration_ms", "exception.type",
+		"service.version", "host.name", "telemetry.sdk.name", "telemetry.sdk.version", "telemetry.sdk.language",
+	},
+	SessionKeys, ModelKeys, ProviderKeys, ResponseIDs, ToolNameKeys, ToolCallIDs, AgentNameKeys, AgentIDKeys,
+	InputTokenKeys, OutputTokenKeys, CacheReadTokenKeys, CacheWriteTokenKeys, CostKeys,
+)
+
+func keySet(lists ...[]string) map[string]bool {
+	m := map[string]bool{}
+	for _, l := range lists {
+		for _, k := range l {
+			m[k] = true
+		}
+	}
+	return m
 }
 
-var Gates = []Gate{
-	{Name: "gen_ai.input.messages", Source: "otel-genai: message content"},
-	{Name: "gen_ai.output.messages", Source: "otel-genai: message content"},
-	{Name: "gen_ai.system_instructions", Source: "otel-genai: system prompt"},
-	{Name: "gen_ai.tool.call.arguments", Source: "otel-genai: tool input"},
-	{Name: "gen_ai.tool.call.result", Source: "otel-genai: tool output"},
-	{Name: "gen_ai.tool.definitions", Source: "otel-genai: opt-in tool schemas"},
-	{Name: "gen_ai.prompt", Prefix: true, Source: "openllmetry: flattened prompts"},
-	{Name: "gen_ai.completion", Prefix: true, Source: "openllmetry: flattened completions"},
-	{Name: "input.value", Source: "openinference: span input"},
-	{Name: "output.value", Source: "openinference: span output"},
-	{Name: "llm.input_messages", Prefix: true, Source: "openinference: messages"},
-	{Name: "llm.output_messages", Prefix: true, Source: "openinference: messages"},
-	{Name: "llm.prompts", Prefix: true, Source: "openinference: prompts"},
-	{Name: "llm.prompt_template", Prefix: true, Source: "openinference: template and variables"},
-	{Name: "tool.parameters", Source: "openinference: tool input"},
-	{Name: "retrieval.documents", Prefix: true, Source: "openinference: retrieved text"},
-	{Name: "embedding.embeddings", Prefix: true, Source: "openinference: embedded text"},
-	{Name: "reranker.input_documents", Prefix: true, Source: "openinference: document text"},
-	{Name: "reranker.output_documents", Prefix: true, Source: "openinference: document text"},
-	{Name: "process.command_line", Source: "otel resource: the command line can carry a prompt"},
-	{Name: "process.command_args", Source: "otel resource: the command line can carry a prompt"},
-
-	{Name: "prompt", In: []string{"user_prompt"}, Source: "claude-code, codex: prompt text"},
-	{Name: "prompt_text", In: []string{"user_prompt"}, Source: "claude-code: prompt text"},
-	{Name: "user_prompt", In: []string{"interaction"}, Source: "claude-code: prompt text"},
-	{Name: "new_context", In: []string{"interaction", "llm_request", "tool"}, Source: "claude-code: detailed tracing content"},
-	{Name: "system_reminders", In: []string{"llm_request"}, Source: "claude-code: detailed tracing content"},
-	{Name: "system_prompt_preview", In: []string{"llm_request"}, Source: "claude-code: system prompt"},
-	{Name: "user_system_prompt", In: []string{"llm_request"}, Source: "claude-code: system prompt"},
-	{Name: "response.model_output", In: []string{"llm_request"}, Source: "claude-code: model text"},
-	{Name: "response", In: []string{"assistant_response"}, Source: "claude-code: model text"},
-	{Name: "body", In: []string{"api_request_body", "api_response_body"}, Source: "claude-code: raw API JSON"},
-	{Name: "*", In: []string{"system_prompt", "tool.output"}, Source: "claude-code: system prompt, tool output"},
-	{Name: "tool_input", In: []string{"tool_result", "tool"}, Source: "claude-code: tool arguments"},
-	{Name: "tool_parameters", In: []string{"tool_result", "tool_decision"}, Source: "claude-code: tool arguments"},
-	{Name: "full_command", In: []string{"tool"}, Source: "claude-code: tool detail"},
-	{Name: "file_path", In: []string{"tool"}, Source: "claude-code: tool detail"},
-	{Name: "error", In: []string{"tool_result", "tool.execution"}, Source: "claude-code: full error text"},
-	{Name: "hook_definitions", In: []string{"hook"}, Source: "claude-code: tool detail"},
-	{Name: "arguments", In: []string{"tool_result"}, Source: "codex: tool arguments"},
-	{Name: "output", In: []string{"tool_result"}, Source: "codex: tool output snippet"},
+// gate keeps the scalar values of the allowed keys of attrs and deletes the
+// rest, so an array or a key-value list never survives under any key.
+func gate(attrs map[string]any) {
+	for k, v := range attrs {
+		switch v.(type) {
+		case string, bool, json.Number, float64:
+			if allowed[k] {
+				continue
+			}
+		}
+		delete(attrs, k)
+	}
 }

@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -66,12 +68,13 @@ func fromTraces(req *colltrace.ExportTraceServiceRequest, storeContent bool) *ba
 				for _, ev := range sp.GetEvents() {
 					se := SpanEvent{Name: ev.GetName(), TimeUnixNano: ev.GetTimeUnixNano(), Attributes: attrsOf(ev.GetAttributes())}
 					if !storeContent {
-						gate(se.Attributes, se.Name)
+						gate(se.Attributes)
 					}
 					r.Events = append(r.Events, se)
 				}
 				if !storeContent {
-					gate(r.Attributes, r.Name)
+					gate(r.Attributes)
+					r.StatusMessage = ""
 				}
 				b.add(service, r)
 			}
@@ -100,7 +103,7 @@ func fromLogs(req *colllogs.ExportLogsServiceRequest, storeContent bool) *batch 
 				if storeContent {
 					r.Body = anyOf(lr.GetBody())
 				} else {
-					gate(r.Attributes, r.Name)
+					gate(r.Attributes)
 				}
 				b.add(service, r)
 			}
@@ -123,12 +126,15 @@ func fromLogs(req *colllogs.ExportLogsServiceRequest, storeContent bool) *batch 
 
 // stampSessions gives each record its session: the first SessionKeys
 // attribute it carries (record before resource), else the one a record of its
-// trace in this request carries, else the trace id. Spans of one trace that
+// trace in this request carries (the first in service name order, then in
+// request order), else the trace id. Spans of one trace that
 // arrive in different requests, only some naming a session, land in
 // different sessions.
 func stampSessions(b *batch) {
 	byTrace := map[string]string{}
-	for _, rs := range b.byService {
+	services := slices.Sorted(maps.Keys(b.byService))
+	for _, service := range services {
+		rs := b.byService[service]
 		for i := range rs {
 			rs[i].SessionID = rs[i].LookupStr(SessionKeys...)
 			if rs[i].SessionID != "" && rs[i].TraceID != "" {
@@ -151,7 +157,7 @@ func resourceOf(res *resourcepb.Resource, storeContent bool) (map[string]any, st
 	attrs := attrsOf(res.GetAttributes())
 	service := Str(attrs, ServiceName)
 	if !storeContent {
-		gate(attrs, "")
+		gate(attrs)
 	}
 	return attrs, streamName(service)
 }
