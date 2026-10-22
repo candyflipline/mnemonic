@@ -458,17 +458,26 @@ func Ingest(root, store string, quiet time.Duration, settleAll bool) error {
 	if err := os.MkdirAll(filepath.Join(store, "parts"), 0o755); err != nil {
 		return err
 	}
+	prev, _ := readManifest(store)
+	keep := map[string]bool{}
+	images := map[string]bool{}
 	for _, members := range parts {
 		id := fingerprint(members)
-		if _, err := os.Stat(partDir(store, id)); err != nil {
+		if slices.ContainsFunc(members, ckpt.hot) {
+			if id, err = hotPart(store, members, prev); err != nil {
+				return err
+			}
+			hot = append(hot, id)
+			if d, ok := readBase(store, id); ok && d.Image != id {
+				keep[d.Image], images[d.Image] = true, true
+			}
+		} else if _, err := os.Stat(partDir(store, id)); err != nil {
 			if err := buildIndex(store, members, id, partDir(store, id)); err != nil {
 				return err
 			}
 		}
 		ids = append(ids, id)
-		if slices.ContainsFunc(members, ckpt.hot) {
-			hot = append(hot, id)
-		}
+		keep[id] = true
 	}
 	mb, _ := json.Marshal(manifestFile{Parts: ids, Hot: hot, Sources: srcs})
 	if cur, err := os.ReadFile(filepath.Join(store, "CURRENT")); err == nil && bytes.Equal(cur, mb) {
@@ -477,7 +486,8 @@ func Ingest(root, store string, quiet time.Duration, settleAll bool) error {
 	if err := writeFileAtomic(filepath.Join(store, "CURRENT"), mb); err != nil {
 		return err
 	}
-	gcParts(store, ids)
+	gcParts(store, keep)
+	gcDeltas(store, images)
 	return gcLogs(store, cks)
 }
 
@@ -557,13 +567,9 @@ func planParts(cks []ckpt) [][]ckpt {
 
 const partShards = 256
 
-// gcParts removes part dirs the manifest does not name, and any half-built
-// part a killed build left behind.
-func gcParts(store string, keep []string) {
-	want := map[string]bool{}
-	for _, id := range keep {
-		want[id] = true
-	}
+// gcParts removes part dirs neither the manifest nor its deltas name, and any
+// half-built part a killed build left behind.
+func gcParts(store string, want map[string]bool) {
 	ents, _ := os.ReadDir(filepath.Join(store, "parts"))
 	for _, e := range ents {
 		if !want[e.Name()] {

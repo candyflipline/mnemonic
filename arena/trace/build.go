@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -17,11 +18,13 @@ import (
 type built struct {
 	row *Row
 	src uint16
+	lf  int64
+	li  int
 }
 
 // partFormat is hashed into every part ID, so a store built by an older layout
 // rebuilds its parts instead of opening them.
-const partFormat = 2
+const partFormat = 3
 
 // fingerprint names the set of checkpoints an index was built from.
 func fingerprint(cks []ckpt) string {
@@ -43,9 +46,25 @@ type indexMeta struct {
 	Sessions    int      `json:"sessions"`
 	Turns       int      `json:"turns"`
 	Terms       int      `json:"terms"`
+	Members     []member `json:"members,omitempty"`
 }
 
-func loadSourceRows(store string, si int, c ckpt) ([]built, error) {
+// member is one source checkpoint a part holds the rows of; a doc's src is
+// its index in the part's members.
+type member struct {
+	Key      string `json:"key"`
+	Path     string `json:"path"`
+	Gen      int    `json:"gen"`
+	LightLen int64  `json:"light_len"`
+	HeavyLen int64  `json:"heavy_len"`
+	Rows     int64  `json:"rows"`
+}
+
+func memberOf(c ckpt) member {
+	return member{Key: c.Key, Path: c.Path, Gen: c.Gen, LightLen: c.LightLen, HeavyLen: c.HeavyLen, Rows: c.Rows}
+}
+
+func loadSourceRows(store string, si int, c ckpt, from int64) ([]built, error) {
 	f, err := os.Open(logPath(store, c.Key, c.Gen, "light"))
 	if err != nil {
 		return nil, err
@@ -53,7 +72,7 @@ func loadSourceRows(store string, si int, c ckpt) ([]built, error) {
 	defer f.Close()
 	var out []built
 	var scratch []byte
-	for off := int64(0); off < c.LightLen; {
+	for off := from; off < c.LightLen; {
 		recs, next, err := readFrame(f, off, scratch)
 		if err != nil {
 			return nil, err
@@ -77,8 +96,10 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 		path string
 	}
 	win := map[string]*winner{}
+	members := make([]member, len(cks))
 	for si, c := range cks {
-		rows, err := loadSourceRows(store, si, c)
+		members[si] = memberOf(c)
+		rows, err := loadSourceRows(store, si, c, 0)
 		if err != nil {
 			return fmt.Errorf("%s: %w", c.Key, err)
 		}
@@ -103,6 +124,70 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 		bySession[w.b.row.Session] = append(bySession[w.b.row.Session], w.b)
 	}
 	win = nil
+
+	heavy := newHeavyReader(store, cks)
+	defer heavy.close()
+	dir := partDir + ".tmp"
+	os.RemoveAll(dir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	lightF, err := openLog(filepath.Join(dir, "light"), 0)
+	if err != nil {
+		return err
+	}
+	defer lightF.Close()
+	heavyF, err := openLog(filepath.Join(dir, "heavy"), 0)
+	if err != nil {
+		return err
+	}
+	defer heavyF.Close()
+	lw := &frameWriter{f: lightF, target: lightFrame, enc: encoder}
+	hw := &frameWriter{f: heavyF, target: heavyFrame, enc: heavyEncoder}
+	place := func(b built) (*Row, int64, int, error) {
+		hrec, err := heavy.record(b)
+		if err != nil {
+			return nil, 0, 0, err
+		}
+		hf, hi, err := hw.add(hrec)
+		if err != nil {
+			return nil, 0, 0, err
+		}
+		own := *b.row
+		own.HeavyFrame, own.HeavyIdx = uint64(hf), uint64(hi)
+		lf, li, err := lw.add(own.append(nil))
+		return &own, lf, li, err
+	}
+	write := func(name string, b []byte) error { return os.WriteFile(filepath.Join(dir, name), b, 0o644) }
+	meta, lsRecs, err := indexRows(bySession, place, heavy.payload, write)
+	if err != nil {
+		return err
+	}
+	if heavy.err != nil {
+		return heavy.err
+	}
+	if err := hw.flush(); err != nil {
+		return err
+	}
+	if err := lw.flush(); err != nil {
+		return err
+	}
+	if err := writeLs(dir, lsRecs); err != nil {
+		return err
+	}
+	meta.Fingerprint, meta.Members = fp, members
+	mb, _ := json.Marshal(meta)
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), mb, 0o644); err != nil {
+		return err
+	}
+	return commitPart(dir, partDir)
+}
+
+// indexRows writes the index files of the winning rows of one part through
+// write. place puts a doc's row in the part's light log and returns the row as
+// the part holds it; payload reads a row's payload_json for the ls rollups.
+func indexRows(bySession map[string][]built, place func(built) (*Row, int64, int, error),
+	payload func(built) string, write func(name string, b []byte) error) (indexMeta, []lsRec, error) {
 	sessionIDs := make([]string, 0, len(bySession))
 	for s := range bySession {
 		sessionIDs = append(sessionIDs, s)
@@ -122,8 +207,6 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 		terminal            int64
 		terminalOrder       int
 	}
-	heavy := newHeavyReader(store, cks)
-	defer heavy.close()
 	var lsRecs []lsRec
 	var sessions []sess
 	var turns []turn
@@ -171,7 +254,7 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 		}
 		s.end = uint32(len(docs))
 		sessions = append(sessions, s)
-		lsRecs = append(lsRecs, lsAggregate(evs, turnSeqs[start:], heavy.payload))
+		lsRecs = append(lsRecs, lsAggregate(evs, turnSeqs[start:], payload))
 		seqs := make([]uint32, 0, len(perTurn))
 		for q := range perTurn {
 			seqs = append(seqs, q)
@@ -182,27 +265,6 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 		}
 		delete(bySession, sid)
 	}
-
-	if heavy.err != nil {
-		return heavy.err
-	}
-	dir := partDir + ".tmp"
-	os.RemoveAll(dir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	lightF, err := openLog(filepath.Join(dir, "light"), 0)
-	if err != nil {
-		return err
-	}
-	defer lightF.Close()
-	heavyF, err := openLog(filepath.Join(dir, "heavy"), 0)
-	if err != nil {
-		return err
-	}
-	defer heavyF.Close()
-	lw := &frameWriter{f: lightF, target: lightFrame, enc: encoder}
-	hw := &frameWriter{f: heavyF, target: heavyFrame, enc: heavyEncoder}
 
 	n := len(docs)
 	docCol := make([]byte, n*docWidth)
@@ -216,20 +278,9 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 	tfs := map[string]uint32{}
 	var hot, hotOff []byte
 	for d, b := range docs {
-		hrec, err := heavy.record(b)
+		r, lf, li, err := place(b)
 		if err != nil {
-			return err
-		}
-		hf, hi, err := hw.add(hrec)
-		if err != nil {
-			return err
-		}
-		own := *b.row
-		own.HeavyFrame, own.HeavyIdx = uint64(hf), uint64(hi)
-		r := &own
-		lf, li, err := lw.add(r.append(nil))
-		if err != nil {
-			return err
+			return indexMeta{}, nil, err
 		}
 		hotOff = binary.LittleEndian.AppendUint64(hotOff, uint64(len(hot)))
 		hot = hotRow(*r).append(hot)
@@ -246,6 +297,7 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 		rec := docCol[d*docWidth : (d+1)*docWidth]
 		binary.LittleEndian.PutUint64(rec[0:], uint64(lf))
 		binary.LittleEndian.PutUint16(rec[8:], uint16(li))
+		binary.LittleEndian.PutUint16(rec[10:], b.src)
 		binary.LittleEndian.PutUint16(rec[12:], uint16(searchFlags(r)))
 		rec[14] = byte(harnesses.id(r.Harness))
 		rec[15] = byte(sourceNames.id(r.SourceName))
@@ -269,23 +321,10 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 	faOffs = append(faOffs, uint32(len(faBlob)))
 	docs = nil
 	hotOff = binary.LittleEndian.AppendUint64(hotOff, uint64(len(hot)))
-	for name, b := range map[string][]byte{"hot": hot, "hot.off": hotOff} {
-		if err := os.WriteFile(filepath.Join(dir, name), b, 0o644); err != nil {
-			return err
+	for name, b := range map[string][]byte{"hot": hot, "hot.off": hotOff, "docs": docCol} {
+		if err := write(name, b); err != nil {
+			return indexMeta{}, nil, err
 		}
-	}
-
-	if err := hw.flush(); err != nil {
-		return err
-	}
-	if err := lw.flush(); err != nil {
-		return err
-	}
-	if err := writeLs(dir, lsRecs); err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(dir, "docs"), docCol, 0o644); err != nil {
-		return err
 	}
 
 	var sb []byte
@@ -304,12 +343,6 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 		sstr = append(sstr, sessionIDs[i]...)
 	}
 	sb = binary.LittleEndian.AppendUint32(sb, uint32(len(sstr)))
-	if err := os.WriteFile(filepath.Join(dir, "sessions"), sb, 0o644); err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(dir, "sessions.str"), sstr, 0o644); err != nil {
-		return err
-	}
 	var tb []byte
 	for _, t := range turns {
 		tb = binary.LittleEndian.AppendUint32(tb, t.session)
@@ -322,8 +355,10 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 		tb = binary.LittleEndian.AppendUint32(tb, c)
 		tb = binary.LittleEndian.AppendUint64(tb, uint64(t.terminal))
 	}
-	if err := os.WriteFile(filepath.Join(dir, "turns"), tb, 0o644); err != nil {
-		return err
+	for name, b := range map[string][]byte{"sessions": sb, "sessions.str": sstr, "turns": tb} {
+		if err := write(name, b); err != nil {
+			return indexMeta{}, nil, err
+		}
 	}
 
 	pairs := make([][2]uint64, len(uids)/2)
@@ -336,8 +371,8 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 		ub = binary.LittleEndian.AppendUint64(ub, p[0])
 		ub = binary.LittleEndian.AppendUint32(ub, uint32(p[1]))
 	}
-	if err := os.WriteFile(filepath.Join(dir, "uids"), ub, 0o644); err != nil {
-		return err
+	if err := write("uids", ub); err != nil {
+		return indexMeta{}, nil, err
 	}
 
 	terms := make([]string, 0, len(postings))
@@ -364,8 +399,8 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 	}
 	dictB, termIdx, termFilter := encodeTerms(terms, offs, lens)
 	for name, b := range map[string][]byte{"terms": dictB, "terms.idx": termIdx, "terms.filter": termFilter, "postings": postB} {
-		if err := os.WriteFile(filepath.Join(dir, name), b, 0o644); err != nil {
-			return err
+		if err := write(name, b); err != nil {
+			return indexMeta{}, nil, err
 		}
 	}
 
@@ -389,18 +424,13 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 	ft = binary.LittleEndian.AppendUint32(ft, faOffs[len(faOffs)-1])
 	tri, trip := trigramIndex(faBlob, faOffs)
 	for name, b := range map[string][]byte{"fa.exact": fe, "fa.tio": ft, "fa.blob": faBlob, "fa.tri": tri, "fa.trip": trip} {
-		if err := os.WriteFile(filepath.Join(dir, name), b, 0o644); err != nil {
-			return err
+		if err := write(name, b); err != nil {
+			return indexMeta{}, nil, err
 		}
 	}
 
-	meta := indexMeta{Fingerprint: fp, Docs: n, ScoredDocs: scoredDocs, TotalLen: totalLen,
-		Harnesses: harnesses.list, SourceNames: sourceNames.list, Sessions: len(sessions), Turns: len(turns), Terms: len(terms)}
-	mb, _ := json.Marshal(meta)
-	if err := os.WriteFile(filepath.Join(dir, "meta.json"), mb, 0o644); err != nil {
-		return err
-	}
-	return commitPart(dir, partDir)
+	return indexMeta{Docs: n, ScoredDocs: scoredDocs, TotalLen: totalLen, Harnesses: harnesses.list,
+		SourceNames: sourceNames.list, Sessions: len(sessions), Turns: len(turns), Terms: len(terms)}, lsRecs, nil
 }
 
 type faEntry struct {
@@ -547,9 +577,10 @@ func tokenize(text string, emit func(string)) int {
 	return n
 }
 
-// heavyReader reads the heavy records of rows at build from the source logs,
-// decoding a few frames at a time.
+// heavyReader reads the heavy records of rows at build, decoding a few frames
+// at a time; a row's src picks its log.
 type heavyReader struct {
+	logs  []io.ReaderAt
 	files []*os.File
 	recs  map[heavyKey][][]byte
 	order []heavyKey
@@ -569,6 +600,7 @@ func newHeavyReader(store string, cks []ckpt) *heavyReader {
 			h.err = err
 		}
 		h.files = append(h.files, f)
+		h.logs = append(h.logs, f)
 	}
 	return h
 }
@@ -583,7 +615,7 @@ func (h *heavyReader) record(b built) ([]byte, error) {
 	recs, ok := h.recs[k]
 	if !ok {
 		var err error
-		recs, _, err = readFrame(h.files[k.src], int64(k.frame), nil)
+		recs, _, err = readFrame(h.logs[k.src], int64(k.frame), nil)
 		if err != nil {
 			h.err = err
 			return nil, err
