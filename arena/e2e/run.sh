@@ -133,11 +133,11 @@ stale_commit() {
 	STALE="commit: gen $g1 keeper exit 3, no gen $g1 manifest after the takeover"
 }
 
-# stale_delete: keeper A (gen g1, grants of 6 s, cycles only when asked) commits twice, so its first manifest is queued for deletion; keeper B takes over before it is due; asked to cycle once it is due, A's delete must be refused.
+# stale_delete: keeper A (gen g1, grants of 3 s, cycles only when asked) commits twice, so its first manifest is queued for deletion; keeper B takes over before it is due; asked to cycle once it is due, A's delete must be refused.
 stale_delete() {
 	local store=$T/2cd/store root=$T/2cd/root a out g1 g2 seq=0 n=0
 	"$BIN/seed" -src "$SRC" -half "$root" >/dev/null || { STALE="seed -half failed"; return 1; }
-	start_keeper 2cd "$store" "$root" "" "" "-grant-ttl 6s -delete-slack 0s -interval 1h" || { STALE="delete keeper A did not start ($(why 2cd))"; return 1; }
+	start_keeper 2cd "$store" "$root" "" "" "-grant-ttl 3s -delete-slack 0s -interval 1h" || { STALE="delete keeper A did not start ($(why 2cd))"; return 1; }
 	a=$KPID
 	local a_port=$KPORT
 	"$E2E" ingest -keeper "http://127.0.0.1:$a_port" >/dev/null || { STALE="delete keeper A ingest failed ($(why 2cd))"; return 1; }
@@ -149,11 +149,19 @@ stale_delete() {
 	done
 	[ "${seq:-0}" -ge 2 ] || { STALE="delete keeper A never reached seq 2"; return 1; }
 	g1=$(field "$out" gen)
-	start_keeper 2cd2 "$store" "$root" "" "" || { STALE="delete keeper B did not start ($(why 2cd2))"; return 1; }
-	out=$("$E2E" ingest -keeper "http://127.0.0.1:$KPORT") || { STALE="delete keeper B ingest failed ($(why 2cd2))"; return 1; }
+	spawn_keeper 2cd2 "$store" "$root" "" "" || { STALE="delete keeper B did not spawn"; return 1; }
+	local b=$KPID b_port=$KPORT
+	n=0
+	while [ "$(ls "$store/t/$TENANT/g" | wc -l)" -lt 2 ] && [ $n -lt 100 ]; do
+		sleep 0.1
+		n=$((n + 1))
+	done
+	sleep 3.5
+	"$E2E" ingest -keeper "http://127.0.0.1:$a_port" || echo "stale keeper refused the ingest" >&2
+	wait_up "$b" "127.0.0.1:$b_port" || { STALE="delete keeper B did not start ($(why 2cd2))"; return 1; }
+	out=$("$E2E" ingest -keeper "http://127.0.0.1:$b_port") || { STALE="delete keeper B ingest failed ($(why 2cd2))"; return 1; }
 	g2=$(field "$out" gen)
 	[ "${g2:-0}" -gt "${g1:-0}" ] || { STALE="delete keeper B did not take a higher gen ($g1 then $g2)"; return 1; }
-	"$E2E" ingest -keeper "http://127.0.0.1:$a_port" || echo "stale keeper refused the ingest" >&2
 	wait_exit "$a"
 	grep -q 'keep: delete refused' "$LOGS/2cd-keeper.log" || { STALE="no 'delete refused' line in keeper A's log (exit $RC)"; return 1; }
 	[ "$RC" = 3 ] || { STALE="delete keeper A exit status $RC, want 3"; return 1; }

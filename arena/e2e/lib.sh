@@ -11,9 +11,10 @@ dead() {
 
 track() { PIDS="$PIDS $1"; }
 
-# start_keeper NAME STORE ROOT TTFB READERS [FLAGS] sets KPORT, SPORT and KPID;
-# FLAGS are extra keep flags, split on spaces.
-start_keeper() {
+# spawn_keeper NAME STORE ROOT TTFB READERS [FLAGS] sets KPORT, SPORT and KPID
+# without waiting for the keeper to listen; FLAGS are extra keep flags, split
+# on spaces. start_keeper waits.
+spawn_keeper() {
 	local name=$1 store=$2 root=$3 ttfb=$4 readers=$5 flags=${6:-} ports uri
 	ports=$("$E2E" ports 2) || return 1
 	KPORT=$(sed -n 1p <<<"$ports")
@@ -26,6 +27,10 @@ start_keeper() {
 		>"$LOGS/$name-keeper.log" 2>&1 &
 	KPID=$!
 	track "$KPID"
+}
+
+start_keeper() {
+	spawn_keeper "$@" || return 1
 	wait_up "$KPID" "127.0.0.1:$KPORT"
 }
 
