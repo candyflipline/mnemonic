@@ -6,8 +6,10 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -28,6 +30,23 @@ type delta struct {
 	HeavyLen int64    `json:"heavy_len"`
 	Rows     int64    `json:"rows"`
 	Members  []member `json:"members"`
+	listed
+}
+
+// listed is what ListParts reports of a part, kept in delta.json so listing a
+// delta does not index it.
+type listed struct {
+	Sessions   []string `json:"sessions"`
+	ScoredDocs int64    `json:"scored_docs"`
+	TotalLen   int64    `json:"total_len"`
+}
+
+func listedOf(st *Part) listed {
+	l := listed{ScoredDocs: int64(st.meta.ScoredDocs), TotalLen: int64(st.meta.TotalLen)}
+	for s := 0; s < st.nSessions; s++ {
+		l.Sessions = append(l.Sessions, st.session(s).id)
+	}
+	return l
 }
 
 // deltaID names a component held as image plus delta.
@@ -88,14 +107,27 @@ func deltaBase(store string, members []ckpt, prev manifestFile) (delta, bool) {
 	return best, bestRows >= 0
 }
 
+// readDelta reads the delta.json of a part dir; ok is false for a full part.
+func readDelta(dir string) (delta, bool, error) {
+	var d delta
+	b, err := os.ReadFile(filepath.Join(dir, deltaFile))
+	if errors.Is(err, fs.ErrNotExist) {
+		return d, false, nil
+	}
+	if err != nil {
+		return d, false, err
+	}
+	return d, true, json.Unmarshal(b, &d)
+}
+
 // readBase reads part id's delta, or an empty delta over it when it is a
 // full part.
 func readBase(store, id string) (delta, bool) {
 	dir := partDir(store, id)
-	var d delta
-	if b, err := os.ReadFile(filepath.Join(dir, deltaFile)); err == nil {
-		return d, json.Unmarshal(b, &d) == nil
+	if d, ok, err := readDelta(dir); ok || err != nil {
+		return d, err == nil
 	}
+	var d delta
 	b, err := os.ReadFile(filepath.Join(dir, "meta.json"))
 	if err != nil {
 		return d, false
@@ -227,6 +259,12 @@ func appendDelta(store string, members []ckpt, base delta, did string) (bool, er
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return false, err
 	}
+	st, err := openDelta(dir, next)
+	if err != nil {
+		return false, err
+	}
+	next.listed = listedOf(st)
+	st.Close()
 	b, _ := json.Marshal(next)
 	if err := os.WriteFile(filepath.Join(dir, deltaFile), b, 0o644); err != nil {
 		return false, err
@@ -235,11 +273,7 @@ func appendDelta(store string, members []ckpt, base delta, did string) (bool, er
 }
 
 // openDelta indexes the image's docs and the delta's rows in memory.
-func openDelta(dir string, pb []byte) (*Part, error) {
-	var d delta
-	if err := json.Unmarshal(pb, &d); err != nil {
-		return nil, err
-	}
+func openDelta(dir string, d delta) (*Part, error) {
 	img, err := OpenPartDir(filepath.Join(filepath.Dir(dir), d.Image))
 	if err != nil {
 		return nil, err
@@ -320,7 +354,7 @@ func openDelta(dir string, pb []byte) (*Part, error) {
 	if files["ls.json"], err = json.Marshal(lsRecs); err != nil {
 		return fail(err)
 	}
-	meta.Fingerprint, meta.Members = filepath.Base(dir), d.Members
+	meta.Members = d.Members
 	mb, _ := json.Marshal(meta)
 	files["light"], files["heavy"] = img.lightB, img.heavyB
 	get := func(name string) ([]byte, error) {

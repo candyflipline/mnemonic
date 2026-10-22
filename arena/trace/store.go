@@ -68,8 +68,11 @@ func mmapFile(path string) ([]byte, error) {
 
 // OpenPartDir opens a part dir.
 func OpenPartDir(dir string) (*Part, error) {
-	if pb, err := os.ReadFile(filepath.Join(dir, deltaFile)); err == nil {
-		return openDelta(dir, pb)
+	if d, ok, err := readDelta(dir); ok || err != nil {
+		if err != nil {
+			return nil, err
+		}
+		return openDelta(dir, d)
 	}
 	mb, err := os.ReadFile(filepath.Join(dir, "meta.json"))
 	if err != nil {
