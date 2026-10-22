@@ -8,7 +8,7 @@ import (
 )
 
 // Local is the keeper's in-process reader, ID route.LocalID, over the parts
-// parts returns at each call.
-func Local(parts func() []*trace.Part) route.Reader {
+// parts returns at each call, keyed by part ID.
+func Local(parts func() map[string]*trace.Part) route.Reader {
 	panic("lane L4")
 }
