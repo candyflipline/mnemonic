@@ -9,9 +9,14 @@ import (
 	"strings"
 	"testing"
 
+	"time"
+
 	"github.com/candyflipline/mnemonic/internal/cache/cachetest"
+	"github.com/candyflipline/mnemonic/internal/lake"
 	"github.com/candyflipline/mnemonic/internal/layout"
+	_ "github.com/candyflipline/mnemonic/internal/normalize/claudecode"
 	"github.com/candyflipline/mnemonic/internal/wire"
+	"github.com/klauspost/compress/zstd"
 )
 
 func TestConverge(t *testing.T) {
@@ -364,5 +369,70 @@ func TestConvergeReordersSessionsAfterFailedRangeDeletes(t *testing.T) {
 	}
 	if got != "4/1 2 3 4" {
 		t.Fatalf("sessions/event_order %s", got)
+	}
+}
+
+func TestEventTimeIsTheSameForAnySplitOfParseRuns(t *testing.T) {
+	ctx := context.Background()
+	lines := []string{
+		`{"type":"summary","summary":"earlier work","leafUuid":"u0"}`,
+		`{"type":"user","sessionId":"7c666c01-d38e-4658-8650-854ffb5b626e","uuid":"u1","timestamp":"2026-01-19T15:58:40.000Z","message":{"role":"user","content":"hi"}}`,
+		`{"type":"file-history-snapshot","messageId":"u1","snapshot":{"trackedFileBackups":{}}}`,
+		`{"type":"user","sessionId":"7c666c01-d38e-4658-8650-854ffb5b626e","uuid":"u2","timestamp":"2026-01-19T15:58:45.000Z","message":{"role":"user","content":"again"}}`,
+	}
+	path := "/client/7c666c01-d38e-4658-8650-854ffb5b626e.jsonl"
+	key := layout.Key{Author: "alice", Machine: "mbp", Harness: "claude-code", SrcID: wire.SrcID(path)}
+	push := func(dataDir string, part []string) {
+		if err := os.MkdirAll(filepath.Dir(key.Raw(dataDir)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := os.OpenFile(key.Raw(dataDir), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		zw, _ := zstd.NewWriter(raw)
+		zw.Write([]byte(strings.Join(part, "\n") + "\n"))
+		zw.Close()
+		info, _ := raw.Stat()
+		raw.Close()
+		m, _ := json.Marshal(map[string]any{"src_id": key.SrcID, "harness": key.Harness, "source_name": "claude",
+			"path": path, "size": info.Size(), "head_hash": "h", "updated_ms": time.Now().UnixMilli(), "zst_size": info.Size()})
+		if err := os.WriteFile(key.Manifest(dataDir), m, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := lake.Run(dataDir, func() bool { return false }, lake.Sweep{}); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	eventTimes := func(runs ...[]string) string {
+		dataDir := t.TempDir()
+		for _, part := range runs {
+			push(dataDir, part)
+		}
+		ix, err := Open(dataDir, Options{MemoryLimit: "1GB", FlagsSQL: "0::USMALLINT"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ix.Close()
+		if _, err := ix.Converge(ctx, RetryFailed); err != nil {
+			t.Fatal(err)
+		}
+		var got string
+		if err := ix.DB().QueryRow(`SELECT string_agg(strftime(event_time, '%S.%g'), ' ' ORDER BY source_line_no, event_order)
+  FROM events`).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	want := "40.000 40.000 40.000 45.000"
+	if got := eventTimes(lines); got != want {
+		t.Errorf("one run: event_time seconds %s, want %s", got, want)
+	}
+	if got := eventTimes(lines[:1], lines[1:]); got != want {
+		t.Errorf("summary first, rest later: event_time seconds %s, want %s", got, want)
+	}
+	if got := eventTimes(lines[:3], lines[3:]); got != want {
+		t.Errorf("snapshot pushed before the next timestamp: event_time seconds %s, want %s", got, want)
 	}
 }
