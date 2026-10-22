@@ -64,6 +64,17 @@ die() {
 
 run_go() { env GOMEMLIMIT="$STAGE_MEM" "$@"; }
 
+# The two builds are independent (the masks compare them), and each parses on one core, so they run at once.
+oracle_builds() {
+	local p rc
+	run_go "$BIN_DIR/oracle" build -raw "$ARENA/raw" -root "$WORK/oracle2" 2>"$LOG/oracle-build-2.log" &
+	p=$!
+	run_go "$BIN_DIR/oracle" build -raw "$ARENA/raw" -root "$WORK/oracle" 2>"$LOG/oracle-build.log"
+	rc=$?
+	wait $p || return 1
+	return $rc
+}
+
 oracle_masks() {
 	local set seed
 	for set in golden hidden; do
@@ -77,8 +88,7 @@ oracle_masks() {
 
 stage unpack run_go "$BIN_DIR/e2e" unpack -raw "$RAWDIR" -src "$SRC" >"$LOG/unpack.log" 2>&1 || die unpack
 stage seed run_go "$BIN_DIR/seed" -src "$SRC" -full "$ARENA/raw" 2>"$LOG/seed.log" || die seed
-stage oracle-build run_go "$BIN_DIR/oracle" build -raw "$ARENA/raw" -root "$WORK/oracle" 2>"$LOG/oracle-build.log" || die oracle-build
-stage oracle-build-2 run_go "$BIN_DIR/oracle" build -raw "$ARENA/raw" -root "$WORK/oracle2" 2>"$LOG/oracle-build-2.log" || die oracle-build-2
+stage oracle-builds oracle_builds || die oracle-builds
 stage gen-and-masks oracle_masks 2>"$LOG/gen.log" || die gen-and-masks
 rm -rf "$WORK/oracle2"
 
