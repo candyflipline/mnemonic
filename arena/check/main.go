@@ -24,32 +24,11 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/candyflipline/mnemonic/arena/check/cmp"
 )
 
 var arena string
-
-type call struct {
-	ID   int             `json:"id"`
-	Tool string          `json:"tool"`
-	Args json.RawMessage `json:"args"`
-}
-
-type result struct {
-	ID    int             `json:"id"`
-	Data  json.RawMessage `json:"data"`
-	Text  string          `json:"text"`
-	Error string          `json:"error"`
-	US    int64           `json:"us"`
-}
-
-// mask is what one call may differ in between two runs of the oracle: data
-// paths with indices, and text line numbers.
-type mask struct {
-	Data      []string `json:"data,omitempty"`
-	TextLines []int    `json:"text_lines,omitempty"`
-}
-
-type masks map[string]map[int]mask
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "masks" {
@@ -77,31 +56,31 @@ func mkMasks(args []string) error {
 	b := fs.String("b", "", "expected.jsonl from oracle run 2")
 	out := fs.String("out", "", "masks.json to merge into")
 	fs.Parse(args)
-	ra, err := readResults(*a)
+	ra, err := cmp.ReadResults(*a)
 	if err != nil {
 		return err
 	}
-	rb, err := readResults(*b)
+	rb, err := cmp.ReadResults(*b)
 	if err != nil {
 		return err
 	}
-	all := masks{}
+	all := cmp.Masks{}
 	if b, err := os.ReadFile(*out); err == nil {
 		if err := json.Unmarshal(b, &all); err != nil {
 			return err
 		}
 	}
-	m := map[int]mask{}
+	m := map[int]cmp.Mask{}
 	for id, x := range ra {
 		y, ok := rb[id]
 		if !ok {
 			return fmt.Errorf("call %d missing from %s", id, *b)
 		}
-		var mk mask
+		var mk cmp.Mask
 		var dx, dy any
-		decode(x.Data, &dx)
-		decode(y.Data, &dy)
-		diffPaths("", dx, dy, nil, func(p string) { mk.Data = append(mk.Data, p) })
+		cmp.Decode(x.Data, &dx)
+		cmp.Decode(y.Data, &dy)
+		cmp.DiffPaths("", dx, dy, nil, func(p string) { mk.Data = append(mk.Data, p) })
 		lx, ly := strings.Split(x.Text, "\n"), strings.Split(y.Text, "\n")
 		if len(lx) != len(ly) {
 			return fmt.Errorf("call %d: text line count differs between oracle runs", id)
@@ -124,143 +103,10 @@ func mkMasks(args []string) error {
 	return os.WriteFile(*out, append(b2, '\n'), 0o644)
 }
 
-func decode(raw json.RawMessage, v *any) {
-	if len(raw) == 0 {
-		*v = nil
-		return
-	}
-	d := json.NewDecoder(bytes.NewReader(raw))
-	d.UseNumber()
-	d.Decode(v)
-}
-
-// diffPaths reports each path where a and b differ. A masked path matches
-// anything; numbers match within a relative 1e-9 unless both are integers.
-func diffPaths(p string, a, b any, masked map[string]bool, report func(string)) {
-	if masked[p] {
-		return
-	}
-	switch x := a.(type) {
-	case map[string]any:
-		y, ok := b.(map[string]any)
-		if !ok {
-			report(p + ":type")
-			return
-		}
-		keys := map[string]bool{}
-		for k := range x {
-			keys[k] = true
-		}
-		for k := range y {
-			keys[k] = true
-		}
-		ks := make([]string, 0, len(keys))
-		for k := range keys {
-			ks = append(ks, k)
-		}
-		sort.Strings(ks)
-		for _, k := range ks {
-			va, oka := x[k]
-			vb, okb := y[k]
-			switch {
-			case !oka:
-				report(p + "." + k + ":extra")
-			case !okb:
-				report(p + "." + k + ":missing")
-			default:
-				diffPaths(p+"."+k, va, vb, masked, report)
-			}
-		}
-	case []any:
-		y, ok := b.([]any)
-		if !ok {
-			report(p + ":type")
-			return
-		}
-		if len(x) != len(y) {
-			report(fmt.Sprintf("%s:len %d!=%d", p, len(x), len(y)))
-		}
-		for i := range min(len(x), len(y)) {
-			diffPaths(p+"["+strconv.Itoa(i)+"]", x[i], y[i], masked, report)
-		}
-	case json.Number:
-		y, ok := b.(json.Number)
-		if !ok {
-			report(p + ":type")
-			return
-		}
-		if !numEqual(x, y) {
-			report(p)
-		}
-	default:
-		if a != b {
-			report(p)
-		}
-	}
-}
-
-func numEqual(a, b json.Number) bool {
-	if a == b {
-		return true
-	}
-	ia, ea := a.Int64()
-	ib, eb := b.Int64()
-	if ea == nil && eb == nil {
-		return ia == ib
-	}
-	fa, err1 := a.Float64()
-	fb, err2 := b.Float64()
-	if err1 != nil || err2 != nil {
-		return false
-	}
-	if fa == fb {
-		return true
-	}
-	return math.Abs(fa-fb) <= 1e-9*math.Max(math.Abs(fa), math.Abs(fb))
-}
-
-func readCalls(path string) ([]call, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	var cs []call
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 1<<20), 16<<20)
-	for sc.Scan() {
-		var c call
-		if err := json.Unmarshal(sc.Bytes(), &c); err != nil {
-			return nil, err
-		}
-		cs = append(cs, c)
-	}
-	return cs, sc.Err()
-}
-
-func readResults(path string) (map[int]result, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	rs := map[int]result{}
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 1<<20), 64<<20)
-	for sc.Scan() {
-		var r result
-		if err := json.Unmarshal(sc.Bytes(), &r); err != nil {
-			return nil, err
-		}
-		rs[r.ID] = r
-	}
-	return rs, sc.Err()
-}
-
 type set struct {
 	name     string
-	calls    []call
-	expected map[int]result
+	calls    []cmp.Call
+	expected map[int]cmp.Result
 }
 
 type diff struct {
@@ -281,7 +127,7 @@ type parity struct {
 	Tools map[string]*tally `json:"tools"`
 }
 
-func compare(sets []set, ms masks, got map[string]map[int]result, want func(set, int) (result, bool)) parity {
+func compare(sets []set, ms cmp.Masks, got map[string]map[int]cmp.Result, want func(set, int) (cmp.Result, bool)) parity {
 	p := parity{Pass: true, Tools: map[string]*tally{}}
 	for _, s := range sets {
 		for _, c := range s.calls {
@@ -291,7 +137,6 @@ func compare(sets []set, ms masks, got map[string]map[int]result, want func(set,
 				p.Tools[c.Tool] = t
 			}
 			var paths []string
-			report := func(x string) { paths = append(paths, x) }
 			e, ok := want(s, c.ID)
 			g, gok := got[s.name][c.ID]
 			switch {
@@ -300,19 +145,7 @@ func compare(sets []set, ms masks, got map[string]map[int]result, want func(set,
 			case !gok:
 				paths = append(paths, "result:missing")
 			default:
-				mk := ms[s.name][c.ID]
-				masked := map[string]bool{}
-				for _, x := range mk.Data {
-					masked[x] = true
-				}
-				var de, dg any
-				decode(e.Data, &de)
-				decode(g.Data, &dg)
-				diffPaths("data", de, dg, prefixed(masked), report)
-				textDiff(e.Text, g.Text, mk.TextLines, report)
-				if (e.Error == "") != (g.Error == "") {
-					report("error")
-				}
+				paths = cmp.Diff(e, g, ms[s.name][c.ID])
 			}
 			if len(paths) == 0 {
 				t.Pass++
@@ -329,34 +162,6 @@ func compare(sets []set, ms masks, got map[string]map[int]result, want func(set,
 		}
 	}
 	return p
-}
-
-func prefixed(m map[string]bool) map[string]bool {
-	out := make(map[string]bool, len(m))
-	for k := range m {
-		out["data"+k] = true
-	}
-	return out
-}
-
-func textDiff(want, got string, maskedLines []int, report func(string)) {
-	if want == got {
-		return
-	}
-	lw, lg := strings.Split(want, "\n"), strings.Split(got, "\n")
-	if len(lw) != len(lg) {
-		report(fmt.Sprintf("text:lines %d!=%d", len(lw), len(lg)))
-		return
-	}
-	skip := map[int]bool{}
-	for _, i := range maskedLines {
-		skip[i] = true
-	}
-	for i := range lw {
-		if lw[i] != lg[i] && !skip[i] {
-			report("text:line " + strconv.Itoa(i))
-		}
-	}
 }
 
 // run is one ingest's measurements.
@@ -392,12 +197,12 @@ func tail(s string) string {
 }
 
 type batchOut struct {
-	results map[string]map[int]result
+	results map[string]map[int]cmp.Result
 	idleRSS int64
 }
 
 func batch(bin, root, store string, sets []set) (batchOut, error) {
-	out := batchOut{results: map[string]map[int]result{}}
+	out := batchOut{results: map[string]map[int]cmp.Result{}}
 	cmd := exec.Command(bin, "batch", "-root", root, "-store", store)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -415,7 +220,7 @@ func batch(bin, root, store string, sets []set) (batchOut, error) {
 	defer cmd.Process.Kill()
 	rd := bufio.NewReaderSize(stdout, 1<<20)
 	for _, s := range sets {
-		out.results[s.name] = map[int]result{}
+		out.results[s.name] = map[int]cmp.Result{}
 		for _, c := range s.calls {
 			b, _ := json.Marshal(c)
 			if _, err := stdin.Write(append(b, '\n')); err != nil {
@@ -425,7 +230,7 @@ func batch(bin, root, store string, sets []set) (batchOut, error) {
 			if err != nil {
 				return out, fmt.Errorf("batch read call %d: %v: %s", c.ID, err, tail(stderr.String()))
 			}
-			var r result
+			var r cmp.Result
 			if err := json.Unmarshal(line, &r); err != nil {
 				return out, fmt.Errorf("batch call %d: bad line: %v", c.ID, err)
 			}
@@ -469,7 +274,7 @@ func dirBytes(dir string) int64 {
 	return n
 }
 
-func percentiles(sets []set, got map[string]map[int]result) map[string]map[string]int64 {
+func percentiles(sets []set, got map[string]map[int]cmp.Result) map[string]map[string]int64 {
 	by := map[string][]int64{}
 	for _, s := range sets {
 		for _, c := range s.calls {
@@ -530,11 +335,11 @@ type card struct {
 }
 
 func loadSet(name, dir string) (set, error) {
-	cs, err := readCalls(filepath.Join(dir, "calls.jsonl"))
+	cs, err := cmp.ReadCalls(filepath.Join(dir, "calls.jsonl"))
 	if err != nil {
 		return set{}, err
 	}
-	exp, err := readResults(filepath.Join(dir, "expected.jsonl"))
+	exp, err := cmp.ReadResults(filepath.Join(dir, "expected.jsonl"))
 	if err != nil {
 		return set{}, err
 	}
@@ -604,12 +409,8 @@ func scoreInto(c *card, bin, work, src, seedBin string, crashSeed int64, skip st
 		return err
 	}
 	sets := []set{pub, hid}
-	ms := masks{}
-	mb, err := os.ReadFile(filepath.Join(arena, "check", "masks.json"))
+	ms, err := cmp.ReadMasks(filepath.Join(arena, "check", "masks.json"))
 	if err != nil {
-		return err
-	}
-	if err := json.Unmarshal(mb, &ms); err != nil {
 		return err
 	}
 	raw := filepath.Join(arena, "raw")
@@ -625,12 +426,12 @@ func scoreInto(c *card, bin, work, src, seedBin string, crashSeed int64, skip st
 	}
 	c.BatchIdleRSS = got.idleRSS
 	c.LatencyUS = percentiles(sets, got.results)
-	vsExpected := func(s set, id int) (result, bool) { r, ok := s.expected[id]; return r, ok }
+	vsExpected := func(s set, id int) (cmp.Result, bool) { r, ok := s.expected[id]; return r, ok }
 	p := compare([]set{pub}, ms, got.results, vsExpected)
 	h := compare([]set{hid}, ms, got.results, vsExpected)
 	c.Public, c.Hidden = &p, &h
 	c.Pass = p.Pass && h.Pass
-	vsClean := func(s set, id int) (result, bool) { r, ok := got.results[s.name][id]; return r, ok }
+	vsClean := func(s set, id int) (cmp.Result, bool) { r, ok := got.results[s.name][id]; return r, ok }
 
 	if !strings.Contains(skip, "incremental") {
 		ip, err := incremental(bin, work, src, seedBin, sets, ms, vsClean)
@@ -650,7 +451,7 @@ func scoreInto(c *card, bin, work, src, seedBin string, crashSeed int64, skip st
 	return nil
 }
 
-func incremental(bin, work, src, seedBin string, sets []set, ms masks, want func(set, int) (result, bool)) (parity, error) {
+func incremental(bin, work, src, seedBin string, sets []set, ms cmp.Masks, want func(set, int) (cmp.Result, bool)) (parity, error) {
 	root := filepath.Join(work, "incr-root")
 	store := filepath.Join(work, "incr-store")
 	if out, err := exec.Command(seedBin, "-src", src, "-half", root).CombinedOutput(); err != nil {
@@ -676,7 +477,7 @@ func incremental(bin, work, src, seedBin string, sets []set, ms masks, want func
 // ingest exits, then re-runs ingest to the end. An ingest that exits before
 // its kill leaves a complete store, so the store is dropped and the kills
 // start over, at most eight attempts.
-func crashRun(bin, raw, work string, cleanMs, seed int64, sets []set, ms masks, want func(set, int) (result, bool)) crash {
+func crashRun(bin, raw, work string, cleanMs, seed int64, sets []set, ms cmp.Masks, want func(set, int) (cmp.Result, bool)) crash {
 	cr := crash{Seed: seed}
 	r := rand.New(rand.NewSource(seed))
 	store := filepath.Join(work, "crash-store")

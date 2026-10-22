@@ -1,6 +1,7 @@
 package trace
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -10,8 +11,8 @@ import (
 	"syscall"
 )
 
-// Part is a read-only view of one committed index plus the source logs it
-// points into.
+// Part is a read-only view of one committed index. Its light and heavy logs
+// hold the frames of its own docs, so it needs nothing outside its members.
 type Part struct {
 	read                      func(name string) ([]byte, error)
 	meta                      indexMeta
@@ -22,7 +23,7 @@ type Part struct {
 	faExact, faTio, faBlob    []byte
 	hotB, hotOff              []byte
 	faTri, faTrip             []byte
-	light, heavy              []*os.File
+	lightB, heavyB            []byte
 	fc                        *frameCache
 	maps                      [][]byte
 	nSessions, nTurns, nTerms int
@@ -45,7 +46,6 @@ func newFrameCache() *frameCache {
 
 type frameKey struct {
 	part  *Part
-	src   uint16
 	frame uint64
 }
 
@@ -65,15 +65,14 @@ func mmapFile(path string) ([]byte, error) {
 	return syscall.Mmap(int(f.Fd()), 0, int(fi.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
 }
 
-// OpenPartDir opens a part dir that lives in a store's parts dir; its source
-// logs are the store's.
+// OpenPartDir opens a part dir.
 func OpenPartDir(dir string) (*Part, error) {
 	mb, err := os.ReadFile(filepath.Join(dir, "meta.json"))
 	if err != nil {
 		return nil, err
 	}
 	var maps [][]byte
-	st, err := openPart(filepath.Dir(filepath.Dir(dir)), mb, func(name string) ([]byte, error) {
+	st, err := openPart(mb, func(name string) ([]byte, error) {
 		b, err := mmapFile(filepath.Join(dir, name))
 		if err == nil {
 			maps = append(maps, b)
@@ -88,7 +87,7 @@ func OpenPartDir(dir string) (*Part, error) {
 	return st, nil
 }
 
-func openPart(store string, meta []byte, load, read func(name string) ([]byte, error)) (*Part, error) {
+func openPart(meta []byte, load, read func(name string) ([]byte, error)) (*Part, error) {
 	st := &Part{read: read, fc: newFrameCache()}
 	if err := json.Unmarshal(meta, &st.meta); err != nil {
 		return st, err
@@ -96,24 +95,13 @@ func openPart(store string, meta []byte, load, read func(name string) ([]byte, e
 	for name, dst := range map[string]*[]byte{"docs": &st.docs, "sessions": &st.sessions, "sessions.str": &st.sessStr,
 		"turns": &st.turns, "uids": &st.uids, "terms": &st.terms, "terms.idx": &st.termIdx, "terms.filter": &st.termFilter, "postings": &st.postings,
 		"fa.exact": &st.faExact, "fa.tio": &st.faTio, "fa.blob": &st.faBlob,
-		"hot": &st.hotB, "hot.off": &st.hotOff, "fa.tri": &st.faTri, "fa.trip": &st.faTrip} {
+		"hot": &st.hotB, "hot.off": &st.hotOff, "fa.tri": &st.faTri, "fa.trip": &st.faTrip,
+		"light": &st.lightB, "heavy": &st.heavyB} {
 		b, err := load(name)
 		if err != nil {
 			return st, err
 		}
 		*dst = b
-	}
-	for i, key := range st.meta.Sources {
-		l, err := os.Open(logPath(store, key, st.meta.Gens[i], "light"))
-		if err != nil {
-			return st, err
-		}
-		h, err := os.Open(logPath(store, key, st.meta.Gens[i], "heavy"))
-		if err != nil {
-			return st, err
-		}
-		st.light = append(st.light, l)
-		st.heavy = append(st.heavy, h)
 	}
 	st.nSessions = st.meta.Sessions
 	st.nTurns = st.meta.Turns
@@ -126,9 +114,6 @@ func (st *Part) Close() {
 		if len(m) > 0 {
 			syscall.Munmap(m)
 		}
-	}
-	for _, f := range append(st.light, st.heavy...) {
-		f.Close()
 	}
 }
 
@@ -223,11 +208,11 @@ func (st *Part) turn(session int, seq uint32) (turnInfo, bool) {
 
 func (st *Part) row(d int) (*Row, error) {
 	rec := st.docRec(d)
-	k := frameKey{part: st, src: binary.LittleEndian.Uint16(rec[10:]), frame: binary.LittleEndian.Uint64(rec[0:])}
+	k := frameKey{part: st, frame: binary.LittleEndian.Uint64(rec[0:])}
 	idx := int(binary.LittleEndian.Uint16(rec[8:]))
 	rows, ok := st.fc.light[k]
 	if !ok {
-		recs, _, err := readFrame(st.light[k.src], int64(k.frame), st.scratch)
+		recs, _, err := readFrame(bytes.NewReader(st.lightB), int64(k.frame), st.scratch)
 		if err != nil {
 			return nil, err
 		}
@@ -252,13 +237,13 @@ func (st *Part) row(d int) (*Row, error) {
 	return rows[idx], nil
 }
 
-// heavyOf returns payload_json and token_usage_json of row r from source src.
-func (st *Part) heavyOf(src uint16, r *Row) (string, string, error) {
-	k := frameKey{part: st, src: src, frame: r.HeavyFrame}
+// heavyOf returns payload_json and token_usage_json of row r.
+func (st *Part) heavyOf(r *Row) (string, string, error) {
+	k := frameKey{part: st, frame: r.HeavyFrame}
 	recs, ok := st.fc.heavy[k]
 	if !ok {
 		var err error
-		recs, _, err = readFrame(st.heavy[src], int64(r.HeavyFrame), nil)
+		recs, _, err = readFrame(bytes.NewReader(st.heavyB), int64(r.HeavyFrame), nil)
 		if err != nil {
 			return "", "", err
 		}
@@ -290,8 +275,7 @@ func (st *Part) hydrate(r *navRow) error {
 	if err != nil {
 		return err
 	}
-	src := binary.LittleEndian.Uint16(st.docRec(r.doc)[10:])
-	p, t, err := st.heavyOf(src, row)
+	p, t, err := st.heavyOf(row)
 	if err != nil {
 		return err
 	}
