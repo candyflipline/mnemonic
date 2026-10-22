@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Shared by run.sh and e3-lab.sh, which set T, BIN, LOGS, E2E, TENANT and
-# ARENA and keep every started pid in PIDS through track.
+# Shared by run.sh, which sets T, BIN, LOGS, E2E, TENANT and ARENA and keeps
+# every started pid in PIDS through track.
 field() { tr ' ' '\n' <<<"$1" | sed -n "s/^$2=//p" | head -1; }
 
 dead() {
@@ -34,10 +34,10 @@ start_keeper() {
 	wait_up "$KPID" "127.0.0.1:$KPORT"
 }
 
-# wait_up PID ADDR waits up to 30 s for ADDR, and fails at once if PID exits.
+# wait_up PID ADDR waits up to WAIT_UP_S (30) s for ADDR, and fails at once if PID exits.
 wait_up() {
 	local n=0
-	while [ $n -lt 30 ]; do
+	while [ $n -lt "${WAIT_UP_S:-30}" ]; do
 		"$E2E" wait -addr "$2" -timeout 1s 2>/dev/null && return 0
 		dead "$1" && return 1
 		n=$((n + 1))

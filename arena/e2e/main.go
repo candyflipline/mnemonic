@@ -8,6 +8,9 @@
 //	e2e stats    -url URL                                     the file store's request and byte counters
 //	e2e ports    N                                            N free 127.0.0.1 ports
 //	e2e wait     -addr HOST:PORT -timeout D                   until the address accepts connections
+//	e2e unpack   -raw DIR -src DIR                            the claude and codex sources of a raw tree as seed's SRC layout
+//
+// E2E_TIMEOUT (a Go duration, default 120s) bounds every request to the keeper, an ingest included.
 package main
 
 import (
@@ -34,7 +37,7 @@ var sets = []string{"golden", "hidden"}
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: e2e drive|ingest|manifest|tools|stats|ports|wait ...")
+		fmt.Fprintln(os.Stderr, "usage: e2e drive|ingest|manifest|tools|stats|ports|wait|unpack ...")
 		os.Exit(2)
 	}
 	var err error
@@ -53,6 +56,8 @@ func main() {
 		err = ports(os.Args[2:])
 	case "wait":
 		err = wait(os.Args[2:])
+	case "unpack":
+		err = unpack(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown command %s", os.Args[1])
 	}
@@ -100,7 +105,18 @@ type callBody struct {
 	Rung string          `json:"rung"`
 }
 
-var client = &http.Client{Timeout: 120 * time.Second}
+var client = &http.Client{Timeout: requestTimeout()}
+
+func requestTimeout() time.Duration {
+	if v := os.Getenv("E2E_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+		fmt.Fprintln(os.Stderr, "e2e: E2E_TIMEOUT is not a duration:", v)
+		os.Exit(2)
+	}
+	return 120 * time.Second
+}
 
 func post(url string, body any, out any) (int, error) {
 	b, err := json.Marshal(body)
