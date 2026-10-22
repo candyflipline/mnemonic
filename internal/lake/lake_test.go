@@ -16,6 +16,8 @@ import (
 
 	"github.com/candyflipline/mnemonic/internal/layout"
 	"github.com/candyflipline/mnemonic/internal/normalize"
+	_ "github.com/candyflipline/mnemonic/internal/normalize/claudecode"
+	_ "github.com/candyflipline/mnemonic/internal/normalize/codex"
 	"github.com/candyflipline/mnemonic/internal/schema"
 	"github.com/candyflipline/mnemonic/internal/wire"
 	_ "github.com/duckdb/duckdb-go/v2"
@@ -415,6 +417,60 @@ func TestRunReparsesIdleSourceOfOlderParser(t *testing.T) {
 	}
 	if st, err := Run(dataDir, never, Sweep{}); err != nil || st != (Stats{Sources: 1, Unchanged: 1}) {
 		t.Fatalf("further run: %+v %v, want {1 0 1 0 0 0}", st, err)
+	}
+}
+
+func TestRunReparsesOnlyTheHarnessWhoseParserChanged(t *testing.T) {
+	dataDir := t.TempDir()
+	claude := layout.Key{Author: "alice", Machine: "chris-mbp", Harness: "claude-code", SrcID: "cccccccccccccccc"}
+	codex := layout.Key{Author: "alice", Machine: "chris-mbp", Harness: "codex", SrcID: "dddddddddddddddd"}
+	writeSource(t, dataDir, claude.Author, claude.Machine, claude.Harness, claude.SrcID, []string{
+		`{"type":"user","sessionId":"s1","cwd":"/w","uuid":"u1","timestamp":"2024-01-02T03:04:05.000Z","message":{"role":"user","content":"hi"}}`,
+	})
+	writeSource(t, dataDir, codex.Author, codex.Machine, codex.Harness, codex.SrcID, []string{
+		`{"timestamp":"2024-01-02T03:04:05.000Z","type":"session_meta","payload":{"id":"s2","cwd":"/w"}}`,
+	})
+	if st, err := Run(dataDir, never, Sweep{}); err != nil || st.Rewrote != 2 {
+		t.Fatalf("first run: %+v %v", st, err)
+	}
+
+	db := openDB(t)
+	for _, key := range []layout.Key{claude, codex} {
+		base := key.Events(dataDir)
+		cp, ok := readCheckpoint(db, base)
+		if !ok {
+			t.Fatalf("%s: no checkpoint", key.Harness)
+		}
+		cp.Parser = 1
+		kv, err := json.Marshal(cp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := copyParquet(db, "SELECT * FROM "+lakeRows(base), base, string(kv), ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Remove(layout.ParserMarker(dataDir)); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := Run(dataDir, never, Sweep{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Rewrote != 1 || st.Unchanged != 1 {
+		t.Fatalf("sweep with claude-code and codex sources checkpointed at 1: %+v, want 1 rewrote and 1 unchanged", st)
+	}
+	got := map[string]int{}
+	for _, key := range []layout.Key{claude, codex} {
+		cp, _ := readCheckpoint(db, key.Events(dataDir))
+		got[key.Harness] = cp.Parser
+	}
+	if want := map[string]int{"claude-code": 2, "codex": 1}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("checkpoint parsers = %v, want %v", got, want)
+	}
+	if st, err := Run(dataDir, never, Sweep{}); err != nil || st != (Stats{Sources: 2, Unchanged: 2}) {
+		t.Fatalf("further run: %+v %v, want {2 0 2 0 0 0}", st, err)
 	}
 }
 
