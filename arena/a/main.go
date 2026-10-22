@@ -261,6 +261,7 @@ type reply struct {
 }
 
 func batch(root, store string) error {
+	stamp, _ := currentStamp(store)
 	db, err := openDB(store)
 	if err != nil {
 		return err
@@ -279,6 +280,12 @@ func batch(root, store string) error {
 			} else {
 				rep.ID = c.ID
 				start := time.Now()
+				if now, ok := currentStamp(store); ok && now != stamp {
+					if next, err := openDB(store); err == nil {
+						db.close()
+						db, stamp = next, now
+					}
+				}
 				data, text, cerr := dispatch(db, c)
 				rep.Us = time.Since(start).Microseconds()
 				rep.Data, rep.Text = data, text

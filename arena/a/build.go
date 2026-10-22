@@ -408,7 +408,10 @@ func commitPart(tmp, dir string) error {
 			return err
 		}
 	}
-	return os.Rename(tmp, dir)
+	if err := syncDir(tmp); err != nil {
+		return err
+	}
+	return renameSynced(tmp, dir)
 }
 
 type dict struct {

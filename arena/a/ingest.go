@@ -138,7 +138,32 @@ func writeFileAtomic(path string, b []byte) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	return renameSynced(tmp, path)
+}
+
+// renameSynced renames tmp to path with the parent directory fsynced before,
+// so the entries of files written next to tmp are durable first, and after,
+// so the rename itself survives power loss.
+func renameSynced(tmp, path string) error {
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
+}
+
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	err = d.Sync()
+	if cerr := d.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 func windowSHA(raw *os.File, end int64) (string, error) {

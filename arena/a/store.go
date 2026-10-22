@@ -102,6 +102,17 @@ func openPart(store, dir string, fc *frameCache) (*Store, error) {
 	return st, nil
 }
 
+func (st *Store) close() {
+	for _, m := range st.maps {
+		if len(m) > 0 {
+			syscall.Munmap(m)
+		}
+	}
+	for _, f := range append(st.light, st.heavy...) {
+		f.Close()
+	}
+}
+
 func (st *Store) docRec(d int) []byte { return st.docs[d*docWidth : (d+1)*docWidth] }
 
 func (st *Store) flags(d int) uint16 { return binary.LittleEndian.Uint16(st.docRec(d)[12:]) }

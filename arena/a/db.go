@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // manifestFile is CURRENT: the parts that make up the index and the source
@@ -56,6 +57,26 @@ func openDB(store string) (*DB, error) {
 		}
 	}
 	return db, nil
+}
+
+func (db *DB) close() {
+	for _, st := range db.parts {
+		st.close()
+	}
+}
+
+// currentStamp names the CURRENT file batch last opened: every commit renames
+// a new inode into place.
+func currentStamp(store string) (uint64, bool) {
+	fi, err := os.Stat(filepath.Join(store, "CURRENT"))
+	if err != nil {
+		return 0, false
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return st.Ino, true
 }
 
 func (db *DB) part(sessionID string) (*Store, bool) {
