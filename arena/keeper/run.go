@@ -20,18 +20,16 @@ import (
 
 var ErrLost = errors.New("keeper: a newer keeper claimed the tenant")
 
-const (
-	checkEvery  = 30 * time.Second
-	deleteSlack = time.Minute
-)
+const checkEvery = 30 * time.Second
 
 type Config struct {
-	Tenant   string
-	Root     string
-	Local    string
-	Quiet    time.Duration
-	Settle   bool
-	GrantTTL time.Duration
+	Tenant      string
+	Root        string
+	Local       string
+	Quiet       time.Duration
+	Settle      bool
+	GrantTTL    time.Duration
+	DeleteSlack time.Duration
 }
 
 // Head is what the keeper serves: its committed manifest, the hot parts that
@@ -55,7 +53,7 @@ type Keeper struct {
 	takenAt  time.Time
 
 	mu      sync.RWMutex
-	head    Head
+	head    atomic.Pointer[Head]
 	stamp   uint64
 	changed chan struct{}
 }
@@ -78,33 +76,31 @@ func Take(ctx context.Context, s obj.Store, cfg Config) (*Keeper, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Keeper{
+	k := &Keeper{
 		cfg:      cfg,
 		s:        s,
 		gen:      g,
 		uploaded: map[string]PartRef{},
 		doomed:   map[obj.Key]time.Time{},
-		head:     Head{Manifest: m},
 		changed:  make(chan struct{}),
-	}, nil
+	}
+	k.head.Store(&Head{Manifest: m})
+	return k, nil
 }
 
 func (k *Keeper) Gen() Gen { return k.gen }
 
-// Check fails with ErrLost once a higher gen is claimed, and keeps failing.
-func (k *Keeper) Check(ctx context.Context) error {
-	if k.lost.Load() {
-		return ErrLost
+// check fails with ErrLost once a higher gen is claimed, and keeps failing.
+func (k *Keeper) check(ctx context.Context) (Gen, error) {
+	top, err := highestGen(ctx, k.s, k.cfg.Tenant)
+	if err != nil && !k.lost.Load() {
+		return 0, err
 	}
-	ok, err := Current(ctx, k.s, k.cfg.Tenant, k.gen)
-	if err != nil {
-		return err
-	}
-	if !ok {
+	if k.lost.Load() || top != k.gen {
 		k.lost.Store(true)
-		return ErrLost
+		return top, ErrLost
 	}
-	return nil
+	return top, nil
 }
 
 // Run cycles every interval and checks the gen every 30 s until ctx ends or
@@ -120,7 +116,7 @@ func (k *Keeper) Run(ctx context.Context, every time.Duration) error {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				if err := k.Check(ctx); errors.Is(err, ErrLost) {
+				if _, err := k.check(ctx); errors.Is(err, ErrLost) {
 					cancel(err)
 					return
 				} else if err != nil {
@@ -162,7 +158,7 @@ func (k *Keeper) Cycle(ctx context.Context) error {
 	if !ok {
 		return fmt.Errorf("keeper: %s has no CURRENT", k.cfg.Local)
 	}
-	if stamp != k.stamp || k.head.Manifest.Gen != k.gen {
+	if stamp != k.stamp || k.head.Load().Manifest.Gen != k.gen {
 		l, err := k.readLocal(stamp)
 		if err != nil {
 			return err
@@ -182,7 +178,7 @@ func (k *Keeper) readLocal(stamp uint64) (local, error) {
 	}
 	l := local{parts: parts, sources: sources, open: map[string]*trace.Part{}, stamp: stamp}
 	for _, lp := range parts {
-		if p, ok := k.head.Parts[lp.ID]; ok {
+		if p, ok := k.head.Load().Parts[lp.ID]; ok {
 			l.open[lp.ID] = p
 			continue
 		}
@@ -198,7 +194,7 @@ func (k *Keeper) readLocal(stamp uint64) (local, error) {
 
 func (k *Keeper) closeNew(open map[string]*trace.Part) {
 	for id, p := range open {
-		if k.head.Parts[id] != p {
+		if k.head.Load().Parts[id] != p {
 			p.Close()
 		}
 	}
@@ -207,7 +203,7 @@ func (k *Keeper) closeNew(open map[string]*trace.Part) {
 // commit uploads the cold parts the latest manifest does not name, validates
 // the gen, then writes the manifest at (gen, seq+1) and dooms what it retired.
 func (k *Keeper) commit(ctx context.Context, l local) error {
-	prev := k.head.Manifest
+	prev := k.head.Load().Manifest
 	named := map[string]PartRef{}
 	for _, p := range prev.Parts {
 		named[p.ID] = p
@@ -240,7 +236,7 @@ func (k *Keeper) commit(ctx context.Context, l local) error {
 		}
 		next.Seq = prev.Seq + 1
 	}
-	if err := k.Check(ctx); err != nil {
+	if _, err := k.check(ctx); err != nil {
 		return err
 	}
 	b, err := json.Marshal(next)
@@ -250,7 +246,7 @@ func (k *Keeper) commit(ctx context.Context, l local) error {
 	if err := k.s.Put(ctx, manifestKey(k.cfg.Tenant, next.Gen, next.Seq), bytes.NewReader(b), int64(len(b))); err != nil {
 		return err
 	}
-	notBefore := time.Now().Add(k.cfg.GrantTTL + deleteSlack)
+	notBefore := time.Now().Add(k.cfg.GrantTTL + k.cfg.DeleteSlack)
 	live := liveKeys(next)
 	for _, p := range prev.Parts {
 		k.doom(p.Key, notBefore, live)
@@ -305,8 +301,8 @@ func (k *Keeper) doom(key obj.Key, notBefore time.Time, live map[obj.Key]bool) {
 
 func (k *Keeper) install(m Manifest, hot []PartRef, l local) {
 	k.mu.Lock()
-	old, oldChanged := k.head, k.changed
-	k.head = Head{Manifest: m, Hot: hot, Parts: l.open}
+	old, oldChanged := *k.head.Load(), k.changed
+	k.head.Store(&Head{Manifest: m, Hot: hot, Parts: l.open})
 	k.stamp = l.stamp
 	moved := m.Gen != old.Manifest.Gen || m.Seq != old.Manifest.Seq
 	if moved {
@@ -329,7 +325,7 @@ func (k *Keeper) install(m Manifest, hot []PartRef, l local) {
 // is how a crashed keeper's garbage goes; it shares the takeover commit's
 // notBefore so no part is due before a manifest that names it.
 func (k *Keeper) sweep(ctx context.Context, now time.Time) error {
-	m := k.head.Manifest
+	m := k.head.Load().Manifest
 	if m.Gen != k.gen {
 		return nil
 	}
@@ -362,7 +358,10 @@ func (k *Keeper) sweep(ctx context.Context, now time.Time) error {
 	if len(manifests)+len(parts) == 0 {
 		return nil
 	}
-	if err := k.Check(ctx); err != nil {
+	if top, err := k.check(ctx); err != nil {
+		if errors.Is(err, ErrLost) {
+			fmt.Fprintf(os.Stderr, "keep: delete refused: %d objects due at gen %d, highest claimed gen is %d\n", len(manifests)+len(parts), k.gen, top)
+		}
 		return err
 	}
 	for _, keys := range [][]obj.Key{manifests, parts} {
@@ -386,15 +385,19 @@ func (k *Keeper) Read(fn func(Head) error) error {
 	}
 	k.mu.RLock()
 	defer k.mu.RUnlock()
-	return fn(k.head)
+	return fn(*k.head.Load())
 }
+
+// Parts is every local part by ID; a part stays open while a Read that saw it
+// runs.
+func (k *Keeper) Parts() map[string]*trace.Part { return k.head.Load().Parts }
 
 // Wait reports whether the committed (gen, seq) rose above (g, s) before ctx
 // ended.
 func (k *Keeper) Wait(ctx context.Context, g Gen, s Seq) bool {
 	for {
 		k.mu.RLock()
-		m, ch := k.head.Manifest, k.changed
+		m, ch := k.head.Load().Manifest, k.changed
 		k.mu.RUnlock()
 		if m.Gen > g || (m.Gen == g && m.Seq > s) {
 			return true

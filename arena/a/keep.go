@@ -19,7 +19,6 @@ import (
 	"github.com/candyflipline/mnemonic/arena/obj"
 	"github.com/candyflipline/mnemonic/arena/reader"
 	"github.com/candyflipline/mnemonic/arena/route"
-	"github.com/candyflipline/mnemonic/arena/trace"
 )
 
 const lostStatus = 3
@@ -33,6 +32,7 @@ func runKeep(args []string) error {
 	readersFlag := fs.String("readers", "", "id=http://host:port,... reader servers for the partial rung")
 	listen := fs.String("listen", "127.0.0.1:7100", "HTTP listen address")
 	grantTTL := fs.Duration("grant-ttl", 10*time.Minute, "lifetime of a presigned part URL")
+	deleteSlack := fs.Duration("delete-slack", time.Minute, "added to -grant-ttl before a retired object may be deleted")
 	quiet := fs.Duration("quiet", 15*time.Minute, "a source settles into its cold part once its updated_ms is this far behind the newest source's")
 	settle := fs.Bool("settle", false, "settle every source now")
 	interval := fs.Duration("interval", 2*time.Second, "time between ingest cycles")
@@ -59,7 +59,7 @@ func runKeep(args []string) error {
 	if err := awaitServe(ctx, *storeURI, errc); err != nil {
 		return err
 	}
-	k, err := keeper.Take(ctx, s, keeper.Config{Tenant: *tenant, Root: *root, Local: *local, Quiet: *quiet, Settle: *settle, GrantTTL: *grantTTL})
+	k, err := keeper.Take(ctx, s, keeper.Config{Tenant: *tenant, Root: *root, Local: *local, Quiet: *quiet, Settle: *settle, GrantTTL: *grantTTL, DeleteSlack: *deleteSlack})
 	if err != nil {
 		return err
 	}
@@ -67,7 +67,7 @@ func runKeep(args []string) error {
 		exitIfLost(k, err)
 		return err
 	}
-	ks := keepServer{k: k, s: s, readers: readers, ttl: *grantTTL}
+	ks := keepServer{k: k, s: s, local: reader.Local(k.Parts), readers: readers, ttl: *grantTTL}
 	srv := &http.Server{Addr: *listen, Handler: ks.mux()}
 	go func() { errc <- srv.ListenAndServe() }()
 	go func() { errc <- k.Run(ctx, *interval) }()
@@ -139,6 +139,7 @@ func awaitServe(ctx context.Context, storeURI string, errc chan error) error {
 type keepServer struct {
 	k       *keeper.Keeper
 	s       obj.Store
+	local   route.Reader
 	readers []route.Reader
 	ttl     time.Duration
 }
@@ -236,7 +237,7 @@ func (ks keepServer) serveCall(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return err
 			}
-			readers := []route.Reader{reader.Local(func() map[string]*trace.Part { return h.Parts })}
+			readers := []route.Reader{ks.local}
 			if rung == route.Partial {
 				readers = append(readers, ks.readers...)
 			}
