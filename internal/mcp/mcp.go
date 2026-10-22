@@ -208,6 +208,9 @@ func Handler(db *sql.DB, lookup func(name string) (query.Tool, bool)) http.Handl
 			h := handler{db: db, lookup: lookup}
 			result := h.toolsCall(r, paramsJSON)
 			switch result := result.(type) {
+			case *query.BusyError:
+				w.Header().Set("Retry-After", strconv.Itoa(int(result.RetryAfter.Seconds())))
+				statusError(w, http.StatusTooManyRequests, result.Error())
 			case *rpcErrorObj:
 				writeJSON(w, rpcResponse{JSONRPC: "2.0", ID: id, Error: result})
 			default:
@@ -231,7 +234,8 @@ type handler struct {
 	lookup func(name string) (query.Tool, bool)
 }
 
-// toolsCall runs one tool and wraps it in the tool envelope. Only a params
+// toolsCall runs one tool and wraps it in the tool envelope. A busy tool is
+// a *query.BusyError, which Handler answers with HTTP 429. Only a params
 // payload that cannot decode is a JSON-RPC error; like upstream, every
 // tool-level failure, such as an unknown name, is an isError result
 // so the client sees the message as tool output, not a protocol failure.
@@ -254,6 +258,10 @@ func (h handler) toolsCall(r *http.Request, paramsJSON json.RawMessage) any {
 	start := time.Now()
 	data, text, err := tool.Call(r.Context(), h.db, args)
 	perf := performance{ElapsedMS: time.Since(start).Milliseconds()}
+	var busy *query.BusyError
+	if errors.As(err, &busy) {
+		return busy
+	}
 	if err != nil {
 		env := errorEnvelope{
 			SchemaVersion: errorSchemaVersion,
