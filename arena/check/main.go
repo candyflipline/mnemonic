@@ -26,7 +26,7 @@ import (
 	"time"
 )
 
-const arena = "/Users/user/.claude/jobs/47d8265e/tmp/arena"
+var arena string
 
 type call struct {
 	ID   int             `json:"id"`
@@ -545,13 +545,24 @@ func score(args []string) (bool, error) {
 	fs := flag.NewFlagSet("check", flag.ExitOnError)
 	bin := fs.String("bin", "", "candidate binary")
 	name := fs.String("name", "", "candidate name")
-	src := fs.String("src", filepath.Join(arena, "..", "sample2"), "transcripts the seed reads")
-	seedBin := fs.String("seed", filepath.Join(arena, "check", "seed"), "seed binary")
+	arenaDir := fs.String("arena", os.Getenv("ARENA"), "arena fixture dir (default $ARENA)")
+	src := fs.String("src", "", "transcripts the seed reads (default <arena>/../sample2)")
+	seedBin := fs.String("seed", "", "seed binary (default <arena>/check/seed)")
 	crashSeed := fs.Int64("crash-seed", time.Now().UnixNano(), "rng seed for kill points")
 	skip := fs.String("skip", "", "comma list of phases to skip: incremental,crash")
 	fs.Parse(args)
 	if *bin == "" || *name == "" {
 		return false, fmt.Errorf("-bin and -name are required")
+	}
+	if *arenaDir == "" {
+		return false, fmt.Errorf("-arena or $ARENA is required")
+	}
+	arena = *arenaDir
+	if *src == "" {
+		*src = filepath.Join(arena, "..", "sample2")
+	}
+	if *seedBin == "" {
+		*seedBin = filepath.Join(arena, "check", "seed")
 	}
 	absBin, err := filepath.Abs(*bin)
 	if err != nil {
