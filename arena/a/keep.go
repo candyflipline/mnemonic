@@ -228,18 +228,22 @@ func (ks keepServer) serveCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var rep callReply
-	var err error
+	var err, viewErr error
 	if body.Tool == "get_ingest_status" {
 		rep.Data, rep.Text, err = ks.k.IngestStatus(body.Args)
 	} else {
 		err = ks.k.Read(func(h keeper.Head) error {
 			v, err := ks.view(h)
 			if err != nil {
+				viewErr = err
 				return err
 			}
 			readers := []route.Reader{ks.local}
 			if rung == route.Partial {
 				readers = append(readers, ks.readers...)
+				for i, rd := range readers {
+					readers[i] = infraReader{rd}
+				}
 			}
 			rep.Data, rep.Text, err = route.Do(r.Context(), v, readers, rung, body.Tool, body.Args)
 			return err
@@ -249,11 +253,33 @@ func (ks keepServer) serveCall(w http.ResponseWriter, r *http.Request) {
 		ks.fail(w, err)
 		return
 	}
+	var infra infraError
+	if viewErr != nil || errors.As(err, &infra) || (err != nil && r.Context().Err() != nil) {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
 	if err != nil {
 		rep.Error = err.Error()
 	}
 	writeJSON(w, rep)
 }
+
+// infraReader marks every error of a scattered phase as a failure to get an
+// answer: the router validates a tool's arguments before it scatters, so a
+// phase never returns the tool's own error.
+type infraReader struct{ route.Reader }
+
+func (r infraReader) Call(ctx context.Context, req route.CallRequest) (route.CallResponse, error) {
+	resp, err := r.Reader.Call(ctx, req)
+	if err != nil {
+		err = infraError{err}
+	}
+	return resp, err
+}
+
+type infraError struct{ error }
+
+func (e infraError) Unwrap() error { return e.error }
 
 func (ks keepServer) serveIngest(w http.ResponseWriter, r *http.Request) {
 	err := ks.k.Cycle(r.Context())
