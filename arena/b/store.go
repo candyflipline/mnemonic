@@ -184,7 +184,7 @@ func ingest(root, dir string) error {
 		return e
 	}
 	var codecs []*segmentCodecs
-	pool := make(chan *segmentCodecs, 3)
+	pool := make(chan *segmentCodecs, 2)
 	type pendingSource struct {
 		rel    string
 		cp     Checkpoint
@@ -208,7 +208,7 @@ func ingest(root, dir string) error {
 			}
 			p.cp.Events += p.writer.count
 			p.cp.MaxVersion = p.writer.maxVersion
-			p.cp.Segments = append(p.cp.Segments, p.writer.names...)
+			p.cp.Segments = p.writer.names
 			m.Sources[p.rel] = p.cp
 		}
 		if err := atomicManifest(dir, m); err != nil {
@@ -302,7 +302,7 @@ func ingest(root, dir string) error {
 				pool <- c
 			}
 		}
-		writer := newSourceStream(dir, pool, cp.MaxVersion)
+		writer := newSourceStream(dir, pool, cp.MaxVersion, cp.Segments)
 		state, parseErr := parser.Parse(zr, normalize.SourceMeta{SourceName: src.SourceName, Harness: src.Harness, SourceFile: src.Path}, cp.State, writer.emit)
 		zr.Close()
 		if parseErr == nil && state.Offset != uint64(src.Size) {

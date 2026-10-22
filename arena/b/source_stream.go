@@ -7,7 +7,7 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-// The parser remains serial, preserving source/event version order. Up to three
+// The parser remains serial, preserving source/event version order. Up to two
 // bounded writers overlap compression, token indexing and durable file writes
 // with parsing the next source. Each codec pair belongs to one worker at a time.
 type sourceStream struct {
@@ -19,7 +19,8 @@ type sourceStream struct {
 	err                  error
 }
 
-func newSourceStream(dir string, pool chan *segmentCodecs, previous uint64) *sourceStream {
+func newSourceStream(dir string, pool chan *segmentCodecs, previous uint64, prior []string) *sourceStream {
+	prior = append([]string(nil), prior...)
 	s := &sourceStream{events: make(chan schema.Event, 8), cancel: make(chan struct{}), done: make(chan struct{})}
 	go func() {
 		defer close(s.done)
@@ -48,6 +49,9 @@ func newSourceStream(dir string, pool chan *segmentCodecs, previous uint64) *sou
 			case ev, ok := <-s.events:
 				if !ok {
 					s.names, s.err = w.finish()
+					if s.err == nil {
+						s.names, s.err = compactSourceSegments(dir, append(prior, s.names...), codecs)
+					}
 					s.count = w.count
 					s.maxVersion = w.maxVersion
 					return

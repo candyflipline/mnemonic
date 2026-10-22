@@ -44,6 +44,7 @@ type termEntry struct {
 	offset, size uint32
 }
 type segmentWriter struct {
+	tier        int
 	path        string
 	codecs      *segmentCodecs
 	meta, heavy *os.File
@@ -295,6 +296,25 @@ func (w *segmentWriter) finish() (string, error) {
 	if writeErr != nil {
 		w.abort()
 		return "", writeErr
+	}
+	if w.tier > 0 {
+		tf, err := os.OpenFile(filepath.Join(w.path, "tier"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+		if err != nil {
+			w.abort()
+			return "", err
+		}
+		_, err = tf.Write([]byte{byte(w.tier)})
+		if err == nil {
+			err = syscall.Fsync(int(tf.Fd()))
+		}
+		ce := tf.Close()
+		if err == nil {
+			err = ce
+		}
+		if err != nil {
+			w.abort()
+			return "", err
+		}
 	}
 	if e = syncStagedDir(w.path); e != nil {
 		w.abort()

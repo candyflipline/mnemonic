@@ -105,6 +105,157 @@ func TestStore(t *testing.T) {
 			})
 		}
 	})
+	t.Run("bounded_compaction", func(t *testing.T) {
+		dir := t.TempDir()
+		codecs, err := newSegmentCodecs()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer codecs.close()
+		w := newSourceWriter(dir, codecs, 0, 1)
+		for i := 0; i < 8; i++ {
+			ev := schema.Event{EventUID: fmt.Sprintf("uid%d", 7-i), SessionID: "session", SourceName: "codex", Harness: "codex", EventVersion: 1, SourceOffset: uint64(i), RecordTS: "2026-01-01T00:00:00Z", TextContent: fmt.Sprintf("alpha beta %d", i), ActorKind: "user", EventKind: "message"}
+			if err = w.emit(&ev); err != nil {
+				t.Fatal(err)
+			}
+		}
+		names, err := w.finish()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(names) != 8 {
+			t.Fatalf("initial segments=%d", len(names))
+		}
+		m, _ := readManifest(dir)
+		m.Sources["fixture"] = Checkpoint{Segments: names, Events: 8}
+		if err = atomicManifest(dir, m); err != nil {
+			t.Fatal(err)
+		}
+		old, err := loadStore(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer old.Close()
+		tool, _ := Lookup("search_sessions")
+		args := json.RawMessage(`{"query":"alpha","n_hits":8}`)
+		before, textBefore, err := tool.Call(context.Background(), old, args)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		for _, name := range names {
+			if err = os.WriteFile(filepath.Join(dir, name, "tier"), []byte{maxMergeTier}, 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		capped, err := compactSourceSegments(dir, names, codecs)
+		if err != nil || !reflect.DeepEqual(capped, names) {
+			t.Fatal("compaction exceeded the tier cap")
+		}
+		for _, name := range names {
+			if err = os.Remove(filepath.Join(dir, name, "tier")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		hf, err := os.OpenFile(filepath.Join(dir, names[0], "heavy"), os.O_RDWR, 0600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st, err := hf.Stat()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = hf.Truncate(maxMergeBytes); err != nil {
+			t.Fatal(err)
+		}
+		capped, err = compactSourceSegments(dir, names, codecs)
+		if err != nil || !reflect.DeepEqual(capped, names) {
+			t.Fatal("compaction exceeded the byte cap")
+		}
+		if err = hf.Truncate(st.Size()); err != nil {
+			t.Fatal(err)
+		}
+		hf.Close()
+		merged, err := compactSourceSegments(dir, names, codecs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(merged) != 1 {
+			t.Fatalf("merged segments=%d", len(merged))
+		}
+		info, err := inspectMerge(dir, merged[0])
+		if err != nil || info.tier != 1 {
+			t.Fatalf("tier=%d err=%v", info.tier, err)
+		}
+		cp := m.Sources["fixture"]
+		cp.Segments = merged
+		m.Sources["fixture"] = cp
+		if err = atomicManifest(dir, m); err != nil {
+			t.Fatal(err)
+		}
+		fresh, err := loadStore(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer fresh.Close()
+		after, textAfter, err := tool.Call(context.Background(), fresh, args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(before, after) || textBefore != textAfter {
+			t.Fatal("compaction changed search output")
+		}
+		if len(fresh.events) != 8 {
+			t.Fatal("compaction dropped events")
+		}
+		heavy, err := fresh.heavyFor(fresh.eventByUID("uid0"))
+		if err != nil || heavy.Text != "alpha beta 7" {
+			t.Fatalf("rebased heavy text=%q err=%v", heavy.Text, err)
+		}
+
+		pool := make(chan *segmentCodecs, 1)
+		pool <- codecs
+		stream := newSourceStream(dir, pool, 1, names)
+		appended := schema.Event{EventUID: "appended", SessionID: "session", EventVersion: 1, TextContent: "gamma delta", ActorKind: "user", EventKind: "message", RecordTS: "2026-01-01T00:00:01Z"}
+		if err = stream.emit(&appended); err != nil {
+			t.Fatal(err)
+		}
+		stream.seal()
+		if err = stream.wait(); err != nil {
+			t.Fatal(err)
+		}
+		if len(stream.names) != 2 || stream.count != 1 || stream.maxVersion != 2 {
+			t.Fatalf("append merge segments=%d count=%d version=%d", len(stream.names), stream.count, stream.maxVersion)
+		}
+		cp.Segments = stream.names
+		cp.Events = 9
+		m.Sources["fixture"] = cp
+		if err = atomicManifest(dir, m); err != nil {
+			t.Fatal(err)
+		}
+		appendedDB, err := loadStore(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer appendedDB.Close()
+		if len(appendedDB.events) != 9 || appendedDB.eventByUID("appended").EventVersion != 2 {
+			t.Fatal("append compaction lost its checkpoint contents")
+		}
+		for _, name := range names {
+			if err = os.RemoveAll(filepath.Join(dir, name)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		old.releaseIdlePages()
+		heavy, err = old.heavyFor(old.eventByUID("uid0"))
+		if err != nil || heavy.Text != "alpha beta 7" {
+			t.Fatal("old reader lost its merged source")
+		}
+		again, err := compactSourceSegments(dir, merged, codecs)
+		if err != nil || !reflect.DeepEqual(again, merged) {
+			t.Fatal("compaction was not idempotent")
+		}
+	})
 	t.Run("dictionary_fences", func(t *testing.T) {
 		dir := t.TempDir()
 		codecs, err := newSegmentCodecs()
