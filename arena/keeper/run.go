@@ -76,6 +76,8 @@ type Keeper struct {
 	head    atomic.Pointer[Head]
 	stamp   uint64
 	changed chan struct{}
+
+	closePart func(*trace.Part)
 }
 
 type local struct {
@@ -105,12 +107,13 @@ func Take(ctx context.Context, s obj.Store, cfg Config) (*Keeper, error) {
 		return nil, err
 	}
 	k := &Keeper{
-		cfg:      cfg,
-		s:        s,
-		gen:      g,
-		uploaded: map[string]PartRef{},
-		doomed:   map[obj.Key]time.Time{},
-		changed:  make(chan struct{}),
+		cfg:       cfg,
+		s:         s,
+		gen:       g,
+		uploaded:  map[string]PartRef{},
+		doomed:    map[obj.Key]time.Time{},
+		changed:   make(chan struct{}),
+		closePart: (*trace.Part).Close,
 	}
 	status, err := trace.SourcesDB(m.Sources)
 	if err != nil {
@@ -239,7 +242,7 @@ func (k *Keeper) readLocal(stamp uint64) (local, error) {
 func (k *Keeper) closeNew(open map[string]*trace.Part) {
 	for id, p := range open {
 		if k.head.Load().Parts[id] != p {
-			p.Close()
+			k.closePart(p)
 		}
 	}
 }
@@ -358,7 +361,7 @@ func (k *Keeper) install(m Manifest, hot []PartRef, l local) {
 	}
 	for id, p := range old.Parts {
 		if l.open[id] != p {
-			p.Close()
+			k.closePart(p)
 		}
 	}
 }
