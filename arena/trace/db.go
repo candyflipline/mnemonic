@@ -80,6 +80,19 @@ func OpenParts(parts []*Part) (*DB, error) {
 	return db, nil
 }
 
+// SourcesDB is a DB with no parts, only the source rows get_ingest_status
+// reads, as ListParts returns them. It holds no files, so it needs no Close.
+func SourcesDB(sources json.RawMessage) (*DB, error) {
+	db := &DB{sessPart: map[string]int{}}
+	if len(sources) == 0 {
+		return db, nil
+	}
+	if err := json.Unmarshal(sources, &db.sources); err != nil {
+		return nil, err
+	}
+	return db, nil
+}
+
 func (db *DB) Close() {
 	for _, st := range db.parts {
 		st.Close()

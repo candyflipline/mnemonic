@@ -145,7 +145,7 @@ stale_commit() {
 stale_delete() {
 	local store=$T/2cd/store root=$T/2cd/root a out g1 g2 seq=0 n=0
 	"$BIN/seed" -src "$SRC" -half "$root" >/dev/null || { STALE="seed -half failed"; return 1; }
-	start_keeper 2cd "$store" "$root" "" "" "-grant-ttl 3s -delete-slack 0s -interval 1h" || { STALE="delete keeper A did not start ($(why 2cd))"; return 1; }
+	start_keeper 2cd "$store" "$root" "" "" "-grant-ttl 3s -delete-slack 3s -interval 1h" || { STALE="delete keeper A did not start ($(why 2cd))"; return 1; }
 	a=$KPID
 	local a_port=$KPORT
 	"$E2E" ingest -keeper "http://127.0.0.1:$a_port" >/dev/null || { STALE="delete keeper A ingest failed ($(why 2cd))"; return 1; }
@@ -164,7 +164,7 @@ stale_delete() {
 		sleep 0.1
 		n=$((n + 1))
 	done
-	sleep 3.5
+	sleep 6.5
 	"$E2E" ingest -keeper "http://127.0.0.1:$a_port" || echo "stale keeper refused the ingest" >&2
 	wait_up "$b" "127.0.0.1:$b_port" || { STALE="delete keeper B did not start ($(why 2cd2))"; return 1; }
 	out=$("$E2E" ingest -keeper "http://127.0.0.1:$b_port") || { STALE="delete keeper B ingest failed ($(why 2cd2))"; return 1; }
