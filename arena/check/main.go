@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/candyflipline/mnemonic/arena/check/cmp"
+	"github.com/klauspost/compress/zstd"
 )
 
 var arena string
@@ -172,6 +173,8 @@ type run struct {
 
 var rssRe = regexp.MustCompile(`(\d+)\s+maximum resident set size`)
 
+var timeReportRe = regexp.MustCompile(`\n\s+[\d.]+\s+real\s`)
+
 func ingest(bin, root, store string) (run, error) {
 	cmd := exec.Command("/usr/bin/time", "-l", bin, "ingest", "-root", root, "-store", store)
 	var stderr bytes.Buffer
@@ -184,7 +187,11 @@ func ingest(bin, root, store string) (run, error) {
 		r.PeakRSS, _ = strconv.ParseInt(string(m[1]), 10, 64)
 	}
 	if err != nil {
-		return r, fmt.Errorf("ingest %s: %v: %s", store, err, tail(stderr.String()))
+		msg := stderr.String()
+		if loc := timeReportRe.FindStringIndex(msg); loc != nil {
+			msg = msg[:loc[0]]
+		}
+		return r, fmt.Errorf("ingest %s: %v: %s", store, err, tail(msg))
 	}
 	return r, nil
 }
@@ -326,6 +333,7 @@ type card struct {
 	Incremental    *parity                     `json:"incremental,omitempty"`
 	IncrementalErr string                      `json:"incremental_error,omitempty"`
 	Crash          *crash                      `json:"crash,omitempty"`
+	AppendCrash    *appendCrash                `json:"append_crash,omitempty"`
 	Ingest         run                         `json:"clean_ingest"`
 	StoreBytes     int64                       `json:"store_bytes"`
 	BatchIdleRSS   int64                       `json:"batch_idle_rss_bytes"`
@@ -354,7 +362,7 @@ func score(args []string) (bool, error) {
 	src := fs.String("src", "", "transcripts the seed reads (default <arena>/../sample2)")
 	seedBin := fs.String("seed", "", "seed binary (default <arena>/check/seed)")
 	crashSeed := fs.Int64("crash-seed", time.Now().UnixNano(), "rng seed for kill points")
-	skip := fs.String("skip", "", "comma list of phases to skip: incremental,crash")
+	skip := fs.String("skip", "", "comma list of phases to skip: incremental,crash,appendcrash")
 	fs.Parse(args)
 	if *bin == "" || *name == "" {
 		return false, fmt.Errorf("-bin and -name are required")
@@ -448,6 +456,11 @@ func scoreInto(c *card, bin, work, src, seedBin string, crashSeed int64, skip st
 		c.Crash = &cr
 		c.Pass = c.Pass && cr.Error == "" && cr.Parity.Pass
 	}
+	if !strings.Contains(skip, "appendcrash") {
+		ac := appendCrashRun(bin, raw, work, crashSeed, sets, ms, vsClean)
+		c.AppendCrash = &ac
+		c.Pass = c.Pass && ac.Error == "" && ac.Parity.Pass
+	}
 	return nil
 }
 
@@ -488,24 +501,17 @@ func crashRun(bin, raw, work string, cleanMs, seed int64, sets []set, ms cmp.Mas
 			window = cleanMs * 3 / 10
 		}
 		after := r.Int63n(max(window, 1)) + 1
-		cmd := exec.Command(bin, "ingest", "-root", raw, "-store", store)
-		cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
-		if err := cmd.Start(); err != nil {
+		killed, _, err := killAfter(bin, raw, store, time.Duration(after)*time.Millisecond)
+		if err != nil {
 			cr.Error = err.Error()
 			return cr
 		}
-		done := make(chan struct{})
-		go func() { cmd.Wait(); close(done) }()
-		select {
-		case <-done:
+		if !killed {
 			cr.ExitedBefore++
 			landed = 0
 			cr.KillAfterMs = nil
 			os.RemoveAll(store)
 			continue
-		case <-time.After(time.Duration(after) * time.Millisecond):
-			cmd.Process.Signal(syscall.SIGKILL)
-			<-done
 		}
 		landed++
 		cr.KillAfterMs = append(cr.KillAfterMs, after)
@@ -526,4 +532,302 @@ func crashRun(bin, raw, work string, cleanMs, seed int64, sets []set, ms cmp.Mas
 	}
 	cr.Parity = compare(sets, ms, got.results, want)
 	return cr
+}
+
+// killAfter runs an ingest and SIGKILLs it after d unless it exits first. It
+// reports whether the kill landed and how long the ingest ran.
+func killAfter(bin, root, store string, d time.Duration) (bool, time.Duration, error) {
+	cmd := exec.Command(bin, "ingest", "-root", root, "-store", store)
+	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	start := time.Now()
+	if err := cmd.Start(); err != nil {
+		return false, 0, err
+	}
+	done := make(chan struct{})
+	go func() { cmd.Wait(); close(done) }()
+	select {
+	case <-done:
+		return false, time.Since(start), nil
+	case <-time.After(d):
+		cmd.Process.Signal(syscall.SIGKILL)
+		<-done
+		return true, time.Since(start), nil
+	}
+}
+
+type appendCrash struct {
+	Seed             int64   `json:"seed"`
+	Steps            int     `json:"steps"`
+	KillsLanded      int     `json:"kills_landed"`
+	KillAfterMs      []int64 `json:"kill_after_ms"`
+	ExitedBefore     int     `json:"ingests_exited_before_kill"`
+	DeltaPartsAtKill []int   `json:"delta_parts_at_kill"`
+	TornLogsAtKill   []int   `json:"torn_delta_logs_at_kill"`
+	Final            run     `json:"final_ingest"`
+	Parity           parity  `json:"parity"`
+	Error            string  `json:"error,omitempty"`
+}
+
+const (
+	appendSteps    = 12
+	appendFirstPct = 70
+	appendMinKills = 3
+)
+
+// appendCrashRun grows a copy of raw in appendSteps slices, the first
+// appendFirstPct percent of every source and then equal steps to the whole,
+// ingesting between slices. Each ingest after the first two is SIGKILLed
+// somewhere inside it, so the delta path of a hot component is killed while it
+// appends. The last slice is ingested to the end and compared with the clean
+// run.
+func appendCrashRun(bin, raw, work string, seed int64, sets []set, ms cmp.Masks, want func(set, int) (cmp.Result, bool)) appendCrash {
+	ac := appendCrash{Seed: seed, Steps: appendSteps}
+	r := rand.New(rand.NewSource(seed))
+	root, store := filepath.Join(work, "append-root"), filepath.Join(work, "append-store")
+	g, err := newGrowth(raw, root, appendSteps)
+	if err != nil {
+		ac.Error = err.Error()
+		return ac
+	}
+	for k := 0; k < 2; k++ {
+		if err := g.grow(k); err != nil {
+			ac.Error = err.Error()
+			return ac
+		}
+		first, err := ingest(bin, root, store)
+		if err != nil {
+			ac.Error = err.Error()
+			return ac
+		}
+		if k == 1 {
+			g.estimate = time.Duration(first.WallMs) * time.Millisecond
+		}
+	}
+	for k := 2; k < appendSteps; k++ {
+		if err := g.grow(k); err != nil {
+			ac.Error = err.Error()
+			return ac
+		}
+		after := time.Duration(r.Int63n(max(g.estimate.Milliseconds(), 1))+1) * time.Millisecond
+		killed, ran, err := killAfter(bin, root, store, after)
+		if err != nil {
+			ac.Error = err.Error()
+			return ac
+		}
+		if !killed {
+			ac.ExitedBefore++
+			g.estimate = ran
+			continue
+		}
+		parts, torn := deltaCensus(store)
+		ac.KillsLanded++
+		ac.KillAfterMs = append(ac.KillAfterMs, after.Milliseconds())
+		ac.DeltaPartsAtKill = append(ac.DeltaPartsAtKill, parts)
+		ac.TornLogsAtKill = append(ac.TornLogsAtKill, torn)
+	}
+	if err := g.grow(appendSteps); err != nil {
+		ac.Error = err.Error()
+		return ac
+	}
+	if ac.Final, err = ingest(bin, root, store); err != nil {
+		ac.Error = err.Error()
+		return ac
+	}
+	live := 0
+	for _, n := range ac.DeltaPartsAtKill {
+		if n > 0 {
+			live++
+		}
+	}
+	switch {
+	case ac.KillsLanded < appendMinKills:
+		ac.Error = fmt.Sprintf("only %d kills landed before an ingest exited, need %d", ac.KillsLanded, appendMinKills)
+		return ac
+	case live < appendMinKills:
+		ac.Error = fmt.Sprintf("only %d kills found a committed delta.json in the store, need %d: the delta path was not live", live, appendMinKills)
+		return ac
+	}
+	got, err := batch(bin, root, store, sets)
+	if err != nil {
+		ac.Error = err.Error()
+		return ac
+	}
+	ac.Parity = compare(sets, ms, got.results, want)
+	return ac
+}
+
+// growth is a copy of a raw root that is written in slices: slice 0 is the
+// first appendFirstPct percent of every source and slice steps is the whole.
+type growth struct {
+	root     string
+	srcs     []slicedSource
+	steps    int
+	estimate time.Duration
+}
+
+type slicedSource struct {
+	rel    string
+	man    map[string]json.RawMessage
+	frames [][]byte
+	ends   []int64
+	zst    int64
+}
+
+func newGrowth(raw, root string, steps int) (*growth, error) {
+	g := &growth{root: root, steps: steps}
+	paths, err := filepath.Glob(filepath.Join(raw, "raw", "author=*", "machine=*", "harness=*", "*.json"))
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(paths)
+	dec, err := zstd.NewReader(nil)
+	if err != nil {
+		return nil, err
+	}
+	defer dec.Close()
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1))
+	if err != nil {
+		return nil, err
+	}
+	defer enc.Close()
+	for _, p := range paths {
+		rel, err := filepath.Rel(raw, p)
+		if err != nil {
+			return nil, err
+		}
+		s := slicedSource{rel: rel}
+		mb, err := os.ReadFile(p)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(mb, &s.man); err != nil {
+			return nil, fmt.Errorf("%s: %v", rel, err)
+		}
+		zb, err := os.ReadFile(strings.TrimSuffix(p, ".json") + ".jsonl.zst")
+		if err != nil {
+			return nil, err
+		}
+		body, err := dec.DecodeAll(zb, nil)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %v", rel, err)
+		}
+		var size int64
+		if err := json.Unmarshal(s.man["size"], &size); err != nil || size != int64(len(body)) || len(body) == 0 || body[len(body)-1] != '\n' {
+			return nil, fmt.Errorf("%s: manifest size %s does not match the %d raw bytes", rel, s.man["size"], len(body))
+		}
+		s.ends = make([]int64, steps+1)
+		for k := 0; k < steps; k++ {
+			at := int64(len(body)) * int64(appendFirstPct*steps+(100-appendFirstPct)*k) / int64(100*steps)
+			s.ends[k] = at + int64(bytes.IndexByte(body[at:], '\n')) + 1
+		}
+		s.ends[steps] = int64(len(body))
+		s.frames = make([][]byte, steps+1)
+		for k := 0; k <= steps; k++ {
+			prev := int64(0)
+			if k > 0 {
+				prev = s.ends[k-1]
+			}
+			if s.ends[k] > prev {
+				s.frames[k] = enc.EncodeAll(body[prev:s.ends[k]], nil)
+			}
+		}
+		g.srcs = append(g.srcs, s)
+	}
+	return g, nil
+}
+
+func (g *growth) grow(k int) error {
+	for i := range g.srcs {
+		s := &g.srcs[i]
+		if len(s.frames[k]) == 0 {
+			continue
+		}
+		manPath := filepath.Join(g.root, s.rel)
+		zstPath := strings.TrimSuffix(manPath, ".json") + ".jsonl.zst"
+		if err := os.MkdirAll(filepath.Dir(manPath), 0o755); err != nil {
+			return err
+		}
+		f, err := os.OpenFile(zstPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+		if err != nil {
+			return err
+		}
+		_, err = f.Write(s.frames[k])
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return err
+		}
+		s.zst += int64(len(s.frames[k]))
+		m := cloneManifest(s.man)
+		num := func(v int64) json.RawMessage { return json.RawMessage(strconv.FormatInt(v, 10)) }
+		m["zst_size"] = num(s.zst)
+		if k < g.steps {
+			m["size"], m["raw_end"] = num(s.ends[k]), num(s.ends[k])
+		}
+		b, err := json.Marshal(m)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(manPath+".tmp", append(b, '\n'), 0o644); err != nil {
+			return err
+		}
+		if err := os.Rename(manPath+".tmp", manPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func cloneManifest(m map[string]json.RawMessage) map[string]json.RawMessage {
+	out := make(map[string]json.RawMessage, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// deltaCensus counts the committed delta.json files in the store and the delta
+// logs that hold bytes past what the newest committed delta.json of their
+// image names, the tail a killed append leaves.
+func deltaCensus(store string) (parts, torn int) {
+	type committed struct{ light, heavy, rows int64 }
+	latest := map[string]committed{}
+	paths, _ := filepath.Glob(filepath.Join(store, "parts", "*", "delta.json"))
+	for _, p := range paths {
+		if strings.HasSuffix(filepath.Dir(p), ".tmp") {
+			continue
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var d struct {
+			Image    string `json:"image"`
+			LightLen int64  `json:"light_len"`
+			HeavyLen int64  `json:"heavy_len"`
+			Rows     int64  `json:"rows"`
+		}
+		if json.Unmarshal(b, &d) != nil {
+			continue
+		}
+		parts++
+		if cur, ok := latest[d.Image]; !ok || d.Rows > cur.rows {
+			latest[d.Image] = committed{d.LightLen, d.HeavyLen, d.Rows}
+		}
+	}
+	dirs, _ := filepath.Glob(filepath.Join(store, "deltas", "*"))
+	for _, dd := range dirs {
+		c := latest[filepath.Base(dd)]
+		size := func(name string) int64 {
+			if fi, err := os.Stat(filepath.Join(dd, name)); err == nil {
+				return fi.Size()
+			}
+			return 0
+		}
+		if size("light") > c.light || size("heavy") > c.heavy || size("src") > 2*c.rows {
+			torn++
+		}
+	}
+	return parts, torn
 }
