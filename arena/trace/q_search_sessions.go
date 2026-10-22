@@ -119,31 +119,37 @@ func derefOrNil(s *string) any {
 	return *s
 }
 
+func (a canonicalSearchSessionsArgs) searchQuery() searchQuery {
+	q := searchQuery{
+		query:      a.query,
+		nHits:      a.nHits,
+		eventTypes: a.eventTypes,
+		harness:    a.harness,
+		sourceName: a.source,
+	}
+	if a.withinID != nil {
+		q.sessionID, q.sessionOK = a.withinID.session, true
+		if a.withinID.kind == kindTurn {
+			q.turnSeq, q.turnOK = a.withinID.turnSeq, true
+		}
+	}
+	return q
+}
+
 func (searchSessionsTool) Call(db *DB, raw json.RawMessage) (any, string, error) {
 	args, err := parseSearchSessionsArgs(raw)
 	if err != nil {
 		return nil, "", err
 	}
-	request := args.requestShape()
-
-	q := searchQuery{
-		query:      args.query,
-		nHits:      args.nHits,
-		eventTypes: args.eventTypes,
-		harness:    args.harness,
-		sourceName: args.source,
-	}
-	if args.withinID != nil {
-		q.sessionID, q.sessionOK = args.withinID.session, true
-		if args.withinID.kind == kindTurn {
-			q.turnSeq, q.turnOK = args.withinID.turnSeq, true
-		}
-	}
-	result, err := db.search(q)
+	result, err := db.search(args.searchQuery())
 	if err != nil {
 		return nil, "", err
 	}
+	return searchAnswer(args, result)
+}
 
+func searchAnswer(args canonicalSearchSessionsArgs, result *searchResult) (any, string, error) {
+	request := args.requestShape()
 	if !result.scopeExists {
 		switch {
 		case args.withinID == nil:

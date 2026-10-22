@@ -193,7 +193,7 @@ func (st *Part) lsRecs() ([]lsRec, error) {
 	return recs, nil
 }
 
-func (db *DB) lsSelectPage(a *lsArgs, cursor *lsCursor) ([]lsItem, error) {
+func (db *DB) lsCandidates(a *lsArgs, cursor *lsCursor) ([]lsCand, error) {
 	var recs []lsRec
 	var infos []sessInfo
 	for _, st := range db.parts {
@@ -235,22 +235,13 @@ func (db *DB) lsSelectPage(a *lsArgs, cursor *lsCursor) ([]lsItem, error) {
 		cands = append(cands, cand{i, s})
 	}
 	desc := a.Sort == lsSortDesc
-	less := func(x, y cand, us bool) bool {
-		kx, ky := x.info.last, y.info.last
-		if us {
-			kx, ky = recs[x.i].LastUs, recs[y.i].LastUs
-		}
-		if kx != ky {
-			return (kx < ky) != desc
-		}
-		return (x.info.id < y.info.id) != desc
-	}
-	sort.Slice(cands, func(i, j int) bool { return less(cands[i], cands[j], true) })
+	sort.Slice(cands, func(i, j int) bool {
+		return lsLess(recs[cands[i].i].LastUs, cands[i].info.id, recs[cands[j].i].LastUs, cands[j].info.id, desc)
+	})
 	if len(cands) > a.Limit+1 {
 		cands = cands[:a.Limit+1]
 	}
-	sort.SliceStable(cands, func(i, j int) bool { return less(cands[i], cands[j], false) })
-	out := make([]lsItem, 0, len(cands))
+	out := make([]lsCand, 0, len(cands))
 	for _, c := range cands {
 		r, s := recs[c.i], c.info
 		item := lsItem{SessionID: s.id, FirstEventUnixMs: s.first, LastEventUnixMs: s.last,
@@ -270,9 +261,40 @@ func (db *DB) lsSelectPage(a *lsArgs, cursor *lsCursor) ([]lsItem, error) {
 		item.Source, item.Harness = strPtr(r.Source), strPtr(r.Harness)
 		item.SessionSlug, item.SessionSummary = strPtr(r.Slug), strPtr(summary)
 		item.DisplayLabel = lsDisplayLabel(r.ExplicitTitle, preview, title, summary, r.Slug, r.Harness, lsParseMode(item.Mode), item.LastEventTime, item.TotalTurns)
-		out = append(out, item)
+		out = append(out, lsCand{Item: item, Us: r.LastUs})
 	}
 	return out, nil
+}
+
+type lsCand struct {
+	Item lsItem `json:"item"`
+	Us   int64  `json:"us"`
+}
+
+func lsLess(xUs int64, xID string, yUs int64, yID string, desc bool) bool {
+	if xUs != yUs {
+		return (xUs < yUs) != desc
+	}
+	return (xID < yID) != desc
+}
+
+func lsOrder(a *lsArgs, cands []lsCand) []lsItem {
+	desc := a.Sort == lsSortDesc
+	sort.Slice(cands, func(i, j int) bool {
+		return lsLess(cands[i].Us, cands[i].Item.SessionID, cands[j].Us, cands[j].Item.SessionID, desc)
+	})
+	if len(cands) > a.Limit+1 {
+		cands = cands[:a.Limit+1]
+	}
+	sort.SliceStable(cands, func(i, j int) bool {
+		x, y := cands[i].Item, cands[j].Item
+		return lsLess(x.LastEventUnixMs, x.SessionID, y.LastEventUnixMs, y.SessionID, desc)
+	})
+	out := make([]lsItem, 0, len(cands))
+	for _, c := range cands {
+		out = append(out, c.Item)
+	}
+	return out
 }
 
 func qFormatMs(ms int64) string { return qFormatDateTime(time.UnixMilli(ms)) }

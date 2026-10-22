@@ -36,10 +36,14 @@ func (listSessions) Call(db *DB, args json.RawMessage) (any, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	page, err := lsQueryPage(db, a)
+	page, err := lsQueryPage(a, func(cursor *lsCursor) ([]lsCand, error) { return db.lsCandidates(a, cursor) })
 	if err != nil {
 		return nil, "", err
 	}
+	return lsAnswer(a, page)
+}
+
+func lsAnswer(a *lsArgs, page *lsPage) (any, string, error) {
 	payload := map[string]any{
 		"request": lsCanonicalRequest(a),
 		"data":    lsDataJSON(a, page),
@@ -254,25 +258,33 @@ func lsDecodeCursor(token string) (*lsCursor, error) {
 	return &c, nil
 }
 
-func lsQueryPage(db *DB, a *lsArgs) (*lsPage, error) {
-	var cursor *lsCursor
-	if a.Cursor != "" {
-		c, err := lsDecodeCursor(a.Cursor)
-		if err != nil {
-			return nil, err
-		}
-		if c.FilterSig != lsFilterSig(a) {
-			return nil, argErrorf("cursor does not match current list_sessions filter")
-		}
-		if c.Sort != a.Sort {
-			return nil, argErrorf("cursor sort does not match requested sort order")
-		}
-		cursor = c
+func lsCursorOf(a *lsArgs) (*lsCursor, error) {
+	if a.Cursor == "" {
+		return nil, nil
 	}
-	items, err := db.lsSelectPage(a, cursor)
+	c, err := lsDecodeCursor(a.Cursor)
 	if err != nil {
 		return nil, err
 	}
+	if c.FilterSig != lsFilterSig(a) {
+		return nil, argErrorf("cursor does not match current list_sessions filter")
+	}
+	if c.Sort != a.Sort {
+		return nil, argErrorf("cursor sort does not match requested sort order")
+	}
+	return c, nil
+}
+
+func lsQueryPage(a *lsArgs, gather func(*lsCursor) ([]lsCand, error)) (*lsPage, error) {
+	cursor, err := lsCursorOf(a)
+	if err != nil {
+		return nil, err
+	}
+	cands, err := gather(cursor)
+	if err != nil {
+		return nil, err
+	}
+	items := lsOrder(a, cands)
 	hasMore := len(items) > a.Limit
 	if hasMore {
 		items = items[:a.Limit]
