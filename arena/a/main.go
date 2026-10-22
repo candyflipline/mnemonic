@@ -17,21 +17,19 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: a ingest|batch -root R -store S")
+		fmt.Fprintln(os.Stderr, "usage: a ingest|batch|keep|read|probe ...")
 		os.Exit(2)
 	}
-	fs := flag.NewFlagSet(os.Args[1], flag.ExitOnError)
-	root := fs.String("root", "", "data root")
-	store := fs.String("store", "", "store dir")
-	quiet := fs.Duration("quiet", 15*time.Minute, "a source settles into its cold part once its updated_ms is this far behind the newest source's")
-	settle := fs.Bool("settle", false, "settle every source now")
-	fs.Parse(os.Args[2:])
 	var err error
 	switch os.Args[1] {
-	case "ingest":
-		err = trace.Ingest(*root, *store, *quiet, *settle)
-	case "batch":
-		err = batch(*root, *store)
+	case "ingest", "batch":
+		err = engine(os.Args[1], os.Args[2:])
+	case "keep":
+		err = runKeep(os.Args[2:])
+	case "read":
+		err = runRead(os.Args[2:])
+	case "probe":
+		err = runProbe(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown command %s", os.Args[1])
 	}
@@ -39,6 +37,19 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func engine(cmd string, args []string) error {
+	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
+	root := fs.String("root", "", "data root")
+	store := fs.String("store", "", "store dir")
+	quiet := fs.Duration("quiet", 15*time.Minute, "a source settles into its cold part once its updated_ms is this far behind the newest source's")
+	settle := fs.Bool("settle", false, "settle every source now")
+	fs.Parse(args)
+	if cmd == "ingest" {
+		return trace.Ingest(*root, *store, *quiet, *settle)
+	}
+	return batch(*root, *store)
 }
 
 type call struct {

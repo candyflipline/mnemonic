@@ -181,7 +181,7 @@ func (st *Part) lsRecs() ([]lsRec, error) {
 	if st.ls != nil {
 		return st.ls, nil
 	}
-	b, err := os.ReadFile(filepath.Join(st.dir, "ls.json"))
+	b, err := st.read("ls.json")
 	if err != nil {
 		return nil, err
 	}

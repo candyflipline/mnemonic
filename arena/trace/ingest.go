@@ -448,6 +448,7 @@ func Ingest(root, store string, quiet time.Duration, settleAll bool) error {
 	}
 	parts := planParts(cks)
 	ids := make([]string, 0, len(parts))
+	var hot []string
 	if err := os.MkdirAll(filepath.Join(store, "parts"), 0o755); err != nil {
 		return err
 	}
@@ -459,8 +460,11 @@ func Ingest(root, store string, quiet time.Duration, settleAll bool) error {
 			}
 		}
 		ids = append(ids, id)
+		if slices.ContainsFunc(members, ckpt.hot) {
+			hot = append(hot, id)
+		}
 	}
-	mb, _ := json.Marshal(manifestFile{Parts: ids, Sources: srcs})
+	mb, _ := json.Marshal(manifestFile{Parts: ids, Hot: hot, Sources: srcs})
 	if cur, err := os.ReadFile(filepath.Join(store, "CURRENT")); err == nil && bytes.Equal(cur, mb) {
 		return nil
 	}

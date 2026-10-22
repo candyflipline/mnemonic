@@ -13,7 +13,7 @@ import (
 // Part is a read-only view of one committed index plus the source logs it
 // points into.
 type Part struct {
-	dir                       string
+	read                      func(name string) ([]byte, error)
 	meta                      indexMeta
 	docs, sessions, sessStr   []byte
 	turns, uids               []byte
@@ -65,34 +65,52 @@ func mmapFile(path string) ([]byte, error) {
 	return syscall.Mmap(int(f.Fd()), 0, int(fi.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
 }
 
-func openPart(store, dir string, fc *frameCache) (*Part, error) {
-	st := &Part{dir: dir, fc: fc}
+// OpenPartDir opens a part dir that lives in a store's parts dir; its source
+// logs are the store's.
+func OpenPartDir(dir string) (*Part, error) {
 	mb, err := os.ReadFile(filepath.Join(dir, "meta.json"))
 	if err != nil {
 		return nil, err
 	}
-	if err := json.Unmarshal(mb, &st.meta); err != nil {
+	var maps [][]byte
+	st, err := openPart(filepath.Dir(filepath.Dir(dir)), mb, func(name string) ([]byte, error) {
+		b, err := mmapFile(filepath.Join(dir, name))
+		if err == nil {
+			maps = append(maps, b)
+		}
+		return b, err
+	}, func(name string) ([]byte, error) { return os.ReadFile(filepath.Join(dir, name)) })
+	st.maps = maps
+	if err != nil {
+		st.Close()
 		return nil, err
+	}
+	return st, nil
+}
+
+func openPart(store string, meta []byte, load, read func(name string) ([]byte, error)) (*Part, error) {
+	st := &Part{read: read, fc: newFrameCache()}
+	if err := json.Unmarshal(meta, &st.meta); err != nil {
+		return st, err
 	}
 	for name, dst := range map[string]*[]byte{"docs": &st.docs, "sessions": &st.sessions, "sessions.str": &st.sessStr,
 		"turns": &st.turns, "uids": &st.uids, "terms": &st.terms, "terms.idx": &st.termIdx, "terms.filter": &st.termFilter, "postings": &st.postings,
 		"fa.exact": &st.faExact, "fa.tio": &st.faTio, "fa.blob": &st.faBlob,
 		"hot": &st.hotB, "hot.off": &st.hotOff, "fa.tri": &st.faTri, "fa.trip": &st.faTrip} {
-		b, err := mmapFile(filepath.Join(dir, name))
+		b, err := load(name)
 		if err != nil {
-			return nil, err
+			return st, err
 		}
 		*dst = b
-		st.maps = append(st.maps, b)
 	}
 	for i, key := range st.meta.Sources {
 		l, err := os.Open(logPath(store, key, st.meta.Gens[i], "light"))
 		if err != nil {
-			return nil, err
+			return st, err
 		}
 		h, err := os.Open(logPath(store, key, st.meta.Gens[i], "heavy"))
 		if err != nil {
-			return nil, err
+			return st, err
 		}
 		st.light = append(st.light, l)
 		st.heavy = append(st.heavy, h)
@@ -103,7 +121,7 @@ func openPart(store, dir string, fc *frameCache) (*Part, error) {
 	return st, nil
 }
 
-func (st *Part) close() {
+func (st *Part) Close() {
 	for _, m := range st.maps {
 		if len(m) > 0 {
 			syscall.Munmap(m)
