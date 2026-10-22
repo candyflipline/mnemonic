@@ -15,14 +15,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/candyflipline/mnemonic/internal/auth"
-	"github.com/candyflipline/mnemonic/internal/cache"
 	"github.com/candyflipline/mnemonic/internal/config"
 	"github.com/candyflipline/mnemonic/internal/lake"
-	"github.com/candyflipline/mnemonic/internal/mcp"
-	_ "github.com/candyflipline/mnemonic/internal/normalize/all"
-	"github.com/candyflipline/mnemonic/internal/query"
-	"github.com/candyflipline/mnemonic/internal/store"
+	"github.com/candyflipline/mnemonic/internal/server"
 )
 
 func init() {
@@ -46,117 +41,37 @@ func serve(args []string) error {
 		authors[t.SHA256] = t.Author
 	}
 
-	ix, err := cache.Open(cfg.DataDir, cache.Options{MemoryLimit: "1GB", FlagsSQL: query.SearchFlagsSQL()})
+	srv, err := server.New(cfg.DataDir, authors)
 	if err != nil {
 		return err
 	}
-	defer ix.Close()
+	defer srv.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	wake := make(chan struct{}, 1)
 	looped := make(chan struct{})
 	go func() {
 		defer close(looped)
-		convergeLoop(ctx, cfg.DataDir, ix, wake)
+		srv.Run(ctx)
 	}()
 	defer func() {
 		stop()
 		<-looped
 	}()
 
-	srv := &http.Server{Addr: cfg.Listen, Handler: serveMux(cfg.DataDir, authors, ix, wake)}
+	hs := &http.Server{Addr: cfg.Listen, Handler: srv.Handler()}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
+		if err := hs.Shutdown(shutdownCtx); err != nil {
 			log.Printf("shutdown: %v", err)
 		}
 	}()
 	log.Printf("mnemonic serve: listening on %s (data_dir %s)", cfg.Listen, cfg.DataDir)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := hs.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("listen on %s: %w", cfg.Listen, err)
 	}
 	return nil
-}
-
-func serveMux(dataDir string, authors map[string]string, ix *cache.Index, wake chan<- struct{}) http.Handler {
-	mux := http.NewServeMux()
-	st := &store.Store{DataDir: dataDir, Wake: wake}
-	mux.Handle("/v1/", auth.Middleware(authors)(st.Handler()))
-	mux.Handle("/mcp", auth.Middleware(authors)(mcp.Handler(ix.DB(), query.Lookup)))
-	return mux
-}
-
-const (
-	settleQuiet = time.Second
-	settleMax   = 3 * time.Second
-	reconcile   = 5 * time.Minute
-)
-
-func convergeLoop(ctx context.Context, dataDir string, ix *cache.Index, wake <-chan struct{}) {
-	pushPending := func() bool { return len(wake) > 0 }
-	ls := cycle(ctx, dataDir, ix, "boot", pushPending, lake.Sweep{})
-	reconciled := time.Now()
-	for {
-		reason := "sweep"
-		if due := time.Until(reconciled.Add(reconcile)); due <= 0 {
-			reason = "reconcile"
-		} else if ls.Stale == 0 || pushPending() {
-			reason = "reconcile"
-			select {
-			case <-ctx.Done():
-				return
-			case <-wake:
-				reason = "put"
-				settle(ctx, wake)
-			case <-time.After(due):
-			}
-		}
-		if ctx.Err() != nil {
-			return
-		}
-		if reason == "reconcile" {
-			reconciled = time.Now()
-		}
-		ls = cycle(ctx, dataDir, ix, reason, pushPending, ls.Next)
-	}
-}
-
-func settle(ctx context.Context, wake <-chan struct{}) {
-	quiet := time.NewTimer(settleQuiet)
-	defer quiet.Stop()
-	limit := time.NewTimer(settleMax)
-	defer limit.Stop()
-	for {
-		select {
-		case <-wake:
-			quiet.Reset(settleQuiet)
-		case <-quiet.C:
-			return
-		case <-limit.C:
-			return
-		case <-ctx.Done():
-			return
-		}
-	}
-}
-
-func cycle(ctx context.Context, dataDir string, ix *cache.Index, reason string, pushPending func() bool, sweep lake.Sweep) lake.Stats {
-	start := time.Now()
-	ls, lerr := lake.Run(dataDir, pushPending, sweep)
-	lakeWall := time.Since(start)
-	failed := cache.SkipFailed
-	if reason == "reconcile" {
-		failed = cache.RetryFailed
-	}
-	cs, cerr := ix.Converge(ctx, failed)
-	log.Printf("cycle %s: lake sources=%d rewrote=%d unchanged=%d raw_only=%d failed=%d stale=%d events=%d in %s err=%v; "+
-		"converge files=%d batches=%d inserted=%d deleted=%d moved=%d reordered=%d sessions=%d in %s err=%v; wall %s",
-		reason, ls.Sources, ls.Rewrote, ls.Unchanged, ls.RawOnly, ls.Failed, ls.Stale, ls.Events, lakeWall.Round(time.Millisecond), lerr,
-		cs.Files, cs.Batches, cs.Inserted, cs.Deleted, cs.Moved, cs.Reordered, cs.Sessions,
-		(time.Since(start) - lakeWall).Round(time.Millisecond), cerr, time.Since(start).Round(time.Millisecond))
-	return ls
 }
 
 func importCH(args []string) error {
