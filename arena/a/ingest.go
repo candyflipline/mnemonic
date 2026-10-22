@@ -46,7 +46,11 @@ type ckpt struct {
 	Author     string          `json:"author"`
 	Machine    string          `json:"machine"`
 	Sessions   []string        `json:"sessions"`
+	ColdZst    int64           `json:"cold_zst"`
 }
+
+// hot reports whether the source grew since it last settled into a cold part.
+func (c ckpt) hot() bool { return c.ZstSize != c.ColdZst }
 
 const window = 64 << 10
 
@@ -192,7 +196,7 @@ func ingestSource(root, store string, s source) (bool, error) {
 	var from ckpt
 	if resumed {
 		from = prev
-		next.Gen = prev.Gen
+		next.Gen, next.ColdZst = prev.Gen, prev.ColdZst
 	} else if has {
 		next.Gen = prev.Gen + 1
 	}

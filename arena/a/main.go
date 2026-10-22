@@ -44,11 +44,13 @@ func main() {
 	fs := flag.NewFlagSet(os.Args[1], flag.ExitOnError)
 	root := fs.String("root", "", "data root")
 	store := fs.String("store", "", "store dir")
+	quiet := fs.Duration("quiet", 15*time.Minute, "a source settles into its cold part once its updated_ms is this far behind the newest source's")
+	settle := fs.Bool("settle", false, "settle every source now")
 	fs.Parse(os.Args[2:])
 	var err error
 	switch os.Args[1] {
 	case "ingest":
-		err = ingest(*root, *store)
+		err = ingest(*root, *store, *quiet, *settle)
 	case "batch":
 		err = batch(*root, *store)
 	default:
@@ -60,7 +62,7 @@ func main() {
 	}
 }
 
-func ingest(root, store string) error {
+func ingest(root, store string, quiet time.Duration, settleAll bool) error {
 	debug.SetGCPercent(25)
 	if err := os.MkdirAll(srcDir(store), 0o755); err != nil {
 		return err
@@ -87,11 +89,22 @@ func ingest(root, store string) error {
 	}
 	close(work)
 	wg.Wait()
+	newest := int64(0)
+	for _, s := range sources {
+		newest = max(newest, s.src.UpdatedMs)
+	}
 	var cks []ckpt
 	var srcs []stSource
 	for _, s := range sources {
 		row := stSource{Author: s.key.Author, Machine: s.key.Machine, UpdatedMs: s.src.UpdatedMs, Size: s.src.Size}
 		if c, ok := readCkpt(store, sourceKey(s.key)); ok {
+			if c.hot() && (settleAll || s.src.UpdatedMs <= newest-quiet.Milliseconds()) {
+				c.ColdZst = c.ZstSize
+				b, _ := json.Marshal(c)
+				if err := writeFileAtomic(ckptPath(store, c.Key), b); err != nil {
+					return err
+				}
+			}
 			cks = append(cks, c)
 			row.Events = c.Rows
 		}
@@ -122,10 +135,11 @@ func ingest(root, store string) error {
 	return gcLogs(store, cks)
 }
 
-// planParts groups sources that share a session into one component and
-// components into partShards parts by a hash of their least session id, so a
+// planParts groups sources that share a session into one component, so a
 // session and every event version that can compete for its uids live in one
-// part, and one source changing rebuilds only its part.
+// part. A component with a hot source is a part of its own, rebuilt on each of
+// its appends; the settled ones go to partShards cold parts by a hash of their
+// least session id, rewritten only when a component settles into or leaves one.
 func planParts(cks []ckpt) [][]ckpt {
 	parent := make([]int, len(cks))
 	for i := range parent {
@@ -150,6 +164,7 @@ func planParts(cks []ckpt) [][]ckpt {
 		}
 	}
 	least := map[int]string{}
+	hot := map[int]bool{}
 	for i, c := range cks {
 		r := find(i)
 		k := c.Key
@@ -159,22 +174,37 @@ func planParts(cks []ckpt) [][]ckpt {
 		if cur, ok := least[r]; !ok || k < cur {
 			least[r] = k
 		}
+		hot[r] = hot[r] || c.hot()
 	}
-	shard := map[uint32][]ckpt{}
+	cold := map[uint32][]ckpt{}
+	hotParts := map[string][]ckpt{}
 	for i, c := range cks {
+		r := find(i)
+		if hot[r] {
+			hotParts[least[r]] = append(hotParts[least[r]], c)
+			continue
+		}
 		h := fnv.New32a()
-		h.Write([]byte(least[find(i)]))
+		h.Write([]byte(least[r]))
 		s := h.Sum32() % partShards
-		shard[s] = append(shard[s], c)
+		cold[s] = append(cold[s], c)
 	}
-	keys := make([]uint32, 0, len(shard))
-	for k := range shard {
+	keys := make([]uint32, 0, len(cold))
+	for k := range cold {
 		keys = append(keys, k)
 	}
 	slices.Sort(keys)
-	out := make([][]ckpt, 0, len(keys))
+	out := make([][]ckpt, 0, len(keys)+len(hotParts))
 	for _, k := range keys {
-		out = append(out, shard[k])
+		out = append(out, cold[k])
+	}
+	hk := make([]string, 0, len(hotParts))
+	for k := range hotParts {
+		hk = append(hk, k)
+	}
+	slices.Sort(hk)
+	for _, k := range hk {
+		out = append(out, hotParts[k])
 	}
 	return out
 }
