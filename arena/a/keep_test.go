@@ -17,7 +17,6 @@ import (
 
 	"github.com/candyflipline/mnemonic/arena/keeper"
 	"github.com/candyflipline/mnemonic/arena/obj"
-	"github.com/candyflipline/mnemonic/arena/reader"
 	"github.com/candyflipline/mnemonic/arena/route"
 )
 
@@ -51,7 +50,7 @@ func TestServeCallStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ks := keepServer{k: k, s: s, local: reader.Local(k.Parts), ttl: time.Minute}
+	ks := keepServer{k: k, s: s, ttl: time.Minute}
 	srv := httptest.NewServer(ks.mux())
 	t.Cleanup(srv.Close)
 
@@ -105,7 +104,7 @@ func TestCallReadsThePartsOfItsPinnedHead(t *testing.T) {
 	if err := k.Cycle(ctx); err != nil {
 		t.Fatal(err)
 	}
-	ks := keepServer{k: k, s: s, local: reader.Local(k.Parts), ttl: time.Minute}
+	ks := keepServer{k: k, s: s, ttl: time.Minute}
 	args := json.RawMessage(`{"start_datetime":"2000-01-01T00:00:00Z","end_datetime":"2100-01-01T00:00:00Z"}`)
 
 	err = k.Read(func(h keeper.Head) error {

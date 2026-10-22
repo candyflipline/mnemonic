@@ -508,10 +508,6 @@ func (k *Keeper) admit() error {
 	return nil
 }
 
-// Parts is every local part by ID; a part stays open while a Read that saw it
-// runs.
-func (k *Keeper) Parts() map[string]*trace.Part { return k.head.Load().Parts }
-
 // Wait reports whether the committed (gen, seq) rose above (g, s) before ctx
 // ended.
 func (k *Keeper) Wait(ctx context.Context, g Gen, s Seq) bool {
