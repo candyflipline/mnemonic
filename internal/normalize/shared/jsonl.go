@@ -20,6 +20,7 @@ func ParseJSONL(r io.Reader, src normalize.SourceMeta, from normalize.State, s S
 	br := bufio.NewReader(r)
 	sessionHint, modelHint, cwdHint := from.SessionHint, from.ModelHint, from.CwdHint
 	offset, lineNo := from.Offset, from.LineNo
+	probes := NewProbes()
 	for {
 		raw, err := br.ReadBytes('\n')
 		if err != nil && err != io.EOF {
@@ -47,6 +48,7 @@ func ParseJSONL(r io.Reader, src normalize.SourceMeta, from normalize.State, s S
 			SessionHint:  sessionHint,
 			ModelHint:    modelHint,
 			CwdHint:      cwdHint,
+			Probes:       probes,
 		})
 		sessionHint, modelHint, cwdHint = out.SessionHint, out.ModelHint, out.CwdHint
 		for i := range out.Events {

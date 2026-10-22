@@ -23,6 +23,7 @@ type Ctx struct {
 	SourceOffset      uint64
 	RecordTS          string
 	EventTS           string
+	Probes            *Probes
 }
 
 // EventRow is one event under construction: the schema columns plus the
@@ -119,7 +120,7 @@ func payloadTypeInDomain(value string) bool { return payloadTypeDomain[value] }
 func (e *Emitter) Event(eventUID, eventKind, payloadType, actorKind, textContent, payloadJSON string) *EventRow {
 	ctx := e.Ctx
 	text := TruncateChars(textContent, textLimit)
-	attention := EventFileAttentionFields(ctx.Cwd)
+	attention := EventFileAttentionFields(ctx.Probes, ctx.Cwd)
 	row := &EventRow{Event: schema.Event{
 		EventUID:              eventUID,
 		SessionID:             ctx.SessionID,
@@ -171,7 +172,7 @@ func (e *Emitter) PushToolResponse(eventUID, toolCallID, parentToolCallID, toolN
 }
 
 func (e *Emitter) toolRow(eventUID, toolCallID, parentToolCallID, toolName, toolPhase string, toolError uint8, inputJSON, outputJSON, outputText string) *ToolRow {
-	attention := ToolFileAttentionFields(e.Ctx.Cwd, toolPhase, inputJSON)
+	attention := ToolFileAttentionFields(e.Ctx.Probes, e.Ctx.Cwd, toolPhase, inputJSON)
 	inputJSON = TruncateChars(inputJSON, textLimit)
 	outputJSON = TruncateChars(outputJSON, textLimit)
 	outputText = TruncateChars(outputText, textLimit)

@@ -43,6 +43,7 @@ type RecordParams struct {
 	ModelHint    string
 	CwdHint      string
 	RecordTSHint string
+	Probes       *Probes
 }
 
 type NormalizedRecord struct {
@@ -87,6 +88,7 @@ func NormalizeRecord(rec JSON, src Source, p RecordParams) NormalizedRecord {
 		SourceOffset:      p.SourceOffset,
 		RecordTS:          recordTS,
 		EventTS:           eventTS,
+		Probes:            p.Probes,
 	}
 	partials := src.Normalize(rec, ctx, topType, baseUID, p.ModelHint)
 	if partials == nil {

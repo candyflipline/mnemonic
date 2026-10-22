@@ -20,28 +20,104 @@ type FileAttentionFields struct {
 	WorktreeRoot string
 }
 
-func EventFileAttentionFields(cwd string) FileAttentionFields {
+// Probes remembers filesystem answers for the length of one parse, so a
+// source's repeated cwds and roots are probed once. A nil Probes probes every
+// time. Each map stops growing at probeLimit entries.
+type Probes struct {
+	event   map[string]FileAttentionFields
+	root    map[string]rootHit
+	dir     map[string]bool
+	git     map[string]bool
+	project map[string]rootHit
+}
+
+type rootHit struct {
+	root string
+	ok   bool
+}
+
+const probeLimit = 4096
+
+func NewProbes() *Probes {
+	return &Probes{event: map[string]FileAttentionFields{}, root: map[string]rootHit{},
+		dir: map[string]bool{}, git: map[string]bool{}, project: map[string]rootHit{}}
+}
+
+func remember[V any](m map[string]V, k string, f func() V) V {
+	if v, ok := m[k]; ok {
+		return v
+	}
+	v := f()
+	if len(m) < probeLimit {
+		m[k] = v
+	}
+	return v
+}
+
+func (p *Probes) eventFields(cwd string) FileAttentionFields {
+	if p == nil {
+		return eventFileAttentionFields(p, cwd)
+	}
+	return remember(p.event, cwd, func() FileAttentionFields { return eventFileAttentionFields(p, cwd) })
+}
+
+func (p *Probes) findRoot(path string) (string, bool) {
+	if p == nil {
+		return findFileAttentionRoot(p, path)
+	}
+	h := remember(p.root, path, func() rootHit { r, ok := findFileAttentionRoot(p, path); return rootHit{r, ok} })
+	return h.root, h.ok
+}
+
+func (p *Probes) isDir(path string) bool {
+	if p == nil {
+		return isDir(path)
+	}
+	return remember(p.dir, path, func() bool { return isDir(path) })
+}
+
+func (p *Probes) hasGit(dir string) bool {
+	probe := func() bool { _, err := os.Stat(filepath.Join(dir, ".git")); return err == nil }
+	if p == nil {
+		return probe()
+	}
+	return remember(p.git, dir, probe)
+}
+
+func (p *Probes) projectID(root string) (string, bool) {
+	if p == nil {
+		return ProjectIDForRoot(root)
+	}
+	h := remember(p.project, root, func() rootHit { r, ok := ProjectIDForRoot(root); return rootHit{r, ok} })
+	return h.root, h.ok
+}
+
+func EventFileAttentionFields(p *Probes, cwd string) FileAttentionFields {
+	return p.eventFields(cwd)
+}
+
+func eventFileAttentionFields(p *Probes, cwd string) FileAttentionFields {
 	cwd = NormalizePathText(strings.TrimSpace(cwd))
 	if cwd == "" || !strings.HasPrefix(cwd, "/") {
 		return FileAttentionFields{}
 	}
-	root, ok := findFileAttentionRoot(cwd)
+	root, ok := p.findRoot(cwd)
 	if !ok {
-		if isDir(cwd) {
+		if p.isDir(cwd) {
 			root, ok = cwd, true
 		}
 	}
 	if !ok {
 		return FileAttentionFields{}
 	}
-	projectID, ok := ProjectIDForRoot(root)
+	projectID, ok := p.projectID(root)
 	if !ok {
 		return FileAttentionFields{}
 	}
 	return FileAttentionFields{ProjectID: projectID, WorktreeRoot: root}
 }
 
-func ToolFileAttentionFields(cwd, toolPhase, inputJSON string) FileAttentionFields {
+func ToolFileAttentionFields(p *Probes, cwd, toolPhase, inputJSON string) FileAttentionFields {
 	if toolPhase != "request" {
 		return FileAttentionFields{}
 	}
@@ -54,14 +130,14 @@ func ToolFileAttentionFields(cwd, toolPhase, inputJSON string) FileAttentionFiel
 	if len(candidates) != 1 {
 		return FileAttentionFields{}
 	}
-	fields, ok := resolveToolPathFields(cwd, candidates[0])
+	fields, ok := resolveToolPathFields(p, cwd, candidates[0])
 	if !ok {
 		return FileAttentionFields{}
 	}
 	return fields
 }
 
-func resolveToolPathFields(cwd, rawPath string) (FileAttentionFields, bool) {
+func resolveToolPathFields(p *Probes, cwd, rawPath string) (FileAttentionFields, bool) {
 	rawPath = strings.TrimSpace(rawPath)
 	if !isSinglePathCandidate(rawPath) {
 		return FileAttentionFields{}, false
@@ -78,14 +154,14 @@ func resolveToolPathFields(cwd, rawPath string) (FileAttentionFields, bool) {
 	if !strings.HasPrefix(normalized, "/") {
 		absolute = NormalizePathText(strings.TrimSuffix(cwd, "/") + "/" + normalized)
 	}
-	root, ok := findFileAttentionRoot(absolute)
-	if !ok && isDir(cwd) && stripRoot(absolute, cwd) != "" {
+	root, ok := p.findRoot(absolute)
+	if !ok && p.isDir(cwd) && stripRoot(absolute, cwd) != "" {
 		root, ok = cwd, true
 	}
 	if !ok {
 		return FileAttentionFields{}, false
 	}
-	projectID, ok := ProjectIDForRoot(root)
+	projectID, ok := p.projectID(root)
 	if !ok {
 		return FileAttentionFields{}, false
 	}
@@ -162,14 +238,14 @@ func NormalizePathText(path string) string {
 	return body
 }
 
-func findFileAttentionRoot(path string) (string, bool) {
+func findFileAttentionRoot(p *Probes, path string) (string, bool) {
 	home := os.Getenv("HOME")
 	dir := path
-	if !isDir(dir) {
+	if !p.isDir(dir) {
 		dir = filepath.Dir(dir)
 	}
 	for {
-		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+		if p.hasGit(dir) {
 			return dir, true
 		}
 		if home != "" && dir == home {
