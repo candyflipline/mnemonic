@@ -171,14 +171,15 @@ func drive(args []string) error {
 	}
 	allEqual := true
 	for pass := 1; pass <= *passes; pass++ {
-		var before counters
+		var before, last counters
 		if *statsURL != "" {
 			if before, err = readStats(*statsURL); err != nil {
 				return err
 			}
+			last = before
 		}
 		total, equal, sent := 0, 0, 0
-		var us []int64
+		var us, fetchedUS []int64
 		saved := map[string][]cmp.Result{}
 		shown := map[string]int{}
 		for _, s := range fx {
@@ -198,6 +199,16 @@ func drive(args []string) error {
 				status, perr := post(*keeperURL+"/v1/call", callBody{Tool: c.Tool, Args: c.Args, Rung: *rung}, &rep)
 				took := time.Since(start).Microseconds()
 				us = append(us, took)
+				if *statsURL != "" {
+					now, err := readStats(*statsURL)
+					if err != nil {
+						return err
+					}
+					if now.Requests > last.Requests {
+						fetchedUS = append(fetchedUS, took)
+					}
+					last = now
+				}
 				got := cmp.Result{ID: c.ID, Data: rep.Data, Text: rep.Text, Error: rep.Error, US: took}
 				saved[s.name] = append(saved[s.name], got)
 				var paths []string
@@ -236,7 +247,7 @@ func drive(args []string) error {
 			if err != nil {
 				return err
 			}
-			line += fmt.Sprintf(" requests=%d bytes=%d", after.Requests-before.Requests, after.Bytes-before.Bytes)
+			line += fmt.Sprintf(" requests=%d bytes=%d fetched_calls=%d fetched_p50_ms=%.2f fetched_max_ms=%.2f", after.Requests-before.Requests, after.Bytes-before.Bytes, len(fetchedUS), p50(fetchedUS), maxMS(fetchedUS))
 		}
 		fmt.Println(line)
 		if equal != total || total == 0 {
@@ -256,6 +267,14 @@ func p50(us []int64) float64 {
 	s := append([]int64(nil), us...)
 	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
 	return float64(s[(len(s)-1)/2]) / 1000
+}
+
+func maxMS(us []int64) float64 {
+	var m int64
+	for _, u := range us {
+		m = max(m, u)
+	}
+	return float64(m) / 1000
 }
 
 func saveResults(dir string, by map[string][]cmp.Result) error {

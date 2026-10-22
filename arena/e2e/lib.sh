@@ -45,12 +45,12 @@ wait_up() {
 	return 1
 }
 
-# start_reader NAME I starts reader rI on RPORT[I] with an empty cache dir and sets RPID[I].
+# start_reader NAME I [FLAGS] starts reader rI on RPORT[I] with an empty cache dir and sets RPID[I]; FLAGS are extra read flags.
 start_reader() {
-	local name=$1 i=$2
+	local name=$1 i=$2 flags=${3:-}
 	rm -rf "${T:?}/$name/cache-r$i"
 	"$BIN/a" read -id "r$i" -listen "127.0.0.1:${RPORT[$i]}" -cache "$T/$name/cache-r$i" \
-		-keeper "http://127.0.0.1:$KPORT" -readers r1,r2,r3 >"$LOGS/$name-r$i.log" 2>&1 &
+		-keeper "http://127.0.0.1:$KPORT" -readers r1,r2,r3 $flags >"$LOGS/$name-r$i.log" 2>&1 &
 	RPID[i]=$!
 	track "${RPID[$i]}"
 }
