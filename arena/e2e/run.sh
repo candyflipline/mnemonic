@@ -171,11 +171,12 @@ stale_delete() {
 	g2=$(field "$out" gen)
 	[ "${g2:-0}" -gt "${g1:-0}" ] || { STALE="delete keeper B did not take a higher gen ($g1 then $g2)"; return 1; }
 	wait_exit "$a"
-	grep -q 'keep: delete refused' "$LOGS/2cd-keeper.log" || { STALE="no 'delete refused' line in keeper A's log (exit $RC)"; return 1; }
+	grep -qE 'keep: delete refused|keep: gen [0-9]+ lost to a newer keeper' "$LOGS/2cd-keeper.log" || { STALE="neither 'delete refused' nor 'lost to a newer keeper' in keeper A's log (exit $RC)"; return 1; }
+	how=$(grep -q 'keep: delete refused' "$LOGS/2cd-keeper.log" && echo "due delete refused" || echo "gen check fenced it before any delete came due")
 	[ "$RC" = 3 ] || { STALE="delete keeper A exit status $RC, want 3"; return 1; }
 	[ -e "$store/t/$TENANT/m/$(printf %016x "$g1")-$(printf %016x 1).json" ] || { STALE="the manifest keeper A queued for deletion is gone"; return 1; }
 	out=$("$E2E" manifest -dir "$store" -tenant "$TENANT" -gen "$g2") || { STALE="after the refused delete: $out"; return 1; }
-	STALE="delete: gen $g1 keeper's due delete refused, exit 3, its queued manifest still there"
+	STALE="delete: gen $g1 keeper's $how, exit 3, its queued manifest still there"
 }
 
 s2c() {

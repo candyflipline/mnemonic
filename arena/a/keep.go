@@ -36,11 +36,12 @@ func runKeep(args []string) error {
 	quiet := fs.Duration("quiet", 15*time.Minute, "a source settles into its cold part once its updated_ms is this far behind the newest source's")
 	settle := fs.Bool("settle", false, "settle every source now")
 	interval := fs.Duration("interval", 2*time.Second, "time between ingest cycles")
+	readerTimeout := fs.Duration("reader-timeout", 10*time.Second, "a reader call not answered within this fails over to the part's next reader")
 	fs.Parse(args)
 	if *tenant == "" || strings.Contains(*tenant, "/") {
 		return fmt.Errorf("keep: -tenant must be a non-empty name without /")
 	}
-	readers, err := parseReaders(*readersFlag)
+	readers, err := parseReaders(*readersFlag, *readerTimeout)
 	if err != nil {
 		return err
 	}
@@ -87,7 +88,7 @@ func exitIfLost(k *keeper.Keeper, err error) {
 	}
 }
 
-func parseReaders(flag string) ([]route.Reader, error) {
+func parseReaders(flag string, timeout time.Duration) ([]route.Reader, error) {
 	var readers []route.Reader
 	for _, kv := range strings.Split(flag, ",") {
 		if kv == "" {
@@ -97,7 +98,7 @@ func parseReaders(flag string) ([]route.Reader, error) {
 		if !ok || id == "" || id == route.LocalID || u == "" {
 			return nil, fmt.Errorf("keep: bad -readers entry %q", kv)
 		}
-		readers = append(readers, route.HTTPReader(id, u))
+		readers = append(readers, route.HTTPReader(id, u, timeout))
 	}
 	return readers, nil
 }
@@ -251,6 +252,10 @@ func (ks keepServer) serveCall(w http.ResponseWriter, r *http.Request) {
 	}
 	if errors.Is(err, keeper.ErrLost) {
 		ks.fail(w, err)
+		return
+	}
+	if errors.Is(err, keeper.ErrUnchecked) {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
 	var infra infraError
