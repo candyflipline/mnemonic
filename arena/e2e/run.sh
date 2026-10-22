@@ -62,6 +62,14 @@ why() {
 	echo "${m:-no log}"
 }
 
+# retire_step S stops what the step started and drops its dirs, so a run's disk use is one step's.
+retire_step() {
+	for p in $PIDS; do kill -9 "$p" 2>/dev/null; done
+	for p in $PIDS; do wait "$p" 2>/dev/null; done
+	PIDS=""
+	[ -n "${KEEP:-}" ] || rm -rf "$T"/2"$1"*
+}
+
 full() { [ "$(field "$1" total)" = "$EXPECT" ] && [ "$(field "$1" equal)" = "$EXPECT" ]; }
 
 s2a() {
@@ -245,5 +253,6 @@ s2e() {
 
 for s in a b c d e; do
 	case " ${ONLY:-a b c d e} " in *" $s "*) "s2$s" ;; esac
+	retire_step "$s"
 done
 exit $FAILED
