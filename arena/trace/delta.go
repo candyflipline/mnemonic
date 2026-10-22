@@ -147,6 +147,18 @@ func logSize(dir, name string) (int64, error) {
 	return fi.Size(), nil
 }
 
+// mkdirDeltas fsyncs the entries MkdirAll adds: dd in deltas, deltas in the store.
+func mkdirDeltas(dd string) error {
+	if err := os.MkdirAll(dd, 0o755); err != nil {
+		return err
+	}
+	deltas := filepath.Dir(dd)
+	if err := syncDir(deltas); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(deltas))
+}
+
 // appendDelta appends to base's delta logs the rows members hold past it and
 // commits part did over them. It reports false, writing nothing, when the
 // delta would outgrow foldRatio times the image.
@@ -178,7 +190,7 @@ func appendDelta(store string, members []ckpt, base delta, did string) (bool, er
 	}
 
 	dd := deltasDir(store, base.Image)
-	if err := os.MkdirAll(dd, 0o755); err != nil {
+	if err := mkdirDeltas(dd); err != nil {
 		return false, err
 	}
 	lightF, err := openLog(filepath.Join(dd, "light"), base.LightLen)
