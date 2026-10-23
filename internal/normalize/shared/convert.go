@@ -110,6 +110,9 @@ const (
 )
 
 func TruncateChars(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
 	n := 0
 	for i := range s {
 		if n == max {
