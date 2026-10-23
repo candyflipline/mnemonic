@@ -74,6 +74,42 @@ func (s *sections) addSession(sid string, evs []built, seqs []uint32, payload fu
 	}
 }
 
+// annFile is one stored annotation: the schema's JSON with the author beside
+// it, because the schema keeps Author out of its JSON (main holds it in a column).
+type annFile struct {
+	schema.Annotation
+	Author string `json:"author"`
+}
+
+func marshalAnn(ann map[string][]schema.Annotation) []byte {
+	out := make(map[string][]annFile, len(ann))
+	for sid, as := range ann {
+		fs := make([]annFile, len(as))
+		for i, a := range as {
+			fs[i] = annFile{Annotation: a, Author: a.Author}
+		}
+		out[sid] = fs
+	}
+	return mustJSON(out)
+}
+
+func unmarshalAnn(b []byte) map[string][]schema.Annotation {
+	var files map[string][]annFile
+	if json.Unmarshal(b, &files) != nil {
+		return nil
+	}
+	out := make(map[string][]schema.Annotation, len(files))
+	for sid, fs := range files {
+		as := make([]schema.Annotation, len(fs))
+		for i, f := range fs {
+			as[i] = f.Annotation
+			as[i].Author = f.Author
+		}
+		out[sid] = as
+	}
+	return out
+}
+
 // files encodes the three section files a part carries: spans and
 // annotations grouped per session id, session authors as its map. Every part
 // write must produce all three, so the reader never sees a missing file.
@@ -90,7 +126,7 @@ func (s *sections) files() map[string][]byte {
 	}
 	return map[string][]byte{
 		"spans":       mustJSON(s.spans),
-		"annotations": mustJSON(s.ann),
+		"annotations": marshalAnn(s.ann),
 		"authors":     mustJSON(authors),
 	}
 }
@@ -136,10 +172,9 @@ func sortAnnotations(ann []schema.Annotation) {
 // was opened with.
 func decodeSections(spansB, annB, authB []byte) (map[string][]schema.Span, map[string][]schema.Annotation, map[string][]string) {
 	var spans map[string][]schema.Span
-	var ann map[string][]schema.Annotation
 	var auth map[string][]string
 	_ = json.Unmarshal(spansB, &spans)
-	_ = json.Unmarshal(annB, &ann)
+	ann := unmarshalAnn(annB)
 	_ = json.Unmarshal(authB, &auth)
 	return spans, ann, auth
 }
