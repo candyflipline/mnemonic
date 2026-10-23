@@ -119,26 +119,26 @@ var semanticPayloadExcludedFields = []string{
 // payload_json grew a moraine_tool_io object, plus the tool identity fields
 // hashed alongside it.
 type FoldedIdentity struct {
-	SemanticPayload string
+	SemanticPayload CanonicalJSON
 	ToolFields      []string
 	Occurrence      uint32
 }
 
-func SemanticEventUID(event *schema.Event, folded *FoldedIdentity) string {
-	payload, toolFields, occurrence := "", []string(nil), uint32(0)
+func SemanticEventUID(event *schema.Event, payload CanonicalJSON, folded *FoldedIdentity) string {
+	semantic, toolFields, occurrence := payload, []string(nil), uint32(0)
 	if folded != nil {
-		payload, toolFields, occurrence = folded.SemanticPayload, folded.ToolFields, folded.Occurrence
+		semantic, toolFields, occurrence = folded.SemanticPayload, folded.ToolFields, folded.Occurrence
 	} else {
-		payload, toolFields, occurrence = semanticPayloadParts(event.PayloadJSON)
+		semantic, toolFields, occurrence = semanticPayloadParts(payload)
 	}
-	m := make([]byte, 0, 1024+len(payload)+len(event.TextContent))
+	m := make([]byte, 0, 1024+len(semantic.s)+len(event.TextContent))
 	m = appendIdentityComponent(m, eventIdentityDomain)
 	for _, field := range eventIdentityFields {
 		m = appendIdentityComponent(m, identityField(event, field))
 	}
 	m = appendNumericMapIdentity(m, bucketMapStrings(event.TokenUsageBuckets))
 	m = appendNumericMapIdentity(m, nativeMapStrings(event.TokenUsageNativeUnits))
-	m = appendIdentityComponent(m, payload)
+	m = appendIdentityComponent(m, semantic.s)
 	for _, field := range toolFields {
 		m = appendIdentityComponent(m, field)
 	}
@@ -294,34 +294,45 @@ func appendIdentityComponent(dst []byte, value string) []byte {
 }
 
 // semanticPayloadParts strips derived payload fields and recovers the folded
-// tool identity from a raw payload_json, like semantic_payload_parts.
-func semanticPayloadParts(payloadJSON string) (string, []string, uint32) {
-	if payload, fields, occurrence, ok := canonicalSemanticPayloadParts(payloadJSON); ok {
-		return payload, fields, occurrence
-	}
+// tool identity from canonical payload bytes, like semantic_payload_parts.
+// The bytes are CanonicalJSON, so they are valid UTF-8, the keys are sorted,
+// and a moraine_tool_io member re-decodes; the decode-and-recompact fallback
+// the untyped version needed is gone.
+func semanticPayloadParts(payload CanonicalJSON) (CanonicalJSON, []string, uint32) {
 	emptyFields := make([]string, len(toolIdentityFields))
-	parsed, err := DecodeJSON([]byte(payloadJSON))
-	if err != nil {
-		return payloadJSON, emptyFields, 0
-	}
-	obj, ok := AsObject(parsed)
+	s := payload.s
+	members, ok := objectMembers(s)
 	if !ok {
-		return Compact(parsed), emptyFields, 0
+		// A non-object payload (Compact of a scalar or array) hashes as
+		// itself, which is what the fallback's re-Compact produced.
+		return payload, emptyFields, 0
 	}
-	var occurrence uint32
-	if n, ok := AsNumber(obj[semanticOccurrenceField]); ok && n <= math.MaxUint32 {
-		occurrence = uint32(n)
-	}
-	tool := obj["moraine_tool_io"]
-	delete(obj, "moraine_tool_io")
-	SanitizeSemanticPayload(obj)
 	toolFields := make([]string, len(toolIdentityFields))
-	if toolObj, isObj := AsObject(tool); isObj {
-		for i, field := range toolIdentityFields {
-			toolFields[i] = encodeIdentityValue(toolObj[field])
+	var occurrence uint32
+	dropped := 0
+	for _, m := range members {
+		if !semanticPayloadDropped[m.key] {
+			continue
+		}
+		dropped++
+		switch m.key {
+		case semanticOccurrenceField:
+			if n, ok := AsNumber(json.Number(m.value)); ok && n <= math.MaxUint32 {
+				occurrence = uint32(n)
+			}
+		case "moraine_tool_io":
+			tool, _ := DecodeJSON([]byte(m.value))
+			if toolObj, isObj := AsObject(tool); isObj {
+				for i, field := range toolIdentityFields {
+					toolFields[i] = encodeIdentityValue(toolObj[field])
+				}
+			}
 		}
 	}
-	return Compact(parsed), toolFields, occurrence
+	if dropped == 0 {
+		return payload, toolFields, 0
+	}
+	return CanonicalJSON{s: joinMembers(s, members, semanticPayloadDropped, "", "")}, toolFields, occurrence
 }
 
 // SanitizeSemanticPayload drops the derived fields the canonical uid ignores.
@@ -362,39 +373,3 @@ var semanticPayloadDropped = func() map[string]bool {
 	}
 	return m
 }()
-
-func canonicalSemanticPayloadParts(payloadJSON string) (string, []string, uint32, bool) {
-	members, ok := canonicalMembers(payloadJSON)
-	if !ok {
-		return "", nil, 0, false
-	}
-	toolFields := make([]string, len(toolIdentityFields))
-	var occurrence uint32
-	dropped := 0
-	for _, m := range members {
-		if !semanticPayloadDropped[m.key] {
-			continue
-		}
-		dropped++
-		switch m.key {
-		case semanticOccurrenceField:
-			if n, ok := AsNumber(json.Number(m.value)); ok && n <= math.MaxUint32 {
-				occurrence = uint32(n)
-			}
-		case "moraine_tool_io":
-			tool, err := DecodeJSON([]byte(m.value))
-			if err != nil {
-				return "", nil, 0, false
-			}
-			if toolObj, isObj := AsObject(tool); isObj {
-				for i, field := range toolIdentityFields {
-					toolFields[i] = encodeIdentityValue(toolObj[field])
-				}
-			}
-		}
-	}
-	if dropped == 0 {
-		return payloadJSON, toolFields, 0, true
-	}
-	return joinMembers(payloadJSON, members, semanticPayloadDropped, "", ""), toolFields, occurrence, true
-}

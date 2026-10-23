@@ -149,7 +149,7 @@ func FoldToolPayloads(p *Partials) map[string]*FoldedIdentity {
 		}
 		ev := p.Events[i]
 		toolPayload := toolPayloadObject(tool)
-		semanticPayload, folded, ok := foldCanonicalPayload(ev.Event.PayloadJSON, Compact(toolPayload))
+		semanticPayload, folded, ok := foldCanonicalPayload(ev.payload, CompactCanonical(toolPayload))
 		if !ok {
 			semanticPayload, folded = foldPayload(ev.Event.PayloadJSON, toolPayload)
 		}
@@ -171,12 +171,15 @@ func FoldToolPayloads(p *Partials) map[string]*FoldedIdentity {
 		if tool.WorktreeRoot != "" {
 			ev.Event.WorktreeRoot = tool.WorktreeRoot
 		}
-		ev.Event.PayloadJSON = folded
+		ev.SetPayload(folded)
 	}
 	return identities
 }
 
-func foldPayload(payloadJSON string, toolPayload map[string]any) (string, string) {
+// foldPayload is the decode path for payloads the in-place fold cannot walk:
+// a non-object payload wraps as source_payload, a key whose escaped spelling
+// sorts unlike its decoded one re-sorts from the decoded keys.
+func foldPayload(payloadJSON string, toolPayload map[string]any) (CanonicalJSON, CanonicalJSON) {
 	var sourcePayload JSON
 	if payloadJSON != "" {
 		if parsed, err := DecodeJSON([]byte(payloadJSON)); err == nil {
@@ -197,7 +200,7 @@ func foldPayload(payloadJSON string, toolPayload map[string]any) (string, string
 	}
 	SanitizeSemanticPayload(semantic)
 	canonical["moraine_tool_io"] = toolPayload
-	return Compact(semantic), Compact(canonical)
+	return CanonicalJSON{s: Compact(semantic)}, CanonicalJSON{s: Compact(canonical)}
 }
 
 func toolPayloadObject(t *ToolRow) map[string]any {
@@ -231,7 +234,7 @@ func StampDuplicateSemanticOccurrences(events []*EventRow, folded map[string]*Fo
 	groups := make([]occurrenceGroup, len(events))
 	counts := make(map[occurrenceGroup]uint32, len(events))
 	for i, ev := range events {
-		base := SemanticEventUID(&ev.Event, folded[ev.Event.EventUID])
+		base := SemanticEventUID(&ev.Event, ev.payload, folded[ev.Event.EventUID])
 		uids[i] = base
 		g := occurrenceGroup{
 			sourceName:   ev.Event.SourceName,
@@ -275,7 +278,7 @@ func stampSemanticOccurrence(ev *EventRow, occurrence uint32) {
 		return
 	}
 	obj[semanticOccurrenceField] = jsonNumberUint(uint64(occurrence))
-	ev.Event.PayloadJSON = Compact(obj)
+	ev.SetPayload(CompactCanonical(obj))
 }
 
 func FinalizeIdentities(events []*EventRow, folded map[string]*FoldedIdentity, uids []string) {
@@ -284,7 +287,7 @@ func FinalizeIdentities(events []*EventRow, folded map[string]*FoldedIdentity, u
 		old := ev.Event.EventUID
 		uid := uids[i]
 		if uid == "" {
-			uid = SemanticEventUID(&ev.Event, folded[old])
+			uid = SemanticEventUID(&ev.Event, ev.payload, folded[old])
 		}
 		uidMap[old] = uid
 	}
@@ -320,7 +323,7 @@ func rewritePayloadUID(ev *EventRow, uidMap map[string]string) {
 		return
 	}
 	obj["request_event_uid"] = uid
-	ev.Event.PayloadJSON = Compact(obj)
+	ev.SetPayload(CompactCanonical(obj))
 }
 
 func EventVersion() uint64 {

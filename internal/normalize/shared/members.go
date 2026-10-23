@@ -2,7 +2,6 @@ package shared
 
 import (
 	"strings"
-	"unicode/utf8"
 )
 
 type member struct {
@@ -99,13 +98,6 @@ func skipValue(s string, i int) (int, bool) {
 	}
 }
 
-func canonicalMembers(s string) ([]member, bool) {
-	if !utf8.ValidString(s) {
-		return nil, false
-	}
-	return objectMembers(s)
-}
-
 func joinMembers(s string, members []member, drop map[string]bool, insertKey, insertValue string) string {
 	var b strings.Builder
 	b.Grow(len(s) + len(insertKey) + len(insertValue) + 4)
@@ -138,18 +130,24 @@ func joinMembers(s string, members []member, drop map[string]bool, insertKey, in
 	return b.String()
 }
 
-func foldCanonicalPayload(payloadJSON, toolJSON string) (string, string, bool) {
-	members, ok := canonicalMembers(payloadJSON)
+// foldCanonicalPayload embeds the canonical tool JSON under moraine_tool_io
+// and strips the derived fields, both in place over the payload's canonical
+// members. It only fails on what the in-place walk cannot order — a non-object
+// payload or a key whose escaped spelling sorts unlike its decoded one — and
+// the caller folds those through the decode path.
+func foldCanonicalPayload(payload, tool CanonicalJSON) (CanonicalJSON, CanonicalJSON, bool) {
+	s := payload.s
+	members, ok := objectMembers(s)
 	if !ok {
-		return "", "", false
+		return CanonicalJSON{}, CanonicalJSON{}, false
 	}
 	for _, m := range members {
 		if strings.IndexByte(m.key, '\\') >= 0 {
-			return "", "", false
+			return CanonicalJSON{}, CanonicalJSON{}, false
 		}
 	}
-	return joinMembers(payloadJSON, members, semanticPayloadDropped, "", ""),
-		joinMembers(payloadJSON, members, foldDropped, "moraine_tool_io", toolJSON), true
+	return CanonicalJSON{s: joinMembers(s, members, semanticPayloadDropped, "", "")},
+		CanonicalJSON{s: joinMembers(s, members, foldDropped, "moraine_tool_io", tool.s)}, true
 }
 
 var foldDropped = map[string]bool{"moraine_tool_io": true}
