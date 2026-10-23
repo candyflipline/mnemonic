@@ -1,9 +1,7 @@
 package shared
 
 import (
-	"bytes"
 	"encoding/json"
-	"io"
 	"math"
 	"sort"
 	"strconv"
@@ -17,20 +15,7 @@ type JSON = any
 
 // DecodeJSON parses one JSON document. Trailing non-space bytes are an error.
 func DecodeJSON(data []byte) (JSON, error) {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	var v JSON
-	if err := dec.Decode(&v); err != nil {
-		return nil, err
-	}
-	var trailing JSON
-	if err := dec.Decode(&trailing); err != io.EOF {
-		if err != nil {
-			return nil, err
-		}
-		return nil, io.ErrUnexpectedEOF
-	}
-	return v, nil
+	return decodeDocument(data)
 }
 
 // Compact serializes v the way serde_json::to_string does: object keys sorted,
