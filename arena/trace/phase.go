@@ -37,11 +37,17 @@ func RunPhase(db *DB, tool, phase string, args, stats json.RawMessage) (json.Raw
 	return encodeJSON(v)
 }
 
+// AnswerError is a reader's phase answer the merge cannot use, as opposed to
+// an error of the call's own arguments.
+type AnswerError struct{ error }
+
+func (e AnswerError) Unwrap() error { return e.error }
+
 func decodeAll[T any](answers []json.RawMessage) ([]T, error) {
 	out := make([]T, len(answers))
 	for i, b := range answers {
 		if err := json.Unmarshal(b, &out[i]); err != nil {
-			return nil, err
+			return nil, AnswerError{err}
 		}
 	}
 	return out, nil
@@ -101,7 +107,7 @@ func SearchPartial(args json.RawMessage, c Corpus, fan Fan) (json.RawMessage, st
 	stats := searchStats{DF: make([]float64, len(sorted)), Docs: uint64(c.ScoredDocs), TotalLen: uint64(c.TotalLen)}
 	for _, df := range parts {
 		if len(df) != len(sorted) {
-			return nil, "", fmt.Errorf("a reader returned df for %d terms, query has %d", len(df), len(sorted))
+			return nil, "", AnswerError{fmt.Errorf("a reader returned df for %d terms, query has %d", len(df), len(sorted))}
 		}
 		for i, n := range df {
 			stats.DF[i] += n

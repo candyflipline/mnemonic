@@ -57,7 +57,12 @@ func partial(ctx context.Context, v View, readers []Reader, tool string, args js
 		}
 		return out, nil
 	}
-	return m(args, c, fan)
+	data, text, err := m(args, c, fan)
+	var bad trace.AnswerError
+	if errors.As(err, &bad) {
+		err = InfraError{err}
+	}
+	return data, text, err
 }
 
 func holding(parts []GrantedPart, session string) []GrantedPart {
