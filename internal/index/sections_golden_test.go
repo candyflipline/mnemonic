@@ -277,3 +277,53 @@ func TestSessionAuthorsEverySource(t *testing.T) {
 		t.Fatal("no session carries authors")
 	}
 }
+
+// TestOtlpSpans is index_spans_otlp.go's contract on synthesized rows (the
+// fixture holds no otlp): a bare span row passes its children up to the
+// nearest emitted ancestor, an invoke_agent carries the sum over the chats
+// beneath it and falls back to its own cost when none carries one, and of two
+// emitted spans on a parent cycle the smaller item_id is the root.
+func TestOtlpSpans(t *testing.T) {
+	row := func(uid, item, origin, kind string, in uint64, cost string) *Row {
+		r := &Row{UID: uid, Session: "s", Harness: "otlp", Author: "alice", PayloadType: "span",
+			TraceID: "t", ItemID: item, OriginEventID: origin, OpKind: kind, InputTokens: in,
+			Bits: bitTimeOK, TimeUs: 1_000_000}
+		if cost != "" {
+			r.Native = `{"cost_usd":` + cost + `}`
+		}
+		return r
+	}
+	rows := []*Row{
+		row("a", "A", "", "invoke_agent", 1, "9"),
+		row("c1", "C1", "a", "chat", 10, "0.5"),
+		row("c2", "C2", "a", "chat", 20, ""),
+		row("x", "X", "a", "", 0, ""),
+		row("t", "T", "x", "execute_tool", 0, ""),
+		row("p", "P", "q", "chat", 0, ""),
+		row("q", "Q", "p", "chat", 0, ""),
+	}
+	id := func(item string) string { return spanIDHex("otlp", "alice", "t", item) }
+	got := map[string]schema.Span{}
+	for _, s := range buildSpans("otlp", rows) {
+		got[s.SpanID] = s
+	}
+	want := map[string]string{
+		id("A"): "", id("C1"): id("A"), id("C2"): id("A"), id("T"): id("A"), id("P"): "", id("Q"): id("P"),
+	}
+	if len(got) != len(want) {
+		t.Fatalf("%d spans, want %d", len(got), len(want))
+	}
+	for span, parent := range want {
+		if got[span].ParentSpanID != parent {
+			t.Errorf("span %s: parent %q, want %q", span, got[span].ParentSpanID, parent)
+		}
+	}
+	a := got[id("A")]
+	if a.InputTokens != 30 || a.Cost == nil || *a.Cost != 0.5 {
+		t.Errorf("invoke_agent: %d input tokens, cost %v; want 30 and 0.5", a.InputTokens, a.Cost)
+	}
+	rows[1].Native = ""
+	if a := buildSpans("otlp", rows)[0]; a.Cost == nil || *a.Cost != 9 {
+		t.Errorf("invoke_agent without chat costs: cost %v, want its own 9", a.Cost)
+	}
+}
