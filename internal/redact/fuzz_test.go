@@ -3,8 +3,13 @@ package redact
 // TestFuzzAgainstOracle proves the live redactor byte-identical to the
 // frozen 59796bc oracle: a seeded generator biased at every builtin rule
 // emits bare strings and JSON lines, and every output and every candidate
-// set must match. Default 20,000 strings per go test run; set
-// REDACT_FUZZ_N for more (the feature's proof run is 1,000,000).
+// set must match. The generator plants U+212A and U+017F, the non-ASCII
+// case-fold partners of K/k and S/s, inside keywords, prefixes and secret
+// runs: the oracle's (?i) folds both and counts {n,} in runes, so without
+// them the differential is blind to fold semantics. Same eight seeds as
+// the first proof; the stream changed when the partners landed, so the
+// 1M pass this file backs is on this stream. Default 20,000 strings per
+// go test run; set REDACT_FUZZ_N for more (the proof run is 1,000,000).
 
 import (
 	"bytes"
@@ -32,6 +37,21 @@ const (
 	fuzzGeneric  = fuzzAlphaNum + "_./+=-"
 )
 
+// The complete list of non-ASCII runes whose unicode.SimpleFold orbit
+// contains an ASCII letter — computed by ranging SimpleFold over 'A'..'Z'
+// and 'a'..'z'; U+0130 and U+0131 are in no orbit. Under Go regexp (?i) a
+// class naming k or K also matches U+212A (3 bytes) and one naming s or S
+// also matches U+017F (2 bytes), and {n,} counts runes, so run charsets
+// behind a (?i) class gain both partners.
+const (
+	fuzzKelvin = "\u212a" // U+212A KELVIN SIGN, folds with K and k
+	fuzzLongS  = "\u017f" // U+017F LATIN SMALL LETTER LONG S, folds with S and s
+
+	// fuzzGenericFold: the generic-api-key class [0-9A-Za-z_./+=-] sits
+	// under (?i), so the oracle folds both partners into it.
+	fuzzGenericFold = fuzzGeneric + fuzzKelvin + fuzzLongS
+)
+
 // One entry per builtin rule family: the prefilter keywords (canonical
 // case), the secret-run charset, and interesting lengths around the
 // pattern's thresholds (min-1/min/min+1, then mid and 255/256 bounds).
@@ -56,7 +76,7 @@ var fuzzRules = []fuzzRule{
 	{[]string{"dckr_pat_"}, fuzzAlphaNum + "-_", []int{19, 20, 21}},
 	{[]string{"lin_api_"}, fuzzAlphaNum, []int{29, 30, 31}},
 	{[]string{"secret_"}, fuzzAlphaNum, []int{29, 30, 31}},
-	{[]string{"api", "access", "auth", "authorization", "bearer", "client", "credential", "passwd", "password", "private", "privatekey", "secret", "token"}, fuzzGeneric, []int{18, 19, 20, 21, 64}},
+	{[]string{"api", "access", "auth", "authorization", "bearer", "client", "credential", "passwd", "password", "private", "privatekey", "secret", "token"}, fuzzGenericFold, []int{18, 19, 20, 21, 64}},
 }
 
 type fuzzRule struct {
@@ -125,6 +145,32 @@ func TestFuzzAgainstOracle(t *testing.T) {
 	orcX, err := newOracle([]string{`acme_internal_[0-9A-Za-z]{32}`, `(?i)team_secret_[a-z0-9]{10,}`})
 	if err != nil {
 		t.Fatalf("newOracle extras: %v", err)
+	}
+	// Hand-picked fold edges, checked before the seeded stream. The seeded
+	// stream only reaches a fold partner into rule 25 by chance
+	// combinations; these pin the semantics deterministically. Each pairs
+	// an ASCII keyword (so the prefilter scans rule 25 on both sides) with
+	// a partner the oracle's (?i) folds, or pins the {20,} rune count.
+	const g25v = "Ab3dEf6_hIj0Lm2nOp4Qr5Tu8Vw9Xy" // 30 class runes, no K/k/S/s of its own
+	for _, e := range []struct{ label, in string }{
+		{"U+017F mid-keyword, word char before it so \\b holds", "token=" + g25v + " xs\u017fEcrEt=" + g25v},
+		{"U+212A as the k of the keyword tail", " api_" + fuzzKelvin + "ey=" + g25v},
+		{"U+017F mid-keyword, no ASCII keyword, no prefilter trip", "xs\u017fEcrEt=" + g25v},
+		{"U+017F keyword start, space before it so \\b fails", " \u017fEcrEt=" + g25v},
+		{"{20,} in runes: 19 runes over 21 bytes must not match", "token=" + "Ab3dEf6_hIj0Lm2nOp" + fuzzKelvin},
+		{"{20,} in runes: 20 runes over 21 bytes must match", "token=" + "Ab3dEf6_hIj0Lm2nOpQ" + fuzzLongS},
+		{"U+212A in a case-sensitive class prefix must not fold", " A" + fuzzKelvin + "IA" + strings.Repeat("Q", 16)},
+	} {
+		b := []byte(e.in)
+		if got, want := live.candidates(b), orc.candidates(b); !slices.Equal(got, want) {
+			t.Fatalf("candidates differ (%s)\ngot  %v\nwant %v\ninput %q", e.label, got, want, b)
+		}
+		if got, want := live.Line(b), orc.Line(b); !bytes.Equal(got, want) {
+			t.Fatalf("Line differs (%s)\ninput %q\ngot  %q\nwant %q", e.label, b, got, want)
+		}
+		if got, want := liveX.Line(b), orcX.Line(b); !bytes.Equal(got, want) {
+			t.Fatalf("Line(extras) differs (%s)\ninput %q\ngot  %q\nwant %q", e.label, b, got, want)
+		}
 	}
 	for si, seed := range fuzzSeeds {
 		count := n / len(fuzzSeeds)
@@ -240,8 +286,10 @@ func fuzzJSONEscape(rng *rand.Rand, s string) string {
 			switch {
 			case r < 0x20:
 				sb.WriteString(fmt.Sprintf("\\u%04x", r))
-			case r == 'é' && rng.IntN(2) == 0:
-				sb.WriteString("\\u00e9")
+			case (r == 'é' || r == '\u212a' || r == '\u017f') && rng.IntN(2) == 0:
+				// half as \uXXXX, so the JSON-decoded line still
+				// carries the fold partner to the matchers
+				sb.WriteString(fmt.Sprintf("\\u%04x", r))
 			default:
 				sb.WriteRune(r)
 			}
@@ -295,9 +343,9 @@ func fuzzGenericExpr(rng *rand.Rand) string {
 	if rng.IntN(3) == 0 {
 		val = fuzzGateValues[rng.IntN(len(fuzzGateValues))]
 	} else {
-		val = fuzzRun(rng, fuzzGeneric, []int{18, 19, 20, 21, 40, 64}[rng.IntN(6)])
+		val = fuzzRun(rng, fuzzGenericFold, []int{18, 19, 20, 21, 40, 64}[rng.IntN(6)])
 		if rng.IntN(4) == 0 {
-			val += fuzzCase(rng, fuzzGenericWords[rng.IntN(len(fuzzGenericWords))]) + fuzzRun(rng, fuzzGeneric, 20)
+			val += fuzzCase(rng, fuzzGenericWords[rng.IntN(len(fuzzGenericWords))]) + fuzzRun(rng, fuzzGenericFold, 20)
 		}
 	}
 	sep := []string{":", "=", ":"}[rng.IntN(3)]
@@ -432,30 +480,53 @@ func fuzzNoise(rng *rand.Rand) string {
 	return sb.String()
 }
 
-// fuzzCase flips the case of ~30% of ASCII letters: enough canonical forms
-// to match, enough mangled ones to exercise the case-insensitive prefilter
-// against case-sensitive patterns.
+// fuzzCase flips the case of ~30% of ASCII letters and swaps a case-fold
+// partner in for ~10% of the K/k and S/s: enough canonical forms to match,
+// enough mangled ones to exercise the case-insensitive prefilter against
+// case-sensitive patterns, and enough partners that keywords and runs
+// spelled U+212A/U+017F reach the matchers, where the oracle's (?i) folds
+// them but byte-wise matching may not.
 func fuzzCase(rng *rand.Rand, s string) string {
-	b := []byte(s)
-	for i := range b {
+	var sb strings.Builder
+	sb.Grow(len(s) + 4)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
 		switch {
-		case b[i] >= 'a' && b[i] <= 'z':
+		case c >= 'a' && c <= 'z':
 			if rng.IntN(100) < 30 {
-				b[i] -= 32
+				c -= 32
 			}
-		case b[i] >= 'A' && b[i] <= 'Z':
+		case c >= 'A' && c <= 'Z':
 			if rng.IntN(100) < 30 {
-				b[i] += 32
+				c += 32
 			}
 		}
+		switch c {
+		case 'k', 'K':
+			if rng.IntN(100) < 10 {
+				sb.WriteString(fuzzKelvin)
+				continue
+			}
+		case 's', 'S':
+			if rng.IntN(100) < 10 {
+				sb.WriteString(fuzzLongS)
+				continue
+			}
+		}
+		sb.WriteByte(c)
 	}
-	return string(b)
+	return sb.String()
 }
 
+// fuzzRun draws n runes from charset — n runes, not bytes, so a run fed to
+// a {n,} class exercises the oracle's rune counting; for the ASCII
+// charsets the draws and output are unchanged.
 func fuzzRun(rng *rand.Rand, charset string, n int) string {
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = charset[rng.IntN(len(charset))]
+	rs := []rune(charset)
+	var sb strings.Builder
+	sb.Grow(n * utf8.UTFMax)
+	for i := 0; i < n; i++ {
+		sb.WriteRune(rs[rng.IntN(len(rs))])
 	}
-	return string(b)
+	return sb.String()
 }
