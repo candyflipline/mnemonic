@@ -110,7 +110,7 @@ func run(root, oracle string, seed int64, out string) error {
 	if len(c.paths) == 0 {
 		// Repo roots are probed on the parsing machine's disk, so a corpus parsed away from its repos has none.
 		c.paths = []string{"AGENTS.md", "README.md", "go.mod", "package.json", "main.go"}
-		fmt.Fprintln(os.Stderr, "gen: no repo-relative tool paths (corpus parsed away from its repos); file_attention draws common names and answers empty")
+		fmt.Fprintln(os.Stderr, "gen: no repo-relative tool paths (corpus parsed away from its repos); file_attention draws common names, matched by path tail")
 	}
 	r := rand.New(rand.NewSource(seed))
 	var calls []call
