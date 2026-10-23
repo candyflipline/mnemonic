@@ -57,6 +57,7 @@ type fakeSource struct {
 	harness string
 	srcName string
 	path    string
+	rootsTo int64
 }
 
 type fakeRoots struct{ query, body string }
@@ -94,7 +95,7 @@ func (s *fakeStore) serveManifest(w http.ResponseWriter, r *http.Request) {
 		}
 		man.Sources = append(man.Sources, wire.Source{
 			SrcID: id, Harness: src.harness, SourceName: src.srcName, Path: src.path,
-			Size: size, RawEnd: src.rawEnd, HeadHash: src.head, UpdatedMs: s.updatedMs,
+			Size: size, RawEnd: src.rawEnd, HeadHash: src.head, UpdatedMs: s.updatedMs, RootsTo: src.rootsTo,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -111,7 +112,10 @@ func (s *fakeStore) serveRoots(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.roots = append(s.roots, fakeRoots{query: r.URL.RawQuery, body: string(body)})
-	json.NewEncoder(w).Encode(wire.Source{SrcID: r.PathValue("srcid")})
+	through, _ := strconv.ParseInt(r.URL.Query().Get("through"), 10, 64)
+	src := s.sources[r.PathValue("srcid")]
+	src.rootsTo = max(src.rootsTo, through)
+	json.NewEncoder(w).Encode(wire.Source{SrcID: r.PathValue("srcid"), RootsTo: src.rootsTo})
 }
 
 func (s *fakeStore) servePut(w http.ResponseWriter, r *http.Request) {
@@ -351,6 +355,12 @@ func TestRootsAreReportedWithEachBody(t *testing.T) {
 	assertRaw(t, s, p, first+second)
 }
 
+func runWithoutRoots(cfg config.Client, red Redactor, hc *http.Client) (Stats, error) {
+	rs := newRootsSync(red)
+	rs.off = true
+	return run(context.Background(), cfg, red, hc, rs)
+}
+
 func fmtFact(format string, from int) string {
 	return strings.Replace(format, "%d", strconv.Itoa(from), 1)
 }
@@ -466,7 +476,7 @@ func TestUnchangedFileBackfillsRawEndThenSkips(t *testing.T) {
 	}
 
 	red := &countingRedactor{}
-	st, err = Run(context.Background(), testConfig(rs.srv.URL, dir), red, rs.srv.Client())
+	st, err = runWithoutRoots(testConfig(rs.srv.URL, dir), red, rs.srv.Client())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -489,7 +499,7 @@ func TestAppendTailRedactsOnlyNewBytes(t *testing.T) {
 	body := "head line\n" + strings.Repeat("filler line\n", 999) + "new one\nnew two\n"
 	writeFile(t, dir, "a.jsonl", body)
 	red := &countingRedactor{}
-	st, err := Run(context.Background(), testConfig(rs.srv.URL, dir), red, rs.srv.Client())
+	st, err := runWithoutRoots(testConfig(rs.srv.URL, dir), red, rs.srv.Client())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -597,9 +607,11 @@ type countingTransport struct {
 }
 
 func (c *countingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	c.mu.Lock()
-	c.reqs = append(c.reqs, r.Method)
-	c.mu.Unlock()
+	if r.Method != http.MethodPost {
+		c.mu.Lock()
+		c.reqs = append(c.reqs, r.Method)
+		c.mu.Unlock()
+	}
 	return c.base.RoundTrip(r)
 }
 
@@ -702,6 +714,7 @@ func TestWatchReconcileSkipsLegacyEntryUnread(t *testing.T) {
 	tr := &countingTransport{base: rs.srv.Client().Transport}
 	red := &countingRedactor{}
 	w := newWatcher(testConfig(rs.srv.URL, dir), red, &http.Client{Transport: tr})
+	w.rs.off = true
 	n, err := newNotifier()
 	if err != nil {
 		t.Fatal(err)
