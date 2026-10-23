@@ -475,7 +475,7 @@ func Ingest(root, store string, quiet time.Duration, settleAll bool) (IngestStat
 	if err != nil {
 		return IngestStats{}, err
 	}
-	return ingest(store, sources, quiet, settleAll)
+	return ingest(root, store, sources, quiet, settleAll)
 }
 
 // IngestPlain brings store up to the machine's harness files the client globs
@@ -486,12 +486,13 @@ func IngestPlain(store string, globs []config.SourceGlob, author, machine string
 	if err != nil {
 		return IngestStats{}, err
 	}
-	return ingest(store, sources, quiet, settleAll)
+	return ingest("", store, sources, quiet, settleAll)
 }
 
 // ingest is the cycle both entry points share: parse the sources, publish the
-// plan, and record the lap.
-func ingest(store string, sources []source, quiet time.Duration, settleAll bool) (stats IngestStats, err error) {
+// plan, and record the lap. root is where KindStore sources' raw lives; a
+// KindPlain source opens its own path and ignores it.
+func ingest(root, store string, sources []source, quiet time.Duration, settleAll bool) (stats IngestStats, err error) {
 	debug.SetGCPercent(25)
 	var rec cycleRecord
 	defer func() { recordCycle(store, rec) }()
@@ -499,7 +500,7 @@ func ingest(store string, sources []source, quiet time.Duration, settleAll bool)
 		return
 	}
 	take := takeCycle(store)
-	outcomes, logBytes, stale, failSweep := parseSources("", store, sources, take.failSweep)
+	outcomes, logBytes, stale, failSweep := parseSources(root, store, sources, take.failSweep)
 	for _, o := range outcomes {
 		stats[o]++
 	}
