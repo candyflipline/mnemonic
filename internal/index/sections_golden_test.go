@@ -192,9 +192,13 @@ func orDash(s string) string {
 
 // writeSource lays one raw source the way push does: zstd lines and a
 // manifest, under author/machine/harness.
-func writeSource(t *testing.T, root, author, harness, srcID, sourceName string, lines []byte) {
+func writeSource(t *testing.T, root, author, harness, srcID, sourceName string, frames ...[]byte) {
 	t.Helper()
-	zst := (&zstd.Encoder{}).EncodeAll(lines, nil)
+	var zst, lines []byte
+	for _, f := range frames {
+		zst = (&zstd.Encoder{}).EncodeAll(f, zst)
+		lines = append(lines, f...)
+	}
 	dir := filepath.Join(root, "raw", "author="+author, "machine=m1", "harness="+harness)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -325,5 +329,64 @@ func TestOtlpSpans(t *testing.T) {
 	rows[1].Native = ""
 	if a := buildSpans("otlp", rows)[0]; a.Cost == nil || *a.Cost != 9 {
 		t.Errorf("invoke_agent without chat costs: cost %v, want its own 9", a.Cost)
+	}
+}
+
+// TestHotPartKeepsSectionAuthors: a part built by appending to a hot
+// component's image (delta.json) answers sessionAuthors and the annotation
+// author as the part built whole does. Tenancy reads sessionAuthors, so an
+// empty answer on a hot part would hide the session from its owners.
+func TestHotPartKeepsSectionAuthors(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "fixtures", "claude-code", "session.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sid = "7c666c01-d38e-4658-8650-854ffb5b626e"
+	more := []byte(`{"type":"user","sessionId":"` + sid + `","cwd":"/work/claude-demo","uuid":"user-3","timestamp":"2026-01-19T15:59:00.000Z","message":{"role":"user","content":"And the tests."}}` + "\n")
+	note := []byte(`{"id":"n1","target":{"session_id":"` + sid + `"},"name":"quality","value":{"number":4},"source":"human","ts":"2026-10-21T10:00:00Z"}` + "\n")
+
+	root, store, coldRoot, coldStore := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	put := func(root string, alice ...[]byte) {
+		writeSource(t, root, "alice", "claude-code", wire.SrcID("a"), "alice.jsonl", alice...)
+		writeSource(t, root, "bob", "claude-code", wire.SrcID("b"), "bob.jsonl", raw)
+		writeSource(t, root, "carol", schema.AnnotationHarness, wire.SrcID("c"), "annotation/2026-10-21", note)
+	}
+	put(root, raw)
+	if _, err := Ingest(root, store, time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	put(root, raw, more)
+	if _, err := Ingest(root, store, time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	cur, err := readManifest(store)
+	if err != nil || len(cur.Hot) != 1 {
+		t.Fatalf("hot parts %v, err %v", cur.Hot, err)
+	}
+	if _, ok, _ := readDelta(partDir(store, cur.Hot[0])); !ok {
+		t.Fatal("the append did not take the delta path")
+	}
+
+	put(coldRoot, raw, more)
+	if _, err := Ingest(coldRoot, coldStore, time.Minute, true); err != nil {
+		t.Fatal(err)
+	}
+	read := func(store string) ([]string, []schema.Annotation) {
+		ix, err := Open(store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ix.Close()
+		db, release := ix.Snapshot()
+		defer release()
+		return db.sessionAuthors(sid), db.sessionAnnotations(sid)
+	}
+	hotAuthors, hotAnn := read(store)
+	coldAuthors, coldAnn := read(coldStore)
+	if want := []string{"alice", "bob", "carol"}; !reflect.DeepEqual(coldAuthors, want) || !reflect.DeepEqual(hotAuthors, want) {
+		t.Fatalf("authors: hot %v, cold %v, want %v", hotAuthors, coldAuthors, want)
+	}
+	if len(hotAnn) != 1 || hotAnn[0].ID != "n1" || hotAnn[0].Author != "carol" || len(coldAnn) != 1 || coldAnn[0].Author != "carol" {
+		t.Fatalf("annotations: hot %+v, cold %+v, want n1 by carol", hotAnn, coldAnn)
 	}
 }
