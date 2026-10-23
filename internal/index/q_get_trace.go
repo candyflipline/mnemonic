@@ -123,8 +123,22 @@ func loadSpans(db *DB, session string, f SessionFilter) []*traceSpan {
 // oracle's `ORDER BY start_time, kind, span_id` gives: span_id is unique, so
 // the order is total.
 func spansToTrace(spans []schema.Span) []*traceSpan {
+	ordered := spans[:0:0]
+	ordered = append(ordered, spans...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		a, b := ordered[i], ordered[j]
+		if !a.Start.Equal(b.Start) {
+			return a.Start.Before(b.Start)
+		}
+		// kind is a DuckDB ENUM in the oracle, so it sorts in declaration
+		// order, not lexicographically.
+		if ra, rb := spanKindRank(string(a.Kind)), spanKindRank(string(b.Kind)); ra != rb {
+			return ra < rb
+		}
+		return a.SpanID < b.SpanID
+	})
 	var out []*traceSpan
-	for _, s := range spans {
+	for _, s := range ordered {
 		out = append(out, &traceSpan{
 			SpanID:   s.SpanID,
 			parent:   s.ParentSpanID,
@@ -139,18 +153,6 @@ func spansToTrace(spans []schema.Span) []*traceSpan {
 			Children: []*traceSpan{},
 		})
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		a, b := out[i], out[j]
-		if a.Start != b.Start {
-			return a.Start < b.Start
-		}
-		// kind is a DuckDB ENUM in the oracle, so it sorts in declaration
-		// order, not lexicographically.
-		if ra, rb := spanKindRank(a.Kind), spanKindRank(b.Kind); ra != rb {
-			return ra < rb
-		}
-		return a.SpanID < b.SpanID
-	})
 	return out
 }
 
