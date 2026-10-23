@@ -1,12 +1,8 @@
 package query
 
 import (
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -128,97 +124,4 @@ func qTypedID(prefix, raw string) (string, error) {
 		return "", argErrorf("%s_id must be a non-empty string", strings.TrimSuffix(prefix, ":"))
 	}
 	return prefix + b64RawURL.EncodeToString([]byte(raw)), nil
-}
-
-func qProjectIDForRoot(root string) string {
-	if common, ok := qGitCommonDir(root); ok {
-		return qProjectIDForPath("moraine-git-common-dir\x00", "git", common)
-	}
-	canonical, ok := qCanonical(root)
-	if !ok || !qIsDir(canonical) {
-		return ""
-	}
-	return qProjectIDForPath("moraine-directory-root\x00", "dir", canonical)
-}
-
-func qProjectIDForPath(domain, prefix, path string) string {
-	h := sha256.New()
-	h.Write([]byte(domain))
-	h.Write([]byte(path))
-	return prefix + ":" + hex.EncodeToString(h.Sum(nil))
-}
-
-func qGitCommonDir(root string) (string, bool) {
-	marker := root + "/.git"
-	gitDir := marker
-	if !qIsDir(marker) {
-		b, err := os.ReadFile(marker)
-		if err != nil {
-			return "", false
-		}
-		rest, ok := strings.CutPrefix(strings.TrimSpace(string(b)), "gitdir:")
-		if !ok {
-			return "", false
-		}
-		path := strings.TrimSpace(rest)
-		if path == "" {
-			return "", false
-		}
-		if strings.HasPrefix(path, "/") {
-			gitDir = path
-		} else {
-			gitDir = root + "/" + path
-		}
-	}
-	common := gitDir
-	if b, err := os.ReadFile(gitDir + "/commondir"); err == nil {
-		cb := strings.TrimSpace(string(b))
-		if strings.HasPrefix(cb, "/") {
-			common = cb
-		} else {
-			common = gitDir + "/" + cb
-		}
-	}
-	return qCanonical(common)
-}
-
-func qCanonical(path string) (string, bool) {
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return "", false
-	}
-	abs, err := filepath.Abs(resolved)
-	if err != nil {
-		return "", false
-	}
-	return abs, true
-}
-
-func qIsDir(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
-}
-
-func qFindProjectRoot(path string) string {
-	home := os.Getenv("HOME")
-	dir := filepath.Dir(path)
-	for {
-		if qExists(dir + "/.git") {
-			return dir
-		}
-		if home != "" && home == dir {
-			break
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	return ""
-}
-
-func qExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }
