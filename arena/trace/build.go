@@ -24,14 +24,16 @@ type built struct {
 
 // partFormat is hashed into every part ID, so a store built by an older layout
 // rebuilds its parts instead of opening them.
-const partFormat = 3
+const partFormat = 4
 
-// fingerprint names the set of checkpoints an index was built from.
+// fingerprint names a part by what its members parsed, never by how a disk
+// laid the logs out, so a restored store names every part it did not change
+// exactly as the store it came from does.
 func fingerprint(cks []ckpt) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "format %d\n", partFormat)
 	for _, c := range cks {
-		fmt.Fprintf(h, "%s %d %d %d %d\n", c.Key, c.Gen, c.LightLen, c.HeavyLen, c.Rows)
+		fmt.Fprintf(h, "%s %d %d %d %s %d\n", c.Key, c.Parser, c.Layout, c.ZstSize, c.WindowSHA, c.Rows)
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -49,19 +51,17 @@ type indexMeta struct {
 	Members     []member `json:"members,omitempty"`
 }
 
-// member is one source checkpoint a part holds the rows of; a doc's src is
-// its index in the part's members.
+// member is one source a part holds the rows of; a doc's src is its index in
+// the part's members. Gen and the lengths stay only because deltaBase reads them.
 type member struct {
-	Key      string `json:"key"`
-	Path     string `json:"path"`
-	Gen      int    `json:"gen"`
-	LightLen int64  `json:"light_len"`
-	HeavyLen int64  `json:"heavy_len"`
-	Rows     int64  `json:"rows"`
+	parsed
+	Gen      int   `json:"gen"`
+	LightLen int64 `json:"light_len"`
+	HeavyLen int64 `json:"heavy_len"`
 }
 
 func memberOf(c ckpt) member {
-	return member{Key: c.Key, Path: c.Path, Gen: c.Gen, LightLen: c.LightLen, HeavyLen: c.HeavyLen, Rows: c.Rows}
+	return member{parsed: c.parsed, Gen: c.Gen, LightLen: c.LightLen, HeavyLen: c.HeavyLen}
 }
 
 func loadSourceRows(store string, si int, c ckpt, from int64) ([]built, error) {
