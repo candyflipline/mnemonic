@@ -185,6 +185,7 @@ tenant = %q
 		env.checkE(),
 		env.checkF(),
 	}
+	env.pickExport()
 	if err := srv.stop(); err != nil {
 		tr.step("shutdown", "server stop: %v", err)
 	} else {
@@ -237,7 +238,8 @@ type env struct {
 	deletedID       string // session (f) deleted, kept out of (c)
 	otlpSession     string // alice's session:<...> id from (a)
 	lastTraceResult map[string]any
-	faPath          string // a file the fixture sessions touched
+	faPath          string            // a file the fixture sessions touched
+	exportPick      map[string]string // one session id per harness for (c)
 }
 
 // ---- (a) OTLP chat span with an execute_tool child, get_trace shows it ----
@@ -259,9 +261,9 @@ func (e *env) checkA() *check {
 		return c
 	}
 	e.otlpSession = sess
-	trace := e.mcpCall(c, e.alice, "get_trace", map[string]any{"session_id": sess, "include_annotations": true})
+	trace, terr := e.mcpCall(c, e.alice, "get_trace", map[string]any{"session_id": sess, "include_annotations": true})
 	if trace == nil {
-		c.failf("get_trace answered no data")
+		c.failf("get_trace answered no data (%s: %s)", terr.code, terr.message)
 		return c
 	}
 	tree, _ := trace["tree"].([]any)
@@ -301,8 +303,8 @@ func (e *env) checkA() *check {
 func (e *env) waitAliceSession(c *check) (string, bool) {
 	deadline := time.Now().Add(90 * time.Second)
 	for {
-		list := e.mcpCall(c, e.alice, "list_sessions", map[string]any{
-			"start_datetime": dayStart, "end_datetime": dayEnd, "harness": "otlp", "limit": 20,
+		list, _ := e.mcpCall(c, e.alice, "list_sessions", map[string]any{
+			"start_datetime": dayStart, "end_datetime": dayEnd, "harness": "otlp", "limit": 25,
 		})
 		for _, s := range arr(mapGet(list, "sessions")) {
 			m, _ := s.(map[string]any)
@@ -327,12 +329,12 @@ func (e *env) checkB() *check {
 		c.failf("no otlp session from (a)")
 		return c
 	}
-	ann := e.mcpCall(c, e.alice, "annotate", map[string]any{
+	ann, terr := e.mcpCall(c, e.alice, "annotate", map[string]any{
 		"session_id": e.otlpSession, "name": "correctness", "number": 0.75,
 		"source": "scorer", "request_id": "e2e-ann-1",
 	})
 	if ann == nil {
-		c.failf("annotate answered no data")
+		c.failf("annotate answered no data (%s: %s)", terr.code, terr.message)
 		return c
 	}
 	annID := str(ann["annotation_id"])
@@ -362,7 +364,7 @@ func (e *env) checkB() *check {
 }
 
 func (e *env) traceHasAnnotation(annID string) bool {
-	trace := e.mcpCall(e.scratchCheck(), e.alice, "get_trace", map[string]any{"session_id": e.otlpSession, "include_annotations": true})
+	trace, _ := e.mcpCall(e.scratchCheck(), e.alice, "get_trace", map[string]any{"session_id": e.otlpSession, "include_annotations": true})
 	e.lastTraceResult = trace
 	for _, a := range arr(mapGet(trace, "annotations")) {
 		m, _ := a.(map[string]any)
@@ -404,13 +406,12 @@ func (e *env) checkD() *check {
 		e.queryEngine(c)
 		return c
 	}
-	refused := e.mcpCall(c, e.mcp, "query", map[string]any{"sql": "SELECT session_id FROM events"})
-	te := toolError(refused)
-	e.tr.step("d", "query without from/to (sql) as arena: refused=%v error=%q", te.code != "", te.message)
-	if te.code == "" {
+	_, rte := e.mcpCall(c, e.mcp, "query", map[string]any{"sql": "SELECT session_id FROM events"})
+	e.tr.step("d", "query without from/to (sql) as arena: refused=%v error=%q", rte.code != "", rte.message)
+	if rte.code == "" {
 		c.failf("query without a time range was not refused")
 	}
-	capped := e.mcpCall(c, e.mcp, "query", map[string]any{
+	capped, _ := e.mcpCall(c, e.mcp, "query", map[string]any{
 		"sql": "SELECT session_id FROM events", "from": dayStart, "to": dayEnd, "limit": 3,
 	})
 	rows := arr(mapGet(capped, "rows"))
@@ -431,13 +432,12 @@ func (e *env) checkD() *check {
 // queryEngine speaks the ql dialect the engine's query tool takes; the
 // semantic assertions are the same ones.
 func (e *env) queryEngine(c *check) {
-	refused := e.mcpCall(c, e.mcp, "query", map[string]any{"query": "from: events"})
-	te := toolError(refused)
-	e.tr.step("d", "query without from/to (ql) as arena: refused=%v error=%q", te.code != "", te.message)
-	if te.code == "" {
+	_, rte := e.mcpCall(c, e.mcp, "query", map[string]any{"query": "from: events"})
+	e.tr.step("d", "query without from/to (ql) as arena: refused=%v error=%q", rte.code != "", rte.message)
+	if rte.code == "" {
 		c.failf("query without a time range was not refused")
 	}
-	capped := e.mcpCall(c, e.mcp, "query", map[string]any{
+	capped, _ := e.mcpCall(c, e.mcp, "query", map[string]any{
 		"query": "from: events | select: session_id", "from": dayStart, "to": dayEnd, "limit": 3,
 	})
 	rows := arr(mapGet(capped, "rows"))
@@ -455,7 +455,7 @@ func (e *env) queryEngine(c *check) {
 
 func (e *env) checkE() *check {
 	c := &check{letter: "e", name: "tenant B's token sees none of tenant A's sessions via any tool", pass: true}
-	bobList := e.mcpCall(c, e.bob, "list_sessions", map[string]any{"start_datetime": dayStart, "end_datetime": dayEnd, "limit": 50})
+	bobList, _ := e.mcpCall(c, e.bob, "list_sessions", map[string]any{"start_datetime": dayStart, "end_datetime": dayEnd, "limit": 25})
 	bobIDs := 0
 	for _, s := range arr(mapGet(bobList, "sessions")) {
 		if m, _ := s.(map[string]any); str(m["id"]) != "" {
@@ -467,7 +467,7 @@ func (e *env) checkE() *check {
 		c.failf("bob lists %d sessions, want 0 (fixture sessions are arena's, alice's are hers)", bobIDs)
 	}
 	for _, q := range []string{otlpWord, e.searchTerm} {
-		sr := e.mcpCall(c, e.bob, "search_sessions", map[string]any{"query": q, "n_hits": 20})
+		sr, _ := e.mcpCall(c, e.bob, "search_sessions", map[string]any{"query": q, "n_hits": 20})
 		n := num(mapGet(sr, "result_count"))
 		e.tr.step("e", "search_sessions %q as bob: result_count=%d", q, n)
 		if n != 0 {
@@ -477,26 +477,24 @@ func (e *env) checkE() *check {
 	if e.searchHit != nil {
 		hitID := str(mapGet(e.searchHit, "id"))
 		if hitID != "" {
-			opened := e.mcpCall(c, e.bob, "open", map[string]any{"id": hitID})
-			te := toolError(opened)
-			e.tr.step("e", "open %s as bob: refused=%v error=%q", hitID, te.code != "", te.message)
-			if te.code == "" {
+			_, ote := e.mcpCall(c, e.bob, "open", map[string]any{"id": hitID})
+			e.tr.step("e", "open %s as bob: refused=%v error=%q", hitID, ote.code != "", ote.message)
+			if ote.code == "" {
 				c.failf("bob opened arena's session %s", hitID)
 			}
 		}
 	}
 	if e.otlpSession != "" {
-		tr := e.mcpCall(c, e.bob, "get_trace", map[string]any{"session_id": e.otlpSession})
-		te := toolError(tr)
-		e.tr.step("e", "get_trace alice's session as bob: refused=%v error=%q", te.code != "", te.message)
-		if te.code == "" {
+		_, tte := e.mcpCall(c, e.bob, "get_trace", map[string]any{"session_id": e.otlpSession})
+		e.tr.step("e", "get_trace alice's session as bob: refused=%v error=%q", tte.code != "", tte.message)
+		if tte.code == "" {
 			c.failf("bob's get_trace read alice's session")
 		}
 	}
 	if e.faPath != "" {
-		fa := e.mcpCall(c, e.bob, "file_attention", map[string]any{"path": e.faPath, "start_datetime": dayStart, "end_datetime": dayEnd})
+		fa, _ := e.mcpCall(c, e.bob, "file_attention", map[string]any{"path": e.faPath, "start_datetime": dayStart, "end_datetime": dayEnd})
 		bobSessions := len(arr(mapGet(fa, "sessions")))
-		faArena := e.mcpCall(c, e.mcp, "file_attention", map[string]any{"path": e.faPath, "start_datetime": dayStart, "end_datetime": dayEnd})
+		faArena, _ := e.mcpCall(c, e.mcp, "file_attention", map[string]any{"path": e.faPath, "start_datetime": dayStart, "end_datetime": dayEnd})
 		arenaSessions := len(arr(mapGet(faArena, "sessions")))
 		e.tr.step("e", "file_attention %s: bob=%d sessions, arena=%d sessions", e.faPath, bobSessions, arenaSessions)
 		if bobSessions != 0 {
@@ -508,9 +506,9 @@ func (e *env) checkE() *check {
 	} else {
 		e.tr.step("e", "file_attention skipped: the pushed fixture sources name no file_path")
 	}
-	q := e.mcpCall(c, e.bob, "query", map[string]any{"sql": "SELECT session_id FROM events", "from": dayStart, "to": dayEnd, "limit": 5})
+	q, _ := e.mcpCall(c, e.bob, "query", map[string]any{"sql": "SELECT session_id FROM events", "from": dayStart, "to": dayEnd, "limit": 5})
 	bobRows := num(mapGet(q, "row_count"))
-	qa := e.mcpCall(c, e.mcp, "query", map[string]any{"sql": "SELECT session_id FROM events", "from": dayStart, "to": dayEnd, "limit": 5})
+	qa, _ := e.mcpCall(c, e.mcp, "query", map[string]any{"sql": "SELECT session_id FROM events", "from": dayStart, "to": dayEnd, "limit": 5})
 	arenaRows := num(mapGet(qa, "row_count"))
 	e.tr.step("e", "query events as bob: %d rows; as arena: %d rows", bobRows, arenaRows)
 	if bobRows != 0 {
@@ -539,16 +537,17 @@ func (e *env) checkF() *check {
 		return c
 	}
 	e.deletedID = target
-	before := e.mcpCall(c, e.mcp, "search_sessions", map[string]any{"query": e.searchTerm, "n_hits": 20})
+	before, _ := e.mcpCall(c, e.mcp, "search_sessions", map[string]any{"query": e.searchTerm, "n_hits": 20})
 	if n := num(mapGet(before, "result_count")); n < 1 {
 		c.failf("pre-delete search found %d hits, want >= 1", n)
 	}
-	del := e.mcpCall(c, e.mcp, "delete_session", map[string]any{"session_id": target})
-	e.tr.step("f", "delete_session %s as arena: deleted=%v duplicate=%v", target, mapGet(del, "deleted"), mapGet(del, "duplicate"))
+	del, dte := e.mcpCall(c, e.mcp, "delete_session", map[string]any{"session_id": target})
+	e.tr.step("f", "delete_session %s as arena: deleted=%v duplicate=%v error=%q",
+		target, mapGet(del, "deleted"), mapGet(del, "duplicate"), dte.message)
 	if mapGet(del, "deleted") != true {
-		c.failf("delete_session did not report deleted=true")
+		c.failf("delete_session did not report deleted=true (%s)", dte.message)
 	}
-	after := e.mcpCall(c, e.mcp, "search_sessions", map[string]any{"query": e.searchTerm, "n_hits": 20})
+	after, _ := e.mcpCall(c, e.mcp, "search_sessions", map[string]any{"query": e.searchTerm, "n_hits": 20})
 	for _, h := range arr(mapGet(after, "results")) {
 		m, _ := h.(map[string]any)
 		s, _ := m["session"].(map[string]any)
@@ -556,8 +555,7 @@ func (e *env) checkF() *check {
 			c.failf("deleted session still in search_sessions")
 		}
 	}
-	opened := e.mcpCall(c, e.mcp, "open", map[string]any{"id": target})
-	ote := toolError(opened)
+	_, ote := e.mcpCall(c, e.mcp, "open", map[string]any{"id": target})
 	e.tr.step("f", "after delete: search hits=%d, open refused=%v error=%q",
 		num(mapGet(after, "result_count")), ote.code != "", ote.message)
 	if ote.code == "" {
@@ -565,10 +563,10 @@ func (e *env) checkF() *check {
 	}
 	// and alice's otlp session hides from open and get_trace the same way
 	if e.otlpSession != "" {
-		d2 := e.mcpCall(c, e.alice, "delete_session", map[string]any{"session_id": e.otlpSession})
+		d2, _ := e.mcpCall(c, e.alice, "delete_session", map[string]any{"session_id": e.otlpSession})
 		e.tr.step("f", "delete_session %s as alice: deleted=%v", e.otlpSession, mapGet(d2, "deleted"))
-		o2 := toolError(e.mcpCall(c, e.alice, "open", map[string]any{"id": e.otlpSession}))
-		t2 := toolError(e.mcpCall(c, e.alice, "get_trace", map[string]any{"session_id": e.otlpSession}))
+		_, o2 := e.mcpCall(c, e.alice, "open", map[string]any{"id": e.otlpSession})
+		_, t2 := e.mcpCall(c, e.alice, "get_trace", map[string]any{"session_id": e.otlpSession})
 		if o2.code == "" || t2.code == "" {
 			c.failf("alice's deleted otlp session still answers open or get_trace")
 		}
@@ -576,20 +574,28 @@ func (e *env) checkF() *check {
 	return c
 }
 
+// pickExport records, while the server is still up, one exportable session id
+// per harness (the first in list order that (f) did not delete).
+func (e *env) pickExport() {
+	c := &check{letter: "c", pass: true}
+	list, _ := e.mcpCall(c, e.mcp, "list_sessions", map[string]any{"start_datetime": dayStart, "end_datetime": dayEnd, "limit": 25})
+	e.exportPick = map[string]string{}
+	for _, s := range arr(mapGet(list, "sessions")) {
+		m, _ := s.(map[string]any)
+		id, h := str(m["id"]), str(m["harness"])
+		if id == "" || id == e.deletedID || e.exportPick[h] != "" {
+			continue
+		}
+		e.exportPick[h] = id
+	}
+	e.tr.step("shutdown", "sessions picked for (c), one per harness: %v", e.exportPick)
+}
+
 // ---- (c) export atif passes the ATIF validator, one session per harness ----
 
 func (e *env) checkC(bin string) *check {
 	c := &check{letter: "c", name: "export atif for one session per harness passes the ATIF validator", pass: true}
-	list := e.mcpCall(c, e.mcp, "list_sessions", map[string]any{"start_datetime": dayStart, "end_datetime": dayEnd, "limit": 50})
-	pick := map[string]string{}
-	for _, s := range arr(mapGet(list, "sessions")) {
-		m, _ := s.(map[string]any)
-		id, h := str(m["id"]), str(m["harness"])
-		if id == "" || id == e.deletedID || pick[h] != "" {
-			continue
-		}
-		pick[h] = id
-	}
+	pick := e.exportPick
 	harnesses := make([]string, 0, len(pick))
 	for h := range pick {
 		harnesses = append(harnesses, h)

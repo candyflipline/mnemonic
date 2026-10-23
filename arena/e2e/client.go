@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -146,10 +147,11 @@ func (c *mcpClient) post(path, contentType string, body []byte) httpResult {
 	return c.do(http.MethodPost, path, contentType, body)
 }
 
-// call issues one tools/call and returns result.structuredContent (the tool
-// envelope: its data holds the payload, its error the refusal). A transport
-// or JSON failure returns nil with the raw answer as the message.
-func (c *mcpClient) call(tool string, args map[string]any) (env map[string]any, isErr bool, msg string) {
+// call issues one tools/call and returns the payload (the envelope's data) —
+// or, when the tool refused (isError) or the exchange failed at the transport,
+// a nil payload and a toolErr naming it. A refused call still carries its
+// envelope on data for the caller that wants the message.
+func (c *mcpClient) call(tool string, args map[string]any) (data map[string]any, terr toolErr) {
 	c.nextID++
 	req := map[string]any{
 		"jsonrpc": "2.0",
@@ -174,20 +176,21 @@ func (c *mcpClient) call(tool string, args map[string]any) (env map[string]any, 
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(resp.body, &outer); err != nil {
-		return nil, true, fmt.Sprintf("status %d, undecodable: %v: %.300s", resp.status, err, resp.text)
+		return nil, toolErr{"transport", fmt.Sprintf("status %d, undecodable: %v: %.300s", resp.status, err, resp.text)}
 	}
 	if outer.Error != nil {
-		return nil, true, fmt.Sprintf("rpc error %d: %s", outer.Error.Code, outer.Error.Message)
+		return nil, toolErr{"transport", fmt.Sprintf("rpc error %d: %s", outer.Error.Code, outer.Error.Message)}
 	}
 	if outer.Result == nil {
-		return nil, true, fmt.Sprintf("status %d, no result: %.300s", resp.status, resp.text)
+		return nil, toolErr{"transport", fmt.Sprintf("status %d, no result: %.300s", resp.status, resp.text)}
 	}
-	env = outer.Result.Structured
+	envd := outer.Result.Structured
 	if outer.Result.IsError {
-		terr, _ := env["error"].(map[string]any)
-		return env, true, str(terr["message"])
+		e, _ := envd["error"].(map[string]any)
+		return envd, toolErr{code: str(e["code"]), message: str(e["message"])}
 	}
-	return env, false, ""
+	data, _ = envd["data"].(map[string]any)
+	return data, toolErr{}
 }
 
 // ---- transcript ----
@@ -317,7 +320,7 @@ func (e *env) pushFixture(fixtureRoot string) error {
 			url.QueryEscape(machine), url.QueryEscape(str(m["harness"])), url.QueryEscape(str(m["src_id"])),
 			url.QueryEscape(str(m["head_hash"])), url.QueryEscape(str(m["source_name"])),
 			url.QueryEscape(str(m["path"])), int64(num(m["raw_end"])))
-		resp := e.mcp.post(q, "application/octet-stream", raw)
+		resp := e.mcp.do("PUT", q, "application/octet-stream", raw)
 		e.pushed = append(e.pushed, pushedSource{manifestPath: man, manifest: m, rawBytes: len(raw)})
 		e.tr.step("push", "PUT /v1/raw/%s/%s (src_id %s): status %d, %d raw bytes",
 			machine, str(m["harness"]), str(m["src_id"]), resp.status, len(raw))
@@ -336,32 +339,53 @@ func (e *env) pushFixture(fixtureRoot string) error {
 	return nil
 }
 
-// searchWords takes the first six words of the first line's content field, so
-// the smoke search runs on real fixture user input.
+// searchWords takes the first six words of the session's first user message
+// (message.content of a type=user line), so the smoke search runs on text the
+// harness really recorded as user input. Plain content fields are the
+// fallback. "" when the source holds neither.
 func searchWords(raw []byte) string {
+	var fallback string
 	for _, line := range bytes.Split(raw, []byte("\n")) {
 		var m map[string]any
 		if json.Unmarshal(line, &m) != nil {
 			continue
 		}
-		content := str(m["content"])
-		if content == "" {
-			continue
-		}
-		words := strings.Fields(content)
-		if len(words) > 6 {
-			words = words[:6]
-		}
-		var keep []string
-		for _, w := range words {
-			w = strings.Trim(w, "\"',.;:!?()[]")
-			if w != "" && !strings.ContainsAny(w, "{}[]|<>") {
-				keep = append(keep, w)
+		content := ""
+		if str(m["type"]) == "user" {
+			if msg, ok := m["message"].(map[string]any); ok {
+				content = str(msg["content"])
 			}
 		}
-		if len(keep) >= 3 {
-			return strings.Join(keep, " ")
+		if content == "" && fallback == "" {
+			content = str(m["content"])
+			if content != "" {
+				fallback = words(content)
+				continue
+			}
 		}
+		if content != "" {
+			if w := words(content); w != "" {
+				return w
+			}
+		}
+	}
+	return fallback
+}
+
+func words(content string) string {
+	ws := strings.Fields(content)
+	if len(ws) > 6 {
+		ws = ws[:6]
+	}
+	var keep []string
+	for _, w := range ws {
+		w = strings.Trim(w, "\"',.;:!?()[]")
+		if w != "" && !strings.ContainsAny(w, "{}[]|<>") {
+			keep = append(keep, w)
+		}
+	}
+	if len(keep) >= 3 {
+		return strings.Join(keep, " ")
 	}
 	return ""
 }
@@ -371,10 +395,10 @@ func searchWords(raw []byte) string {
 func (e *env) waitFixtureVisible() {
 	deadline := time.Now().Add(120 * time.Second)
 	for {
-		env, isErr, msg := e.mcp.call("search_sessions", map[string]any{"query": e.searchTerm, "n_hits": 20})
-		if !isErr {
-			if n := num(mapGet(env, "result_count")); n > 0 {
-				hits := arr(mapGet(env, "results"))
+		data, terr := e.mcp.call("search_sessions", map[string]any{"query": e.searchTerm, "n_hits": 20})
+		if terr.code == "" {
+			if n := num(mapGet(data, "result_count")); n > 0 {
+				hits := arr(mapGet(data, "results"))
 				e.searchHit, _ = hits[0].(map[string]any)
 				sess, _ := e.searchHit["session"].(map[string]any)
 				e.tr.step("boot", "fixture visible: search %q result_count=%d first session=%s",
@@ -383,7 +407,7 @@ func (e *env) waitFixtureVisible() {
 				return
 			}
 		} else {
-			e.tr.step("boot", "search_sessions not ready: %s", msg)
+			e.tr.step("boot", "search_sessions not ready: %s", terr.message)
 		}
 		if time.Now().After(deadline) {
 			e.tr.step("boot", "fixture never became searchable within 120s")
@@ -393,25 +417,28 @@ func (e *env) waitFixtureVisible() {
 	}
 }
 
-// mineFilePath pulls a file_path out of the first pushed source's raw, for
-// the file_attention half of (e); empty when the source names none.
+// mineFilePath pulls a file_path out of the pushed sources' raw, for the
+// file_attention half of (e); empty when none names one.
 func (e *env) mineFilePath() {
 	zr, err := zstd.NewReader(nil)
 	if err != nil {
 		return
 	}
 	defer zr.Close()
-	zst := strings.TrimSuffix(e.pushed[0].manifestPath, ".json") + ".jsonl.zst"
-	comp, err := os.ReadFile(zst)
-	if err != nil {
-		return
-	}
-	raw, err := zr.DecodeAll(comp, nil)
-	if err != nil {
-		return
-	}
-	if m := regexp.MustCompile(`"file_path"\s*:\s*"([^"]+)"`).FindSubmatch(raw); m != nil {
-		e.faPath = string(m[1])
+	for _, p := range e.pushed {
+		zst := strings.TrimSuffix(p.manifestPath, ".json") + ".jsonl.zst"
+		comp, err := os.ReadFile(zst)
+		if err != nil {
+			continue
+		}
+		raw, err := zr.DecodeAll(comp, nil)
+		if err != nil {
+			continue
+		}
+		if m := regexp.MustCompile(`"file_path"\s*:\s*"([^"]+)"`).FindSubmatch(raw); m != nil {
+			e.faPath = string(m[1])
+			return
+		}
 	}
 }
 
@@ -426,19 +453,21 @@ func (e *env) setBase(base string) {
 }
 
 // mcpCall wraps call for the checks: it records the exchange and returns the
-// envelope; a failure marks the check and is recorded.
-func (e *env) mcpCall(c *check, cl *mcpClient, tool string, args map[string]any) map[string]any {
-	envd, isErr, msg := cl.call(tool, args)
+// payload map (nil when the tool refused or the transport failed) plus the
+// refusal. A transport failure marks the check; a refusal is the tool's
+// answer and the caller judges it.
+func (e *env) mcpCall(c *check, cl *mcpClient, tool string, args map[string]any) (map[string]any, toolErr) {
+	data, terr := cl.call(tool, args)
 	ab := abbrevArgs(args)
-	if isErr {
-		e.tr.step(c.letter, "tools/call %s %s -> error: %s", tool, ab, msg)
-		if envd == nil {
-			c.failf("%s failed: %s", tool, msg)
+	if terr.code != "" {
+		e.tr.step(c.letter, "tools/call %s %s -> %s: %s", tool, ab, terr.code, terr.message)
+		if terr.code == "transport" {
+			c.failf("%s failed: %s", tool, terr.message)
 		}
-		return envd
+		return data, terr
 	}
-	e.tr.step(c.letter, "tools/call %s %s -> %s", tool, ab, jsonOne(envd, mcpRecordCap))
-	return envd
+	e.tr.step(c.letter, "tools/call %s %s -> %s", tool, ab, jsonOne(data, mcpRecordCap))
+	return data, terr
 }
 
 func abbrevArgs(args map[string]any) string {
@@ -471,19 +500,21 @@ func otlpBody() []byte {
 	const traceID = "11223344556677889900112233445566"
 	const chatSpan = "aabbccddeeff0001"
 	const toolSpan = "aabbccddeeff0002"
-	var start uint64 = 1_792_000_000_000_000_000 // fixed, in ns
-	end := start + 3_000_000_000
-	span := func(id, parent, name, op string, extra map[string]any, in, out uint64, st, en uint64) map[string]any {
-		attrs := map[string]any{
-			"gen_ai.conversation.id": otlpConv,
-			"gen_ai.operation.name":  op,
+	// OTLP/JSON: attributes are a repeated KeyValue; 64-bit times are decimal
+	// strings, the shape the spec writes and protojson parses.
+	kv := func(k string, v any) map[string]any { return map[string]any{"key": k, "value": v} }
+	span := func(id, parent, name, op string, extra []map[string]any, in, out int, st, en string) map[string]any {
+		attrs := []any{
+			kv("gen_ai.conversation.id", map[string]any{"stringValue": otlpConv}),
+			kv("gen_ai.operation.name", map[string]any{"stringValue": op}),
 		}
-		for k, v := range extra {
-			attrs[k] = v
+		for _, a := range extra {
+			attrs = append(attrs, a)
 		}
 		if in > 0 {
-			attrs["gen_ai.usage.input_tokens"] = int(in)
-			attrs["gen_ai.usage.output_tokens"] = int(out)
+			attrs = append(attrs,
+				kv("gen_ai.usage.input_tokens", map[string]any{"intValue": strconv.Itoa(in)}),
+				kv("gen_ai.usage.output_tokens", map[string]any{"intValue": strconv.Itoa(out)}))
 		}
 		m := map[string]any{
 			"traceId":           traceID,
@@ -500,18 +531,25 @@ func otlpBody() []byte {
 		}
 		return m
 	}
+	const st = "1792000000000000000" // fixed, in ns
+	const mid = "1792000003000000000"
+	const en = "1792000004000000000"
 	body := map[string]any{
 		"resourceSpans": []any{map[string]any{
 			"resource": map[string]any{"attributes": []any{
-				map[string]any{"key": "service.name", "value": map[string]any{"stringValue": "e2e-otlp"}},
+				kv("service.name", map[string]any{"stringValue": "e2e-otlp"}),
 			}},
 			"scopeSpans": []any{map[string]any{
 				"scope": map[string]any{"name": "e2e", "version": "1"},
 				"spans": []any{
 					span(chatSpan, "", otlpWord, "chat",
-						map[string]any{"gen_ai.request.model": otlpModel}, 1234, 567, start, end),
+						[]map[string]any{kv("gen_ai.request.model", map[string]any{"stringValue": otlpModel})},
+						1234, 567, st, mid),
 					span(toolSpan, chatSpan, "read_file", "execute_tool",
-						map[string]any{"gen_ai.tool.name": "read_file", "gen_ai.tool.call.id": "call_e2e_1"}, 5, 7, end, end+1_000_000_000),
+						[]map[string]any{
+							kv("gen_ai.tool.name", map[string]any{"stringValue": "read_file"}),
+							kv("gen_ai.tool.call.id", map[string]any{"stringValue": "call_e2e_1"}),
+						}, 5, 7, mid, en),
 				},
 			}},
 		}},
