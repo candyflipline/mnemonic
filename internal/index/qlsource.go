@@ -147,11 +147,12 @@ func eventCells(cols []ql.Column) ([]func(*Part, *Row, int) (ql.Value, error), e
 }
 
 // eventColumn answers one events column from the light row, the doc section
-// or the member source. The heavy ones read the heavy record; their
-// derivations are best effort over payload_json and token_usage_json, the
-// fields the parsers read them from at parse time. The old events table held
-// them NOT NULL with the parse's zero fill, so an absent value reads "", 0 or
-// [], never null (pinned against the oracle on the arena fixture).
+// or the member source. model, request_id, trace_id, latency_ms and the
+// token counts ride the light row since the sections lane extended it: the
+// parse stamps them the way the old events table was filled, so the column is
+// the parse's value, not a payload re-derivation. An absent value reads "", 0
+// or [], never null — the old columns were NOT NULL (pinned against the
+// oracle on the arena fixture).
 var eventColumn = map[string]func(*Part, *Row, int) (ql.Value, error){
 	"event_uid":              func(_ *Part, r *Row, _ int) (ql.Value, error) { return str(r.UID) },
 	"session_id":             func(_ *Part, r *Row, _ int) (ql.Value, error) { return str(r.Session) },
@@ -195,12 +196,12 @@ var eventColumn = map[string]func(*Part, *Row, int) (ql.Value, error){
 	"event_ordinal":       func(st *Part, _ *Row, d int) (ql.Value, error) { return num(int64(st.ordinal(d))) },
 	"payload_json":        heavyColumn(0),
 	"token_usage_json":    heavyColumn(1),
-	"model":               modelCell,
-	"request_id":          heavyString("requestId"),
-	"trace_id":            heavyString("requestId"),
-	"latency_ms":          heavyNumber("durationMs", "duration_ms"),
-	"input_tokens":        heavyUsage("input_tokens", "prompt_tokens", "total_input_tokens"),
-	"output_tokens":       heavyUsage("output_tokens", "completion_tokens", "total_output_tokens"),
+	"model":               func(_ *Part, r *Row, _ int) (ql.Value, error) { return str(r.Model) },
+	"request_id":          func(_ *Part, r *Row, _ int) (ql.Value, error) { return str(r.RequestID) },
+	"trace_id":            func(_ *Part, r *Row, _ int) (ql.Value, error) { return str(r.TraceID) },
+	"latency_ms":          func(_ *Part, r *Row, _ int) (ql.Value, error) { return num(int64(r.LatencyMs)) },
+	"input_tokens":        func(_ *Part, r *Row, _ int) (ql.Value, error) { return num(int64(r.InputTokens)) },
+	"output_tokens":       func(_ *Part, r *Row, _ int) (ql.Value, error) { return num(int64(r.OutputTokens)) },
 	"content_types":       contentTypesCell,
 	"token_usage_buckets": func(_ *Part, r *Row, _ int) (ql.Value, error) { return uintMap(r.Buckets) },
 	"token_usage_native_units": func(_ *Part, r *Row, _ int) (ql.Value, error) {
@@ -228,28 +229,6 @@ func heavyColumn(i int) func(*Part, *Row, int) (ql.Value, error) {
 	}
 }
 
-// heavyString is the first payload key holding a string, "" when none does.
-// A key may descend objects with dots ("message.model").
-func heavyString(keys ...string) func(*Part, *Row, int) (ql.Value, error) {
-	return func(st *Part, r *Row, _ int) (ql.Value, error) {
-		p, _, err := st.heavyOf(r)
-		if err != nil {
-			return ql.StringValue(""), err
-		}
-		var m map[string]json.RawMessage
-		if json.Unmarshal([]byte(p), &m) != nil {
-			return ql.StringValue(""), nil
-		}
-		if v, ok := lookupPath(m, keys); ok {
-			var s string
-			if json.Unmarshal(v, &s) == nil {
-				return ql.StringValue(s), nil
-			}
-		}
-		return ql.StringValue(""), nil
-	}
-}
-
 // lookupPath is the first key present in m, dotted keys descending objects.
 func lookupPath(m map[string]json.RawMessage, keys []string) (json.RawMessage, bool) {
 	for _, k := range keys {
@@ -274,37 +253,23 @@ func lookupPath(m map[string]json.RawMessage, keys []string) (json.RawMessage, b
 	return nil, false
 }
 
-// modelCell is events.model, the model the parsers put in the old column:
-// the record's or its message object's model string, run through
-// shared.CanonicalizeModel's derivation.
-func modelCell(st *Part, r *Row, _ int) (ql.Value, error) {
-	v, err := heavyString("model", "model_name", "message.model")(st, r, 0)
-	if err != nil {
-		return v, err
-	}
-	s, _ := v.Any().(string)
-	return ql.StringValue(canonicalModel(r.Harness, s)), nil
-}
-
-// canonicalModel is shared.CanonicalizeModel's derivation at 59796bc, which
-// filled the old events.model at parse time.
-func canonicalModel(harness, s string) string {
-	m := strings.ToLower(strings.TrimSpace(s))
-	if m == "" {
-		return ""
-	}
-	m = strings.ReplaceAll(m, " ", "-")
-	if harness == "codex" && m == "codex" {
-		return "gpt-5.3-codex-xhigh"
-	}
-	return m
-}
-
-// contentTypesCell is events.content_types, which the claude-code parse
-// derived as the distinct sorted type of every item of the record's
-// message.content array. Harnesses whose parse filled it another way (codex
-// fixed it per event kind) read [] here; a difference listed, not hidden.
+// contentTypesCell is events.content_types, which the parsers filled at
+// parse time two ways: shared.ExtractContentTypes over a message content
+// array — message.content (claude-code scalar messages) or the item's own
+// content (codex messages, whose heavy record is the item) — or the fixed
+// stamp [payload_type] on claude-code block rows (text, tool_use,
+// tool_result). The engine's light row does not carry the slice and row.go
+// is not mine, so the column is re-derived from the row and the heavy
+// record. Thinking blocks and every harness whose parse stamped another way
+// (cursor kinds) read [] here where the old column held null; a difference
+// listed, not hidden.
 func contentTypesCell(st *Part, r *Row, _ int) (ql.Value, error) {
+	if r.Harness == "claude-code" && r.PayloadType != "" &&
+		(r.EventKind == "message" || r.EventKind == "tool_call" || r.EventKind == "tool_result") {
+		if r.PayloadType != "message" {
+			return ql.StringsValue([]string{r.PayloadType}), nil
+		}
+	}
 	p, _, err := st.heavyOf(r)
 	if err != nil {
 		return ql.StringsValue(nil), err
@@ -313,13 +278,26 @@ func contentTypesCell(st *Part, r *Row, _ int) (ql.Value, error) {
 	if json.Unmarshal([]byte(p), &m) != nil {
 		return ql.StringsValue(nil), nil
 	}
-	msg, ok := lookupPath(m, []string{"message"})
-	if !ok {
-		return ql.StringsValue(nil), nil
+	bases := []string{"message"}
+	if r.Harness == "codex" {
+		bases = []string{"content"}
 	}
+	for _, base := range bases {
+		v, ok := m[base]
+		if !ok {
+			continue
+		}
+		return extractContentTypes(v), nil
+	}
+	return ql.StringsValue(nil), nil
+}
+
+// extractContentTypes is shared.ExtractContentTypes over a content array:
+// the distinct sorted non-empty type of every item.
+func extractContentTypes(content json.RawMessage) ql.Value {
 	var items []json.RawMessage
-	if json.Unmarshal(msg, &items) != nil {
-		return ql.StringsValue(nil), nil
+	if json.Unmarshal(content, &items) != nil {
+		return ql.StringsValue(nil)
 	}
 	seen := map[string]bool{}
 	var out []string
@@ -335,54 +313,7 @@ func contentTypesCell(st *Part, r *Row, _ int) (ql.Value, error) {
 		}
 	}
 	sort.Strings(out)
-	return ql.StringsValue(out), nil
-}
-
-// heavyNumber is the first payload key holding a number, 0 when none does.
-func heavyNumber(keys ...string) func(*Part, *Row, int) (ql.Value, error) {
-	return func(st *Part, r *Row, _ int) (ql.Value, error) {
-		p, _, err := st.heavyOf(r)
-		if err != nil {
-			return ql.IntValue(0), err
-		}
-		var m map[string]json.RawMessage
-		if json.Unmarshal([]byte(p), &m) != nil {
-			return ql.IntValue(0), nil
-		}
-		for _, k := range keys {
-			if v, ok := m[k]; ok {
-				var n float64
-				if json.Unmarshal(v, &n) == nil {
-					return ql.IntValue(int64(n)), nil
-				}
-			}
-		}
-		return ql.IntValue(0), nil
-	}
-}
-
-// heavyUsage is the first token_usage_json key holding a whole number, 0
-// when none does.
-func heavyUsage(keys ...string) func(*Part, *Row, int) (ql.Value, error) {
-	return func(st *Part, r *Row, _ int) (ql.Value, error) {
-		_, t, err := st.heavyOf(r)
-		if err != nil {
-			return ql.IntValue(0), err
-		}
-		var m map[string]json.RawMessage
-		if json.Unmarshal([]byte(t), &m) != nil {
-			return ql.IntValue(0), nil
-		}
-		for _, k := range keys {
-			if v, ok := m[k]; ok {
-				var n int64
-				if json.Unmarshal(v, &n) == nil {
-					return ql.IntValue(n), nil
-				}
-			}
-		}
-		return ql.IntValue(0), nil
-	}
+	return ql.StringsValue(out)
 }
 
 func uintMap(s string) (ql.Value, error) {
