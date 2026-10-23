@@ -97,6 +97,9 @@ func run(srcDir, root, mode string) error {
 			jobs = append(jobs, job{s, abs})
 		}
 	}
+	if len(jobs) == 0 {
+		return fmt.Errorf("-src %q holds no claude/*.jsonl or codex/*.jsonl sources", srcDir)
+	}
 	errs := make([]error, len(jobs))
 	var failedAt atomic.Int64
 	failedAt.Store(math.MaxInt64)

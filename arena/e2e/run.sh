@@ -5,15 +5,16 @@
 # everything else on stderr.
 # Exits non-zero if any fails. The caller holds heavy.lock:
 #   lockf -k /Users/user/xstock-scratch/heavy.lock nice -n 15 env GOMAXPROCS=4 GOMEMLIMIT=900MiB arena/e2e/run.sh
-# KEEP=1 keeps the temp dir; ONLY="f g" runs those steps. MAX_CALL_S (default 5) is the keeper's -max-call in seconds. ARENA and SRC override the fixture and the
-# transcripts the seed reads. BIN_DIR=<dir holding a, e2e, seed> skips the build. LOG_DIR keeps the logs
+# KEEP=1 keeps the temp dir; ONLY="f g" runs those steps. MAX_CALL_S (default 5) is the keeper's -max-call in seconds. ARENA overrides the fixture; SRC (required)
+# names the transcripts the seed reads. BIN_DIR=<dir holding a, e2e, seed> skips the build. LOG_DIR keeps the logs
 # and du.txt outside the temp dir. ENVLABEL names the host and corpus in the 2e line. WAIT_UP_S,
 # WAIT_EXIT_S and PREWARM_WAIT_S (seconds) and E2E_TIMEOUT (a duration) stretch the waits for a big corpus.
 set -u -o pipefail
 exec 3>&1 1>&2
 
 ARENA=${ARENA:-/Users/user/loyal/mnemonic-harness/arena-fixture}
-SRC=${SRC:-/Users/user/.claude/jobs/47d8265e/tmp/sample2}
+SRC=${SRC:-}
+[ -n "$SRC" ] || { echo "set SRC=<dir of claude/codex sources>" >&2; exit 2; }
 BUILD_LOCK=${BUILD_LOCK:-/Users/user/xstock-scratch/build.lock}
 export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-900MiB}
 TENANT=e2e

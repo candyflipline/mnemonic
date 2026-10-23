@@ -134,27 +134,31 @@ func highestGen(ctx context.Context, s obj.Store, tenant string) (Gen, error) {
 // Latest reads the manifest with the highest (gen, seq); ok is false when the
 // tenant has none.
 func Latest(ctx context.Context, s obj.ReadStore, tenant string) (m Manifest, ok bool, err error) {
-	es, err := s.List(ctx, manifestPrefix(tenant))
-	if err != nil {
+	g, q, ok, err := Newest(ctx, s, tenant)
+	if !ok || err != nil {
 		return m, false, err
-	}
-	var g Gen
-	var q Seq
-	var key obj.Key
-	for _, e := range es {
-		eg, eq, err := parseManifestKey(tenant, e.Key)
-		if err != nil {
-			return m, false, err
-		}
-		if key == "" || eg > g || (eg == g && eq > q) {
-			g, q, key = eg, eq, e.Key
-		}
-	}
-	if key == "" {
-		return m, false, nil
 	}
 	m, err = Load(ctx, s, tenant, g, q)
 	return m, err == nil, err
+}
+
+// Newest lists m/ and returns the highest (gen, seq) without reading it; ok is
+// false when the tenant has none.
+func Newest(ctx context.Context, s obj.ReadStore, tenant string) (g Gen, q Seq, ok bool, err error) {
+	es, err := s.List(ctx, manifestPrefix(tenant))
+	if err != nil {
+		return 0, 0, false, err
+	}
+	for _, e := range es {
+		eg, eq, err := parseManifestKey(tenant, e.Key)
+		if err != nil {
+			return 0, 0, false, err
+		}
+		if !ok || eg > g || (eg == g && eq > q) {
+			g, q, ok = eg, eq, true
+		}
+	}
+	return g, q, ok, nil
 }
 
 // Load reads m/<gen>-<seq>.json. A manifest is immutable, so callers may cache

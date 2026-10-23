@@ -11,7 +11,6 @@ import (
 	"hash/fnv"
 	"io"
 	"io/fs"
-	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -60,7 +59,9 @@ type parsed struct {
 // ckpt is parsed plus where this disk keeps the rows. It is written by rename
 // after both logs are fsynced, so the logs are valid up to LightLen and
 // HeavyLen whatever happened after. Restored marks logs re-framed from a
-// part: they hold only that part's winners.
+// part: they hold only that part's winners. An empty WindowSHA marks logs
+// that may miss rows: it matches no raw, so the next ingest parses the source
+// from byte 0, and a part built from them is named apart from a full parse.
 type ckpt struct {
 	parsed
 	Gen      int   `json:"gen"`
@@ -200,50 +201,82 @@ func windowSHA(raw *os.File, end int64) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// ingestSource brings one source's logs up to its raw, parsing only the bytes
-// past its checkpoint when the raw still extends it, and reports what it did.
-// force parses from byte 0 into the next generation even when the raw extends
-// the checkpoint.
-func ingestSource(root, store string, s source, force bool) (Outcome, error) {
-	key := sourceKey(s.key)
-	parser, ok := normalize.For(s.src.Harness)
-	if !ok {
-		return Unchanged, nil
-	}
+var errMoved = errors.New("raw stopped extending its checkpoint after this cycle planned on it")
+
+func openRaw(root string, s source) (*os.File, int64, error) {
 	raw, err := os.Open(s.key.Raw(root))
 	if err != nil {
-		return 0, err
+		return nil, 0, err
 	}
-	defer raw.Close()
 	fi, err := raw.Stat()
 	if err != nil {
-		return 0, err
+		raw.Close()
+		return nil, 0, err
 	}
 	end := s.src.ZstSize
 	if end <= 0 || end > fi.Size() {
 		end = fi.Size()
 	}
-	want := ckpt{parsed: parsed{Key: key, Parser: normalize.Version, Harness: s.src.Harness, SourceName: s.src.SourceName,
+	return raw, end, nil
+}
+
+func wantCkpt(s source) ckpt {
+	return ckpt{parsed: parsed{Key: sourceKey(s.key), Parser: normalize.Version, Harness: s.src.Harness, SourceName: s.src.SourceName,
 		SourceFile: s.src.Path, Author: s.key.Author, Machine: s.key.Machine, Layout: logLayout,
 		Path: filepath.ToSlash(s.key.Events("")) /* lake path order */}}
+}
+
+func sourceMeta(root string, s source) (normalize.SourceMeta, error) {
 	book, err := readBook(s.key.Roots(root))
 	if err != nil {
-		return 0, fmt.Errorf("roots: %w", err)
+		return normalize.SourceMeta{}, fmt.Errorf("roots: %w", err)
 	}
-	meta := normalize.SourceMeta{SourceName: s.src.SourceName, Harness: s.src.Harness, SourceFile: s.src.Path, Roots: book}
-	prev, has := readCkpt(store, key)
-	resumed := false
-	if has && !force && normalize.Resumable(prev.State, meta) && prev.Parser == want.Parser && prev.Harness == want.Harness && prev.SourceName == want.SourceName &&
-		prev.SourceFile == want.SourceFile && prev.Layout == want.Layout && prev.ZstSize <= end {
-		if sum, err := windowSHA(raw, prev.ZstSize); err == nil && sum == prev.WindowSHA {
-			resumed = true
-			if prev.ZstSize < end {
-				magic := make([]byte, 4)
-				if _, err := raw.ReadAt(magic, prev.ZstSize); err != nil || !bytes.Equal(magic, zstdMagic) {
-					resumed = false
-				}
-			}
+	return normalize.SourceMeta{SourceName: s.src.SourceName, Harness: s.src.Harness, SourceFile: s.src.Path, Roots: book}, nil
+}
+
+// extends reports whether raw up to end still holds the bytes prev was parsed
+// from, under the same parser, identity and roots, so only the bytes past it parse.
+func extends(raw *os.File, end int64, want, prev ckpt, meta normalize.SourceMeta) bool {
+	if !normalize.Resumable(prev.State, meta) || prev.Parser != want.Parser || prev.Harness != want.Harness || prev.SourceName != want.SourceName ||
+		prev.SourceFile != want.SourceFile || prev.Layout != want.Layout || prev.ZstSize > end {
+		return false
+	}
+	if sum, err := windowSHA(raw, prev.ZstSize); err != nil || sum != prev.WindowSHA {
+		return false
+	}
+	if prev.ZstSize < end {
+		magic := make([]byte, 4)
+		if _, err := raw.ReadAt(magic, prev.ZstSize); err != nil || !bytes.Equal(magic, zstdMagic) {
+			return false
 		}
+	}
+	return true
+}
+
+// ingestSource brings one source's logs up to its raw, parsing only the bytes
+// past its checkpoint when the raw still extends it, and reports what it did.
+// pinned refuses to parse from byte 0, because this cycle marked no restored
+// component-mate for it.
+func ingestSource(root, store string, s source, pinned bool) (Outcome, error) {
+	key := sourceKey(s.key)
+	parser, ok := normalize.For(s.src.Harness)
+	if !ok {
+		return Unchanged, nil
+	}
+	raw, end, err := openRaw(root, s)
+	if err != nil {
+		return 0, err
+	}
+	defer raw.Close()
+	meta, err := sourceMeta(root, s)
+	if err != nil {
+		return 0, err
+	}
+	want := wantCkpt(s)
+	prev, has := readCkpt(store, key)
+	resumed := has && extends(raw, end, want, prev, meta)
+	if has && !resumed && pinned {
+		return 0, errMoved
 	}
 	if resumed && prev.ZstSize == end {
 		return Unchanged, nil
@@ -468,18 +501,17 @@ func Ingest(root, store string, quiet time.Duration, settleAll bool) (IngestStat
 			before[c.Key] = c
 		}
 	}
-	outcomes := parseSources(root, store, sources, nil)
-	if force := restoredWithReparsed(store, sources, before, outcomes); len(force) > 0 {
-		var again []source
-		for _, s := range sources {
-			if force[sourceKey(s.key)] {
-				again = append(again, s)
+	force, pinned := restoredWithReparsed(root, sources, before)
+	for k := range force {
+		if c := before[k]; c.WindowSHA != "" {
+			c.WindowSHA = ""
+			b, _ := json.Marshal(c)
+			if err := writeFileAtomic(ckptPath(store, k), b); err != nil {
+				return IngestStats{}, err
 			}
 		}
-		for k, o := range parseSources(root, store, again, force) {
-			outcomes[k] = o
-		}
 	}
+	outcomes := parseSources(root, store, sources, pinned)
 	var stats IngestStats
 	for _, o := range outcomes {
 		stats[o]++
@@ -489,7 +521,7 @@ func Ingest(root, store string, quiet time.Duration, settleAll bool) (IngestStat
 
 // parseSources runs ingestSource over sources on GOMAXPROCS workers and
 // returns each outcome by source key; a source that failed has none.
-func parseSources(root, store string, sources []source, force map[string]bool) map[string]Outcome {
+func parseSources(root, store string, sources []source, pinned map[string]bool) map[string]Outcome {
 	outcomes := make(map[string]Outcome, len(sources))
 	var mu sync.Mutex
 	work := make(chan source)
@@ -499,7 +531,7 @@ func parseSources(root, store string, sources []source, force map[string]bool) m
 		go func() {
 			defer wg.Done()
 			for s := range work {
-				o, err := ingestSource(root, store, s, force[sourceKey(s.key)])
+				o, err := ingestSource(root, store, s, pinned[sourceKey(s.key)])
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "ingest: %s: %v\n", s.mpath, err)
 					continue
@@ -518,39 +550,66 @@ func parseSources(root, store string, sources []source, force map[string]bool) m
 	return outcomes
 }
 
-// restoredWithReparsed returns the keys of the restored sources that share a
-// component with a reparsed one. Their logs hold only the winners of the part
-// they came from, so once a winner may be gone from raw they parse again.
-// before holds the checkpoints from ahead of the parse, whose sessions still
-// link a reparsed source to the component it left.
-func restoredWithReparsed(store string, sources []source, before map[string]ckpt, outcomes map[string]Outcome) map[string]bool {
-	if !slices.Contains(slices.Collect(maps.Values(outcomes)), Reparsed) {
-		return nil
-	}
-	now := make([]ckpt, 0, len(sources))
-	tokens := make([][]string, 0, len(sources))
+// restoredWithReparsed decides, before any checkpoint of the cycle is
+// written, which restored sources parse again: those sharing a component with
+// a source that parses from byte 0. Their logs hold only the winners of the
+// part they came from, so once a winner may be gone from raw they parse again.
+// The components are the checkpoints' sessions, which link every source that
+// competed in a restored part. pinned holds the other members of components
+// with a restored source: the decision relies on them not starting over.
+func restoredWithReparsed(root string, sources []source, before map[string]ckpt) (force, pinned map[string]bool) {
+	var members []source
+	var tokens [][]string
 	for _, s := range sources {
-		c, ok := readCkpt(store, sourceKey(s.key))
-		if !ok {
+		if c, ok := before[sourceKey(s.key)]; ok {
+			members = append(members, s)
+			tokens = append(tokens, c.Sessions)
+		}
+	}
+	comp := components(tokens)
+	size, restored := map[int]int{}, map[int]bool{}
+	for i, s := range members {
+		size[comp[i]]++
+		restored[comp[i]] = restored[comp[i]] || before[sourceKey(s.key)].Restored
+	}
+	reparses := map[int]bool{}
+	pinned = map[string]bool{}
+	for i, s := range members {
+		r := comp[i]
+		if size[r] < 2 || !restored[r] {
 			continue
 		}
-		now = append(now, c)
-		tokens = append(tokens, slices.Concat(c.Sessions, before[c.Key].Sessions, []string{"\x00" + c.Key}))
-	}
-	root := components(tokens)
-	reparsed := map[int]bool{}
-	for i, c := range now {
-		if outcomes[c.Key] == Reparsed {
-			reparsed[root[i]] = true
+		if _, ok := normalize.For(s.src.Harness); !ok {
+			continue
+		}
+		if startsOver(root, s, before[sourceKey(s.key)]) {
+			reparses[r] = true
+		} else {
+			pinned[sourceKey(s.key)] = true
 		}
 	}
-	force := map[string]bool{}
-	for i, c := range now {
-		if c.Restored && reparsed[root[i]] {
-			force[c.Key] = true
+	force = map[string]bool{}
+	for i, s := range members {
+		k := sourceKey(s.key)
+		if reparses[comp[i]] && before[k].Restored {
+			force[k] = true
+			delete(pinned, k)
 		}
 	}
-	return force
+	return force, pinned
+}
+
+func startsOver(root string, s source, prev ckpt) bool {
+	raw, end, err := openRaw(root, s)
+	if err != nil {
+		return true
+	}
+	defer raw.Close()
+	meta, err := sourceMeta(root, s)
+	if err != nil {
+		return true
+	}
+	return !extends(raw, end, wantCkpt(s), prev, meta)
 }
 
 // publish plans the parts of the sources' checkpoints, builds the missing ones
