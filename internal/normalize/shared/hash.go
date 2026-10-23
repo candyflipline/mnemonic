@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
@@ -318,6 +319,9 @@ func hashIdentityField(h hash.Hash, value []byte) {
 // semanticPayloadParts strips derived payload fields and recovers the folded
 // tool identity from a raw payload_json, like semantic_payload_parts.
 func semanticPayloadParts(payloadJSON string) (string, []string, uint32) {
+	if payload, fields, occurrence, ok := canonicalSemanticPayloadParts(payloadJSON); ok {
+		return payload, fields, occurrence
+	}
 	emptyFields := make([]string, len(toolIdentityFields))
 	parsed, err := DecodeJSON([]byte(payloadJSON))
 	if err != nil {
@@ -372,4 +376,66 @@ func encodeIdentityValue(v JSON) string {
 	default:
 		return Compact(t)
 	}
+}
+
+var semanticPayloadDropped = func() map[string]bool {
+	m := map[string]bool{"moraine_tool_io": true}
+	for _, f := range semanticPayloadExcludedFields {
+		m[f] = true
+	}
+	return m
+}()
+
+func canonicalSemanticPayloadParts(payloadJSON string) (string, []string, uint32, bool) {
+	if !utf8.ValidString(payloadJSON) {
+		return "", nil, 0, false
+	}
+	members, ok := objectMembers(payloadJSON)
+	if !ok {
+		return "", nil, 0, false
+	}
+	toolFields := make([]string, len(toolIdentityFields))
+	var occurrence uint32
+	dropped := 0
+	for _, m := range members {
+		if !semanticPayloadDropped[m.key] {
+			continue
+		}
+		dropped++
+		switch m.key {
+		case semanticOccurrenceField:
+			if n, ok := AsNumber(json.Number(m.value)); ok && n <= math.MaxUint32 {
+				occurrence = uint32(n)
+			}
+		case "moraine_tool_io":
+			tool, err := DecodeJSON([]byte(m.value))
+			if err != nil {
+				return "", nil, 0, false
+			}
+			if toolObj, isObj := AsObject(tool); isObj {
+				for i, field := range toolIdentityFields {
+					toolFields[i] = encodeIdentityValue(toolObj[field])
+				}
+			}
+		}
+	}
+	if dropped == 0 {
+		return payloadJSON, toolFields, 0, true
+	}
+	var b strings.Builder
+	b.Grow(len(payloadJSON))
+	b.WriteByte('{')
+	first := true
+	for _, m := range members {
+		if semanticPayloadDropped[m.key] {
+			continue
+		}
+		if !first {
+			b.WriteByte(',')
+		}
+		first = false
+		b.WriteString(payloadJSON[m.start:m.end])
+	}
+	b.WriteByte('}')
+	return b.String(), toolFields, occurrence, true
 }
