@@ -32,7 +32,7 @@ const (
 
 type rule struct {
 	id          string
-	re          *regexp.Regexp
+	m           matcher // extra patterns: regex-backed; builtins use matchers[i]
 	keywords    [][]byte
 	secretGroup int
 	gate        entropyGate
@@ -113,16 +113,14 @@ var builtinRules = []ruleSpec{
 // Extra patterns get the ids upstream would give them (extra-pattern-1, ...)
 // and, having no keywords, are always scanned rather than prefiltered.
 func New(extraPatterns []string) (*Redactor, error) {
+	if len(matchers) != len(builtinRules) {
+		panic(fmt.Sprintf("redact: %d matchers for %d builtin rules", len(matchers), len(builtinRules)))
+	}
 	r := &Redactor{}
 	for i := range builtinRules {
 		spec := &builtinRules[i]
-		re, err := regexp.Compile(spec.pattern)
-		if err != nil {
-			return nil, fmt.Errorf("failed to compile builtin redaction rule %s: %w", spec.id, err)
-		}
 		r.rules = append(r.rules, rule{
 			id:          spec.id,
-			re:          re,
 			keywords:    lowerKeywords(spec.keywords),
 			secretGroup: spec.secretGroup,
 			gate:        spec.gate,
@@ -137,7 +135,7 @@ func New(extraPatterns []string) (*Redactor, error) {
 		}
 		r.rules = append(r.rules, rule{
 			id:       fmt.Sprintf("extra-pattern-%d", i+1),
-			re:       re,
+			m:        regexMatcher(re, 0),
 			minLen:   1,
 			priority: len(builtinRules) + i,
 		})
@@ -391,14 +389,19 @@ func (r *Redactor) nonOverlappingSpans(text []byte) []redactionSpan {
 	}
 	ph := placeholderRanges(text)
 	var spans []redactionSpan
+	var raw [][2]int
 	for i := range r.rules {
 		if !cands[i] {
 			continue
 		}
 		ru := &r.rules[i]
-		for _, loc := range ru.re.FindAllSubmatchIndex(text, -1) {
-			g0, g1 := loc[2*ru.secretGroup], loc[2*ru.secretGroup+1]
-			if g0 < 0 || overlapsAny(ph, g0, g1) || !utf8.Valid(text[g0:g1]) {
+		m := ru.m
+		if i < len(matchers) {
+			m = matchers[i]
+		}
+		for _, sp := range m(text, raw[:0]) {
+			g0, g1 := sp[0], sp[1]
+			if overlapsAny(ph, g0, g1) || !utf8.Valid(text[g0:g1]) {
 				continue
 			}
 			if !r.shouldRedact(ru, text[g0:g1]) {
