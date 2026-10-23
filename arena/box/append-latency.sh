@@ -194,7 +194,7 @@ PYEOF
 import json, re, sys
 run, log, reply, pre, session = sys.argv[1:6]
 t = open(log, encoding="utf-8", errors="replace").read()
-m = re.search(r"Elapsed \(wall clock\) time [^:]*: (\S+)", t)
+m = re.search(r"Elapsed \(wall clock\) time[^\n]*: (\S+)", t)
 secs = 0.0
 for p in (m.group(1) if m else "").split(":"):
     secs = secs * 60 + float(p or 0)

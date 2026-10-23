@@ -66,7 +66,7 @@ for i in $(seq "$FIRST" "$((FIRST + RUNS - 1))"); do
 import re, sys
 run, path = sys.argv[1], sys.argv[2]
 t = open(path, encoding="utf-8", errors="replace").read()
-m = re.search(r"Elapsed \(wall clock\) time [^:]*: (\S+)", t)
+m = re.search(r"Elapsed \(wall clock\) time[^\n]*: (\S+)", t)
 wall = m.group(1) if m else ""
 parts = wall.split(":")
 secs = 0.0
