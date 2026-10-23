@@ -52,12 +52,14 @@ type indexMeta struct {
 }
 
 // member is one source a part holds the rows of; a doc's src is its index in
-// the part's members. Gen and the lengths stay only because deltaBase reads them.
+// the part's members. Gen and the lengths name one disk's logs, so only a hot
+// part carries them (deltaBase reads them); a cold part's bytes are the same
+// on every disk that parsed the same raw.
 type member struct {
 	parsed
-	Gen      int   `json:"gen"`
-	LightLen int64 `json:"light_len"`
-	HeavyLen int64 `json:"heavy_len"`
+	Gen      int   `json:"gen,omitempty"`
+	LightLen int64 `json:"light_len,omitempty"`
+	HeavyLen int64 `json:"heavy_len,omitempty"`
 }
 
 func memberOf(c ckpt) member {
@@ -97,8 +99,12 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 	}
 	win := map[string]*winner{}
 	members := make([]member, len(cks))
+	cold := !slices.ContainsFunc(cks, ckpt.hot)
 	for si, c := range cks {
 		members[si] = memberOf(c)
+		if cold {
+			members[si].Gen, members[si].LightLen, members[si].HeavyLen = 0, 0, 0
+		}
 		rows, err := loadSourceRows(store, si, c, 0)
 		if err != nil {
 			return fmt.Errorf("%s: %w", c.Key, err)
