@@ -34,8 +34,8 @@ func RemoteID(url string) (string, bool) {
 }
 
 type remote struct {
-	scheme, user, host, path string
-	scp                      bool
+	scheme, host, path string
+	userinfo, scp      bool
 }
 
 func splitRemote(url string) remote {
@@ -44,20 +44,34 @@ func splitRemote(url string) remote {
 		authority, path, _ := strings.Cut(rest, "/")
 		r := remote{scheme: scheme, path: path}
 		if i := strings.LastIndex(authority, "@"); i >= 0 {
-			r.user, authority = authority[:i], authority[i+1:]
+			r.userinfo, authority = true, authority[i+1:]
 		}
 		r.host = authority
 		return r
 	}
-	colon := strings.Index(url, ":")
+	colon := scpColon(url)
 	if colon > 0 && !strings.Contains(url[:colon], "/") {
 		r := remote{scp: true, host: url[:colon], path: url[colon+1:]}
 		if i := strings.LastIndex(r.host, "@"); i >= 0 {
-			r.user, r.host = r.host[:i], r.host[i+1:]
+			r.userinfo, r.host = true, r.host[i+1:]
 		}
 		return r
 	}
 	return remote{path: url}
+}
+
+func scpColon(url string) int {
+	off := 0
+	if i := strings.Index(url, "@"); i >= 0 && !strings.Contains(url[:i], "/") {
+		off = i + 1
+	}
+	if !strings.HasPrefix(url[off:], "[") {
+		return strings.Index(url, ":")
+	}
+	if j := strings.Index(url[off:], "]:"); j >= 0 {
+		return off + j + 1
+	}
+	return -1
 }
 
 func (r remote) String() string {
@@ -73,10 +87,10 @@ func (r remote) String() string {
 
 func StripUserinfo(url string) string {
 	r := splitRemote(url)
-	if r.user == "" {
+	if !r.userinfo {
 		return strings.TrimSpace(url)
 	}
-	r.user = ""
+	r.userinfo = false
 	return r.String()
 }
 
