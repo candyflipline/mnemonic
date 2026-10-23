@@ -121,10 +121,17 @@ original: winner selection is a max, so the winners alone give the same
 winners.
 
 That holds only while no source is reparsed. A re-framed log holds only its
-part's winners, so when a source is `Reparsed` (identity, window or parser
-mismatch) every `restored` member of its component, taken over the sessions it
-had before and after the parse, parses from raw into gen+1 too and counts
-`Reparsed`. A source parsed from raw clears `restored`.
+part's winners, so when a source will be `Reparsed` (identity, window or parser
+mismatch) every `restored` member of its component, taken over the
+checkpoints' sessions before the cycle, parses from raw into gen+1 too and
+counts `Reparsed`. Ingest decides this before it writes any checkpoint and
+clears each such member's `window_sha256` on disk first, so a cycle that
+fails after the reparsed source's checkpoint lands still reparses the members
+next time, and a part built from their logs meanwhile gets its own id. A
+source parsed from raw clears `restored`.
+
+Keeper deletes are safe only while the router, keeper and store clocks agree
+within `DeleteSlack/2 + MaxCall` (the retire comment in `arena/keeper/run.go`).
 
 Known limitation: while a source is hot (appended within `-quiet`), its
 component is not in a committed manifest at all, so a committed-only answer

@@ -137,6 +137,46 @@ func TestReparseAfterRestoreDoesNotResurrectALoser(t *testing.T) {
 	if stats != (IngestStats{0, 0, 0, 2}) {
 		t.Fatalf("ingest after rewriting the winner: %v, want [0 0 0 2]", stats)
 	}
+	if got, want := sharedSessionRows(t, b), map[string]int{"/p/s2.jsonl": 6}; !maps.Equal(got, want) {
+		t.Fatalf("rows of the shared session by source: %v, want %v", got, want)
+	}
+}
+
+func TestLoserParsesAgainAfterAFailedCycle(t *testing.T) {
+	session := fixtureSessionLines(t)
+	other := bytes.ReplaceAll(session, []byte(fixtureSession), []byte("11111111-d38e-4658-8650-854ffb5b626e"))
+	root := t.TempDir()
+	writeSources(t, root, map[string][]byte{"s1": bytes.Repeat(session, 20), "s2": bytes.Repeat(session, 20)})
+
+	a := t.TempDir()
+	if _, err := Ingest(root, a, time.Minute, true); err != nil {
+		t.Fatal(err)
+	}
+	ids, shas, blobs := packedParts(t, a)
+	b := t.TempDir()
+	restoreInto(t, b, ids, shas, blobs)
+
+	writeSources(t, root, map[string][]byte{"s1": bytes.Repeat(other, 20)})
+	blocked := logPath(b, "a__m__claude-code__s2", 1, "light")
+	if err := os.Mkdir(blocked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Ingest(root, b, time.Minute, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(blocked); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Ingest(root, b, time.Minute, true); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := sharedSessionRows(t, b), map[string]int{"/p/s2.jsonl": 6}; !maps.Equal(got, want) {
+		t.Fatalf("rows of the shared session by source: %v, want %v", got, want)
+	}
+}
+
+func sharedSessionRows(t *testing.T, b string) map[string]int {
+	t.Helper()
 	rows := map[string]int{}
 	parts, _, err := ListParts(b)
 	if err != nil {
@@ -158,7 +198,5 @@ func TestReparseAfterRestoreDoesNotResurrectALoser(t *testing.T) {
 		}
 		p.Close()
 	}
-	if want := map[string]int{"/p/s2.jsonl": 6}; !maps.Equal(rows, want) {
-		t.Fatalf("rows of the shared session by source: %v, want %v", rows, want)
-	}
+	return rows
 }
