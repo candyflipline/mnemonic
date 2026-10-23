@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
@@ -387,10 +386,7 @@ var semanticPayloadDropped = func() map[string]bool {
 }()
 
 func canonicalSemanticPayloadParts(payloadJSON string) (string, []string, uint32, bool) {
-	if !utf8.ValidString(payloadJSON) {
-		return "", nil, 0, false
-	}
-	members, ok := objectMembers(payloadJSON)
+	members, ok := canonicalMembers(payloadJSON)
 	if !ok {
 		return "", nil, 0, false
 	}
@@ -422,20 +418,5 @@ func canonicalSemanticPayloadParts(payloadJSON string) (string, []string, uint32
 	if dropped == 0 {
 		return payloadJSON, toolFields, 0, true
 	}
-	var b strings.Builder
-	b.Grow(len(payloadJSON))
-	b.WriteByte('{')
-	first := true
-	for _, m := range members {
-		if semanticPayloadDropped[m.key] {
-			continue
-		}
-		if !first {
-			b.WriteByte(',')
-		}
-		first = false
-		b.WriteString(payloadJSON[m.start:m.end])
-	}
-	b.WriteByte('}')
-	return b.String(), toolFields, occurrence, true
+	return joinMembers(payloadJSON, members, semanticPayloadDropped, "", ""), toolFields, occurrence, true
 }

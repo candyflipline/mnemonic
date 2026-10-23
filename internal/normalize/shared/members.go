@@ -1,5 +1,10 @@
 package shared
 
+import (
+	"strings"
+	"unicode/utf8"
+)
+
 type member struct {
 	key, value string
 	start, end int
@@ -93,3 +98,58 @@ func skipValue(s string, i int) (int, bool) {
 		return i, i > start
 	}
 }
+
+func canonicalMembers(s string) ([]member, bool) {
+	if !utf8.ValidString(s) {
+		return nil, false
+	}
+	return objectMembers(s)
+}
+
+func joinMembers(s string, members []member, drop map[string]bool, insertKey, insertValue string) string {
+	var b strings.Builder
+	b.Grow(len(s) + len(insertKey) + len(insertValue) + 4)
+	b.WriteByte('{')
+	first := true
+	write := func(part ...string) {
+		if !first {
+			b.WriteByte(',')
+		}
+		first = false
+		for _, p := range part {
+			b.WriteString(p)
+		}
+	}
+	inserted := insertKey == ""
+	for _, m := range members {
+		if !inserted && m.key >= insertKey {
+			write(`"`, insertKey, `":`, insertValue)
+			inserted = true
+		}
+		if drop[m.key] {
+			continue
+		}
+		write(s[m.start:m.end])
+	}
+	if !inserted {
+		write(`"`, insertKey, `":`, insertValue)
+	}
+	b.WriteByte('}')
+	return b.String()
+}
+
+func foldCanonicalPayload(payloadJSON, toolJSON string) (string, string, bool) {
+	members, ok := canonicalMembers(payloadJSON)
+	if !ok {
+		return "", "", false
+	}
+	for _, m := range members {
+		if strings.IndexByte(m.key, '\\') >= 0 {
+			return "", "", false
+		}
+	}
+	return joinMembers(payloadJSON, members, semanticPayloadDropped, "", ""),
+		joinMembers(payloadJSON, members, foldDropped, "moraine_tool_io", toolJSON), true
+}
+
+var foldDropped = map[string]bool{"moraine_tool_io": true}
