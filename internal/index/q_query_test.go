@@ -114,8 +114,10 @@ func TestQueryResultsOnTheEngine(t *testing.T) {
 		{"order survives the row cap", "from: events | select: event_ts | sort: event_ts | limit: 2", jan, nil,
 			`[["2026-01-19T15:58:40Z"],["2026-01-19T15:58:41.421Z"]]`, "", nil},
 		{"turns of the sessions in range", "from: turns | measures: count()", jan, nil, `[[1]]`, "", nil},
-		{"a heavy column read from the record", "from: events | filter: latency_ms is not null | select: latency_ms", jan, nil, `[[12]]`, "", nil},
-		{"another heavy column", "from: events | filter: model is not null | select: model", feb, nil, `[["gpt-5.3-codex"]]`, "", nil},
+		{"a heavy column read from the record", "from: events | filter: latency_ms > 0 | select: latency_ms", jan, nil, `[[12]]`, "", nil},
+		{"another heavy column", "from: events | filter: model != '' | select: model", feb, nil, `[["gpt-5.3-codex"]]`, "", nil},
+		{"absent heavy values are the zero fill, not null", "from: events | filter: input_tokens = 0 | measures: count()", jan, nil, `[[6]]`, "", nil},
+		{"an absent list column includes nothing", "from: events | filter: content_types includes 'text' | measures: count()", jan, nil, `[[0]]`, "", nil},
 		{"names are case-insensitive", "FROM: EVENTS | MEASURES: COUNT(*)", all, nil, `[[21]]`, "", nil},
 	} {
 		d, _, err := queryCall(t, ctx, db, c.q, c.rng[0], c.rng[1], c.limit)
