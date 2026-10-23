@@ -257,18 +257,31 @@ func TestQueryHidesAControlledSession(t *testing.T) {
 	if got := queryRows(t, d); got != "[[1]]" {
 		t.Fatalf("a deleted session is still a row: %s", got)
 	}
-	// The private path needs sessionAuthors (scope.go soleAuthor), a lane
-	// U5-authors section; until it lands, the filter it will produce is
-	// exercised by hand: the session hidden, every other session kept.
-	f := SessionFilter{db: db, scoped: true, author: "b", tenant: auth.AuthorSet{Except: true},
-		hidden: map[string]bool{sid: true}, link: map[string]bool{}}
-	s := &qlSource{db: db, f: f, from: time.Unix(0, 0), to: time.Date(2999, 1, 1, 0, 0, 0, 0, time.UTC),
-		spansOf: func(string) []schema.Span { return nil }, annotationsOf: func(string) []schema.Annotation { return nil }}
-	n := 0
-	err = s.Scan(ctx, ql.ScanRequest{Relation: "sessions", Columns: []ql.Column{{Name: "session_id"}}},
-		func(ql.Row) error { n++; return nil })
-	if err != nil || n != 1 {
-		t.Fatalf("hidden session scan: n=%d err=%v", n, err)
+}
+
+// TestQueryHidesAPrivateSession: private hides a session from every author
+// but its sole one, through the same scope the other tools use.
+func TestQueryHidesAPrivateSession(t *testing.T) {
+	db, dir := newQueryDB(t)
+	const sid = "7c666c01-d38e-4658-8650-854ffb5b626e"
+	plantControl(t, dir, "a", `{"session_id":"`+sid+`","action":"visibility","visibility":"private","ts":"2026-10-23T00:00:00Z","request_key":"k1"}`)
+	ctl, err := LoadControls(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens := auth.Authors(map[string]string{auth.Hash("tok-a"): "a", auth.Hash("tok-b"): "b"})
+	for _, c := range []struct{ token, want string }{{"tok-a", "[[2]]"}, {"tok-b", "[[1]]"}} {
+		ctx, ok := tokens.Context(WithControls(context.Background(), ctl), c.token)
+		if !ok {
+			t.Fatal("token")
+		}
+		d, _, err := queryCall(t, ctx, db, "from: sessions | measures: count()", "2026-01-16T00:00:00Z", "2026-02-16T00:00:00Z", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := queryRows(t, d); got != c.want {
+			t.Fatalf("%s sees %s sessions, want %s", c.token, got, c.want)
+		}
 	}
 }
 
