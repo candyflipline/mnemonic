@@ -110,6 +110,7 @@ s2a() {
 	local out_w out_p ok=1 note=""
 	cluster_up 2a "$T/2a/store" "$ARENA/raw" "" || { fail 2a "cluster did not start ($(why 2a))"; return; }
 	"$E2E" ingest -keeper "http://127.0.0.1:$KPORT" || { fail 2a "ingest failed ($(why 2a))"; return; }
+	router_ready || { fail 2a "router listed no manifest ($(why 2a))"; return; }
 	out_w=$(drive -rung whole -save "$T/clean") || ok=0
 	out_p=$(drive -rung partial) || ok=0
 	full "$out_w" || ok=0
@@ -124,6 +125,7 @@ s2b() {
 	local out ok=1 victim kill_at=$((EXPECT / 2))
 	cluster_up 2b "$T/2b/store" "$ARENA/raw" "" || { fail 2b "cluster did not start ($(why 2b))"; return; }
 	"$E2E" ingest -keeper "http://127.0.0.1:$KPORT" || { fail 2b "ingest failed ($(why 2b))"; return; }
+	router_ready || { fail 2b "router listed no manifest ($(why 2b))"; return; }
 	victim=${RPID[2]}
 	out=$(drive -rung partial -kill-pid "$victim" -kill-at "$kill_at") || ok=0
 	dead "$victim" || { ok=0; echo "reader r2 is still alive after the kill" >&2; }
@@ -233,6 +235,7 @@ s2d() {
 	"$BIN/seed" -src "$SRC" -half "$root" >/dev/null || { fail 2d "seed -half failed"; return; }
 	cluster_up 2d "$T/2d/store" "$root" "" || { fail 2d "cluster did not start ($(why 2d))"; return; }
 	"$E2E" ingest -keeper "http://127.0.0.1:$KPORT" || { fail 2d "half ingest failed ($(why 2d))"; return; }
+	router_ready || { fail 2d "router listed no manifest ($(why 2d))"; return; }
 	"$BIN/seed" -src "$SRC" -rest "$root" >/dev/null || { fail 2d "seed -rest failed"; return; }
 	"$E2E" ingest -keeper "http://127.0.0.1:$KPORT" || { fail 2d "rest ingest failed ($(why 2d))"; return; }
 	# shellcheck disable=SC2086
@@ -263,6 +266,7 @@ s2e_at() {
 	E2E_LINE="ttfb=${label}:"
 	cluster_up "2e$label" "$T/2e$label/store" "$ARENA/raw" "$ttfb" "" || { E2E_OK=0; E2E_LINE="$E2E_LINE cluster did not start ($(why "2e$label"))"; return; }
 	"$E2E" ingest -keeper "http://127.0.0.1:$KPORT" || { E2E_OK=0; E2E_LINE="$E2E_LINE ingest failed"; return; }
+	router_ready || { E2E_OK=0; E2E_LINE="$E2E_LINE router listed no manifest"; return; }
 	stats_url="http://127.0.0.1:$SPORT/stats"
 	tools=$("$E2E" tools -arena "$ARENA") || { E2E_OK=0; E2E_LINE="$E2E_LINE no tools"; return; }
 	kill_readers
@@ -339,6 +343,7 @@ s2f_first() {
 	out=$("$E2E" ingest -keeper "http://127.0.0.1:$KPORT") || { F_MSG="keeper A ingest failed ($(why 2f))"; return 1; }
 	sources=$(field "$out" fresh)
 	{ [ "${sources:-0}" -gt 0 ] && [ "$(field "$out" resumed)" = 0 ] && [ "$(field "$out" reparsed)" = 0 ]; } || { F_MSG="keeper A first ingest did not parse every source fresh ($(ingest_counts "$out"))"; return 1; }
+	router_ready || { F_MSG="router listed no manifest ($(why 2f))"; return 1; }
 	m1=$("$E2E" manifest -dir "$store" -tenant "$TENANT") || { F_MSG="manifest after keeper A: $m1"; return 1; }
 	g1=$(field "$m1" gen)
 	keys1=$(field "$m1" keys)
@@ -371,6 +376,7 @@ s2f_half() {
 	cluster_up 2fh "$T/2fh/store" "$root" "" || { H_MSG="cluster did not start ($(why 2fh))"; return 1; }
 	local c=$KPID
 	"$E2E" ingest -keeper "http://127.0.0.1:$KPORT" || { H_MSG="keeper C ingest failed ($(why 2fh))"; return 1; }
+	router_ready || { H_MSG="router listed no manifest ($(why 2fh))"; return 1; }
 	kill_keeper "$c"
 	"$BIN/seed" -src "$SRC" -rest "$root" >/dev/null || { H_MSG="seed -rest failed"; return 1; }
 	respawn_keeper 2fh2 "$root" || { H_MSG="keeper D did not spawn"; return 1; }
@@ -409,6 +415,7 @@ s2g() {
 	a=$KPID
 	out=$("$E2E" ingest -keeper "http://127.0.0.1:$KPORT") || { fail 2g "ingest failed ($(why 2g))"; return; }
 	g1=$(field "$out" gen)
+	router_ready || { fail 2g "router listed no manifest ($(why 2g))"; return; }
 	k=$(drive -rung partial -kill-pid "$a" -kill-at "$kill_at") || ok=0
 	dead "$a" || { ok=0; echo "keeper A is still alive after the kill" >&2; }
 	full "$k" || ok=0

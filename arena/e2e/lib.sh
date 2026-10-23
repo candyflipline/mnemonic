@@ -110,5 +110,17 @@ kill_readers() {
 
 drive() { "$E2E" drive -router "http://127.0.0.1:$ROPORT" -arena "$ARENA" "$@"; }
 
+# router_ready waits up to WAIT_UP_S (30) s for the router to list a manifest, so a first call is not refused as stale.
+router_ready() {
+	local n=0 out
+	while [ $n -lt $((${WAIT_UP_S:-30} * 5)) ]; do
+		out=$(drive -rung partial -tool get_ingest_status -limit 1 2>/dev/null)
+		[ "$(field "$out" total)" = 1 ] && [ "$(field "$out" s503)" = 0 ] && return 0
+		sleep 0.2
+		n=$((n + 1))
+	done
+	return 1
+}
+
 ratio() { echo "${1:-?}/${2:-?}"; }
 
