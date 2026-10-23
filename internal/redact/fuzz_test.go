@@ -160,6 +160,8 @@ func TestFuzzAgainstOracle(t *testing.T) {
 		{"{20,} in runes: 19 runes over 21 bytes must not match", "token=" + "Ab3dEf6_hIj0Lm2nOp" + fuzzKelvin},
 		{"{20,} in runes: 20 runes over 21 bytes must match", "token=" + "Ab3dEf6_hIj0Lm2nOpQ" + fuzzLongS},
 		{"U+212A in a case-sensitive class prefix must not fold", " A" + fuzzKelvin + "IA" + strings.Repeat("Q", 16)},
+		{"discord webhook: letters where [0-9]{6,} demands digits must not match", "https://discord.com/api/webhooks/abcdef/aaaaaaaaaaaaaaaaaaaa"},
+		{"discord webhook: digits still match", "https://discord.com/api/webhooks/123456/aaaaaaaaaaaaaaaaaaaa"},
 	} {
 		b := []byte(e.in)
 		if got, want := live.candidates(b), orc.candidates(b); !slices.Equal(got, want) {
@@ -439,7 +441,11 @@ func fuzzHook(rng *rand.Rand) string {
 		return "https://hooks.slack.com/services/" + fuzzRun(rng, fuzzAlphaNum+"/_+-", 20+rng.IntN(40))
 	case 1:
 		host := []string{"discord.com", "discordapp.com"}[rng.IntN(2)]
-		return "https://" + host + "/api/webhooks/" + fuzzRun(rng, fuzzDigits, 6+rng.IntN(12)) + "/" + fuzzRun(rng, fuzzB64URL, 20+rng.IntN(40))
+		idCharset := fuzzDigits
+		if rng.IntN(2) == 0 {
+			idCharset = fuzzAlphaNum // letters where the rule's [0-9]{6,} demands digits
+		}
+		return "https://" + host + "/api/webhooks/" + fuzzRun(rng, idCharset, 6+rng.IntN(12)) + "/" + fuzzRun(rng, fuzzB64URL, 20+rng.IntN(40))
 	default:
 		return "SG." + fuzzRun(rng, fuzzAlphaNum+"-_", 20+rng.IntN(10)) + "." + fuzzRun(rng, fuzzAlphaNum+"-_", 20+rng.IntN(10))
 	}

@@ -24,9 +24,11 @@ func bInClass(c byte, k bClass) bool {
 	switch c {
 	case '_', '-':
 		return k == bClsWordDash
-	default:
-		return '0' <= c && c <= '9' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
 	}
+	if k == bClsDigit {
+		return '0' <= c && c <= '9'
+	}
+	return '0' <= c && c <= '9' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
 }
 
 // bIsWord reports whether c is an ASCII word character, the alphabet of \b
