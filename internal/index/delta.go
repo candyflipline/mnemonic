@@ -324,7 +324,10 @@ func openDelta(dir string, d delta) (*Part, error) {
 	lightD, heavyD, srcD = lightD[:d.LightLen], heavyD[:d.HeavyLen], srcD[:2*d.Rows]
 
 	win := map[string]built{}
+	var all []built
 	offer := func(b built) {
+		b.row.Author = d.Members[b.src].Author
+		all = append(all, b)
 		if w, ok := win[b.row.UID]; ok && w.src != b.src && d.Members[w.src].Path >= d.Members[b.src].Path {
 			return
 		}
@@ -357,6 +360,8 @@ func openDelta(dir string, d delta) (*Part, error) {
 		bySession[b.row.Session] = append(bySession[b.row.Session], b)
 	}
 	win = nil
+	authors := authorsOf(all, func(src uint16) string { return d.Members[src].Author })
+	all = nil
 
 	heavy := &heavyReader{logs: []io.ReaderAt{segments{img.heavyB, heavyD}}, recs: map[heavyKey][][]byte{}}
 	files := map[string][]byte{}
@@ -371,6 +376,9 @@ func openDelta(dir string, d delta) (*Part, error) {
 		return fail(heavy.err)
 	}
 	if files["ls.json"], err = json.Marshal(lsRecs); err != nil {
+		return fail(err)
+	}
+	if files["authors"], err = json.Marshal(authors); err != nil {
 		return fail(err)
 	}
 	meta.Members = d.Members
