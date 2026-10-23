@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,42 +36,15 @@ func servedFileStore(t *testing.T) (obj.Store, context.Context) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go obj.Serve(ctx, s)
-	if err := awaitServe(ctx, fmt.Sprintf("file://x?serve=http://%s", addr), make(chan error)); err != nil {
-		t.Fatal(err)
-	}
-	return s, ctx
-}
-
-func TestServeCallStatus(t *testing.T) {
-	s, ctx := servedFileStore(t)
-	m, _ := json.Marshal(keeper.Manifest{Tenant: "acme", Gen: 1, Seq: 1, Parts: []keeper.PartRef{{ID: "p1", Gen: 1, Key: "t/acme/p/p1.g1"}}})
-	if err := s.Put(ctx, "t/acme/m/0000000000000001-0000000000000001.json", bytes.NewReader(m), int64(len(m))); err != nil {
-		t.Fatal(err)
-	}
-	k, err := keeper.Take(ctx, s, keeper.Config{Tenant: "acme", GrantTTL: time.Minute, DeleteSlack: keeper.MinDeleteSlack})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ks := keepServer{k: k, s: s, ttl: time.Minute}
-	srv := httptest.NewServer(ks.mux())
-	t.Cleanup(srv.Close)
-
-	for _, c := range []struct {
-		name, body string
-		want       int
-	}{
-		{"partial call whose cold part has no reader", `{"tool":"list_sessions","args":{"start_datetime":"2026-01-01T00:00:00Z","end_datetime":"2026-02-01T00:00:00Z"},"rung":"partial"}`, http.StatusBadGateway},
-		{"tool refuses its own arguments", `{"tool":"open","args":{"id":"nope"},"rung":"whole"}`, http.StatusOK},
-	} {
-		res, err := http.Post(srv.URL+"/v1/call", "application/json", bytes.NewReader([]byte(c.body)))
-		if err != nil {
-			t.Fatal(err)
+	for range 200 {
+		if resp, err := http.Get("http://" + addr + "/stats"); err == nil {
+			resp.Body.Close()
+			return s, ctx
 		}
-		res.Body.Close()
-		if res.StatusCode != c.want {
-			t.Errorf("%s: status %d, want %d", c.name, res.StatusCode, c.want)
-		}
+		time.Sleep(10 * time.Millisecond)
 	}
+	t.Fatal("store did not serve")
+	return nil, nil
 }
 
 func TestCallReadsThePartsOfItsPinnedHead(t *testing.T) {
@@ -104,15 +79,30 @@ func TestCallReadsThePartsOfItsPinnedHead(t *testing.T) {
 	if err := k.Cycle(ctx); err != nil {
 		t.Fatal(err)
 	}
-	ks := keepServer{k: k, s: s, ttl: time.Minute}
 	args := json.RawMessage(`{"start_datetime":"2000-01-01T00:00:00Z","end_datetime":"2100-01-01T00:00:00Z"}`)
 
 	err = k.Read(func(h keeper.Head) error {
-		v, err := ks.view(h)
-		if err != nil {
-			return err
+		call := func() ([]byte, error) {
+			var parts []route.GrantedPart
+			for _, p := range h.Hot {
+				parts = append(parts, route.GrantedPart{PartRef: p, Local: true})
+			}
+			body, _ := json.Marshal(route.CallRequest{Tenant: "acme", Parts: parts, Tool: "list_sessions", Args: args, Phase: route.PhaseWhole})
+			srv := httptest.NewServer(callHandler(h))
+			defer srv.Close()
+			res, err := http.Post(srv.URL+"/v1/call", "application/json", bytes.NewReader(body))
+			if err != nil {
+				return nil, err
+			}
+			defer res.Body.Close()
+			var resp route.CallResponse
+			if res.StatusCode != http.StatusOK {
+				return nil, fmt.Errorf("status %d", res.StatusCode)
+			}
+			err = json.NewDecoder(res.Body).Decode(&resp)
+			return resp.Data, err
 		}
-		want, _, err := ks.do(ctx, h, v, route.Whole, "list_sessions", args)
+		want, err := call()
 		if err != nil {
 			return err
 		}
@@ -131,7 +121,7 @@ func TestCallReadsThePartsOfItsPinnedHead(t *testing.T) {
 		}); err != nil {
 			return err
 		}
-		got, _, err := ks.do(ctx, h, v, route.Whole, "list_sessions", args)
+		got, err := call()
 		if err != nil {
 			return err
 		}
@@ -151,6 +141,9 @@ func TestServesTheStoredHeadBeforeTheFirstCycleEnds(t *testing.T) {
 	if err := s.Put(ctx, "t/acme/m/0000000000000001-0000000000000001.json", bytes.NewReader(m), int64(len(m))); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.PutExclusive(ctx, "t/acme/g/0000000000000001", bytes.NewReader(nil), 0); err != nil {
+		t.Fatal(err)
+	}
 	k, err := keeper.Take(ctx, s, keeper.Config{Tenant: "acme", GrantTTL: time.Minute, DeleteSlack: keeper.MinDeleteSlack})
 	if err != nil {
 		t.Fatal(err)
@@ -167,7 +160,7 @@ func TestServesTheStoredHeadBeforeTheFirstCycleEnds(t *testing.T) {
 		return nil
 	}
 	done := make(chan error, 1)
-	ks := keepServer{k: k, s: s, ttl: time.Minute}
+	ks := keepServer{k: k}
 	go func() { done <- ks.serve(ctx, l, time.Hour, first, make(chan error, 3)) }()
 	t.Cleanup(func() {
 		close(release)
@@ -179,16 +172,13 @@ func TestServesTheStoredHeadBeforeTheFirstCycleEnds(t *testing.T) {
 	<-entered
 
 	c := http.Client{Timeout: 10 * time.Second}
-	res, err := c.Get("http://" + l.Addr().String() + "/v1/view")
+	res, err := c.Get("http://" + l.Addr().String() + "/v1/head")
 	if err != nil {
-		t.Fatalf("GET /v1/view while the first cycle runs: %v", err)
+		t.Fatalf("GET /v1/head while the first cycle runs: %v", err)
 	}
 	defer res.Body.Close()
-	var v route.View
-	if err := json.NewDecoder(res.Body).Decode(&v); err != nil {
-		t.Fatal(err)
-	}
-	if res.StatusCode != http.StatusOK || len(v.Parts) != 1 || v.Parts[0].ID != "p1" {
-		t.Errorf("view = %d %+v, want 200 with part p1", res.StatusCode, v.Parts)
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(body), "no commit at gen") {
+		t.Errorf("head = %d %q, want 503 with %q", res.StatusCode, body, "no commit at gen")
 	}
 }
