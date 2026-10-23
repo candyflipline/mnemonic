@@ -90,7 +90,12 @@ against `expected.jsonl` under `masks.json`:
   names (60 claude + 10 codex sources).
 - crash: three SIGKILLs mid-`ingest` into one store, then a final `ingest`;
   answers must match.
-- appendcrash: the same with appends between kills.
+- appendcrash: the same with appends between kills. This phase also asserts
+  the engine's delta protocol: kills must land on ingests that had committed a
+  `delta.json` under `STORE/parts/*`. The DuckDB oracle has no delta path, so
+  a full self-check of the oracle reports appendcrash failed with "the delta
+  path was not live" — expected for this candidate; an engine candidate must
+  pass it.
 
 `-skip` takes a comma list of phase names. The result JSON lands in
 `<arena>/runs/<name>-<stamp>.json` (`pass`, per-tool `pass`/`fail` counts, up
