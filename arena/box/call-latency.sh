@@ -4,11 +4,12 @@
 ## Inputs
 ##   $1  BIN  the binary under test (`batch`, arena contract).
 ## Requires: gen-masks.sh produced $BOX/arena/golden/calls.jsonl and
-##           $BOX/arena/hidden/calls.jsonl, and ingest-timed.sh left
-##           $BOX/cold-3 (the store the calls run against).
-## Env: BOX (default /var/lib/mnemonic-e3). RUNS (default 5).
+##           $BOX/arena/hidden/calls.jsonl, and ingest-timed.sh left a full
+##           store (BASE_STORE, default $BOX/cold-1) the calls run against.
+## Env: BOX (default /var/lib/mnemonic-e3). BASE_STORE (default $BOX/cold-1).
+##      RUNS (default 5).
 #
-# RUNS fresh `BIN batch -root $BOX -store $BOX/cold-3` processes (GOMAXPROCS=16),
+# RUNS fresh `BIN batch -root $BOX -store $BASE_STORE` processes (GOMAXPROCS=16),
 # each fed the golden calls then the hidden calls in one stdin stream (one
 # process, both sets, the order check uses); replies to $BOX/out/lat-<i>.jsonl.
 # Per run, per tool over BOTH sets combined: n, p50 and p95 of the reply's `us`
@@ -23,6 +24,7 @@ BIN=${1:?usage: call-latency.sh BIN}
 [ -x "$BIN" ] || { echo "not executable: $BIN" >&2; exit 2; }
 OUT=$BOX/out
 CALLS=$BOX/arena
+BASE_STORE=${BASE_STORE:-$BOX/cold-1}
 export GOMAXPROCS=16
 mkdir -p "$OUT"
 
@@ -30,7 +32,7 @@ mkdir -p "$OUT"
 cat "$CALLS/golden/calls.jsonl" "$CALLS/hidden/calls.jsonl" > "$OUT/all-calls.jsonl"
 for i in $(seq 1 "$RUNS"); do
 	set +e
-	/usr/bin/time -f 'batch_wall_s %e' "$BIN" batch -root "$BOX" -store "$BOX/cold-3" \
+	/usr/bin/time -f 'batch_wall_s %e' "$BIN" batch -root "$BOX" -store "$BASE_STORE" \
 		< "$OUT/all-calls.jsonl" \
 		> "$OUT/lat-$i.jsonl" 2> "$OUT/lat-$i.log"
 	RC=$?

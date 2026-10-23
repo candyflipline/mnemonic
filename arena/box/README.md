@@ -14,8 +14,9 @@ timings only.
 $BOX/raw                     the frozen corpus (read-only; scripts never write here)
 $BOX/bin-<tree>/             binaries built by build.sh from that tree + sha256.txt
                              + wrapper-<name> (GOMAXPROCS=16 launcher for check's -bin)
-$BOX/cold-1..3               stores from ingest-timed.sh (cold-3 = the gen root,
-                             cold-1 = the second store the masks diff needs)
+$BOX/cold-N                  stores from ingest-timed.sh; cold-1 is the gen root
+                             (GEN_ROOT) and cold-2 the masks diff store (MASK_ROOT);
+                             append-latency and call-latency default to cold-1 too
 $BOX/arena/                  the fixture check scores: golden/, hidden/, check/,
                              runs/, and raw/ — a DATAROOT whose raw/raw symlinks
                              to the frozen corpus (check's clean phase runs
@@ -28,10 +29,13 @@ $BOX/append/, $BOX/out/      scratch and logs
 1. `build.sh TARBALL TREE` — build oracle/gen (cgo) and check/seed from a git
    archive tar; sha256 into `$BOX/bin-<tree>/sha256.txt`. Also installs the
    `/usr/bin/time` shim (below) and the GOMAXPROCS wrappers.
-2. `ingest-timed.sh BIN` — 3 cold full-corpus ingests (fresh store, page cache
-   dropped, GOMAXPROCS=16, no GOMEMLIMIT) with vmstat/pidstat alongside.
-3. `gen-masks.sh BIN` — gen seed 1 (golden) and seed 2 (hidden) from cold-3;
-   masks by answering the same calls from cold-1 vs cold-3 and diffing with
+2. `ingest-timed.sh BIN` — cold full-corpus ingests (fresh store, page cache
+   dropped, GOMAXPROCS=16, no GOMEMLIMIT) with vmstat/pidstat alongside;
+   RUNS runs starting at FIRST (defaults 3 and 1). The oracle baseline on the
+   box was 2 runs (a single-core parse, ~1 h each); the engine lane adds runs
+   alternating.
+3. `gen-masks.sh BIN` — gen seed 1 (golden) and seed 2 (hidden) from the
+   gen root; masks by answering the same calls from the second store and diffing with
    `check masks`; then the oracle self-check (`check -bin wrapper -skip
    incremental,crash,appendcrash`), whose clean phase is one more full ingest.
 4. `append-latency.sh BIN` — 5 rounds of: fresh hardlink overlay of the raw
@@ -51,7 +55,7 @@ $BOX/append/, $BOX/out/      scratch and logs
   a GNU `-f` format printing the max-RSS line check's parser reads
   (`%M maximum resident set size`). Measurement semantics unchanged.
 - `check masks` needs two full stores of the same corpus. ingest-timed.sh
-  already produces two (cold-1, cold-3); gen-masks.sh diffs those instead of
+  already produces two (cold-1, cold-2); gen-masks.sh diffs those instead of
   building a dedicated second store.
 - check's clean phase requires `<arena>/raw/raw` (a dataroot under the arena),
   not `<arena>/raw` being the corpus dir itself.

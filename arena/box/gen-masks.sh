@@ -4,15 +4,16 @@
 ## Inputs
 ##   $1  BIN  the binary under test; its sibling binaries from the same tree
 ##            (gen, check) are found next to it, per arena/README.md's build.
-## Requires: ingest-timed.sh ran first for this BIN — $BOX/cold-1 and
-##           $BOX/cold-3 are two full stores of the same corpus (cold-3 is the
-##           oracle root gen draws from, cold-1 the second store the masks
-##           diff needs).
-## Env: BOX (default /var/lib/mnemonic-e3). SEED_GOLDEN/SEED_HIDDEN (default
+## Requires: ingest-timed.sh ran first for this BIN — two full stores of the
+##           same corpus exist (GEN_ROOT, default $BOX/cold-1, is the oracle
+##           root gen draws from; MASK_ROOT, default $BOX/cold-2, is the
+##           second store the masks diff needs).
+## Env: BOX (default /var/lib/mnemonic-e3). GEN_ROOT (default $BOX/cold-1),
+##      MASK_ROOT (default $BOX/cold-2). SEED_GOLDEN/SEED_HIDDEN (default
 ##      1/2). SKIP_CHECK=1 skips the self-check. CHECK_WRAPPER overrides the
 ##      -bin wrapper (default: $BIN-dir/wrapper-<basename>, else one is written).
 #
-# - gen: `gen -root $BOX/cold-3 -oracle BIN -seed 1 -out $BOX/arena/golden`,
+# - gen: `gen -root $GEN_ROOT -oracle BIN -seed 1 -out $BOX/arena/golden`,
 #   then seed 2 -out $BOX/arena/hidden (calls.jsonl + expected.jsonl each).
 # - masks: the same calls answered from the second store via `BIN answer`,
 #   diffed against the first store's answers with `check masks`, both sets
@@ -36,6 +37,8 @@ GEN=$BINDIR/gen
 CHECK=$BINDIR/check
 ARENA=$BOX/arena
 OUT=$BOX/out
+GEN_ROOT=${GEN_ROOT:-$BOX/cold-1}
+MASK_ROOT=${MASK_ROOT:-$BOX/cold-2}
 RAWROOT=$ARENA/raw
 mkdir -p "$OUT" "$RAWROOT" "$ARENA/golden" "$ARENA/hidden" "$ARENA/runs"
 [ -e "$RAWROOT/raw" ] || ln -sfn "$BOX/raw" "$RAWROOT/raw"
@@ -57,16 +60,16 @@ fi
 SG=${SEED_GOLDEN:-1}
 SH=${SEED_HIDDEN:-2}
 
-echo "== gen golden (seed $SG) from $BOX/cold-3"
-"$GEN" -root "$BOX/cold-3" -oracle "$BIN" -seed "$SG" -out "$ARENA/golden" 2>&1 | tee "$OUT/gen-golden.log"
-echo "== gen hidden (seed $SH) from $BOX/cold-3"
-"$GEN" -root "$BOX/cold-3" -oracle "$BIN" -seed "$SH" -out "$ARENA/hidden" 2>&1 | tee "$OUT/gen-hidden.log"
+echo "== gen golden (seed $SG) from $GEN_ROOT"
+"$GEN" -root "$GEN_ROOT" -oracle "$BIN" -seed "$SG" -out "$ARENA/golden" 2>&1 | tee "$OUT/gen-golden.log"
+echo "== gen hidden (seed $SH) from $GEN_ROOT"
+"$GEN" -root "$GEN_ROOT" -oracle "$BIN" -seed "$SH" -out "$ARENA/hidden" 2>&1 | tee "$OUT/gen-hidden.log"
 wc -l "$ARENA/golden/calls.jsonl" "$ARENA/hidden/calls.jsonl" "$ARENA/golden/expected.jsonl" "$ARENA/hidden/expected.jsonl"
 
-echo "== masks: cold-3 answers vs cold-1 answers"
+echo "== masks: $GEN_ROOT answers vs $MASK_ROOT answers"
 for set in golden hidden; do
-	"$BIN" answer -root "$BOX/cold-3" < "$ARENA/$set/calls.jsonl" > "$OUT/masks-$set-e1.jsonl"
-	"$BIN" answer -root "$BOX/cold-1" < "$ARENA/$set/calls.jsonl" > "$OUT/masks-$set-e2.jsonl"
+	"$BIN" answer -root "$GEN_ROOT" < "$ARENA/$set/calls.jsonl" > "$OUT/masks-$set-e1.jsonl"
+	"$BIN" answer -root "$MASK_ROOT" < "$ARENA/$set/calls.jsonl" > "$OUT/masks-$set-e2.jsonl"
 	"$CHECK" masks -set "$set" -a "$ARENA/$set/expected.jsonl" -b "$OUT/masks-$set-e2.jsonl" -out "$ARENA/check/masks.json"
 done
 wc -c "$ARENA/check/masks.json"

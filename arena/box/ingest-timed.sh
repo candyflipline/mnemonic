@@ -5,7 +5,9 @@
 ##   $1  BIN  the binary under test speaking the arena contract's
 ##            `ingest -root RAWROOT -store STORE` (oracle or engine).
 ## Env: BOX (default /var/lib/mnemonic-e3) — the dataroot whose raw/ is the
-##      frozen corpus, and where stores and logs land. RUNS (default 3).
+##      frozen corpus, and where stores and logs land. RUNS (default 3) —
+##      number of runs, FIRST (default 1) — index of the first run, so a
+##      second store is FIRST=2 RUNS=1 without touching the earlier one.
 #
 # RUNS timed cold ingests, sequential, each into a FRESH empty store
 # $BOX/cold-N with the page cache dropped first
@@ -18,23 +20,23 @@
 # to stdout and $BOX/out/ingest-cold-summary.tsv; the last lines name the
 # median wall and RSS and the range.
 #
-# Stores are left in place on purpose: $BOX/cold-3 is the oracle root the
-# gen step uses and $BOX/cold-1 the second store the masks diff needs
-# (gen-masks.sh depends on both).
+# Stores are left in place on purpose: the first store (cold-1) is the gen
+# root and the second (cold-2) the masks diff store gen-masks.sh needs.
 set -eu
 
 BOX=${BOX:-/var/lib/mnemonic-e3}
 RUNS=${RUNS:-3}
+FIRST=${FIRST:-1}
 BIN=${1:?usage: ingest-timed.sh BIN}
 [ -x "$BIN" ] || { echo "not executable: $BIN" >&2; exit 2; }
 DATAROOT=$BOX
 OUT=$BOX/out
 mkdir -p "$OUT"
-: > "$OUT/ingest-cold-summary.tsv"
+if [ "$FIRST" -eq 1 ]; then : > "$OUT/ingest-cold-summary.tsv"; fi
 export GOMAXPROCS=16
 unset GOMEMLIMIT || true
 
-for i in $(seq 1 "$RUNS"); do
+for i in $(seq "$FIRST" "$((FIRST + RUNS - 1))"); do
 	STORE=$BOX/cold-$i
 	rm -rf "$STORE"
 	mkdir -p "$STORE"

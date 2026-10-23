@@ -3,8 +3,8 @@
 #
 ## Inputs
 ##   $1  BIN  the binary under test (`ingest`/`batch`, arena contract).
-## Requires: ingest-timed.sh ran first for this BIN — $BOX/cold-3 is the
-##           pre-built store the append lands on. No other setup.
+## Requires: ingest-timed.sh ran first for this BIN — BASE_STORE (default
+##           $BOX/cold-1) is the pre-built store the append lands on.
 ## Env: BOX (default /var/lib/mnemonic-e3). RUNS (default 5). SETUP=1 forces
 ##      the deterministic target/donor/term choice to be redone; setup also
 ##      redoes itself whenever BIN differs from the one recorded in the state.
@@ -18,7 +18,7 @@
 #   zstd CLI; the search term is the longest [a-z][a-z0-9_]{5,} token among
 #   them that a search_sessions call on the pristine store returns in its top
 #   hit; that top hit's session id is what must stay in the reply.
-# - the pre-append reply of the timed call is saved against $BOX/cold-3.
+# - the pre-append reply of the timed call is saved against the base store.
 #
 # Each of RUNS rounds then does, timed only where marked:
 #   1. fresh overlay dataroot: cp -al of the frozen raw; the target's
@@ -28,7 +28,7 @@
 #      appended to the target's .jsonl.zst; its manifest is updated:
 #      zst_size = new file size, size += appended plain bytes, raw_end = size,
 #      updated_ms = now ms (head_hash untouched: first line unchanged);
-#   3. fresh run store: a real cp -a of $BOX/cold-3 (a hardlink clone would
+#   3. fresh run store: a real cp -a of the base store (a hardlink clone would
 #      let the converge write through into the base store);
 #   4. timed: `BIN ingest -root overlay -store runstore` under /usr/bin/time
 #      -v with 1 s vmstat (and pidstat when installed) alongside;
@@ -47,6 +47,7 @@ BIN=${1:?usage: append-latency.sh BIN}
 [ -x "$BIN" ] || { echo "not executable: $BIN" >&2; exit 2; }
 OUT=$BOX/out
 APP=$BOX/append
+BASE_STORE=${BASE_STORE:-$BOX/cold-1}
 export GOMAXPROCS=16
 unset GOMEMLIMIT || true
 mkdir -p "$OUT"
@@ -103,7 +104,7 @@ PYEOF
 	TERM=""; SESSION=""
 	while IFS= read -r cand; do
 		printf '{"id":1,"tool":"search_sessions","args":{"query":"%s","n_hits":10}}\n' "$cand" \
-			| "$BIN" batch -root "$BOX" -store "$BOX/cold-3" > "$APP/term-reply.jsonl" 2>/dev/null \
+			| "$BIN" batch -root "$BOX" -store "$BASE_STORE" > "$APP/term-reply.jsonl" 2>/dev/null \
 			|| continue
 		GOT=$(python3 -I - "$APP/term-reply.jsonl" <<'PYEOF'
 import json, sys
@@ -164,7 +165,7 @@ m["zst_size"] = os.path.getsize(zst)
 m["updated_ms"] = int(time.time() * 1000)
 json.dump(m, open(man, "w"))
 PYEOF
-	cp -a "$BOX/cold-3" "$RST"
+	cp -a "$BASE_STORE" "$RST"
 	LOG=$OUT/append-$i.log
 	: > "$LOG"
 	if command -v pidstat >/dev/null 2>&1; then
