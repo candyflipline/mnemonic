@@ -144,7 +144,11 @@ func (searchSessionsTool) Call(ctx context.Context, db *DB, raw json.RawMessage)
 	if err != nil {
 		return nil, "", err
 	}
-	result, err := db.search(args.searchQuery())
+	q := args.searchQuery()
+	if q.listed, err = Sessions(ctx, db); err != nil {
+		return nil, "", err
+	}
+	result, err := db.search(q)
 	if err != nil {
 		return nil, "", err
 	}

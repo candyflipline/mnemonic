@@ -3,7 +3,6 @@ package mcp
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/candyflipline/mnemonic/internal/auth"
-	"github.com/candyflipline/mnemonic/internal/query"
+	"github.com/candyflipline/mnemonic/internal/index"
 )
 
 type stubTool struct {
@@ -24,13 +23,13 @@ type stubTool struct {
 
 func (s stubTool) Name() string { return s.name }
 
-func (s stubTool) Call(_ context.Context, _ *sql.DB, _ json.RawMessage) (any, string, error) {
+func (s stubTool) Call(_ context.Context, _ *index.DB, _ json.RawMessage) (any, string, error) {
 	return s.data, s.text, s.err
 }
 
-func mcpServer(t *testing.T, tools ...query.Tool) *httptest.Server {
+func mcpServer(t *testing.T, tools ...index.Tool) *httptest.Server {
 	t.Helper()
-	lookup := func(name string) (query.Tool, bool) {
+	lookup := func(name string) (index.Tool, bool) {
 		for _, tool := range tools {
 			if tool.Name() == name {
 				return tool, true
@@ -38,7 +37,11 @@ func mcpServer(t *testing.T, tools ...query.Tool) *httptest.Server {
 		}
 		return nil, false
 	}
-	srv := httptest.NewServer(auth.Middleware(map[string]string{auth.Hash("tok"): "chris"})(Handler(nil, lookup)))
+	ix, err := index.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(auth.Middleware(map[string]string{auth.Hash("tok"): "chris"})(Handler(ix, lookup, nil)))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -205,7 +208,7 @@ func TestToolsCallWrapsStubInEnvelope(t *testing.T) {
 func TestToolsCallArgErrorIsErrorResult(t *testing.T) {
 	srv := mcpServer(t, stubTool{
 		name: "search_sessions",
-		err:  &query.ArgError{Msg: "query must be a non-empty string"},
+		err:  &index.ArgError{Msg: "query must be a non-empty string"},
 	})
 	resp := postRPC(t, srv, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_sessions","arguments":{"query":""}}}`)
 	payload := decode(t, resp)

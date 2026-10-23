@@ -55,3 +55,11 @@ func openPlain(s source) (*os.File, int64, error) { panic("lane U10") }
 // checkpoint offset hash to prev.WindowSHA; on a mismatch the source parses
 // from byte 0 into gen+1.
 func plainExtends(f *os.File, end int64, prev ckpt) bool { panic("lane U10") }
+
+// listPlainSources is every harness file local mode indexes in place, as
+// sources of KindPlain: the key's author and machine are the local identity,
+// its src_id the file's stable id as push names it, and src the manifest push
+// would have sent (path, harness, source_name, size, updated_ms = mtime).
+func listPlainSources(globs []string, author, machine string) ([]source, error) {
+	panic("lane U10")
+}

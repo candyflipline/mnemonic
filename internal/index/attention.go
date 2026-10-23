@@ -8,7 +8,6 @@ import (
 	"slices"
 	"sort"
 	"strings"
-
 )
 
 type faQuery struct {
@@ -24,6 +23,7 @@ type faQuery struct {
 	SourceName      string
 	MutationsOnly   bool
 	MaxRows         int
+	listed          SessionFilter
 }
 
 type faTouch struct {
@@ -75,7 +75,7 @@ func faFilterRow(r *Row, q faQuery) bool {
 	if q.MutationsOnly && slices.Contains(faReadTools, tn) {
 		return false
 	}
-	return true
+	return q.listed.all() || q.listed.Listed(r.Session)
 }
 
 func faTimeOK(ms int64, sourceName string, q faQuery) bool {

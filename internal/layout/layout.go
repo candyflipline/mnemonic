@@ -7,6 +7,7 @@
 //	events/author=A/machine=M/harness=H/<src_id>.tail.parquet  events appended since, when any
 //	events/.parser-version                                     each parser's Version the whole lake was last swept at
 //	cache/index.duckdb                                         derived; serve converges it from events/
+//	index/                                                     the engine's store (internal/index), derived from raw/
 package layout
 
 import "path/filepath"
@@ -41,3 +42,6 @@ func (k Key) Tail(root string) string {
 func ParserMarker(root string) string { return filepath.Join(root, "events", ".parser-version") }
 
 func CacheDir(root string) string { return filepath.Join(root, "cache") }
+
+// IndexDir is the engine's store: frame logs, parts and CURRENT.
+func IndexDir(root string) string { return filepath.Join(root, "index") }

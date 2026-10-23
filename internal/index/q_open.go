@@ -18,6 +18,7 @@ type canonicalOpenArgs struct {
 	target mcpID
 	page   *openPage
 	cursor string
+	opened SessionFilter
 }
 
 type openPage struct {
@@ -142,6 +143,9 @@ func (openTool) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, str
 	if err != nil {
 		return nil, "", err
 	}
+	if args.opened, err = Sessions(ctx, db); err != nil {
+		return nil, "", err
+	}
 	request := args.requestShape()
 
 	switch args.target.kind {
@@ -155,7 +159,7 @@ func (openTool) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, str
 }
 
 func openSessionFlow(db *DB, request map[string]any, args canonicalOpenArgs) (any, string, error) {
-	scan, err := db.loadSessionScan(args.target.session, scanOpts{})
+	scan, err := db.loadSessionScan(args.target.session, scanOpts{opened: args.opened})
 	if err != nil {
 		return nil, "", err
 	}
@@ -208,7 +212,7 @@ func openSessionFlow(db *DB, request map[string]any, args canonicalOpenArgs) (an
 }
 
 func openTurnFlow(db *DB, request map[string]any, args canonicalOpenArgs) (any, string, error) {
-	scan, err := db.loadSessionScan(args.target.session, scanOpts{turn: &args.target.turnSeq})
+	scan, err := db.loadSessionScan(args.target.session, scanOpts{turn: &args.target.turnSeq, opened: args.opened})
 	if err != nil {
 		return nil, "", err
 	}
@@ -272,7 +276,7 @@ func openEventFlow(db *DB, request map[string]any, args canonicalOpenArgs) (any,
 	if !ok {
 		return nil, "", argErrorf("event not found")
 	}
-	scan, err := db.loadSessionScan(sessionID, scanOpts{targetUID: uid})
+	scan, err := db.loadSessionScan(sessionID, scanOpts{targetUID: uid, opened: args.opened})
 	if err != nil {
 		return nil, "", err
 	}

@@ -13,7 +13,6 @@ import (
 	"slices"
 	"sort"
 	"strings"
-
 )
 
 type built struct {
@@ -40,16 +39,16 @@ func fingerprint(cks []ckpt) string {
 }
 
 type indexMeta struct {
-	Fingerprint string      `json:"fingerprint"`
-	Docs        int         `json:"docs"`
-	ScoredDocs  uint64      `json:"scored_docs"`
-	TotalLen    uint64      `json:"total_len"`
-	Harnesses   []string    `json:"harnesses"`
-	SourceNames []string    `json:"source_names"`
-	Sessions    int         `json:"sessions"`
-	Turns       int         `json:"turns"`
-	Terms       int         `json:"terms"`
-	Members     []member    `json:"members,omitempty"`
+	Fingerprint string   `json:"fingerprint"`
+	Docs        int      `json:"docs"`
+	ScoredDocs  uint64   `json:"scored_docs"`
+	TotalLen    uint64   `json:"total_len"`
+	Harnesses   []string `json:"harnesses"`
+	SourceNames []string `json:"source_names"`
+	Sessions    int      `json:"sessions"`
+	Turns       int      `json:"turns"`
+	Terms       int      `json:"terms"`
+	Members     []member `json:"members,omitempty"`
 }
 
 // member is one source a part holds the rows of; a doc's src is its index in
@@ -437,7 +436,7 @@ func indexRows(bySession map[string][]built, place func(built) (*Row, int64, int
 	}
 
 	return indexMeta{Docs: n, ScoredDocs: scoredDocs, TotalLen: totalLen, Harnesses: harnesses.list,
-		SourceNames: sourceNames.list, Sessions: len(sessions), Turns: len(turns), Terms: len(terms) }, lsRecs, nil
+		SourceNames: sourceNames.list, Sessions: len(sessions), Turns: len(turns), Terms: len(terms)}, lsRecs, nil
 }
 
 type faEntry struct {

@@ -1,56 +1,52 @@
 // Package server is `mnemonic serve` without its flags: the HTTP surface
-// (/v1 pushes, /mcp) over one cache, and the loop that parses raw into the
-// lake and converges the cache.
+// (/v1 pushes, /mcp) over one index, and the loop that ingests raw into it.
 package server
 
 import (
 	"context"
-	"errors"
 	"log"
 	"net/http"
 	"time"
 
 	"github.com/candyflipline/mnemonic/internal/auth"
-	"github.com/candyflipline/mnemonic/internal/cache"
-	"github.com/candyflipline/mnemonic/internal/lake"
+	"github.com/candyflipline/mnemonic/internal/index"
+	"github.com/candyflipline/mnemonic/internal/layout"
 	"github.com/candyflipline/mnemonic/internal/mcp"
-	_ "github.com/candyflipline/mnemonic/internal/normalize/all"
 	"github.com/candyflipline/mnemonic/internal/otlp"
-	"github.com/candyflipline/mnemonic/internal/query"
 	"github.com/candyflipline/mnemonic/internal/store"
 )
 
 type Server struct {
 	dataDir string
-	ix      *cache.Index
+	ix      *index.Index
 	wake    chan struct{}
 	handler http.Handler
 	otlp    *otlp.Receiver
 }
 
-// New opens the cache under dataDir, loads the session controls from raw,
+// New opens the index under dataDir, loads the session controls from raw,
 // and mounts the store (push scope) and MCP (read scope) behind tokens. MCP
 // tools find the store with store.From and the controls with
-// query.WithControls on their ctx.
+// index.WithControls on their ctx.
 func New(dataDir string, tokens auth.Tokens) (*Server, error) {
-	ctl, err := query.LoadControls(dataDir)
+	ctl, err := index.LoadControls(dataDir)
 	if err != nil {
 		return nil, err
 	}
-	ix, err := cache.Open(dataDir, cache.Options{MemoryLimit: "1GB", FlagsSQL: query.SearchFlagsSQL()})
+	ix, err := index.Open(layout.IndexDir(dataDir))
 	if err != nil {
 		return nil, err
 	}
 	wake := make(chan struct{}, 1)
 	st := &store.Store{DataDir: dataDir, Wake: wake}
-	tools := mcp.Handler(ix.DB(), query.Lookup)
+	tools := mcp.Handler(ix, index.Lookup, nil)
 	rcv := otlp.NewReceiver(st)
 	mux := http.NewServeMux()
 	mux.Handle("/v1/", tokens.Require(auth.Push)(st.Handler()))
 	mux.Handle("POST /v1/traces", tokens.Require(auth.Push)(rcv.Traces()))
 	mux.Handle("POST /v1/logs", tokens.Require(auth.Push)(rcv.Logs()))
 	mux.Handle("/mcp", tokens.Require(auth.Read)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tools.ServeHTTP(w, r.WithContext(query.WithControls(store.WithStore(r.Context(), st), ctl)))
+		tools.ServeHTTP(w, r.WithContext(index.WithControls(store.WithStore(r.Context(), st), ctl)))
 	})))
 	return &Server{dataDir: dataDir, ix: ix, wake: wake, handler: mux, otlp: rcv}, nil
 }
@@ -63,53 +59,36 @@ func (s *Server) StoreOTLPContent(on bool) { s.otlp.SetStoreContent(on) }
 
 func (s *Server) Close() error { return s.ix.Close() }
 
-// Cycle parses and converges everything pending now, retrying failed lake
-// files, and returns once the parser sweep has no stale source left.
-func (s *Server) Cycle(ctx context.Context) error {
-	sweep := lake.Sweep{}
-	for {
-		ls, err := s.cycle(ctx, "reconcile", func() bool { return false }, sweep)
-		if err != nil || ls.Stale == 0 {
-			return err
-		}
-		sweep = ls.Next
-	}
-}
+// Cycle ingests everything pending now.
+func (s *Server) Cycle(context.Context) error { return s.cycle("reconcile") }
 
 const (
 	settleQuiet = time.Second
 	settleMax   = 3 * time.Second
 	reconcile   = 5 * time.Minute
+	// settleSource is how long a source's manifest must go without a push
+	// before it leaves its hot part for a cold one.
+	settleSource = 15 * time.Minute
 )
 
-// Run converges at boot, after each push once pushes settle (1 s quiet, 3 s
+// Run ingests at boot, after each push once pushes settle (1 s quiet, 3 s
 // at most), and every 5 min without one, until ctx is done.
 func (s *Server) Run(ctx context.Context) {
-	pushPending := func() bool { return len(s.wake) > 0 }
-	ls, _ := s.cycle(ctx, "boot", pushPending, lake.Sweep{})
-	reconciled := time.Now()
+	s.cycle("boot")
 	for {
-		reason := "sweep"
-		if due := time.Until(reconciled.Add(reconcile)); due <= 0 {
-			reason = "reconcile"
-		} else if ls.Stale == 0 || pushPending() {
-			reason = "reconcile"
-			select {
-			case <-ctx.Done():
-				return
-			case <-s.wake:
-				reason = "put"
-				settle(ctx, s.wake)
-			case <-time.After(due):
-			}
+		reason := "reconcile"
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.wake:
+			reason = "put"
+			settle(ctx, s.wake)
+		case <-time.After(reconcile):
 		}
 		if ctx.Err() != nil {
 			return
 		}
-		if reason == "reconcile" {
-			reconciled = time.Now()
-		}
-		ls, _ = s.cycle(ctx, reason, pushPending, ls.Next)
+		s.cycle(reason)
 	}
 }
 
@@ -132,19 +111,10 @@ func settle(ctx context.Context, wake <-chan struct{}) {
 	}
 }
 
-func (s *Server) cycle(ctx context.Context, reason string, pushPending func() bool, sweep lake.Sweep) (lake.Stats, error) {
+func (s *Server) cycle(reason string) error {
 	start := time.Now()
-	ls, lerr := lake.Run(s.dataDir, pushPending, sweep)
-	lakeWall := time.Since(start)
-	failed := cache.SkipFailed
-	if reason == "reconcile" {
-		failed = cache.RetryFailed
-	}
-	cs, cerr := s.ix.Converge(ctx, failed)
-	log.Printf("cycle %s: lake sources=%d rewrote=%d unchanged=%d raw_only=%d failed=%d stale=%d events=%d in %s err=%v; "+
-		"converge files=%d batches=%d inserted=%d deleted=%d moved=%d reordered=%d sessions=%d in %s err=%v; wall %s",
-		reason, ls.Sources, ls.Rewrote, ls.Unchanged, ls.RawOnly, ls.Failed, ls.Stale, ls.Events, lakeWall.Round(time.Millisecond), lerr,
-		cs.Files, cs.Batches, cs.Inserted, cs.Deleted, cs.Moved, cs.Reordered, cs.Sessions,
-		(time.Since(start) - lakeWall).Round(time.Millisecond), cerr, time.Since(start).Round(time.Millisecond))
-	return ls, errors.Join(lerr, cerr)
+	st, err := s.ix.Ingest(s.dataDir, index.IngestOptions{Quiet: settleSource})
+	log.Printf("cycle %s: ingest unchanged=%d resumed=%d fresh=%d reparsed=%d in %s err=%v",
+		reason, st[index.Unchanged], st[index.Resumed], st[index.Fresh], st[index.Reparsed], time.Since(start).Round(time.Millisecond), err)
+	return err
 }

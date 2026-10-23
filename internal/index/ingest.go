@@ -519,7 +519,7 @@ func publish(store string, sources []source, quiet time.Duration, settleAll bool
 	var cks []ckpt
 	var srcs []stSource
 	for _, s := range sources {
-		row := stSource{Author: s.key.Author, Machine: s.key.Machine, UpdatedMs: s.src.UpdatedMs, Size: s.src.Size}
+		row := stSource{Author: s.key.Author, Machine: s.key.Machine, Harness: s.key.Harness, UpdatedMs: s.src.UpdatedMs, Size: s.src.Size}
 		if c, ok := readCkpt(store, sourceKey(s.key)); ok {
 			if c.hot() && (settleAll || s.src.UpdatedMs <= newest-quiet.Milliseconds()) {
 				c.ColdZst = c.ZstSize

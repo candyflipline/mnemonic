@@ -4,16 +4,12 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"os/user"
@@ -22,13 +18,8 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
-	"time"
 
-	"github.com/candyflipline/mnemonic/internal/auth"
 	"github.com/candyflipline/mnemonic/internal/config"
-	pushrun "github.com/candyflipline/mnemonic/internal/push"
-	"github.com/candyflipline/mnemonic/internal/redact"
-	"github.com/candyflipline/mnemonic/internal/server"
 	"github.com/candyflipline/mnemonic/internal/wire"
 )
 
@@ -58,86 +49,12 @@ func local(args []string) error {
 	return runLocal(ctx, opts, os.Stdout, os.Stderr)
 }
 
+// runLocal indexes this machine's harness files in place under
+// opts.dataDir (the engine's KindPlain sources, no raw copy, no store, no HTTP
+// and no push loop), feeds push.Watch's file events to the index ingest, and
+// serves MCP with every tool result redacted at the output boundary.
 func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) error {
-	if err := requireLoopback(opts.listen); err != nil {
-		return err
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		if err := refuseClientDir(opts.dataDir, home); err != nil {
-			return err
-		}
-	}
-	if err := os.MkdirAll(opts.dataDir, 0o700); err != nil {
-		return err
-	}
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		return fmt.Errorf("read random bytes: %w", err)
-	}
-	tok := base64.RawURLEncoding.EncodeToString(raw)
-	tokenPath := filepath.Join(opts.dataDir, "token")
-
-	author, machine := localIdentity()
-	srv, err := server.New(opts.dataDir, auth.Authors(map[string]string{auth.Hash(tok): author}))
-	if err != nil {
-		return err
-	}
-	defer srv.Close()
-
-	ln, err := net.Listen("tcp", opts.listen)
-	if err != nil {
-		return fmt.Errorf("listen on %s: %w", opts.listen, err)
-	}
-	defer ln.Close()
-	base := "http://" + ln.Addr().String()
-
-	if err := publishToken(tokenPath, tok); err != nil {
-		return err
-	}
-	defer os.Remove(tokenPath)
-
-	red, err := redact.New(nil)
-	if err != nil {
-		return err
-	}
-	cfg := config.Client{Server: base, Token: tok, Machine: machine}
-	for _, s := range config.DefaultSources {
-		glob, err := config.ExpandHome(s.Glob)
-		if err != nil {
-			return err
-		}
-		s.Glob = glob
-		cfg.Sources = append(cfg.Sources, s)
-	}
-
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	hs := &http.Server{Handler: srv.Handler()}
-	errs := make(chan error, 3)
-	go func() { srv.Run(ctx); errs <- nil }()
-	go func() {
-		if err := hs.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
-			errs <- err
-			return
-		}
-		errs <- nil
-	}()
-	go func() { errs <- pushrun.Watch(ctx, cfg, red, &http.Client{Timeout: 60 * time.Second}, logOut) }()
-
-	fmt.Fprintf(out, "mnemonic local: MCP at %s/mcp\n", base)
-	fmt.Fprintf(out, "mnemonic local: bearer token in %s (author %s, data dir %s)\n", tokenPath, author, opts.dataDir)
-
-	first := <-errs
-	cancel()
-	shutdownCtx, done := context.WithTimeout(context.Background(), 10*time.Second)
-	defer done()
-	if err := hs.Shutdown(shutdownCtx); err != nil {
-		log.Printf("shutdown: %v", err)
-	}
-	for range 2 {
-		<-errs
-	}
-	return first
+	panic("lane U10")
 }
 
 // publishToken replaces path with tok through a temp file and a rename, so a

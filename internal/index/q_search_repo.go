@@ -16,6 +16,7 @@ type searchQuery struct {
 	eventTypes []string
 	harness    *string
 	sourceName *string
+	listed     SessionFilter
 }
 
 type searchHit struct {

@@ -238,9 +238,16 @@ func (st *Part) score(q searchQuery, terms []string, idf []float64, norm float64
 			exists = hi > lo
 		}
 	}
+	scoped := !q.listed.all()
+	if scoped && q.sessionOK && !q.listed.Listed(q.sessionID) {
+		lo, hi, exists = 0, 0, false
+	}
 	mask := uint16(eventTypeMask(q.eventTypes))
 	pass := func(d int) bool {
 		if d < lo || d >= hi {
+			return false
+		}
+		if scoped && !q.listed.Listed(st.session(st.sessionOf(d)).id) {
 			return false
 		}
 		f := st.flags(d)

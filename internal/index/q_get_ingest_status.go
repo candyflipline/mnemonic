@@ -18,7 +18,11 @@ func (getIngestStatus) Call(ctx context.Context, db *DB, args json.RawMessage) (
 	if !stEmptyArgs(args) {
 		return nil, "", argErrorf("get_ingest_status expects an empty JSON object")
 	}
-	read, err := stReadSources(db)
+	f, err := Sessions(ctx, db)
+	if err != nil {
+		return nil, "", err
+	}
+	read, err := stReadSources(db, f)
 	if err != nil {
 		return nil, "", err
 	}
@@ -51,16 +55,20 @@ type stGroupRow struct {
 type stSource struct {
 	Author    string `json:"author"`
 	Machine   string `json:"machine"`
+	Harness   string `json:"harness"`
 	UpdatedMs int64  `json:"updated_ms"`
 	Size      int64  `json:"size"`
 	Events    int64  `json:"events"`
 }
 
-func stReadSources(db *DB) (stStatusRead, error) {
+func stReadSources(db *DB, f SessionFilter) (stStatusRead, error) {
 	srcs := db.sources
 	groups := []stGroupRow{}
 	agg := map[[2]string]stGroupRow{}
 	for _, s := range srcs {
+		if s.Harness == controlHarness || !f.Author(s.Author) {
+			continue
+		}
 		k := [2]string{s.Author, s.Machine}
 		g, ok := agg[k]
 		if !ok {

@@ -189,7 +189,7 @@ func (st *Part) lsRecs() ([]lsRec, error) {
 	return recs, nil
 }
 
-func (db *DB) lsCandidates(a *lsArgs, cursor *lsCursor) ([]lsCand, error) {
+func (db *DB) lsCandidates(a *lsArgs, cursor *lsCursor, listed SessionFilter) ([]lsCand, error) {
 	var recs []lsRec
 	var infos []sessInfo
 	for _, st := range db.parts {
@@ -219,6 +219,9 @@ func (db *DB) lsCandidates(a *lsArgs, cursor *lsCursor) ([]lsCand, error) {
 			continue
 		}
 		if a.Source != nil && r.Source != *a.Source {
+			continue
+		}
+		if !listed.all() && !listed.Listed(s.id) {
 			continue
 		}
 		if cursor != nil {

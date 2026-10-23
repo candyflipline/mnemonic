@@ -24,6 +24,9 @@ func (fileAttention) Call(ctx context.Context, db *DB, args json.RawMessage) (an
 	if err != nil {
 		return nil, "", err
 	}
+	if c.q.listed, err = Sessions(ctx, db); err != nil {
+		return nil, "", err
+	}
 	touches, err := db.faTouches(c.q)
 	if err != nil {
 		return nil, "", err

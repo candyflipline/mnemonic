@@ -41,7 +41,11 @@ func (listSessions) Call(ctx context.Context, db *DB, args json.RawMessage) (any
 	if err != nil {
 		return nil, "", err
 	}
-	page, err := lsQueryPage(a, func(cursor *lsCursor) ([]lsCand, error) { return db.lsCandidates(a, cursor) })
+	listed, err := Sessions(ctx, db)
+	if err != nil {
+		return nil, "", err
+	}
+	page, err := lsQueryPage(a, func(cursor *lsCursor) ([]lsCand, error) { return db.lsCandidates(a, cursor, listed) })
 	if err != nil {
 		return nil, "", err
 	}

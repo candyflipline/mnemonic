@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"bytes"
-	"database/sql"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -16,7 +15,8 @@ import (
 	"time"
 
 	"github.com/candyflipline/mnemonic/internal/auth"
-	"github.com/candyflipline/mnemonic/internal/query"
+	"github.com/candyflipline/mnemonic/internal/index"
+	"github.com/candyflipline/mnemonic/internal/redact"
 )
 
 //go:embed tools.json
@@ -117,8 +117,10 @@ type rpcResponse struct {
 }
 
 // Handler serves MCP to requests whose ctx carries an auth.Identity, the one
-// every tool's reads are scoped to; any other request is 401.
-func Handler(db *sql.DB, lookup func(name string) (query.Tool, bool)) http.Handler {
+// every tool's reads are scoped to; any other request is 401. Each tool call
+// reads the index snapshot ix serves when it starts. A non-nil out (local
+// mode) redacts every tool result before it leaves.
+func Handler(ix *index.Index, lookup func(name string) (index.Tool, bool), out *redact.Redactor) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := auth.From(r.Context()); !ok {
 			statusError(w, http.StatusUnauthorized, "unauthorized")
@@ -205,12 +207,12 @@ func Handler(db *sql.DB, lookup func(name string) (query.Tool, bool)) http.Handl
 				w.WriteHeader(http.StatusAccepted)
 				return
 			}
-			h := handler{db: db, lookup: lookup}
+			h := handler{ix: ix, lookup: lookup}
 			result := h.toolsCall(r, paramsJSON)
+			if out != nil {
+				result = redactResult(out, result)
+			}
 			switch result := result.(type) {
-			case *query.BusyError:
-				w.Header().Set("Retry-After", strconv.Itoa(int(result.RetryAfter.Seconds())))
-				statusError(w, http.StatusTooManyRequests, result.Error())
 			case *rpcErrorObj:
 				writeJSON(w, rpcResponse{JSONRPC: "2.0", ID: id, Error: result})
 			default:
@@ -230,12 +232,15 @@ func Handler(db *sql.DB, lookup func(name string) (query.Tool, bool)) http.Handl
 }
 
 type handler struct {
-	db     *sql.DB
-	lookup func(name string) (query.Tool, bool)
+	ix     *index.Index
+	lookup func(name string) (index.Tool, bool)
 }
 
-// toolsCall runs one tool and wraps it in the tool envelope. A busy tool is
-// a *query.BusyError, which Handler answers with HTTP 429. Only a params
+// redactResult is a tools/call result with every string in its content and
+// structured content passed through out.Line, the local-mode output boundary.
+func redactResult(out *redact.Redactor, result any) any { panic("lane U10") }
+
+// toolsCall runs one tool and wraps it in the tool envelope. Only a params
 // payload that cannot decode is a JSON-RPC error; like upstream, every
 // tool-level failure, such as an unknown name, is an isError result
 // so the client sees the message as tool output, not a protocol failure.
@@ -256,12 +261,10 @@ func (h handler) toolsCall(r *http.Request, paramsJSON json.RawMessage) any {
 		return unstructuredToolError(fmt.Sprintf("unknown tool: %s", p.Name))
 	}
 	start := time.Now()
-	data, text, err := tool.Call(r.Context(), h.db, args)
+	db, release := h.ix.Snapshot()
+	data, text, err := tool.Call(r.Context(), db, args)
+	release()
 	perf := performance{ElapsedMS: time.Since(start).Milliseconds()}
-	var busy *query.BusyError
-	if errors.As(err, &busy) {
-		return busy
-	}
 	if err != nil {
 		env := errorEnvelope{
 			SchemaVersion: errorSchemaVersion,
@@ -270,7 +273,7 @@ func (h handler) toolsCall(r *http.Request, paramsJSON json.RawMessage) any {
 			Warnings:      []string{},
 			Performance:   perf,
 		}
-		var argErr *query.ArgError
+		var argErr *index.ArgError
 		if errors.As(err, &argErr) {
 			env.Error = toolError{Code: "invalid_request", Message: argErr.Msg}
 		} else {

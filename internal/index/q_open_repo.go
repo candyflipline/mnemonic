@@ -196,9 +196,13 @@ func (sc *sessionScan) turnSeqs() []uint32 {
 type scanOpts struct {
 	turn      *uint32
 	targetUID string
+	opened    SessionFilter
 }
 
 func (db *DB) loadSessionScan(sessionID string, opts scanOpts) (*sessionScan, error) {
+	if !opts.opened.Opened(sessionID) {
+		return nil, nil
+	}
 	st, ok := db.part(sessionID)
 	if !ok {
 		return nil, nil

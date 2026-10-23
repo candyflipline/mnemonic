@@ -1,14 +1,10 @@
 package query_test
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -16,7 +12,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/cache"
 	"github.com/candyflipline/mnemonic/internal/cache/cachetest"
 	"github.com/candyflipline/mnemonic/internal/layout"
-	"github.com/candyflipline/mnemonic/internal/mcp"
 	"github.com/candyflipline/mnemonic/internal/query"
 )
 
@@ -210,73 +205,5 @@ func TestQueryTimeout(t *testing.T) {
 	}
 	if d, err := l.call(context.Background(), "alice", args("SELECT count(*) FROM events", feb)); err != nil || rowsJSON(t, d) != "[[15]]" {
 		t.Fatalf("after a timeout: %v %v", d, err)
-	}
-}
-
-func TestQueryBusyIs429(t *testing.T) {
-	l := newLake(t)
-	inner := mcp.Handler(l.ix.DB(), query.Lookup)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		inner.ServeHTTP(w, r.WithContext(l.with(r.Context(), "alice")))
-	}))
-	defer srv.Close()
-	post := func(ctx context.Context, sql string) (*http.Response, error) {
-		body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-			"params": map[string]any{"name": "query", "arguments": json.RawMessage(args(sql, feb))}})
-		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL, bytes.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json")
-		req.Header.Set("Mcp-Protocol-Version", "2025-06-18")
-		return srv.Client().Do(req)
-	}
-	probe := func() *http.Response {
-		resp, err := post(context.Background(), "SELECT 1")
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
-		return resp
-	}
-	if resp := probe(); resp.StatusCode != http.StatusOK {
-		t.Fatalf("idle probe status %d", resp.StatusCode)
-	}
-	slow, stop := context.WithCancel(context.Background())
-	var wg sync.WaitGroup
-	for range 2 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for slow.Err() == nil {
-				resp, err := post(slow, crossJoin)
-				if err != nil {
-					return
-				}
-				resp.Body.Close()
-				if resp.StatusCode != http.StatusTooManyRequests {
-					return
-				}
-				time.Sleep(20 * time.Millisecond)
-			}
-		}()
-	}
-	var busy *http.Response
-	var seen []int
-	for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
-		resp := probe()
-		seen = append(seen, resp.StatusCode)
-		if resp.StatusCode != http.StatusOK {
-			busy = resp
-			break
-		}
-	}
-	if busy == nil || busy.StatusCode != http.StatusTooManyRequests || busy.Header.Get("Retry-After") != "1" {
-		t.Fatalf("with both slots held: %+v (probe statuses %v)", busy, seen)
-	}
-	stop()
-	wg.Wait()
-	for deadline := time.Now().Add(15 * time.Second); probe().StatusCode != http.StatusOK; time.Sleep(50 * time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatal("the slots were not released after the slow queries were cancelled")
-		}
 	}
 }
