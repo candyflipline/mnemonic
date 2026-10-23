@@ -1,9 +1,9 @@
 package query
 
 import (
+	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -76,28 +76,26 @@ func TestFaTailSegmentsCountsNonEmptyComponents(t *testing.T) {
 	}
 }
 
-func faGitDir(t *testing.T) string {
-	t.Helper()
-	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+func TestFileAttentionResolvesAbsolutePathFromStoredRoots(t *testing.T) {
+	db := fixtureDB(t)
+	if _, err := db.Exec(`UPDATE events SET worktree_root = '/w/repo', project_id = 'git:abc', repo_rel_path = 'a/b.go'
+WHERE doc = (SELECT min(doc) FROM events WHERE tool_phase = 'request' AND event_order IS NOT NULL)`); err != nil {
 		t.Fatal(err)
 	}
-	return root
-}
-
-func TestFaResolveTailStripsAbsolutePathToMarkerRoot(t *testing.T) {
-	root := faGitDir(t)
-	file := filepath.Join(root, "crates", "foo", "tee.rs")
-	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+	raw, _ := callTool(t, db, fileAttention{}, `{"path":"/w/repo/a/b.go"}`)
+	data := raw.(map[string]any)
+	if data["stripped_root"] != "/w/repo" || data["tail"] != "a/b.go" || data["result_count"] != 1 {
+		t.Fatalf("data = %#v", data)
+	}
+	if got := fmt.Sprint(data["roots"]); got != `[map[root:/w/repo sessions:1 touches:1]]` {
+		t.Fatalf("roots = %s", got)
+	}
+	touches, err := faTouches(context.Background(), db, faQuery{Rel: "a/b.go", NormalizedPID: "git:abc", ProjectScope: true, MaxRows: faScanCap})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	tail := faResolveTail(file)
-	if tail.Rel != "crates/foo/tee.rs" || tail.Root != root ||
-		tail.ProjID != qProjectIDForRoot(root) {
-		t.Fatalf("tail = %#v", tail)
+	if len(touches) != 1 || touches[0].MatchKind != "path_suffix" || touches[0].MatchedPath != "/w/repo/a/b.go" {
+		t.Fatalf("touches = %#v", touches)
 	}
 }
 
