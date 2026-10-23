@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Proves done-predicate 2a-2e of traces substrate v0 on the Mac against the
-# fixture: a file store served over HTTP, one keeper, three readers. Prints
-# exactly five lines on stdout, 2a: to 2e:, and everything else on stderr.
+# Proves done-predicate 2a-2g of traces substrate v0 and D1 on the Mac against
+# the fixture: a file store process, one keeper, one router, three readers, every
+# call through the router. Prints exactly seven lines on stdout, 2a: to 2g:, and
+# everything else on stderr.
 # Exits non-zero if any fails. The caller holds heavy.lock:
 #   lockf -k /Users/user/xstock-scratch/heavy.lock nice -n 15 env GOMAXPROCS=4 GOMEMLIMIT=900MiB arena/e2e/run.sh
-# KEEP=1 keeps the temp dir; ONLY="c d" runs those steps. ARENA and SRC override the fixture and the
+# KEEP=1 keeps the temp dir; ONLY="f g" runs those steps. MAX_CALL_S (default 2) is the keeper's -max-call in seconds. ARENA and SRC override the fixture and the
 # transcripts the seed reads. BIN_DIR=<dir holding a, e2e, seed> skips the build. LOG_DIR keeps the logs
 # and du.txt outside the temp dir. ENVLABEL names the host and corpus in the 2e line. WAIT_UP_S,
 # WAIT_EXIT_S and PREWARM_WAIT_S (seconds) and E2E_TIMEOUT (a duration) stretch the waits for a big corpus.
@@ -89,12 +90,17 @@ step_du() {
 	done
 }
 
-# retire_step S stops what the step started and drops its dirs, so a run's disk use is one step's.
-retire_step() {
-	step_du "$1"
+# kill_all stops every process the steps started.
+kill_all() {
 	for p in $PIDS; do kill -9 "$p" 2>/dev/null; done
 	for p in $PIDS; do wait "$p" 2>/dev/null; done
 	PIDS=""
+}
+
+# retire_step S stops what the step started and drops its dirs, so a run's disk use is one step's.
+retire_step() {
+	step_du "$1"
+	kill_all
 	[ -n "${KEEP:-}" ] || rm -rf "$T"/2"$1"*
 }
 
@@ -147,13 +153,14 @@ wait_exit() {
 stale_commit() {
 	local store=$T/2c/store root=$T/2c/root a g1 g2 out before
 	"$BIN/seed" -src "$SRC" -half "$root" >/dev/null || { STALE="seed -half failed"; return 1; }
-	start_keeper 2c "$store" "$root" "" "" || { STALE="first keeper did not start ($(why 2c))"; return 1; }
+	start_store 2c "$store" || { STALE="store did not start ($(why 2c))"; return 1; }
+	start_keeper 2c "$root" || { STALE="first keeper did not start ($(why 2c))"; return 1; }
 	a=$KPID
 	local a_port=$KPORT
 	"$E2E" ingest -keeper "http://127.0.0.1:$a_port" || { STALE="first keeper ingest failed ($(why 2c))"; return 1; }
 	out=$("$E2E" manifest -dir "$store" -tenant "$TENANT") || { STALE="first manifest: $out"; return 1; }
 	g1=$(field "$out" gen)
-	start_keeper 2c2 "$store" "$root" "" "" || { STALE="second keeper did not start ($(why 2c2))"; return 1; }
+	start_keeper 2c2 "$root" || { STALE="second keeper did not start ($(why 2c2))"; return 1; }
 	"$E2E" ingest -keeper "http://127.0.0.1:$KPORT" || { STALE="second keeper ingest failed ($(why 2c2))"; return 1; }
 	out=$("$E2E" manifest -dir "$store" -tenant "$TENANT") || { STALE="second manifest: $out"; return 1; }
 	g2=$(field "$out" gen)
@@ -173,7 +180,8 @@ stale_commit() {
 stale_delete() {
 	local store=$T/2cd/store root=$T/2cd/root a out g1 g2 seq=0 n=0
 	"$BIN/seed" -src "$SRC" -half "$root" >/dev/null || { STALE="seed -half failed"; return 1; }
-	start_keeper 2cd "$store" "$root" "" "" "-grant-ttl 3s -delete-slack 3s -interval 1h" || { STALE="delete keeper A did not start ($(why 2cd))"; return 1; }
+	start_store 2cd "$store" || { STALE="store did not start ($(why 2cd))"; return 1; }
+	start_keeper 2cd "$root" "-grant-ttl 3s -delete-slack 3s -interval 1h" || { STALE="delete keeper A did not start ($(why 2cd))"; return 1; }
 	a=$KPID
 	local a_port=$KPORT
 	"$E2E" ingest -keeper "http://127.0.0.1:$a_port" >/dev/null || { STALE="delete keeper A ingest failed ($(why 2cd))"; return 1; }
@@ -185,14 +193,14 @@ stale_delete() {
 	done
 	[ "${seq:-0}" -ge 2 ] || { STALE="delete keeper A never reached seq 2"; return 1; }
 	g1=$(field "$out" gen)
-	spawn_keeper 2cd2 "$store" "$root" "" "" || { STALE="delete keeper B did not spawn"; return 1; }
+	spawn_keeper 2cd2 "$root" || { STALE="delete keeper B did not spawn"; return 1; }
 	local b=$KPID b_port=$KPORT
 	n=0
 	while [ "$(ls "$store/t/$TENANT/g" | wc -l)" -lt 2 ] && [ $n -lt 100 ]; do
 		sleep 0.1
 		n=$((n + 1))
 	done
-	sleep 6.5
+	sleep "$((6 + MAX_CALL_S)).5"
 	"$E2E" ingest -keeper "http://127.0.0.1:$a_port" || echo "stale keeper refused the ingest" >&2
 	wait_up "$b" "127.0.0.1:$b_port" || { STALE="delete keeper B did not start ($(why 2cd2))"; return 1; }
 	out=$("$E2E" ingest -keeper "http://127.0.0.1:$b_port") || { STALE="delete keeper B ingest failed ($(why 2cd2))"; return 1; }
@@ -305,7 +313,7 @@ s2e_at() {
 }
 
 s2e() {
-	local ok=1 line="$ENVLABEL, partial rung, 3 readers, cold = fresh cache and -prewarm=false; get_ingest_status is keeper-answered so its 0 is by design;"
+	local ok=1 line="$ENVLABEL, partial rung, 3 readers, cold = fresh cache and -prewarm=false; get_ingest_status is router-answered so its 0 is by design;"
 	for ttfb in "$TTFB" ""; do
 		s2e_at "$ttfb"
 		[ "$E2E_OK" = 1 ] || ok=0
@@ -315,9 +323,115 @@ s2e() {
 	if [ $ok = 1 ]; then emit "2e: PASS $line"; else fail 2e "$line ($(why 2e0))"; fi
 }
 
-for s in a b c d e; do
+# ingest_counts OUT prints OUT's four outcome counts.
+ingest_counts() { echo "unchanged=$(field "$1" unchanged) resumed=$(field "$1" resumed) fresh=$(field "$1" fresh) reparsed=$(field "$1" reparsed)"; }
+
+kill_keeper() {
+	kill -9 "$1" 2>/dev/null
+	wait "$1" 2>/dev/null
+}
+
+# s2f_first: keeper A ingests the settled raw and is killed; keeper B on an empty local over the same store parses nothing, commits at a higher gen naming the same part keys, and the cluster answers both rungs N/N.
+s2f_first() {
+	local out sources g1 g2 keys1 keys2 m1 m2 ok=1 w p store=$T/2f/store
+	cluster_up 2f "$store" "$ARENA/raw" "" || { F_MSG="cluster did not start ($(why 2f))"; return 1; }
+	local a=$KPID
+	out=$("$E2E" ingest -keeper "http://127.0.0.1:$KPORT") || { F_MSG="keeper A ingest failed ($(why 2f))"; return 1; }
+	sources=$(field "$out" fresh)
+	{ [ "${sources:-0}" -gt 0 ] && [ "$(field "$out" resumed)" = 0 ] && [ "$(field "$out" reparsed)" = 0 ]; } || { F_MSG="keeper A first ingest did not parse every source fresh ($(ingest_counts "$out"))"; return 1; }
+	m1=$("$E2E" manifest -dir "$store" -tenant "$TENANT") || { F_MSG="manifest after keeper A: $m1"; return 1; }
+	g1=$(field "$m1" gen)
+	keys1=$(field "$m1" keys)
+	kill_keeper "$a"
+	respawn_keeper 2f2 "$ARENA/raw" || { F_MSG="keeper B did not spawn"; return 1; }
+	wait_up "$KPID" "127.0.0.1:$KPORT" || { F_MSG="keeper B did not start ($(why 2f2))"; return 1; }
+	out=$("$E2E" ingest -keeper "http://127.0.0.1:$KPORT") || { F_MSG="keeper B ingest failed ($(why 2f2))"; return 1; }
+	[ "$(ingest_counts "$out")" = "unchanged=$sources resumed=0 fresh=0 reparsed=0" ] || { F_MSG="keeper B on an empty local parsed: $(ingest_counts "$out"), want unchanged=$sources only"; return 1; }
+	m2=$("$E2E" manifest -dir "$store" -tenant "$TENANT") || { F_MSG="manifest after keeper B: $m2"; return 1; }
+	g2=$(field "$m2" gen)
+	keys2=$(field "$m2" keys)
+	[ "${g2:-0}" -gt "${g1:-0}" ] || { F_MSG="keeper B did not commit at a higher gen ($g1 then $g2)"; return 1; }
+	{ [ -n "$keys1" ] && [ "$keys1" = "$keys2" ]; } || { F_MSG="keeper B's manifest names other part keys than keeper A's"; return 1; }
+	w=$(drive -rung whole) || ok=0
+	p=$(drive -rung partial) || ok=0
+	full "$w" || ok=0
+	full "$p" || ok=0
+	F_MSG="whole $(ratio "$(field "$w" equal)" "$(field "$w" total)") partial $(ratio "$(field "$p" equal)" "$(field "$p" total)")"
+	[ $ok = 1 ] || { F_MSG="$F_MSG ($(why 2f2))"; return 1; }
+	F_MSG="keeper B on an empty local over keeper A's store: $(ingest_counts "$out") ($sources sources), gen $g1 to $g2 naming the same part keys, $F_MSG"
+}
+
+# s2f_half: keeper C ingests the half root and is killed, more raw arrives, keeper D on an empty local over C's store ingests it without a reparse, and the cluster is N/N equal to a clean run.
+s2f_half() {
+	local root=$T/2fh/root out base="" ok=1 w p what="a clean run"
+	[ -d "$T/clean" ] && base="-baseline $T/clean"
+	[ -z "$base" ] && what="the expected results (no clean run saved)"
+	"$BIN/seed" -src "$SRC" -half "$root" >/dev/null || { H_MSG="seed -half failed"; return 1; }
+	cluster_up 2fh "$T/2fh/store" "$root" "" || { H_MSG="cluster did not start ($(why 2fh))"; return 1; }
+	local c=$KPID
+	"$E2E" ingest -keeper "http://127.0.0.1:$KPORT" || { H_MSG="keeper C ingest failed ($(why 2fh))"; return 1; }
+	kill_keeper "$c"
+	"$BIN/seed" -src "$SRC" -rest "$root" >/dev/null || { H_MSG="seed -rest failed"; return 1; }
+	respawn_keeper 2fh2 "$root" || { H_MSG="keeper D did not spawn"; return 1; }
+	wait_up "$KPID" "127.0.0.1:$KPORT" || { H_MSG="keeper D did not start ($(why 2fh2))"; return 1; }
+	out=$("$E2E" ingest -keeper "http://127.0.0.1:$KPORT") || { H_MSG="keeper D ingest failed ($(why 2fh2))"; return 1; }
+	[ "$(field "$out" reparsed)" = 0 ] || { H_MSG="keeper D reparsed sources: $(ingest_counts "$out")"; return 1; }
+	# shellcheck disable=SC2086
+	w=$(drive -rung whole $base) || ok=0
+	# shellcheck disable=SC2086
+	p=$(drive -rung partial $base) || ok=0
+	full "$w" || ok=0
+	full "$p" || ok=0
+	H_MSG="half, keeper killed, rest, fresh keeper D: $(ingest_counts "$out"), whole $(ratio "$(field "$w" equal)" "$(field "$w" total)") partial $(ratio "$(field "$p" equal)" "$(field "$p" total)") equal to $what"
+	[ $ok = 1 ] || { H_MSG="$H_MSG ($(why 2fh2))"; return 1; }
+}
+
+s2f() {
+	local f h fmsg
+	s2f_first && f=1 || f=0
+	fmsg=$F_MSG
+	retire_step f
+	s2f_half && h=1 || h=0
+	if [ $f = 1 ] && [ $h = 1 ]; then
+		emit "2f: PASS $fmsg; $H_MSG"
+	elif [ $f = 0 ]; then
+		fail 2f "empty-local keeper: $fmsg"
+	else
+		fail 2f "half then rest: $H_MSG"
+	fi
+}
+
+# s2g: reads with the keeper down. The router answers committed while keeper A is dead, refuses the whole rung, keeps answering while keeper B restores, and covers everything once B has committed.
+s2g() {
+	local out g1 g2 ok=1 kill_at=$((EXPECT / 2)) a k w r n line
+	cluster_up 2g "$T/2g/store" "$ARENA/raw" "" || { fail 2g "cluster did not start ($(why 2g))"; return; }
+	a=$KPID
+	out=$("$E2E" ingest -keeper "http://127.0.0.1:$KPORT") || { fail 2g "ingest failed ($(why 2g))"; return; }
+	g1=$(field "$out" gen)
+	k=$(drive -rung partial -kill-pid "$a" -kill-at "$kill_at") || ok=0
+	dead "$a" || { ok=0; echo "keeper A is still alive after the kill" >&2; }
+	full "$k" || ok=0
+	[ "$(field "$k" committed)" -ge "$kill_at" ] 2>/dev/null || ok=0
+	w=$(drive -rung whole -limit 1) && ok=0
+	[ "$(field "$w" s503)" = 1 ] || ok=0
+	respawn_keeper 2g2 "$ARENA/raw" || { fail 2g "keeper B did not spawn"; return; }
+	r=$(drive -rung partial) || ok=0
+	full "$r" || ok=0
+	[ "$(field "$r" committed)" -ge 1 ] 2>/dev/null || ok=0
+	wait_up "$KPID" "127.0.0.1:$KPORT" || { fail 2g "keeper B did not start ($(why 2g2))"; return; }
+	out=$("$E2E" ingest -keeper "http://127.0.0.1:$KPORT") || { fail 2g "keeper B ingest failed ($(why 2g2))"; return; }
+	g2=$(field "$out" gen)
+	[ "${g2:-0}" -gt "${g1:-0}" ] || ok=0
+	n=$(drive -rung partial) || ok=0
+	full "$n" || ok=0
+	[ "$(field "$n" all)" = "$EXPECT" ] || ok=0
+	line="keeper SIGKILLed before call $kill_at: partial $(ratio "$(field "$k" equal)" "$(field "$k" total)") with committed=$(field "$k" committed); whole answers 503; keeper B restoring: partial $(ratio "$(field "$r" equal)" "$(field "$r" total)") with committed=$(field "$r" committed); after its first commit (gen $g1 to $g2): partial $(ratio "$(field "$n" equal)" "$(field "$n" total)") all=$(field "$n" all)"
+	if [ $ok = 1 ]; then emit "2g: PASS $line"; else fail 2g "$line ($(why 2g2))"; fi
+}
+
+for s in a b c d e f g; do
 	t0=$SECONDS
-	case " ${ONLY:-a b c d e} " in *" $s "*) "s2$s" ;; esac
+	case " ${ONLY:-a b c d e f g} " in *" $s "*) "s2$s" ;; esac
 	retire_step "$s"
 	echo "2$s took $((SECONDS - t0))s" | tee -a "$LOGS/steps.txt"
 done

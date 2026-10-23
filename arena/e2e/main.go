@@ -1,20 +1,21 @@
-// Command e2e drives a keeper's /v1/call with the fixture's calls and diffs
+// Command e2e drives a router's /v1/call with the fixture's calls and diffs
 // the answers against the expected results with arena/check/cmp.
 //
-//	e2e drive    -keeper URL -arena DIR -rung whole|partial   send every call, diff, print one line per pass
-//	e2e ingest   -keeper URL                                  one ingest and commit cycle
-//	e2e manifest -dir DIR -tenant T [-gen N]                  latest manifest, and whether every part it names exists
+//	e2e drive    -router URL -arena DIR -rung whole|partial   send every call, diff, print one line per pass
+//	e2e ingest   -keeper URL                                  one ingest and commit cycle, with the keeper's four outcome counts
+//	e2e manifest -dir DIR -tenant T [-gen N]                  latest manifest, whether every part it names exists, and a digest of its part keys
 //	e2e tools    -arena DIR                                   the tools the fixture calls, one per line
 //	e2e stats    -url URL                                     the file store's request and byte counters
 //	e2e ports    N                                            N free 127.0.0.1 ports
 //	e2e wait     -addr HOST:PORT -timeout D                   until the address accepts connections
 //	e2e unpack   -raw DIR -src DIR                            the claude and codex sources of a raw tree as seed's SRC layout
 //
-// E2E_TIMEOUT (a Go duration, default 120s) bounds every request to the keeper, an ingest included.
+// E2E_TIMEOUT (a Go duration, default 120s) bounds every request to the router or keeper, an ingest included.
 package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -93,10 +94,11 @@ func loadSets(arena, baseline string) ([]fixtureSet, error) {
 	return out, nil
 }
 
-type keeperReply struct {
-	Data  json.RawMessage `json:"data"`
-	Text  string          `json:"text"`
-	Error string          `json:"error"`
+type routerReply struct {
+	Data     json.RawMessage `json:"data"`
+	Text     string          `json:"text"`
+	Error    string          `json:"error"`
+	Coverage string          `json:"coverage"`
 }
 
 type callBody struct {
@@ -160,7 +162,7 @@ func readStats(url string) (counters, error) {
 
 func drive(args []string) error {
 	fs := flag.NewFlagSet("drive", flag.ExitOnError)
-	keeperURL := fs.String("keeper", "", "keeper base URL")
+	routerURL := fs.String("router", "", "router base URL")
 	arena := fs.String("arena", os.Getenv("ARENA"), "fixture dir (default $ARENA)")
 	rung := fs.String("rung", "partial", "whole or partial")
 	baseline := fs.String("baseline", "", "dir of <set>.jsonl results to compare to instead of the fixture's expected")
@@ -168,11 +170,12 @@ func drive(args []string) error {
 	only := fs.String("tool", "", "send only this tool's calls")
 	passes := fs.Int("passes", 1, "send the calls this many times")
 	statsURL := fs.String("stats", "", "file store /stats URL; each pass line carries the requests and bytes it fetched")
+	limit := fs.Int("limit", 0, "send only the first N calls of each pass (0 sends all)")
 	killPID := fs.Int("kill-pid", 0, "SIGKILL this pid before call -kill-at of the first pass")
 	killAt := fs.Int("kill-at", 0, "0-based index into the sent calls")
 	fs.Parse(args)
-	if *keeperURL == "" || *arena == "" {
-		return fmt.Errorf("-keeper and -arena are required")
+	if *routerURL == "" || *arena == "" {
+		return fmt.Errorf("-router and -arena are required")
 	}
 	if *rung != "whole" && *rung != "partial" {
 		return fmt.Errorf("-rung is whole or partial")
@@ -195,12 +198,16 @@ func drive(args []string) error {
 			last = before
 		}
 		total, equal, sent := 0, 0, 0
+		coverAll, coverCommitted, s503 := 0, 0, 0
 		var us, fetchedUS []int64
 		saved := map[string][]cmp.Result{}
 		shown := map[string]int{}
 		for _, s := range fx {
 			for _, c := range s.calls {
 				if *only != "" && c.Tool != *only {
+					continue
+				}
+				if *limit > 0 && sent >= *limit {
 					continue
 				}
 				if pass == 1 && *killPID != 0 && sent == *killAt {
@@ -211,8 +218,16 @@ func drive(args []string) error {
 				sent++
 				total++
 				start := time.Now()
-				var rep keeperReply
-				status, perr := post(*keeperURL+"/v1/call", callBody{Tool: c.Tool, Args: c.Args, Rung: *rung}, &rep)
+				var rep routerReply
+				status, perr := post(*routerURL+"/v1/call", callBody{Tool: c.Tool, Args: c.Args, Rung: *rung}, &rep)
+				switch {
+				case status == http.StatusServiceUnavailable:
+					s503++
+				case status == http.StatusOK && rep.Coverage == "all":
+					coverAll++
+				case status == http.StatusOK && rep.Coverage == "committed":
+					coverCommitted++
+				}
 				took := time.Since(start).Microseconds()
 				us = append(us, took)
 				if *statsURL != "" {
@@ -229,10 +244,12 @@ func drive(args []string) error {
 				saved[s.name] = append(saved[s.name], got)
 				var paths []string
 				switch w, ok := s.want[c.ID]; {
-				case perr != nil:
+				case status == 0 && perr != nil:
 					paths = []string{"transport: " + perr.Error()}
 				case status != http.StatusOK:
 					paths = []string{"status " + strconv.Itoa(status)}
+				case perr != nil:
+					paths = []string{"body: " + perr.Error()}
 				case !ok:
 					paths = []string{"baseline:missing"}
 				default:
@@ -256,7 +273,7 @@ func drive(args []string) error {
 				return err
 			}
 		}
-		line := fmt.Sprintf("pass=%d rung=%s total=%d equal=%d p50_ms=%.2f", pass, *rung, total, equal, p50(us))
+		line := fmt.Sprintf("pass=%d rung=%s total=%d equal=%d all=%d committed=%d s503=%d p50_ms=%.2f", pass, *rung, total, equal, coverAll, coverCommitted, s503, p50(us))
 		if *statsURL != "" {
 			after, err := readStats(*statsURL)
 			if err != nil {
@@ -316,7 +333,7 @@ func ingest(args []string) error {
 	fs := flag.NewFlagSet("ingest", flag.ExitOnError)
 	keeperURL := fs.String("keeper", "", "keeper base URL")
 	fs.Parse(args)
-	var out struct{ Gen, Seq, Parts uint64 }
+	var out struct{ Gen, Seq, Parts, Unchanged, Resumed, Fresh, Reparsed uint64 }
 	status, err := post(*keeperURL+"/v1/ingest", struct{}{}, &out)
 	if err != nil {
 		return err
@@ -324,7 +341,7 @@ func ingest(args []string) error {
 	if status != http.StatusOK {
 		return fmt.Errorf("ingest answered status %d", status)
 	}
-	fmt.Printf("gen=%d seq=%d parts=%d\n", out.Gen, out.Seq, out.Parts)
+	fmt.Printf("gen=%d seq=%d parts=%d unchanged=%d resumed=%d fresh=%d reparsed=%d\n", out.Gen, out.Seq, out.Parts, out.Unchanged, out.Resumed, out.Fresh, out.Reparsed)
 	return nil
 }
 
@@ -358,11 +375,15 @@ func manifest(args []string) error {
 		return err
 	}
 	missing := 0
+	keys := make([]string, 0, len(m.Parts))
 	for _, p := range m.Parts {
+		keys = append(keys, string(p.Key))
 		if _, err := os.Stat(filepath.Join(*dir, string(p.Key))); err != nil {
 			missing++
 		}
 	}
+	sort.Strings(keys)
+	digest := sha256.Sum256([]byte(strings.Join(keys, "\n")))
 	claimed := int64(-1)
 	if gs, err := os.ReadDir(filepath.Join(*dir, "t", *tenant, "g")); err == nil {
 		for _, g := range gs {
@@ -371,7 +392,7 @@ func manifest(args []string) error {
 			}
 		}
 	}
-	fmt.Printf("gen=%d seq=%d parts=%d missing=%d claimed=%d manifests=%d\n", m.Gen, m.Seq, len(m.Parts), missing, claimed, len(names))
+	fmt.Printf("gen=%d seq=%d parts=%d missing=%d claimed=%d manifests=%d keys=%x\n", m.Gen, m.Seq, len(m.Parts), missing, claimed, len(names), digest)
 	if missing > 0 {
 		return fmt.Errorf("%d parts the manifest names are missing", missing)
 	}

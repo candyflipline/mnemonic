@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# Runs done-predicate 2a-2e of traces substrate v0 on a real corpus beside a
+# Runs done-predicate 2a-2g of traces substrate v0 and D1 on a real corpus beside a
 # live bot, from prebuilt binaries. Needs the owner's go (E3_GO=1).
 #
 #   E3_GO=1 BIN_DIR=/var/lib/mnemonic-e3/bin RAW=/var/lib/mnemonic-e3/raw WORK=/var/lib/mnemonic-e3/run-<stamp> e3-workers.sh
 #
 # BIN_DIR holds a, check, e2e, seed, gen, oracle. RAW is a raw tree (author=*/... directly under it, or under RAW/raw).
 # run.sh and lib.sh sit beside this script. E3_NOUNIT=1 runs without systemd-run.
+# run.sh starts, per step, one `a store`, one `a keep`, one `a route` and three `a read` on 127.0.0.1, all from BIN_DIR/a,
+# so the host needs nothing beyond the six binaries. E3_MAX_CALL_S (default 30) is the keeper's -max-call in seconds.
 # Under WORK it writes src/ (the claude and codex sources unpacked from RAW), arena/ (laid out like
 # arena-fixture, raw/ made by seed -full from src/ so 2c and 2d can cut the same sources in halves),
-# oracle/, tmp/ and log/. log/lines.txt holds the five lines.
+# oracle/, tmp/ and log/. log/lines.txt holds the seven lines.
 set -u -o pipefail
 
 [ "${E3_GO:-}" = 1 ] || { echo "e3-workers: refusing to run without E3_GO=1 (the owner's go)" >&2; exit 2; }
@@ -28,7 +30,7 @@ if [ -z "${E3_IN_UNIT:-}" ] && [ -z "${E3_NOUNIT:-}" ]; then
 		--property=CPUWeight=10 --property=Nice=10 --property=MemoryMax=8G \
 		--property=OOMScoreAdjust=800 --property=IOWeight=10 \
 		--setenv=E3_GO=1 --setenv=E3_IN_UNIT=1 --setenv=BIN_DIR="$BIN_DIR" --setenv=RAW="$RAW" --setenv=WORK="$WORK" \
-		--setenv=GOMAXPROCS=6 --setenv=E3_STAGE_MEM="${E3_STAGE_MEM:-3GiB}" --setenv=E3_CLUSTER_MEM="${E3_CLUSTER_MEM:-1400MiB}" \
+		--setenv=E3_MAX_CALL_S="${E3_MAX_CALL_S:-30}" --setenv=GOMAXPROCS=6 --setenv=E3_STAGE_MEM="${E3_STAGE_MEM:-3GiB}" --setenv=E3_CLUSTER_MEM="${E3_CLUSTER_MEM:-1400MiB}" \
 		"$HERE/$(basename "$0")"
 fi
 
@@ -83,7 +85,7 @@ stage gen-and-masks oracle_masks 2>"$LOG/gen.log" || die gen-and-masks
 rm -rf "$WORK/oracle2"
 
 ENVLABEL=${E3_ENVLABEL:-$(hostname -s), real corpus} E2E_TIMEOUT=${E3_TIMEOUT:-3h} WAIT_UP_S=${E3_WAIT_UP_S:-900} WAIT_EXIT_S=${E3_WAIT_EXIT_S:-600} \
-	PREWARM_WAIT_S=${E3_PREWARM_WAIT_S:-1800} GOMEMLIMIT=$CLUSTER_MEM \
+	PREWARM_WAIT_S=${E3_PREWARM_WAIT_S:-1800} MAX_CALL_S=${E3_MAX_CALL_S:-30} GOMEMLIMIT=$CLUSTER_MEM \
 	ARENA="$ARENA" SRC="$SRC" BIN_DIR="$BIN_DIR" LOG_DIR="$LOG/e2e" TMPDIR="$WORK/tmp" \
 	stage run.sh "$HERE/run.sh" >"$LOG/lines.txt" 2>"$LOG/run.stderr"
 RC=$?
@@ -98,13 +100,13 @@ peak() {
 	if [ "${v:-}" -ge 0 ] 2>/dev/null; then echo "$((v / 1048576)) MiB"; else echo "n/a (not in a unit)"; fi
 }
 
-echo "---- the five lines"
+echo "---- the seven lines"
 cat "$LOG/lines.txt"
 echo "---- stages"
 cat "$LOG/stages.txt" "$LOG/e2e/steps.txt" 2>/dev/null
 echo "---- du"
 du -sh "$RAWDIR" "$SRC" "$ARENA/raw" "$WORK/oracle" "$WORK/oracle/raw" "$WORK/oracle/events" "$WORK/oracle/cache" "$LOG" 2>/dev/null | sed "s#$WORK/##"
-echo "per step, KiB (the object store, the keeper root of 2c/2d, the keeper local dir, the reader caches), as each step ended:"
+echo "per step, KiB (the object store, the keeper root of 2c/2d/2f, the keeper local dirs, the reader caches), as each step ended:"
 cat "$LOG/e2e/du.txt" 2>/dev/null
 echo "---- unit peak memory: $(peak)"
 exit $RC

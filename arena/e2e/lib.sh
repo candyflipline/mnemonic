@@ -11,19 +11,33 @@ dead() {
 
 track() { PIDS="$PIDS $1"; }
 
-# spawn_keeper NAME STORE ROOT TTFB READERS [FLAGS] sets KPORT, SPORT and KPID
-# without waiting for the keeper to listen; FLAGS are extra keep flags, split
-# on spaces. start_keeper waits.
+MAX_CALL_S=${MAX_CALL_S:-2}
+
+# start_store NAME DIR [TTFB] starts `a store` over DIR with a secret of its own that every process of the step
+# inherits, waits until it serves /stats, and sets SPORT, STPID and STORE_URI. TTFB delays each presigned GET.
+start_store() {
+	local name=$1 dir=$2 ttfb=${3:-}
+	SPORT=$("$E2E" ports 1) || return 1
+	STORE_URI="file://$dir?serve=http://127.0.0.1:$SPORT"
+	[ -n "$ttfb" ] && STORE_URI="$STORE_URI&ttfb=$ttfb"
+	ARENA_OBJ_SECRET=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+	export ARENA_OBJ_SECRET
+	mkdir -p "$dir"
+	"$BIN/a" store -store "$STORE_URI" >"$LOGS/$name-store.log" 2>&1 &
+	STPID=$!
+	track "$STPID"
+	wait_up "$STPID" "127.0.0.1:$SPORT" && "$E2E" stats -url "http://127.0.0.1:$SPORT/stats" >/dev/null
+}
+
+# spawn_keeper NAME ROOT [FLAGS] starts a keeper over STORE_URI with an empty local dir named after NAME and sets KPORT and KPID
+# without waiting for it to listen; FLAGS are extra keep flags, split on spaces. KEEPER_PORT fixes the port.
+# start_keeper waits. respawn_keeper takes over the port of the keeper before it, which the router is pointed at.
 spawn_keeper() {
-	local name=$1 store=$2 root=$3 ttfb=$4 readers=$5 flags=${6:-} ports uri
-	ports=$("$E2E" ports 2) || return 1
-	KPORT=$(sed -n 1p <<<"$ports")
-	SPORT=$(sed -n 2p <<<"$ports")
-	uri="file://$store?serve=http://127.0.0.1:$SPORT"
-	[ -n "$ttfb" ] && uri="$uri&ttfb=$ttfb"
-	mkdir -p "$store" "$T/$name/local"
-	"$BIN/a" keep -tenant "$TENANT" -root "$root" -local "$T/$name/local" -store "$uri" \
-		-readers "$readers" -listen "127.0.0.1:$KPORT" -grant-ttl 10m -quiet 15m -settle -interval 2s $flags \
+	local name=$1 root=$2 flags=${3:-}
+	KPORT=${KEEPER_PORT:-$("$E2E" ports 1)} || return 1
+	mkdir -p "$T/$name/local"
+	"$BIN/a" keep -tenant "$TENANT" -root "$root" -local "$T/$name/local" -store "$STORE_URI" \
+		-listen "127.0.0.1:$KPORT" -grant-ttl 10m -max-call "${MAX_CALL_S}s" -quiet 15m -settle -interval 2s $flags \
 		>"$LOGS/$name-keeper.log" 2>&1 &
 	KPID=$!
 	track "$KPID"
@@ -32,6 +46,19 @@ spawn_keeper() {
 start_keeper() {
 	spawn_keeper "$@" || return 1
 	wait_up "$KPID" "127.0.0.1:$KPORT"
+}
+
+respawn_keeper() { KEEPER_PORT=$KPORT spawn_keeper "$@"; }
+
+# start_router NAME [FLAGS] starts a router over STORE_URI, the keeper on KPORT and READERS, and sets ROPORT and ROPID.
+start_router() {
+	local name=$1 flags=${2:-}
+	ROPORT=$("$E2E" ports 1) || return 1
+	"$BIN/a" route -tenant "$TENANT" -store "$STORE_URI" -keeper "http://127.0.0.1:$KPORT" -readers "$READERS" \
+		-listen "127.0.0.1:$ROPORT" $flags >"$LOGS/$name-router.log" 2>&1 &
+	ROPID=$!
+	track "$ROPID"
+	wait_up "$ROPID" "127.0.0.1:$ROPORT"
 }
 
 # wait_up PID ADDR waits up to WAIT_UP_S (30) s for ADDR, and fails at once if PID exits.
@@ -50,12 +77,12 @@ start_reader() {
 	local name=$1 i=$2 flags=${3:-}
 	rm -rf "${T:?}/$name/cache-r$i"
 	"$BIN/a" read -id "r$i" -listen "127.0.0.1:${RPORT[$i]}" -cache "$T/$name/cache-r$i" \
-		-keeper "http://127.0.0.1:$KPORT" -readers r1,r2,r3 $flags >"$LOGS/$name-r$i.log" 2>&1 &
+		-router "http://127.0.0.1:$ROPORT" -readers r1,r2,r3 $flags >"$LOGS/$name-r$i.log" 2>&1 &
 	RPID[i]=$!
 	track "${RPID[$i]}"
 }
 
-# cluster_up NAME STORE ROOT TTFB: one keeper and three readers.
+# cluster_up NAME STORE_DIR ROOT TTFB: a store, one keeper, one router and three readers.
 cluster_up() {
 	local name=$1 ports
 	ports=$("$E2E" ports 3) || return 1
@@ -63,7 +90,9 @@ cluster_up() {
 	RPORT[2]=$(sed -n 2p <<<"$ports")
 	RPORT[3]=$(sed -n 3p <<<"$ports")
 	READERS="r1=http://127.0.0.1:${RPORT[1]},r2=http://127.0.0.1:${RPORT[2]},r3=http://127.0.0.1:${RPORT[3]}"
-	start_keeper "$name" "$2" "$3" "$4" "$READERS" || return 1
+	start_store "$name" "$2" "$4" || return 1
+	start_keeper "$name" "$3" || return 1
+	start_router "$name" || return 1
 	for i in 1 2 3; do
 		start_reader "$name" "$i"
 	done
@@ -79,7 +108,7 @@ kill_readers() {
 	done
 }
 
-drive() { "$E2E" drive -keeper "http://127.0.0.1:$KPORT" -arena "$ARENA" "$@"; }
+drive() { "$E2E" drive -router "http://127.0.0.1:$ROPORT" -arena "$ARENA" "$@"; }
 
 ratio() { echo "${1:-?}/${2:-?}"; }
 
