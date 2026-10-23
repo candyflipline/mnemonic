@@ -48,19 +48,19 @@ func (s *sections) addSession(sid string, evs []built, seqs []uint32, payload fu
 	slices.Sort(hs)
 	for _, h := range hs {
 		if f, ok := spanBuilders[h]; ok {
-			s.spans[sid] = append(s.spans[sid], f(h, perHarness[h])...)
+			if sp := f(h, perHarness[h]); len(sp) > 0 {
+				s.spans[sid] = append(s.spans[sid], sp...)
+			}
 		}
 	}
+	var anns []annRow
 	for _, b := range evs {
-		if b.row.Harness != schema.AnnotationHarness {
-			continue
+		if b.row.Harness == schema.AnnotationHarness {
+			anns = append(anns, annRow{row: b.row, payload: payload(b), author: b.row.Author})
 		}
-		a, err := schema.ParseAnnotation([]byte(payload(b)))
-		if err != nil {
-			continue
-		}
-		a.Author = b.row.Author
-		s.ann[sid] = append(s.ann[sid], a)
+	}
+	if len(anns) > 0 {
+		s.ann[sid] = buildAnnotations(anns)
 	}
 	set := s.auth[sid]
 	if set == nil {
