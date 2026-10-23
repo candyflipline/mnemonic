@@ -79,7 +79,9 @@ Store for the arena raw (22 MB, 70 sources, 17.7k events): logs 29.7 MB and
    it is built in `<id>.tmp`, fsynced, then renamed. Unchanged parts are
    reused; a killed build leaves a `.tmp` that GC removes.
    - Within a part, winners are: the highest version per uid within a source,
-     then version desc and lake path across sources. Then come session order,
+     then the last source in lake path order across sources, the copy a clean
+     lake run stamps with the highest event_version because it parses sources
+     in that order. Then come session order,
      turn_seq, ordinals and rollups.
 4. **Commit.** Every rename of a checkpoint, part or `CURRENT` fsyncs the
    parent directory before (so the entries of new logs or part files are

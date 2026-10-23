@@ -318,7 +318,7 @@ func openDelta(dir string, d delta) (*Part, error) {
 
 	win := map[string]built{}
 	offer := func(b built) {
-		if w, ok := win[b.row.UID]; ok && w.src != b.src && d.Members[w.src].Path <= d.Members[b.src].Path {
+		if w, ok := win[b.row.UID]; ok && w.src != b.src && d.Members[w.src].Path >= d.Members[b.src].Path {
 			return
 		}
 		win[b.row.UID] = b

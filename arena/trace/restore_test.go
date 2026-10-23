@@ -109,7 +109,7 @@ func TestRestoredStoreIngestsNothing(t *testing.T) {
 		t.Fatalf("ingest after restore: %v, want [2 0 0 0]", stats)
 	}
 	got, _, _ := packedParts(t, b)
-	want := []string{"36a9d9184acec604bbf1947d44bcbc095c439859781f3f788533965cf6aba64f", "d5dd677df4a2d0d6c9cbbce21b7426d43c0cfbe13b1435657293fa3956232a2a"}
+	want := []string{"2a14222eddb2ae753d677bf80dec852083d212f0a4e02d5f7775a44ec756ee85", "9059d76a94e289df8761710465c07357c67aace0bc88071304e5b6591367f1d6"}
 	if !slices.Equal(got, want) || !slices.Equal(ids, want) {
 		t.Fatalf("restored store names parts %v, original %v, want %v", got, ids, want)
 	}
@@ -129,7 +129,7 @@ func TestReparseAfterRestoreDoesNotResurrectALoser(t *testing.T) {
 	b := t.TempDir()
 	restoreInto(t, b, ids, shas, blobs)
 
-	writeSources(t, root, map[string][]byte{"s1": bytes.Repeat(other, 20)})
+	writeSources(t, root, map[string][]byte{"s2": bytes.Repeat(other, 20)})
 	stats, err := Ingest(root, b, time.Minute, true)
 	if err != nil {
 		t.Fatal(err)
@@ -137,7 +137,7 @@ func TestReparseAfterRestoreDoesNotResurrectALoser(t *testing.T) {
 	if stats != (IngestStats{0, 0, 0, 2}) {
 		t.Fatalf("ingest after rewriting the winner: %v, want [0 0 0 2]", stats)
 	}
-	if got, want := sharedSessionRows(t, b), map[string]int{"/p/s2.jsonl": 6}; !maps.Equal(got, want) {
+	if got, want := sharedSessionRows(t, b), map[string]int{"/p/s1.jsonl": 6}; !maps.Equal(got, want) {
 		t.Fatalf("rows of the shared session by source: %v, want %v", got, want)
 	}
 }
@@ -156,8 +156,8 @@ func TestLoserParsesAgainAfterAFailedCycle(t *testing.T) {
 	b := t.TempDir()
 	restoreInto(t, b, ids, shas, blobs)
 
-	writeSources(t, root, map[string][]byte{"s1": bytes.Repeat(other, 20)})
-	blocked := logPath(b, "a__m__claude-code__s2", 1, "light")
+	writeSources(t, root, map[string][]byte{"s2": bytes.Repeat(other, 20)})
+	blocked := logPath(b, "a__m__claude-code__s1", 1, "light")
 	if err := os.Mkdir(blocked, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func TestLoserParsesAgainAfterAFailedCycle(t *testing.T) {
 	if _, err := Ingest(root, b, time.Minute, true); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := sharedSessionRows(t, b), map[string]int{"/p/s2.jsonl": 6}; !maps.Equal(got, want) {
+	if got, want := sharedSessionRows(t, b), map[string]int{"/p/s1.jsonl": 6}; !maps.Equal(got, want) {
 		t.Fatalf("rows of the shared session by source: %v, want %v", got, want)
 	}
 }

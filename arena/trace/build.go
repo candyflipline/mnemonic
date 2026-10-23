@@ -26,7 +26,7 @@ type built struct {
 
 // partFormat is hashed into every part ID, so a store built by an older layout
 // rebuilds its parts instead of opening them.
-const partFormat = 5
+const partFormat = 6
 
 // fingerprint names a part by what its members parsed, never by how a disk
 // laid the logs out, so a restored store names every part it did not change
@@ -123,7 +123,7 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 		for _, i := range local {
 			b := rows[i]
 			w, ok := win[b.row.UID]
-			if !ok || c.Path < w.path {
+			if !ok || c.Path > w.path {
 				win[b.row.UID] = &winner{b: b, path: c.Path}
 			}
 		}
