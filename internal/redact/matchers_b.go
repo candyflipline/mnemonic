@@ -1,6 +1,6 @@
 package redact
 
-// Builtin rules 13-24 as hand-written matchers, no regexp: one shared
+// Builtin rules 13-24 as hand-written matchers, no regex engine: one shared
 // prefix+bounded-run shape (bTailRule), one exact-hex shape (bHexRule),
 // and the three patterns whose shape differs (bOpenAI, bSendGrid,
 // bDiscordHook), all meeting the matcher contract (see matchers.go).

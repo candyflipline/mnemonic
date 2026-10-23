@@ -3,7 +3,7 @@ package redact
 // Hand-written scanning primitives for builtin rules 13-24: literal
 // prefixes, greedy {n,} class runs and ASCII \b, with the exact
 // leftmost-first, non-overlapping semantics of the rule regexes reported
-// through FindAllSubmatchIndex (see matchers.go). No regexp.
+// through FindAllSubmatchIndex (see matchers.go). No regex engine.
 //
 // Helpers carry the b prefix; the sibling matchers_*.go lanes pick their
 // own, and the package must still build once the lanes merge.
