@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/candyflipline/mnemonic/internal/layout"
@@ -343,8 +345,8 @@ type frameWriter struct {
 	n      int
 }
 
-var encoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBetterCompression), zstd.WithEncoderConcurrency(4), zstd.WithLowerEncoderMem(true))
-var heavyEncoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBetterCompression), zstd.WithEncoderConcurrency(4), zstd.WithLowerEncoderMem(true))
+var encoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBetterCompression), zstd.WithEncoderConcurrency(runtime.GOMAXPROCS(0)), zstd.WithLowerEncoderMem(true))
+var heavyEncoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBetterCompression), zstd.WithEncoderConcurrency(runtime.GOMAXPROCS(0)), zstd.WithLowerEncoderMem(true))
 
 func (w *frameWriter) add(rec []byte) (int64, int, error) {
 	if len(w.buf) > 0 && len(w.buf)+len(rec) > w.target {
@@ -461,23 +463,19 @@ func Ingest(root, store string, quiet time.Duration, settleAll bool) error {
 	prev, _ := readManifest(store)
 	keep := map[string]bool{}
 	images := map[string]bool{}
-	for _, members := range parts {
-		id := fingerprint(members)
-		if slices.ContainsFunc(members, ckpt.hot) {
-			if id, err = hotPart(store, members, prev); err != nil {
-				return err
-			}
-			hot = append(hot, id)
-			if d, ok := readBase(store, id); ok && d.Image != id {
-				keep[d.Image], images[d.Image] = true, true
-			}
-		} else if _, err := os.Stat(partDir(store, id)); err != nil {
-			if err := buildIndex(store, members, id, partDir(store, id)); err != nil {
-				return err
+	planned, err := buildParts(store, parts, prev)
+	if err != nil {
+		return err
+	}
+	for _, p := range planned {
+		if p.hot {
+			hot = append(hot, p.id)
+			if p.image != "" {
+				keep[p.image], images[p.image] = true, true
 			}
 		}
-		ids = append(ids, id)
-		keep[id] = true
+		ids = append(ids, p.id)
+		keep[p.id] = true
 	}
 	mb, _ := json.Marshal(manifestFile{Parts: ids, Hot: hot, Sources: srcs})
 	if cur, err := os.ReadFile(filepath.Join(store, "CURRENT")); err == nil && bytes.Equal(cur, mb) {
@@ -489,6 +487,73 @@ func Ingest(root, store string, quiet time.Duration, settleAll bool) error {
 	gcParts(store, keep)
 	gcDeltas(store, images)
 	return gcLogs(store, cks)
+}
+
+type builtPart struct {
+	id    string
+	hot   bool
+	image string
+}
+
+// buildParts builds every part of the plan that is missing on a pool of
+// GOMAXPROCS workers. The parts are independent: each writes its own dir, and
+// a delta only appends to the logs of the one image it extends. Results are in
+// plan order, and the error is the first one in plan order.
+func buildParts(store string, parts [][]ckpt, prev manifestFile) ([]builtPart, error) {
+	out := make([]builtPart, len(parts))
+	errs := make([]error, len(parts))
+	var failedAt atomic.Int64
+	failedAt.Store(math.MaxInt64)
+	next := make(chan int)
+	var wg sync.WaitGroup
+	for range runtime.GOMAXPROCS(0) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range next {
+				if int64(i) > failedAt.Load() {
+					continue
+				}
+				out[i], errs[i] = buildPart(store, parts[i], prev)
+				if errs[i] != nil {
+					for cur := failedAt.Load(); int64(i) < cur && !failedAt.CompareAndSwap(cur, int64(i)); cur = failedAt.Load() {
+					}
+				}
+			}
+		}()
+	}
+	for i := range parts {
+		next <- i
+	}
+	close(next)
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func buildPart(store string, members []ckpt, prev manifestFile) (builtPart, error) {
+	id := fingerprint(members)
+	if slices.ContainsFunc(members, ckpt.hot) {
+		id, err := hotPart(store, members, prev)
+		if err != nil {
+			return builtPart{}, err
+		}
+		p := builtPart{id: id, hot: true}
+		if d, ok := readBase(store, id); ok && d.Image != id {
+			p.image = d.Image
+		}
+		return p, nil
+	}
+	if _, err := os.Stat(partDir(store, id)); err != nil {
+		if err := buildIndex(store, members, id, partDir(store, id)); err != nil {
+			return builtPart{}, err
+		}
+	}
+	return builtPart{id: id}, nil
 }
 
 // planParts groups sources that share a session into one component, so a
