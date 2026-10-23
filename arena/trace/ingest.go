@@ -6,9 +6,11 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
+	"io/fs"
 	"maps"
 	"math"
 	"os"
@@ -25,6 +27,7 @@ import (
 	"github.com/candyflipline/mnemonic/internal/layout"
 	"github.com/candyflipline/mnemonic/internal/normalize"
 	_ "github.com/candyflipline/mnemonic/internal/normalize/all"
+	"github.com/candyflipline/mnemonic/internal/repo"
 	"github.com/candyflipline/mnemonic/internal/schema"
 	"github.com/candyflipline/mnemonic/internal/wire"
 	"github.com/klauspost/compress/zstd"
@@ -223,9 +226,14 @@ func ingestSource(root, store string, s source, force bool) (Outcome, error) {
 	want := ckpt{parsed: parsed{Key: key, Parser: normalize.Version, Harness: s.src.Harness, SourceName: s.src.SourceName,
 		SourceFile: s.src.Path, Author: s.key.Author, Machine: s.key.Machine, Layout: logLayout,
 		Path: filepath.ToSlash(s.key.Events("")) /* lake path order */}}
+	book, err := readBook(s.key.Roots(root))
+	if err != nil {
+		return 0, fmt.Errorf("roots: %w", err)
+	}
+	meta := normalize.SourceMeta{SourceName: s.src.SourceName, Harness: s.src.Harness, SourceFile: s.src.Path, Roots: book}
 	prev, has := readCkpt(store, key)
 	resumed := false
-	if has && !force && prev.Parser == want.Parser && prev.Harness == want.Harness && prev.SourceName == want.SourceName &&
+	if has && !force && normalize.Resumable(prev.State, meta) && prev.Parser == want.Parser && prev.Harness == want.Harness && prev.SourceName == want.SourceName &&
 		prev.SourceFile == want.SourceFile && prev.Layout == want.Layout && prev.ZstSize <= end {
 		if sum, err := windowSHA(raw, prev.ZstSize); err == nil && sum == prev.WindowSHA {
 			resumed = true
@@ -272,25 +280,24 @@ func ingestSource(root, store string, s source, force bool) (Outcome, error) {
 	for _, s := range from.Sessions {
 		sessions[s] = true
 	}
-	state, err := parser.Parse(zr, normalize.SourceMeta{SourceName: s.src.SourceName, Harness: s.src.Harness, SourceFile: s.src.Path},
-		from.State, func(ev *schema.Event) error {
-			r := rowFrom(ev)
-			r.Version = uint64(rows)
-			sessions[r.Session] = true
-			var heavy []byte
-			heavy = appendStr(heavy, ev.PayloadJSON)
-			heavy = appendStr(heavy, ev.TokenUsageJSON)
-			fo, idx, err := hw.add(heavy)
-			if err != nil {
-				return err
-			}
-			r.HeavyFrame, r.HeavyIdx = uint64(fo), uint64(idx)
-			if _, _, err := lw.add(r.append(nil)); err != nil {
-				return err
-			}
-			rows++
-			return nil
-		})
+	state, err := parser.Parse(zr, meta, from.State, func(ev *schema.Event) error {
+		r := rowFrom(ev)
+		r.Version = uint64(rows)
+		sessions[r.Session] = true
+		var heavy []byte
+		heavy = appendStr(heavy, ev.PayloadJSON)
+		heavy = appendStr(heavy, ev.TokenUsageJSON)
+		fo, idx, err := hw.add(heavy)
+		if err != nil {
+			return err
+		}
+		r.HeavyFrame, r.HeavyIdx = uint64(fo), uint64(idx)
+		if _, _, err := lw.add(r.append(nil)); err != nil {
+			return err
+		}
+		rows++
+		return nil
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -327,6 +334,16 @@ func ingestSource(root, store string, s source, force bool) (Outcome, error) {
 		return Reparsed, nil
 	}
 	return Fresh, nil
+}
+
+// readBook decodes a source's pushed root facts; a source nobody has posted
+// facts for has no file and gets the empty Book.
+func readBook(path string) (repo.Book, error) {
+	b, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return repo.Book{}, err
+	}
+	return repo.DecodeBook(b)
 }
 
 func appendStr(b []byte, s string) []byte {

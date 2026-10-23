@@ -165,19 +165,7 @@ func (db *DB) faLists(q faQuery) (faLists, error) {
 	return l.top(q.MaxRows + 1), nil
 }
 
-func (st *Part) rootSeen() []repo.Seen {
-	var out []repo.Seen
-	b := st.faExact
-	for len(b) > 0 {
-		l, k := binary.Uvarint(b)
-		d := int(binary.LittleEndian.Uint32(b[k+int(l):]))
-		b = b[k+int(l)+4:]
-		if r, _, err := st.hot(d); err == nil && r.WorktreeRoot != "" {
-			out = append(out, repo.Seen{Root: r.WorktreeRoot, ProjectID: r.ProjectID})
-		}
-	}
-	return mergeSeen(out)
-}
+func (st *Part) rootSeen() []repo.Seen { return st.meta.Roots }
 
 func (db *DB) rootSeen() []repo.Seen {
 	lists := make([][]repo.Seen, len(db.parts))
