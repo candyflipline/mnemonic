@@ -2,7 +2,7 @@ package redact
 
 // Builtin rules 0-12, hand-written (scan_redact-a.go) behind the matcher
 // contract (see matchers.go). Each entry binds the rule's head, run class
-// and bounds into one shared scanner; no regexp.
+// and bounds into one shared scanner.
 
 var (
 	m00 = token(true, prefixAWS, classAWS, 16, 16, true)                                        // aws-access-token
