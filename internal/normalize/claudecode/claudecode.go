@@ -315,16 +315,16 @@ func handleClaudeTextBlock(r *claudeRecord, em *shared.Emitter, blockUID string,
 
 func normalizeClaudeScalarMessage(r *claudeRecord, em *shared.Emitter, actor string) {
 	content := shared.Get(r.message, "content")
-	row := r.stampCommon(em.Event(r.baseUID, "message", "message", actor,
-		shared.ExtractMessageText(r.message), shared.Compact(r.rec)))
+	row := r.stampCommon(em.EventForJSON(r.baseUID, "message", "message", actor,
+		shared.ExtractMessageText(r.message), r.rec))
 	row.SetContentTypes(shared.ExtractContentTypes(content))
 	em.PushEvent(row)
 }
 
 func normalizeCoworkSessionMeta(r *claudeRecord, em *shared.Emitter) {
 	title := shared.ToStr(shared.Get(r.rec, "title"))
-	row := em.Event(r.baseUID, "session_meta", "session_meta", "system",
-		title, shared.Compact(r.rec))
+	row := em.EventForJSON(r.baseUID, "session_meta", "session_meta", "system",
+		title, r.rec)
 	row.Event.Model = shared.CanonicalizeModel("claude-code", shared.ToStr(shared.Get(r.rec, "model")))
 	em.PushEvent(row)
 }
@@ -336,8 +336,8 @@ func normalizeClaudeOperationalRecord(r *claudeRecord, em *shared.Emitter) {
 	if eventPayloadType == "" {
 		eventPayloadType = r.topType
 	}
-	row := r.stampCommon(em.Event(r.baseUID, eventKind, eventPayloadType, "system",
-		shared.ExtractMessageText(r.rec), shared.Compact(r.rec)))
+	row := r.stampCommon(em.EventForJSON(r.baseUID, eventKind, eventPayloadType, "system",
+		shared.ExtractMessageText(r.rec), r.rec))
 	row.Event.OpKind = payloadType
 	row.Event.OpStatus = shared.ToStr(shared.Get(r.rec, "status"))
 	row.Event.LatencyMs = shared.ToU32(shared.Get(r.rec, "durationMs"))

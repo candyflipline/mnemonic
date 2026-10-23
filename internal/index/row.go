@@ -12,7 +12,7 @@ import (
 // Row is the light part of one parsed event: every field a tool reads except
 // payload_json and token_usage_json, which live in the heavy log.
 type Row struct {
-	UID, Session, SourceName, Harness, InfProv              string
+	UID, Session, SourceName, Harness, InfProv, Author      string
 	SourceFile, SourceRef                                   string
 	EventKind, ActorKind, PayloadType, ToolPhase, Phase     string
 	ItemID, ToolCallID, ToolName, EndpointKind              string
@@ -20,14 +20,23 @@ type Row struct {
 	ProjectID, RepoRelPath, WorktreeRoot, Cwd               string
 	Buckets, Native                                         string
 	TioInput, TioInPrev, TioOutPrev, TioProj, TioRel, TioWT string
-	TimeUs                                                  int64
-	TsMs                                                    int64
-	Gen                                                     uint64
-	LineNo, Offset, Version                                 uint64
-	Emission, TurnIndex                                     uint64
-	Bits                                                    uint64
-	HeavyFrame                                              uint64
-	HeavyIdx                                                uint64
+	// The event columns the derived sections read (spans, annotations):
+	// dropped by the arena engine the same move took from the cache, put
+	// back by lane U5S so a part section is a function of its rows.
+	RequestID, TraceID, ParentToolCallID string
+	AgentRunID, AgentLabel, Model        string
+	OriginEventID, OpKind, OpStatus      string
+	TimeUs                               int64
+	TsMs                                 int64
+	Gen                                  uint64
+	LineNo, Offset, Version              uint64
+	Emission, TurnIndex                  uint64
+	IsSubstream, ToolError, LatencyMs    uint64
+	InputTokens, OutputTokens            uint64
+	CacheReadTokens, CacheWriteTokens    uint64
+	Bits                                 uint64
+	HeavyFrame                           uint64
+	HeavyIdx                             uint64
 }
 
 const (
@@ -41,11 +50,15 @@ func (r *Row) strs() []*string {
 		&r.SourceFile, &r.SourceRef, &r.EventKind, &r.ActorKind, &r.PayloadType, &r.ToolPhase, &r.Phase,
 		&r.ItemID, &r.ToolCallID, &r.ToolName, &r.EndpointKind, &r.Text, &r.TextPreview,
 		&r.ProjectID, &r.RepoRelPath, &r.WorktreeRoot, &r.Cwd, &r.Buckets, &r.Native,
-		&r.TioInput, &r.TioInPrev, &r.TioOutPrev, &r.TioProj, &r.TioRel, &r.TioWT}
+		&r.TioInput, &r.TioInPrev, &r.TioOutPrev, &r.TioProj, &r.TioRel, &r.TioWT,
+		&r.RequestID, &r.TraceID, &r.ParentToolCallID, &r.AgentRunID, &r.AgentLabel, &r.Model,
+		&r.OriginEventID, &r.OpKind, &r.OpStatus}
 }
 
 func (r *Row) ints() []*uint64 {
-	return []*uint64{&r.Gen, &r.LineNo, &r.Offset, &r.Version, &r.Emission, &r.TurnIndex, &r.Bits, &r.HeavyFrame, &r.HeavyIdx}
+	return []*uint64{&r.Gen, &r.LineNo, &r.Offset, &r.Version, &r.Emission, &r.TurnIndex,
+		&r.IsSubstream, &r.ToolError, &r.LatencyMs, &r.InputTokens, &r.OutputTokens,
+		&r.CacheReadTokens, &r.CacheWriteTokens, &r.Bits, &r.HeavyFrame, &r.HeavyIdx}
 }
 
 func (r *Row) append(b []byte) []byte {
@@ -101,8 +114,14 @@ func rowFrom(ev *schema.Event) Row {
 		ToolPhase: ev.ToolPhase, Phase: ev.ToolPhase, ItemID: ev.ItemID, ToolCallID: ev.ToolCallID,
 		ToolName: ev.ToolName, EndpointKind: ev.EndpointKind, Text: ev.TextContent, TextPreview: ev.TextPreview,
 		ProjectID: ev.ProjectID, RepoRelPath: ev.RepoRelPath, WorktreeRoot: ev.WorktreeRoot, Cwd: ev.Cwd,
+		RequestID: ev.RequestID, TraceID: ev.TraceID, ParentToolCallID: ev.ParentToolCallID,
+		AgentRunID: ev.AgentRunID, AgentLabel: ev.AgentLabel, Model: ev.Model,
+		OriginEventID: ev.OriginEventID, OpKind: ev.OpKind, OpStatus: ev.OpStatus,
 		Gen: uint64(ev.SourceGeneration), LineNo: ev.SourceLineNo, Offset: ev.SourceOffset,
 		Version: ev.EventVersion, TurnIndex: uint64(ev.TurnIndex),
+		IsSubstream: uint64(ev.IsSubstream), ToolError: uint64(ev.ToolError), LatencyMs: uint64(ev.LatencyMs),
+		InputTokens: uint64(ev.InputTokens), OutputTokens: uint64(ev.OutputTokens),
+		CacheReadTokens: uint64(ev.CacheReadTokens), CacheWriteTokens: uint64(ev.CacheWriteTokens),
 	}
 	if r.Phase == "" {
 		r.Phase = ev.OpStatus

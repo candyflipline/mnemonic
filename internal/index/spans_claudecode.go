@@ -1,0 +1,291 @@
+package index
+
+import (
+	"strconv"
+
+	"github.com/candyflipline/mnemonic/internal/schema"
+)
+
+// claudeCodeSpans: the session is the root invoke_agent; main-thread events
+// form one turn span per turn_seq; a sidechain's agent_run_id is an
+// invoke_agent under the tool call its rows name in parent_tool_call_id, else
+// under the root; each request_id is a chat span under its subagent or turn;
+// each tool_call_id is an execute_tool span under the chat of its tool_call
+// row, else under the tool call named by parent_tool_call_id. Every row of a
+// request carries the request's usage, so a chat's tokens are the max over
+// its rows; the root, a turn and a subagent carry the sum over the chats
+// below them.
+// claudeAgg is one span group's bounds and its span id.
+type claudeAgg struct {
+	b  spanBounds
+	id string
+}
+
+// claudeAgentAgg is one sidechain's invoke_agent: every row whose is_substream
+// names its agent_run_id.
+type claudeAgentAgg struct {
+	claudeAgg
+	label string
+	tok   tokens
+}
+
+// claudeChatAgg is one request's chat: every row whose request_id (else
+// trace_id) names it. turnID is the turn of the min main-thread turn_seq.
+type claudeChatAgg struct {
+	claudeAgg
+	model   string
+	sub     string
+	turnID  string
+	turnSeq uint32
+	hasTurn bool
+	tok     tokens
+}
+
+// claudeToolAgg is one tool_call_id's execute_tool.
+type claudeToolAgg struct {
+	claudeAgg
+	name    string
+	sub     string
+	err     uint64
+	req     string
+	pcall   string
+	turnSeq uint32
+	hasTurn bool
+}
+
+// claudeApAgg is agent_parent: the parent tool span of a sidechain, the
+// tool_call its rows name in parent_tool_call_id when that tool belongs to
+// another thread or to none.
+type claudeApAgg struct {
+	id, turnID string
+	hasTurn    bool
+}
+
+func claudeCodeSpans(_ string, session []*Row) []schema.Span {
+	sid := session[0].Session
+	rootID := spanIDHex("session", sid)
+	reqOf := func(r *Row) string {
+		if r.RequestID != "" {
+			return r.RequestID
+		}
+		return r.TraceID
+	}
+	subOf := func(r *Row) string {
+		if r.IsSubstream != 0 {
+			return r.AgentRunID
+		}
+		return ""
+	}
+
+	var rb spanBounds
+	turns := map[uint32]*claudeAgg{}
+	agents := map[string]*claudeAgentAgg{}
+	chats := map[string]*claudeChatAgg{}
+	tools := map[string]*claudeToolAgg{}
+	for _, r := range session {
+		uid, t := r.UID, eventTimeUs(r)
+		rb.add(uid, t)
+		sub := subOf(r)
+		seq := uint32(r.TurnIndex)
+		if sub == "" {
+			tr := turns[seq]
+			if tr == nil {
+				tr = &claudeAgg{id: spanIDHex("turn", sid, strconv.FormatUint(uint64(seq), 10))}
+				turns[seq] = tr
+			}
+			tr.b.add(uid, t)
+		} else {
+			a := agents[sub]
+			if a == nil {
+				a = &claudeAgentAgg{claudeAgg: claudeAgg{id: spanIDHex("agent", sid, sub)}}
+				agents[sub] = a
+			}
+			a.label = maxStr(a.label, r.AgentLabel)
+			a.b.add(uid, t)
+		}
+		if req := reqOf(r); req != "" {
+			c := chats[req]
+			if c == nil {
+				c = &claudeChatAgg{claudeAgg: claudeAgg{id: spanIDHex("chat", sid, req)}}
+				chats[req] = c
+			}
+			c.model = maxStr(c.model, r.Model)
+			c.sub = maxNN(c.sub, sub)
+			if sub == "" && (!c.hasTurn || seq < c.turnSeq) {
+				c.turnSeq, c.hasTurn, c.turnID = seq, true, turns[seq].id
+			}
+			c.tok = tokens{maxU64(c.tok.in, r.InputTokens), maxU64(c.tok.out, r.OutputTokens),
+				maxU64(c.tok.cr, r.CacheReadTokens), maxU64(c.tok.cw, r.CacheWriteTokens)}
+			c.b.add(uid, t)
+		}
+		if call := r.ToolCallID; call != "" {
+			o := tools[call]
+			if o == nil {
+				o = &claudeToolAgg{claudeAgg: claudeAgg{id: spanIDHex("tool", sid, call)}}
+				tools[call] = o
+			}
+			o.name = maxStr(o.name, r.ToolName)
+			o.err = maxU64(o.err, r.ToolError)
+			o.sub = maxNN(o.sub, sub)
+			if r.EventKind == "tool_call" && o.req == "" {
+				o.req = reqOf(r)
+			}
+			if pc := r.ParentToolCallID; pc != "" && pc != call {
+				o.pcall = maxNN(o.pcall, pc)
+			}
+			if sub == "" && (!o.hasTurn || seq < o.turnSeq) {
+				o.turnSeq, o.hasTurn = seq, true
+			}
+			o.b.add(uid, t)
+		}
+	}
+
+	// agent_parent: for each subagent, the tool span of the parent_tool_call
+	// its rows name, when that tool belongs to another thread or to none;
+	// first row in event order wins each field, the way arg_min does.
+	ap := map[string]*claudeApAgg{}
+	for _, r := range session {
+		sub := subOf(r)
+		if sub == "" {
+			continue
+		}
+		p := tools[r.ParentToolCallID]
+		if p == nil || p.sub == sub {
+			continue
+		}
+		a := ap[sub]
+		if a == nil {
+			a = &claudeApAgg{}
+			ap[sub] = a
+		}
+		if a.id == "" {
+			a.id = p.id
+		}
+		if !a.hasTurn && p.hasTurn {
+			a.turnID, a.hasTurn = turns[p.turnSeq].id, true
+		}
+	}
+
+	var rootTok tokens
+	turnTok := map[string]tokens{}
+	for _, c := range chats {
+		rootTok.add(c.tok)
+		turn := ""
+		if c.hasTurn {
+			turn = c.turnID
+		} else if a := ap[c.sub]; a != nil && a.hasTurn {
+			turn = a.turnID
+		}
+		if turn != "" {
+			s := turnTok[turn]
+			s.add(c.tok)
+			turnTok[turn] = s
+		}
+		if a := agents[c.sub]; a != nil {
+			a.tok.add(c.tok)
+		}
+	}
+
+	out := []schema.Span{{SessionID: sid, SpanID: rootID, Kind: schema.SpanInvokeAgent, Name: "claude-code",
+		Start: spanTime(rb.startUs), End: spanTime(rb.endUs), Status: schema.SpanOK,
+		FirstEventUID: rb.first, LastEventUID: rb.last}}
+	rootTok.setSpan(&out[0])
+	for _, sub := range sortedMapKeys(agents) {
+		a := agents[sub]
+		parent := rootID
+		if p := ap[sub]; p != nil && p.id != "" {
+			parent = p.id
+		}
+		s := spanAcc{sid: sid, id: a.id, parent: parent, kind: schema.SpanInvokeAgent,
+			name: orAgent(a.label, sub), b: a.b, status: schema.SpanOK}
+		a.tok.set(&s)
+		out = append(out, s.span())
+	}
+	for _, q := range sortedTurnSeqs(turns) {
+		tr := turns[q]
+		s := spanAcc{sid: sid, id: tr.id, parent: rootID, kind: schema.SpanTurn,
+			name: "turn " + strconv.FormatUint(uint64(q), 10), b: tr.b, status: schema.SpanOK}
+		turnTok[tr.id].set(&s)
+		out = append(out, s.span())
+	}
+	for _, req := range sortedMapKeys(chats) {
+		c := chats[req]
+		s := spanAcc{sid: sid, id: c.id, kind: schema.SpanChat,
+			name: orChat(c.model), model: c.model, b: c.b, status: schema.SpanOK}
+		s.parent = claudeChatParent(c.sub, c.turnID, c.hasTurn, agents, ap, rootID)
+		c.tok.set(&s)
+		out = append(out, s.span())
+	}
+	for _, call := range sortedMapKeys(tools) {
+		o := tools[call]
+		status := schema.SpanOK
+		if o.err > 0 {
+			status = schema.SpanError
+		}
+		acc := spanAcc{sid: sid, id: o.id, kind: schema.SpanExecuteTool,
+			name: orTool(o.name), b: o.b, status: status,
+			parent: claudeToolParent(o.req, o.pcall, o.sub, o.hasTurn, o.turnSeq, chats, tools, agents, turns, rootID),
+		}
+		out = append(out, acc.span())
+	}
+	return out
+}
+
+// claudeChatParent is coalesce(a.span_id, t.span_id, r.span_id) of
+// chat_parent: the chat's subagent, else its turn (a sidechain chat with no
+// main-thread row takes the turn of the tool its subagent hangs under), else
+// the root.
+func claudeChatParent(sub, turnID string, hasTurn bool,
+	agents map[string]*claudeAgentAgg, ap map[string]*claudeApAgg, rootID string) string {
+	if sub != "" {
+		if a := agents[sub]; a != nil {
+			return a.id
+		}
+	}
+	if hasTurn {
+		return turnID
+	}
+	if sub != "" {
+		if p := ap[sub]; p != nil && p.hasTurn {
+			return p.turnID
+		}
+	}
+	return rootID
+}
+
+// claudeToolParent is coalesce(c.span_id, p.span_id, a.span_id, t.span_id,
+// r.span_id) of the execute_tool rows: the chat of the request its first
+// tool_call row carries, else the tool span parent_tool_call_id names, else
+// the subagent, else the turn, else the root.
+func claudeToolParent(req, pcall, sub string, hasTurn bool, turnSeq uint32,
+	chats map[string]*claudeChatAgg, tools map[string]*claudeToolAgg,
+	agents map[string]*claudeAgentAgg, turns map[uint32]*claudeAgg, rootID string) string {
+	if req != "" {
+		if c := chats[req]; c != nil {
+			return c.id
+		}
+	}
+	if pcall != "" {
+		if p := tools[pcall]; p != nil {
+			return p.id
+		}
+	}
+	if sub != "" {
+		if a := agents[sub]; a != nil {
+			return a.id
+		}
+	}
+	if hasTurn {
+		if t := turns[turnSeq]; t != nil {
+			return t.id
+		}
+	}
+	return rootID
+}
+
+func orAgent(label, sub string) string {
+	if label != "" {
+		return label
+	}
+	return sub
+}

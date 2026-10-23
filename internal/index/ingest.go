@@ -247,16 +247,16 @@ func storeExtends(raw *os.File, end int64, prev ckpt) bool {
 
 // ingestSource brings one source's logs up to its input, parsing only the
 // bytes past its checkpoint when the input still extends it, and reports what
-// it did.
-func ingestSource(root, store string, s source) (Outcome, error) {
+// it did and how many log bytes it appended.
+func ingestSource(root, store string, s source) (Outcome, int64, error) {
 	key := sourceKey(s.key)
 	parser, ok := normalize.For(s.src.Harness)
 	if !ok {
-		return Unchanged, nil
+		return Unchanged, 0, nil
 	}
 	raw, end, err := s.kind.open(root, s)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer raw.Close()
 	meta := normalize.SourceMeta{SourceName: s.src.SourceName, Harness: s.src.Harness, SourceFile: s.src.Path}
@@ -264,7 +264,7 @@ func ingestSource(root, store string, s source) (Outcome, error) {
 	prev, has := readCkpt(store, key)
 	resumed := has && extends(raw, end, want, prev)
 	if resumed && prev.ZstSize == end {
-		return Unchanged, nil
+		return Unchanged, 0, nil
 	}
 	next := want
 	var from ckpt
@@ -276,18 +276,18 @@ func ingestSource(root, store string, s source) (Outcome, error) {
 	}
 	lightF, err := openLog(logPath(store, key, next.Gen, "light"), from.LightLen)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer lightF.Close()
 	heavyF, err := openLog(logPath(store, key, next.Gen, "heavy"), from.HeavyLen)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer heavyF.Close()
 
 	zr, err := s.kind.reader(raw, from.ZstSize, end)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer zr.Close()
 
@@ -317,23 +317,23 @@ func ingestSource(root, store string, s source) (Outcome, error) {
 		return nil
 	})
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if err := hw.flush(); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if err := lw.flush(); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if err := lightF.Sync(); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if err := heavyF.Sync(); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	sum, err := windowSHA(raw, end)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	next.ZstSize, next.WindowSHA, next.State = end, sum, state
 	next.LightLen, next.HeavyLen, next.Rows = lw.off, hw.off, rows
@@ -343,15 +343,16 @@ func ingestSource(root, store string, s source) (Outcome, error) {
 	sort.Strings(next.Sessions)
 	b, _ := json.Marshal(next)
 	if err := writeFileAtomic(ckptPath(store, key), b); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
+	written := next.LightLen - from.LightLen + next.HeavyLen - from.HeavyLen
 	switch {
 	case resumed:
-		return Resumed, nil
+		return Resumed, written, nil
 	case has:
-		return Reparsed, nil
+		return Reparsed, written, nil
 	}
-	return Fresh, nil
+	return Fresh, written, nil
 }
 
 func appendStr(b []byte, s string) []byte {
@@ -460,58 +461,136 @@ const (
 // IngestStats counts sources by Outcome, indexed by Outcome.
 type IngestStats [4]int
 
+// sweepBudget bounds the wall time one Ingest spends handing out version-stale
+// sources, checked before each after the first, so a parser version bump
+// re-parses over consecutive cycles instead of one. The caller starts the next
+// cycle at once while any are left (server.Run); each source's own checkpoint
+// is the lap's marker, so no sweep state is kept on disk.
+const sweepBudget = 5 * time.Second
+
 // Ingest brings store up to root's raw and reports what it did per source.
-func Ingest(root, store string, quiet time.Duration, settleAll bool) (IngestStats, error) {
+func Ingest(root, store string, quiet time.Duration, settleAll bool) (stats IngestStats, err error) {
 	debug.SetGCPercent(25)
-	if err := os.MkdirAll(srcDir(store), 0o755); err != nil {
-		return IngestStats{}, err
+	var rec cycleRecord
+	defer func() { recordCycle(store, rec) }()
+	if err = os.MkdirAll(srcDir(store), 0o755); err != nil {
+		return
 	}
 	sources, err := listSources(root)
 	if err != nil {
-		return IngestStats{}, err
+		return
 	}
-	outcomes := parseSources(root, store, sources)
-	var stats IngestStats
+	take := takeCycle(store)
+	outcomes, logBytes, stale, failSweep := parseSources(root, store, sources, take.failSweep)
 	for _, o := range outcomes {
 		stats[o]++
 	}
-	return stats, publish(store, sources, quiet, settleAll)
+	rec = cycleRecord{stats: CycleStats{LogBytes: logBytes}, stale: stale,
+		failed: len(sources) - len(outcomes), failSweep: failSweep}
+	cs, perr := publish(store, sources, quiet, settleAll)
+	cs.LogBytes = logBytes
+	rec.stats = cs
+	return stats, perr
 }
 
 // parseSources runs ingestSource over sources on GOMAXPROCS workers and
-// returns each outcome by source key; a source that failed has none.
-func parseSources(root, store string, sources []source) map[string]Outcome {
-	outcomes := make(map[string]Outcome, len(sources))
+// returns each outcome by source key, how many log bytes the parses appended,
+// how many version-stale sources the sweep budget left for the next cycle, and
+// the failSweep to carry into it: the version-stale sources whose re-parse
+// failed, so one poison source cannot keep the sweep cycling, plus skip for
+// the keys already known to fail at their version. A source that failed has no
+// outcome.
+func parseSources(root, store string, sources []source, skip map[string]int) (outcomes map[string]Outcome, logBytes int64, stale int, failSweep map[string]int) {
+	outcomes = make(map[string]Outcome, len(sources))
+	failSweep = map[string]int{}
+	for k, v := range skip {
+		failSweep[k] = v
+	}
+	var now []source // pushed, fresh or appended: parsed whatever the sweep is doing
+	var sweep []source
+	for _, s := range sources {
+		if versionStale(store, s) && failSweep[sourceKey(s.key)] != parserVersion(s) {
+			sweep = append(sweep, s)
+			continue
+		}
+		delete(failSweep, sourceKey(s.key))
+		now = append(now, s)
+	}
 	var mu sync.Mutex
 	work := make(chan source)
+	done := make(chan []source)
 	var wg sync.WaitGroup
 	for range runtime.GOMAXPROCS(0) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			var failed []source
 			for s := range work {
-				o, err := ingestSource(root, store, s)
+				o, written, err := ingestSource(root, store, s)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "ingest: %s: %v\n", s.mpath, err)
+					failed = append(failed, s)
 					continue
 				}
 				mu.Lock()
 				outcomes[sourceKey(s.key)] = o
+				logBytes += written
 				mu.Unlock()
 			}
+			done <- failed
 		}()
 	}
-	for _, s := range sources {
+	for _, s := range now {
+		work <- s
+	}
+	sweepEnd := time.Now().Add(sweepBudget)
+	for i, s := range sweep {
+		if i > 0 && time.Now().After(sweepEnd) {
+			stale = len(sweep) - i
+			break
+		}
 		work <- s
 	}
 	close(work)
-	wg.Wait()
-	return outcomes
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	for failed := range done {
+		for _, s := range failed {
+			if versionStale(store, s) {
+				failSweep[sourceKey(s.key)] = parserVersion(s)
+			}
+		}
+	}
+	return outcomes, logBytes, stale, failSweep
+}
+
+// parserVersion is the Version of s's parser, zero for a harness without one
+// (such a source is never version-stale).
+func parserVersion(s source) int {
+	p, ok := normalize.For(s.src.Harness)
+	if !ok {
+		return 0
+	}
+	return p.Version()
+}
+
+// versionStale reports whether s would re-parse from byte 0 only because its
+// parser has a newer Version than its checkpoint: no new bytes and none lost,
+// so it is sweep work, bounded per cycle, not push work. KindPlain sources are
+// never sweep work; their byte test is not the manifest's size.
+func versionStale(store string, s source) bool {
+	if s.kind != KindStore {
+		return false
+	}
+	prev, has := readCkpt(store, sourceKey(s.key))
+	return has && prev.Parser != parserVersion(s) && prev.ZstSize == s.src.ZstSize
 }
 
 // publish plans the parts of the sources' checkpoints, builds the missing ones
-// and points CURRENT at them.
-func publish(store string, sources []source, quiet time.Duration, settleAll bool) error {
+// and points CURRENT at them, reporting what it wrote.
+func publish(store string, sources []source, quiet time.Duration, settleAll bool) (CycleStats, error) {
 	newest := int64(0)
 	for _, s := range sources {
 		newest = max(newest, s.src.UpdatedMs)
@@ -525,7 +604,7 @@ func publish(store string, sources []source, quiet time.Duration, settleAll bool
 				c.ColdZst = c.ZstSize
 				b, _ := json.Marshal(c)
 				if err := writeFileAtomic(ckptPath(store, c.Key), b); err != nil {
-					return err
+					return CycleStats{}, err
 				}
 			}
 			cks = append(cks, c)
@@ -537,15 +616,16 @@ func publish(store string, sources []source, quiet time.Duration, settleAll bool
 	ids := make([]string, 0, len(parts))
 	var hot []string
 	if err := os.MkdirAll(filepath.Join(store, "parts"), 0o755); err != nil {
-		return err
+		return CycleStats{}, err
 	}
 	prev, _ := readManifest(store)
 	keep := map[string]bool{}
 	images := map[string]bool{}
 	planned, err := buildParts(store, parts, prev)
 	if err != nil {
-		return err
+		return CycleStats{}, err
 	}
+	var cs CycleStats
 	for _, p := range planned {
 		if p.hot {
 			hot = append(hot, p.id)
@@ -555,23 +635,30 @@ func publish(store string, sources []source, quiet time.Duration, settleAll bool
 		}
 		ids = append(ids, p.id)
 		keep[p.id] = true
+		if p.built {
+			cs.PartsBuilt++
+			cs.PartBytes += p.written
+		}
 	}
+	cs.HotParts, cs.ColdParts = len(hot), len(ids)-len(hot)
 	mb, _ := json.Marshal(manifestFile{Parts: ids, Hot: hot, Sources: srcs})
 	if cur, err := os.ReadFile(filepath.Join(store, "CURRENT")); err == nil && bytes.Equal(cur, mb) {
-		return nil
+		return cs, nil
 	}
 	if err := writeFileAtomic(filepath.Join(store, "CURRENT"), mb); err != nil {
-		return err
+		return cs, err
 	}
 	gcParts(store, keep)
 	gcDeltas(store, images)
-	return gcLogs(store, cks)
+	return cs, gcLogs(store, cks)
 }
 
 type builtPart struct {
-	id    string
-	hot   bool
-	image string
+	id      string
+	hot     bool
+	image   string
+	built   bool
+	written int64
 }
 
 // buildParts builds every part of the plan that is missing on a pool of
@@ -617,11 +704,11 @@ func buildParts(store string, parts [][]ckpt, prev manifestFile) ([]builtPart, e
 func buildPart(store string, members []ckpt, prev manifestFile) (builtPart, error) {
 	id := fingerprint(members)
 	if slices.ContainsFunc(members, ckpt.hot) {
-		id, err := hotPart(store, members, prev)
+		id, built, written, err := hotPart(store, members, prev)
 		if err != nil {
 			return builtPart{}, err
 		}
-		p := builtPart{id: id, hot: true}
+		p := builtPart{id: id, hot: true, built: built, written: written}
 		if d, ok := readBase(store, id); ok && d.Image != id {
 			p.image = d.Image
 		}
@@ -631,8 +718,25 @@ func buildPart(store string, members []ckpt, prev manifestFile) (builtPart, erro
 		if err := buildIndex(store, members, id, partDir(store, id)); err != nil {
 			return builtPart{}, err
 		}
+		return builtPart{id: id, built: true, written: dirSize(partDir(store, id))}, nil
 	}
 	return builtPart{id: id}, nil
+}
+
+// dirSize is the bytes of the files directly in dir, what a part build or a
+// delta commit wrote there.
+func dirSize(dir string) int64 {
+	var n int64
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	for _, e := range ents {
+		if fi, err := e.Info(); err == nil {
+			n += fi.Size()
+		}
+	}
+	return n
 }
 
 // components returns, per item, a representative of its component: items that
