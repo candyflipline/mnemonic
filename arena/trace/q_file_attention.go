@@ -3,6 +3,8 @@ package trace
 import (
 	"encoding/json"
 	"strings"
+
+	"github.com/candyflipline/mnemonic/internal/repo"
 )
 
 type fileAttention struct{}
@@ -17,7 +19,7 @@ const (
 )
 
 func (fileAttention) Call(db *DB, args json.RawMessage) (any, string, error) {
-	c, err := newFaCall(args)
+	c, err := newFaCall(args, func() ([]repo.Seen, error) { return db.rootSeen(), nil })
 	if err != nil {
 		return nil, "", err
 	}
@@ -35,14 +37,20 @@ type faCall struct {
 	q        faQuery
 }
 
-func newFaCall(args json.RawMessage) (*faCall, error) {
+func newFaCall(args json.RawMessage, seen func() ([]repo.Seen, error)) (*faCall, error) {
 	a, err := faParseArgs(args)
 	if err != nil {
 		return nil, err
 	}
 
 	warnings := []string{}
-	tail := faResolveTail(a.Path)
+	var cands []repo.Seen
+	if _, abs := faAbsolute(a.Path); abs {
+		if cands, err = seen(); err != nil {
+			return nil, err
+		}
+	}
+	tail := faResolveTail(a.Path, cands)
 	if tail.Normalized {
 		warnings = append(warnings, sprintf("normalized %q to %q before matching.", a.Path, tail.Rel))
 	}
@@ -72,7 +80,7 @@ func newFaCall(args json.RawMessage) (*faCall, error) {
 	q := faQuery{
 		Rel:             tail.Rel,
 		NormalizedPID:   tail.ProjID,
-		NormalizedRoots: faRootsFor(tail.Root),
+		NormalizedRoots: tail.Roots,
 		DeriveLegacy:    tail.Root != "",
 		ProjectScope:    a.Scope == faScopeProject,
 		StartUnixMs:     a.StartUnixMs,
@@ -94,13 +102,6 @@ func (c *faCall) answer(touches []faTouch) (any, string, error) {
 		"warnings": c.warnings,
 	}
 	return data, faText(payload), nil
-}
-
-func faRootsFor(root string) []string {
-	if root == "" {
-		return nil
-	}
-	return qWorktreeRootsForRepoRoot(root)
 }
 
 type faScope string

@@ -3,6 +3,8 @@ package shared
 import (
 	"strings"
 	"time"
+
+	"github.com/candyflipline/mnemonic/internal/repo"
 )
 
 type Source interface {
@@ -43,7 +45,7 @@ type RecordParams struct {
 	ModelHint    string
 	CwdHint      string
 	RecordTSHint string
-	Probes       *Probes
+	Roots        repo.Book
 }
 
 type NormalizedRecord struct {
@@ -88,7 +90,7 @@ func NormalizeRecord(rec JSON, src Source, p RecordParams) NormalizedRecord {
 		SourceOffset:      p.SourceOffset,
 		RecordTS:          recordTS,
 		EventTS:           eventTS,
-		Probes:            p.Probes,
+		Roots:             p.Roots,
 	}
 	partials := src.Normalize(rec, ctx, topType, baseUID, p.ModelHint)
 	if partials == nil {

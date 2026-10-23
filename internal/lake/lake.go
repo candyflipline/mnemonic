@@ -18,6 +18,7 @@ import (
 
 	"github.com/candyflipline/mnemonic/internal/layout"
 	"github.com/candyflipline/mnemonic/internal/normalize"
+	"github.com/candyflipline/mnemonic/internal/repo"
 	"github.com/candyflipline/mnemonic/internal/schema"
 	"github.com/candyflipline/mnemonic/internal/wire"
 	_ "github.com/duckdb/duckdb-go/v2"
@@ -92,9 +93,10 @@ func Run(dataDir string, yield func() bool, sweep Sweep) (Stats, error) {
 
 	var st Stats
 	parse := func(mpath string, key layout.Key, src manifest, parser normalize.Parser) {
+		parsedMs := inputMs(key, dataDir, src)
 		written, n, err := parseAndWrite(db, dataDir, key, src, parser, ingestedAt)
 		if err == nil {
-			err = stamp(written, src.UpdatedMs)
+			err = stamp(written, parsedMs)
 		}
 		if err != nil {
 			st.Failed++
@@ -119,7 +121,7 @@ func Run(dataDir string, yield func() bool, sweep Sweep) (Stats, error) {
 			fmt.Fprintf(os.Stderr, "lake: %s: %v\n", mpath, err)
 			continue
 		}
-		if lakeMtime(key, dataDir) >= src.UpdatedMs {
+		if lakeMtime(key, dataDir) >= inputMs(key, dataDir, src) {
 			if sweeping {
 				idles = append(idles, idle{mpath, key, src})
 			} else {
@@ -329,6 +331,11 @@ func parseAndWrite(db *sql.DB, dataDir string, key layout.Key, src manifest, par
 		return "", 0, err
 	}
 	defer raw.Close()
+	book, err := readBook(key.Roots(dataDir))
+	if err != nil {
+		return "", 0, fmt.Errorf("roots: %w", err)
+	}
+	meta := normalize.SourceMeta{SourceName: src.SourceName, Harness: src.Harness, SourceFile: src.Path, Roots: book}
 	basePath, tailPath := key.Events(dataDir), key.Tail(dataDir)
 	next := checkpoint{Parser: normalize.Version, Harness: src.Harness, SourceName: src.SourceName, SourceFile: src.Path}
 	baseCP, hasBase := readCheckpoint(db, basePath)
@@ -343,7 +350,7 @@ func parseAndWrite(db *sql.DB, dataDir string, key layout.Key, src manifest, par
 	if hasTail {
 		cp = tailCP
 	}
-	from, resumed := resume(raw, src, next, cp)
+	from, resumed := resume(raw, src, meta, next, cp)
 
 	zr, err := zstd.NewReader(io.NewSectionReader(raw, from.ZstSize, src.ZstSize-from.ZstSize))
 	if err != nil {
@@ -365,11 +372,7 @@ func parseAndWrite(db *sql.DB, dataDir string, key layout.Key, src manifest, par
 	var losers []string
 	var row uint64
 	next.MaxVersion = from.MaxVersion
-	state, err := parser.Parse(zr, normalize.SourceMeta{
-		SourceName: src.SourceName,
-		Harness:    src.Harness,
-		SourceFile: src.Path,
-	}, from.State, func(ev *schema.Event) error {
+	state, err := parser.Parse(zr, meta, from.State, func(ev *schema.Event) error {
 		if prev, ok := winners[ev.EventUID]; ok && ev.EventVersion < prev.version {
 			losers = append(losers, strconv.FormatUint(row, 10))
 		} else {
@@ -441,6 +444,16 @@ func parseAndWrite(db *sql.DB, dataDir string, key layout.Key, src manifest, par
 	return out, n, err
 }
 
+// readBook decodes a source's pushed root facts; a source nobody has posted
+// facts for has no file and gets the empty Book.
+func readBook(path string) (repo.Book, error) {
+	b, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return repo.Book{}, err
+	}
+	return repo.DecodeBook(b)
+}
+
 func lakeRows(path string) string {
 	return "read_parquet(" + sqlQuote(path) + ", hive_partitioning=false)"
 }
@@ -465,12 +478,25 @@ func lakeMtime(key layout.Key, dataDir string) int64 {
 	return ms
 }
 
+// inputMs is the newest input the lake reads for a source, in ms: the
+// manifest's UpdatedMs or the roots file's mtime. The store renames the roots
+// file before it bumps the manifest, so after a crash between the two the file
+// is newer than the UpdatedMs that should have vouched for it.
+func inputMs(key layout.Key, dataDir string, src manifest) int64 {
+	ms := src.UpdatedMs
+	if info, err := os.Stat(key.Roots(dataDir)); err == nil {
+		ms = max(ms, info.ModTime().UnixMilli())
+	}
+	return ms
+}
+
 // resume returns cp and true when it belongs to this binary and source and
-// raw still extends it: the window ending at its ZstSize hashes the same, and
-// a zstd frame starts at ZstSize unless raw ends there. Otherwise it returns
-// the zero checkpoint, a parse from the start.
-func resume(raw *os.File, src manifest, want, cp checkpoint) (checkpoint, bool) {
-	if !cp.sameSource(want) || cp.ZstSize > src.ZstSize {
+// raw still extends it: the window ending at its ZstSize hashes the same, a
+// zstd frame starts at ZstSize unless raw ends there, and the roots facts that
+// reach the lines before it are the ones its State was parsed with. Otherwise
+// it returns the zero checkpoint, a parse from the start.
+func resume(raw *os.File, src manifest, meta normalize.SourceMeta, want, cp checkpoint) (checkpoint, bool) {
+	if !cp.sameSource(want) || cp.ZstSize > src.ZstSize || !normalize.Resumable(cp.State, meta) {
 		return checkpoint{}, false
 	}
 	if sum, err := windowSHA256(raw, cp.ZstSize); err != nil || sum != cp.WindowSHA256 {
@@ -510,8 +536,8 @@ func readCheckpoint(db *sql.DB, eventsPath string) (checkpoint, bool) {
 	return cp, true
 }
 
-// stamp sets written's mtime to the millisecond of parsedMs, the manifest
-// UpdatedMs it was parsed from, and below it the write's own nanoseconds.
+// stamp sets written's mtime to the millisecond of parsedMs, the inputMs it
+// was parsed from, and below it the write's own nanoseconds.
 func stamp(written string, parsedMs int64) error {
 	t := time.UnixMilli(parsedMs).Add(time.Duration(time.Now().Nanosecond() % 1e6))
 	return os.Chtimes(written, t, t)

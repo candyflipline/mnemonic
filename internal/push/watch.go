@@ -50,6 +50,7 @@ type watcher struct {
 	failed   bool
 	retries  int
 	note     *notifier
+	rs       *rootsSync
 	held     map[string]*wire.Source
 	files    map[string]*watched
 	dirs     map[string]bool
@@ -66,7 +67,7 @@ func Watch(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client
 }
 
 func newWatcher(cfg config.Client, red Redactor, hc *http.Client) *watcher {
-	w := &watcher{cfg: cfg, red: red, hc: hc, quiet: quietFor, within: flushWithin, stale: true}
+	w := &watcher{cfg: cfg, red: red, rs: newRootsSync(red), hc: hc, quiet: quietFor, within: flushWithin, stale: true}
 	for _, src := range cfg.Sources {
 		glob, err := filepath.Abs(src.Glob)
 		if err != nil {
@@ -161,7 +162,7 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 			fmt.Fprintln(out, "push:", w.watchErr)
 			w.watchErr = nil
 		}
-		if st.Appended+st.Replaced+st.Failed > 0 {
+		if st.Appended+st.Replaced+st.Failed+st.RootsFailed > 0 {
 			fmt.Fprintln(out, st)
 		}
 		if !w.stale {
@@ -194,6 +195,7 @@ func (w *watcher) reconcile(ctx context.Context) (Stats, error) {
 		w.stale = true
 		return Stats{}, err
 	}
+	w.rs.newPass()
 	oldFiles, oldDirs := w.files, w.dirs
 	w.held = held
 	w.files = make(map[string]*watched)
@@ -219,12 +221,24 @@ func (w *watcher) reconcile(ctx context.Context) (Stats, error) {
 	for p := range w.files {
 		paths = append(paths, p)
 	}
+	var budget backfillBudget
+	for _, p := range paths {
+		f := w.files[p]
+		if f == nil {
+			continue
+		}
+		w.rs.backfill(ctx, w.cfg, w.hc, f.fileRef, w.held[wire.SrcID(p)], &budget)
+	}
+	if budget.deferred {
+		w.stale = true
+	}
 	return w.sync(ctx, paths), nil
 }
 
 // flush lists the dirty directories and any glob base not seen yet, then
 // syncs the dirty files and the files those listings found.
 func (w *watcher) flush(ctx context.Context, dirty map[string]bool) Stats {
+	w.rs.newPass()
 	var paths []string
 	for p := range dirty {
 		if w.dirs[p] {
@@ -331,7 +345,7 @@ func (w *watcher) sync(ctx context.Context, paths []string) Stats {
 		st.Scanned++
 		f.size, f.mtimeMs = now.size, info.ModTime().UnixMilli()
 		srcID := wire.SrcID(path)
-		held, conflicted, err := syncSource(ctx, w.cfg, w.red, w.hc, w.held[srcID], f.fileRef, &st)
+		held, conflicted, err := syncSource(ctx, w.cfg, w.red, w.hc, w.rs, w.held[srcID], f.fileRef, &st)
 		if held != nil {
 			w.held[srcID] = held
 		}
@@ -345,5 +359,6 @@ func (w *watcher) sync(ctx context.Context, paths []string) Stats {
 		}
 		f.synced = now
 	}
+	w.rs.drain(&st)
 	return st
 }

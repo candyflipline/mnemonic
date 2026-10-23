@@ -30,7 +30,9 @@ go vet ./...
 CGO_ENABLED=0 go build -o /dev/null ./cmd/mnemonic
 go build -tags server -o /dev/null ./cmd/mnemonic
 go test ./internal/<your package>/...
+go list -f '{{join .Imports "\n"}}' ./internal/normalize/... ./internal/repo | grep -qx os && exit 1
 ```
+The `go list` line enforces that parsing never reads a disk: no package under `internal/normalize` or `internal/repo` imports `os`, so parser output is a function of the raw bytes and the pushed root facts (`internal/repo.Book`) alone.
 
 ## Rules
 - **The owner's machine is not a load box.** Never run push, lake or cache over the real corpus locally. Use `go test -p 2`, at most 3 `go test` processes across lanes, and no Docker. Corpus runs happen on the server.

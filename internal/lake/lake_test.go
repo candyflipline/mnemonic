@@ -430,3 +430,25 @@ func TestRunWritesMarkerDespitePushedSourceThatNeverParses(t *testing.T) {
 		t.Fatalf("marker = %d after 3 runs, want %d", got, normalize.Version)
 	}
 }
+
+func TestRunReparsesSourceWhoseRootsFileIsNewerThanItsParquet(t *testing.T) {
+	dataDir := t.TempDir()
+	key := layout.Key{Author: "alice", Machine: "chris-mbp", Harness: "test-fake", SrcID: "1111111111111111"}
+	writeSource(t, dataDir, key.Author, key.Machine, key.Harness, key.SrcID, []string{
+		"uid-1|1|2024-01-02 03:04:05.000",
+	})
+	if st, err := Run(dataDir, never, Sweep{}); err != nil || st.Rewrote != 1 {
+		t.Fatalf("first run: %+v %v", st, err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	facts := `[{"path":"/work/app","kind":"dir","key":"/work/app","from":0}]`
+	if err := os.WriteFile(key.Roots(dataDir), []byte(facts), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := Run(dataDir, never, Sweep{}); err != nil || st != (Stats{Sources: 1, Rewrote: 1}) {
+		t.Fatalf("run after a roots file the manifest never vouched for: %+v %v, want {1 1 0 0 0 0}", st, err)
+	}
+	if st, err := Run(dataDir, never, Sweep{}); err != nil || st != (Stats{Sources: 1, Unchanged: 1}) {
+		t.Fatalf("further run: %+v %v, want {1 0 1 0 0 0}", st, err)
+	}
+}

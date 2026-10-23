@@ -2,12 +2,15 @@ package trace
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/binary"
 	"encoding/json"
 	"regexp"
 	"slices"
 	"sort"
 	"strings"
+
+	"github.com/candyflipline/mnemonic/internal/repo"
 )
 
 type faQuery struct {
@@ -160,6 +163,39 @@ func (db *DB) faLists(q faQuery) (faLists, error) {
 		l.Exact, l.Suffix = append(l.Exact, e...), append(l.Suffix, s...)
 	}
 	return l.top(q.MaxRows + 1), nil
+}
+
+func (st *Part) rootSeen() []repo.Seen {
+	var out []repo.Seen
+	b := st.faExact
+	for len(b) > 0 {
+		l, k := binary.Uvarint(b)
+		d := int(binary.LittleEndian.Uint32(b[k+int(l):]))
+		b = b[k+int(l)+4:]
+		if r, _, err := st.hot(d); err == nil && r.WorktreeRoot != "" {
+			out = append(out, repo.Seen{Root: r.WorktreeRoot, ProjectID: r.ProjectID})
+		}
+	}
+	return mergeSeen(out)
+}
+
+func (db *DB) rootSeen() []repo.Seen {
+	lists := make([][]repo.Seen, len(db.parts))
+	for i, st := range db.parts {
+		lists[i] = st.rootSeen()
+	}
+	return mergeSeen(lists...)
+}
+
+func mergeSeen(lists ...[]repo.Seen) []repo.Seen {
+	var all []repo.Seen
+	for _, l := range lists {
+		all = append(all, l...)
+	}
+	slices.SortFunc(all, func(a, b repo.Seen) int {
+		return cmp.Or(cmp.Compare(a.Root, b.Root), cmp.Compare(a.ProjectID, b.ProjectID))
+	})
+	return slices.Compact(all)
 }
 
 func sortTouches(t []faTouch) {
