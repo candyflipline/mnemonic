@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -34,28 +35,36 @@ type manifest struct {
 	ZstSize int64 `json:"zst_size"`
 }
 
-// ckpt is where one source's parse stopped. It is written by rename after
-// both logs are fsynced, so the logs are valid up to LightLen and HeavyLen
-// whatever happened after.
-type ckpt struct {
+// parsed is where one source's parse stopped, independent of where its rows
+// are kept: a checkpoint resumes from it and a cold part records it per member.
+type parsed struct {
 	Key        string          `json:"key"`
 	Parser     int             `json:"parser"`
+	Layout     int             `json:"layout"`
 	Harness    string          `json:"harness"`
 	SourceName string          `json:"source_name"`
 	SourceFile string          `json:"source_file"`
-	ZstSize    int64           `json:"zst_size"`
-	WindowSHA  string          `json:"window_sha256"`
-	State      normalize.State `json:"state"`
-	Gen        int             `json:"gen"`
-	LightLen   int64           `json:"light_len"`
-	HeavyLen   int64           `json:"heavy_len"`
-	Rows       int64           `json:"rows"`
 	Path       string          `json:"path"`
 	Author     string          `json:"author"`
 	Machine    string          `json:"machine"`
+	ZstSize    int64           `json:"zst_size"`
+	WindowSHA  string          `json:"window_sha256"`
+	State      normalize.State `json:"state"`
+	Rows       int64           `json:"rows"`
 	Sessions   []string        `json:"sessions"`
-	ColdZst    int64           `json:"cold_zst"`
-	Layout     int             `json:"layout"`
+}
+
+// ckpt is parsed plus where this disk keeps the rows. It is written by rename
+// after both logs are fsynced, so the logs are valid up to LightLen and
+// HeavyLen whatever happened after. Restored marks logs re-framed from a
+// part: they hold only that part's winners.
+type ckpt struct {
+	parsed
+	Gen      int   `json:"gen"`
+	LightLen int64 `json:"light_len"`
+	HeavyLen int64 `json:"heavy_len"`
+	ColdZst  int64 `json:"cold_zst"`
+	Restored bool  `json:"restored,omitempty"`
 }
 
 // logLayout is the shape of the rows a log holds. Layout 1 numbers a row's
@@ -189,33 +198,34 @@ func windowSHA(raw *os.File, end int64) (string, error) {
 }
 
 // ingestSource brings one source's logs up to its raw, parsing only the bytes
-// past its checkpoint when the raw still extends it. It reports whether the
-// checkpoint moved.
-func ingestSource(root, store string, s source) (bool, error) {
+// past its checkpoint when the raw still extends it, and reports what it did.
+// force parses from byte 0 into the next generation even when the raw extends
+// the checkpoint.
+func ingestSource(root, store string, s source, force bool) (Outcome, error) {
 	key := sourceKey(s.key)
 	parser, ok := normalize.For(s.src.Harness)
 	if !ok {
-		return false, nil
+		return Unchanged, nil
 	}
 	raw, err := os.Open(s.key.Raw(root))
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	defer raw.Close()
 	fi, err := raw.Stat()
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	end := s.src.ZstSize
 	if end <= 0 || end > fi.Size() {
 		end = fi.Size()
 	}
-	want := ckpt{Key: key, Parser: normalize.Version, Harness: s.src.Harness, SourceName: s.src.SourceName,
+	want := ckpt{parsed: parsed{Key: key, Parser: normalize.Version, Harness: s.src.Harness, SourceName: s.src.SourceName,
 		SourceFile: s.src.Path, Author: s.key.Author, Machine: s.key.Machine, Layout: logLayout,
-		Path: filepath.ToSlash(s.key.Events("")) /* lake path order */}
+		Path: filepath.ToSlash(s.key.Events("")) /* lake path order */}}
 	prev, has := readCkpt(store, key)
 	resumed := false
-	if has && prev.Parser == want.Parser && prev.Harness == want.Harness && prev.SourceName == want.SourceName &&
+	if has && !force && prev.Parser == want.Parser && prev.Harness == want.Harness && prev.SourceName == want.SourceName &&
 		prev.SourceFile == want.SourceFile && prev.Layout == want.Layout && prev.ZstSize <= end {
 		if sum, err := windowSHA(raw, prev.ZstSize); err == nil && sum == prev.WindowSHA {
 			resumed = true
@@ -228,30 +238,30 @@ func ingestSource(root, store string, s source) (bool, error) {
 		}
 	}
 	if resumed && prev.ZstSize == end {
-		return false, nil
+		return Unchanged, nil
 	}
 	next := want
 	var from ckpt
 	if resumed {
 		from = prev
-		next.Gen, next.ColdZst = prev.Gen, prev.ColdZst
+		next.Gen, next.ColdZst, next.Restored = prev.Gen, prev.ColdZst, prev.Restored
 	} else if has {
 		next.Gen = prev.Gen + 1
 	}
 	lightF, err := openLog(logPath(store, key, next.Gen, "light"), from.LightLen)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	defer lightF.Close()
 	heavyF, err := openLog(logPath(store, key, next.Gen, "heavy"), from.HeavyLen)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	defer heavyF.Close()
 
 	zr, err := zstd.NewReader(io.NewSectionReader(raw, from.ZstSize, end-from.ZstSize), zstd.WithDecoderConcurrency(1))
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	defer zr.Close()
 
@@ -282,23 +292,23 @@ func ingestSource(root, store string, s source) (bool, error) {
 			return nil
 		})
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	if err := hw.flush(); err != nil {
-		return false, err
+		return 0, err
 	}
 	if err := lw.flush(); err != nil {
-		return false, err
+		return 0, err
 	}
 	if err := lightF.Sync(); err != nil {
-		return false, err
+		return 0, err
 	}
 	if err := heavyF.Sync(); err != nil {
-		return false, err
+		return 0, err
 	}
 	sum, err := windowSHA(raw, end)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	next.ZstSize, next.WindowSHA, next.State = end, sum, state
 	next.LightLen, next.HeavyLen, next.Rows = lw.off, hw.off, rows
@@ -308,9 +318,15 @@ func ingestSource(root, store string, s source) (bool, error) {
 	sort.Strings(next.Sessions)
 	b, _ := json.Marshal(next)
 	if err := writeFileAtomic(ckptPath(store, key), b); err != nil {
-		return false, err
+		return 0, err
 	}
-	return true, nil
+	switch {
+	case resumed:
+		return Resumed, nil
+	case has:
+		return Reparsed, nil
+	}
+	return Fresh, nil
 }
 
 func appendStr(b []byte, s string) []byte {
@@ -421,18 +437,44 @@ type IngestStats [4]int
 
 // Ingest brings store up to root's raw and reports what it did per source.
 func Ingest(root, store string, quiet time.Duration, settleAll bool) (IngestStats, error) {
-	return IngestStats{}, ingest(root, store, quiet, settleAll)
-}
-
-func ingest(root, store string, quiet time.Duration, settleAll bool) error {
 	debug.SetGCPercent(25)
 	if err := os.MkdirAll(srcDir(store), 0o755); err != nil {
-		return err
+		return IngestStats{}, err
 	}
 	sources, err := listSources(root)
 	if err != nil {
-		return err
+		return IngestStats{}, err
 	}
+	before := map[string]ckpt{}
+	for _, s := range sources {
+		if c, ok := readCkpt(store, sourceKey(s.key)); ok {
+			before[c.Key] = c
+		}
+	}
+	outcomes := parseSources(root, store, sources, nil)
+	if force := restoredWithReparsed(store, sources, before, outcomes); len(force) > 0 {
+		var again []source
+		for _, s := range sources {
+			if force[sourceKey(s.key)] {
+				again = append(again, s)
+			}
+		}
+		for k, o := range parseSources(root, store, again, force) {
+			outcomes[k] = o
+		}
+	}
+	var stats IngestStats
+	for _, o := range outcomes {
+		stats[o]++
+	}
+	return stats, publish(store, sources, quiet, settleAll)
+}
+
+// parseSources runs ingestSource over sources on GOMAXPROCS workers and
+// returns each outcome by source key; a source that failed has none.
+func parseSources(root, store string, sources []source, force map[string]bool) map[string]Outcome {
+	outcomes := make(map[string]Outcome, len(sources))
+	var mu sync.Mutex
 	work := make(chan source)
 	var wg sync.WaitGroup
 	for range runtime.GOMAXPROCS(0) {
@@ -440,9 +482,14 @@ func ingest(root, store string, quiet time.Duration, settleAll bool) error {
 		go func() {
 			defer wg.Done()
 			for s := range work {
-				if _, err := ingestSource(root, store, s); err != nil {
+				o, err := ingestSource(root, store, s, force[sourceKey(s.key)])
+				if err != nil {
 					fmt.Fprintf(os.Stderr, "ingest: %s: %v\n", s.mpath, err)
+					continue
 				}
+				mu.Lock()
+				outcomes[sourceKey(s.key)] = o
+				mu.Unlock()
 			}
 		}()
 	}
@@ -451,6 +498,47 @@ func ingest(root, store string, quiet time.Duration, settleAll bool) error {
 	}
 	close(work)
 	wg.Wait()
+	return outcomes
+}
+
+// restoredWithReparsed returns the keys of the restored sources that share a
+// component with a reparsed one. Their logs hold only the winners of the part
+// they came from, so once a winner may be gone from raw they parse again.
+// before holds the checkpoints from ahead of the parse, whose sessions still
+// link a reparsed source to the component it left.
+func restoredWithReparsed(store string, sources []source, before map[string]ckpt, outcomes map[string]Outcome) map[string]bool {
+	if !slices.Contains(slices.Collect(maps.Values(outcomes)), Reparsed) {
+		return nil
+	}
+	now := make([]ckpt, 0, len(sources))
+	tokens := make([][]string, 0, len(sources))
+	for _, s := range sources {
+		c, ok := readCkpt(store, sourceKey(s.key))
+		if !ok {
+			continue
+		}
+		now = append(now, c)
+		tokens = append(tokens, slices.Concat(c.Sessions, before[c.Key].Sessions, []string{"\x00" + c.Key}))
+	}
+	root := components(tokens)
+	reparsed := map[int]bool{}
+	for i, c := range now {
+		if outcomes[c.Key] == Reparsed {
+			reparsed[root[i]] = true
+		}
+	}
+	force := map[string]bool{}
+	for i, c := range now {
+		if c.Restored && reparsed[root[i]] {
+			force[c.Key] = true
+		}
+	}
+	return force
+}
+
+// publish plans the parts of the sources' checkpoints, builds the missing ones
+// and points CURRENT at them.
+func publish(store string, sources []source, quiet time.Duration, settleAll bool) error {
 	newest := int64(0)
 	for _, s := range sources {
 		newest = max(newest, s.src.UpdatedMs)
@@ -574,13 +662,10 @@ func buildPart(store string, members []ckpt, prev manifestFile) (builtPart, erro
 	return builtPart{id: id}, nil
 }
 
-// planParts groups sources that share a session into one component, so a
-// session and every event version that can compete for its uids live in one
-// part. A component with a hot source is a part of its own, rebuilt on each of
-// its appends; the settled ones go to partShards cold parts by a hash of their
-// least session id, rewritten only when a component settles into or leaves one.
-func planParts(cks []ckpt) [][]ckpt {
-	parent := make([]int, len(cks))
+// components returns, per item, a representative of its component: items that
+// share a token are joined.
+func components(tokens [][]string) []int {
+	parent := make([]int, len(tokens))
 	for i := range parent {
 		parent[i] = i
 	}
@@ -593,15 +678,34 @@ func planParts(cks []ckpt) [][]ckpt {
 		return i
 	}
 	owner := map[string]int{}
-	for i, c := range cks {
-		for _, s := range c.Sessions {
-			if j, ok := owner[s]; ok {
+	for i, ts := range tokens {
+		for _, t := range ts {
+			if j, ok := owner[t]; ok {
 				parent[find(i)] = find(j)
 			} else {
-				owner[s] = i
+				owner[t] = i
 			}
 		}
 	}
+	root := make([]int, len(tokens))
+	for i := range root {
+		root[i] = find(i)
+	}
+	return root
+}
+
+// planParts groups sources that share a session into one component, so a
+// session and every event version that can compete for its uids live in one
+// part. A component with a hot source is a part of its own, rebuilt on each of
+// its appends; the settled ones go to partShards cold parts by a hash of their
+// least session id, rewritten only when a component settles into or leaves one.
+func planParts(cks []ckpt) [][]ckpt {
+	tokens := make([][]string, len(cks))
+	for i, c := range cks {
+		tokens[i] = c.Sessions
+	}
+	root := components(tokens)
+	find := func(i int) int { return root[i] }
 	least := map[int]string{}
 	hot := map[int]bool{}
 	for i, c := range cks {

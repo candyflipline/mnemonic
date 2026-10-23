@@ -12,23 +12,39 @@ import (
 
 type merge func(args json.RawMessage, c trace.Corpus, fan trace.Fan) (json.RawMessage, string, error)
 
-var merges = map[string]merge{
-	"search_sessions":   trace.SearchPartial,
-	"file_attention":    trace.AttentionPartial,
-	"list_sessions":     trace.ListPartial,
-	"open":              trace.OpenPartial,
-	"get_ingest_status": keeperAnswers,
+type viewAnswer func(v View, args json.RawMessage) (json.RawMessage, string, error)
+
+// rule says how one tool is answered: scattered over the parts and merged, or
+// from the View alone at either rung.
+type rule struct {
+	merge merge
+	view  viewAnswer
 }
 
-func keeperAnswers(json.RawMessage, trace.Corpus, trace.Fan) (json.RawMessage, string, error) {
-	return nil, "", errors.New("get_ingest_status is answered by the keeper, never scattered")
+var rules = map[string]rule{
+	"search_sessions":   {merge: trace.SearchPartial},
+	"file_attention":    {merge: trace.AttentionPartial},
+	"list_sessions":     {merge: trace.ListPartial},
+	"open":              {merge: trace.OpenPartial},
+	"get_ingest_status": {view: sourcesAnswer},
 }
+
+func sourcesAnswer(v View, args json.RawMessage) (json.RawMessage, string, error) {
+	db, err := trace.SourcesDB(v.Sources)
+	if err != nil {
+		return nil, "", err
+	}
+	return trace.Call(db, "get_ingest_status", args)
+}
+
+// viewOnly reports whether tool is answered from the View without a reader.
+func viewOnly(tool string) bool { return rules[tool].view != nil }
 
 // partial answers a call at rung Partial: scatter each phase, then merge
 // exactly by the tool's merge rule.
 func partial(ctx context.Context, v View, readers []Reader, tool string, args json.RawMessage) (json.RawMessage, string, error) {
-	m, ok := merges[tool]
-	if !ok {
+	m := rules[tool].merge
+	if m == nil {
 		return nil, "", fmt.Errorf("unknown tool %s", tool)
 	}
 	if len(args) == 0 {
@@ -49,6 +65,10 @@ func partial(ctx context.Context, v View, readers []Reader, tool string, args js
 		}
 		resps, err := scatter(ctx, w, readers, tool, phase, args, stats)
 		if err != nil {
+			var infra InfraError
+			if errors.As(err, &infra) {
+				return nil, infra
+			}
 			return nil, InfraError{error: err}
 		}
 		out := make([]json.RawMessage, len(resps))

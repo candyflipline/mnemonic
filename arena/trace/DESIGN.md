@@ -71,9 +71,10 @@ Store for the arena raw (22 MB, 70 sources, 17.7k events): logs 29.7 MB and
    - A component with a hot source is a **hot part** of its own.
    - A settled component goes to the **cold part** of shard
      `fnv32(least session id) % 256`, with the other settled components there.
-   - A part's name is the fingerprint of its sources' checkpoints (key, gen,
-     lengths, rows), so a settled source moving cold changes no name but its
-     shard's.
+   - A part's name is the fingerprint of what its sources parsed (key, parser,
+     layout, zst_size, window hash, rows), never of how a disk laid out the
+     logs, so a settled source moving cold changes no name but its shard's and
+     two disks that parsed the same raw name the same part.
 3. **Build only what is missing.** A part dir that exists is complete:
    it is built in `<id>.tmp`, fsynced, then renamed. Unchanged parts are
    reused; a killed build leaves a `.tmp` that GC removes.
@@ -93,6 +94,43 @@ A crash or split ingest therefore orders exactly like a clean one
 session. Every version that competes for a uid is then in the same part. If a
 uid ever spans sessions, cross-part winners would not be resolved; nothing
 checks for this.
+
+## Restore
+
+A cold part's `meta.json` records each member's `parsed` record: the
+checkpoint minus the local log fields (a cold part carries Gen and the log
+lengths as zero, so its bytes are the same on every disk). `RestorePart`
+turns a packed part back into local state:
+
+1. The blob is fetched to `parts/.fetch-<id>`, checked against its SHA-256 and
+   unpacked into `parts/<id>.tmp`, then renamed (`commitPart`). A dir that
+   exists is skipped.
+2. Each member with no checkpoint gets `src/<key>.0.light|heavy` re-framed from
+   the part's own frames (its docs whose src is that member, in doc order, heavy
+   records placed again), fsynced, and then a checkpoint by rename: the parsed
+   record, gen 0, the new lengths, `cold_zst = zst_size`, `restored: true`.
+   A member with a checkpoint is left alone. A part without parse records
+   returns `ErrNoParseRecord`.
+3. A crash leaves a `.fetch-*` file or `.tmp` dir (removed on the next run), or
+   logs with no checkpoint (rewritten on the next run). Rerunning converges.
+
+Ingest then resumes every restored source by the usual test, so an unchanged
+raw parses nothing (`IngestStats{N,0,0,0}`) and `planParts` names the same
+parts. A part rebuilt from restored logs packs to the same bytes as the
+original: winner selection is a max, so the winners alone give the same
+winners.
+
+That holds only while no source is reparsed. A re-framed log holds only its
+part's winners, so when a source is `Reparsed` (identity, window or parser
+mismatch) every `restored` member of its component, taken over the sessions it
+had before and after the parse, parses from raw into gen+1 too and counts
+`Reparsed`. A source parsed from raw clears `restored`.
+
+Known limitation: while a source is hot (appended within `-quiet`), its
+component is not in a committed manifest at all, so a committed-only answer
+can miss currently active sessions entirely, not just their newest events. A
+durable plan that retains the committed prefix until the component settles is
+the follow-up.
 
 ## Hot and cold
 

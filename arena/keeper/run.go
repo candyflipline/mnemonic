@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"slices"
 	"strings"
@@ -40,7 +41,18 @@ type Config struct {
 	Settle      bool
 	GrantTTL    time.Duration
 	DeleteSlack time.Duration
+	MaxCall     time.Duration
 }
+
+func (c Config) fence() Fence {
+	return Fence{GrantTTL: c.GrantTTL, DeleteSlack: c.DeleteSlack, MaxCall: c.MaxCall}
+}
+
+func maxFence(a, b Fence) Fence {
+	return Fence{GrantTTL: max(a.GrantTTL, b.GrantTTL), DeleteSlack: max(a.DeleteSlack, b.DeleteSlack), MaxCall: max(a.MaxCall, b.MaxCall)}
+}
+
+func (f Fence) horizon() time.Duration { return f.GrantTTL + f.DeleteSlack + f.MaxCall }
 
 // checkEvery keeps 2*checkEvery, the longest Read serves after the last good
 // check, below DeleteSlack, the margin a successor's deletes leave past the
@@ -50,13 +62,11 @@ func (c Config) checkEvery() time.Duration {
 }
 
 // Head is what the keeper serves: its committed manifest, the hot parts that
-// stay on its disk, every local part open by ID, and the source rows of the
-// manifest, which get_ingest_status reads.
+// stay on its disk, and every local part open by ID.
 type Head struct {
 	Manifest Manifest
 	Hot      []PartRef
 	Parts    map[string]*trace.Part
-	status   *trace.DB
 	epoch    uint64
 }
 
@@ -64,6 +74,8 @@ type Keeper struct {
 	cfg     Config
 	s       obj.Store
 	gen     Gen
+	fence   Fence
+	taken   Manifest
 	lost    atomic.Bool
 	checked atomic.Pointer[time.Time]
 
@@ -79,6 +91,7 @@ type Keeper struct {
 	changed chan struct{}
 	pins    map[uint64]int
 	limbo   []dropped
+	totals  trace.IngestStats
 
 	closePart func(*trace.Part)
 }
@@ -94,12 +107,13 @@ type local struct {
 	parts   []trace.LocalPart
 	sources json.RawMessage
 	open    map[string]*trace.Part
-	status  *trace.DB
 	stamp   uint64
 }
 
 // Take checks that s enforces exclusive create, claims the next gen, then
-// reads the latest manifest; the first commit is the first Cycle.
+// reads the latest manifest; the first commit is the first Cycle. Cycle
+// restores that manifest's parts to cfg.Local before it, so a keeper on an
+// empty disk resumes where the store says the last keeper stopped.
 func Take(ctx context.Context, s obj.Store, cfg Config) (*Keeper, error) {
 	if cfg.DeleteSlack < MinDeleteSlack {
 		return nil, fmt.Errorf("%w: got %s, want at least %s (raise -delete-slack)", ErrDeleteSlack, cfg.DeleteSlack, MinDeleteSlack)
@@ -120,17 +134,15 @@ func Take(ctx context.Context, s obj.Store, cfg Config) (*Keeper, error) {
 		cfg:       cfg,
 		s:         s,
 		gen:       g,
+		fence:     maxFence(cfg.fence(), m.Fence),
+		taken:     m,
 		uploaded:  map[string]PartRef{},
 		doomed:    map[obj.Key]time.Time{},
 		changed:   make(chan struct{}),
 		pins:      map[uint64]int{},
 		closePart: (*trace.Part).Close,
 	}
-	status, err := trace.SourcesDB(m.Sources)
-	if err != nil {
-		return nil, err
-	}
-	k.head.Store(&Head{Manifest: m, status: status})
+	k.head.Store(&Head{Manifest: m})
 	k.checked.Store(&claimed)
 	return k, nil
 }
@@ -138,7 +150,11 @@ func Take(ctx context.Context, s obj.Store, cfg Config) (*Keeper, error) {
 func (k *Keeper) Gen() Gen { return k.gen }
 
 // Totals is the sum of every Cycle's IngestStats since Take.
-func (k *Keeper) Totals() trace.IngestStats { panic("lane L2") }
+func (k *Keeper) Totals() trace.IngestStats {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.totals
+}
 
 // check fails with ErrLost once a higher gen is claimed, and keeps failing.
 func (k *Keeper) check(ctx context.Context) (Gen, error) {
@@ -208,7 +224,18 @@ func (k *Keeper) Cycle(ctx context.Context) error {
 	}
 	k.cycle.Lock()
 	defer k.cycle.Unlock()
-	if _, err := trace.Ingest(k.cfg.Root, k.cfg.Local, k.cfg.Quiet, k.cfg.Settle); err != nil {
+	if k.head.Load().Manifest.Gen != k.gen {
+		if err := k.restore(ctx, k.taken); err != nil {
+			return err
+		}
+	}
+	st, err := trace.Ingest(k.cfg.Root, k.cfg.Local, k.cfg.Quiet, k.cfg.Settle)
+	k.mu.Lock()
+	for i := range st {
+		k.totals[i] += st[i]
+	}
+	k.mu.Unlock()
+	if err != nil {
 		return err
 	}
 	stamp, ok := trace.CurrentStamp(k.cfg.Local)
@@ -233,11 +260,7 @@ func (k *Keeper) readLocal(stamp uint64) (local, error) {
 	if err != nil {
 		return local{}, err
 	}
-	status, err := trace.SourcesDB(sources)
-	if err != nil {
-		return local{}, err
-	}
-	l := local{parts: parts, sources: sources, open: map[string]*trace.Part{}, status: status, stamp: stamp}
+	l := local{parts: parts, sources: sources, open: map[string]*trace.Part{}, stamp: stamp}
 	for _, lp := range parts {
 		if p, ok := k.head.Load().Parts[lp.ID]; ok {
 			l.open[lp.ID] = p
@@ -289,7 +312,7 @@ func (k *Keeper) commit(ctx context.Context, l local) error {
 		refs = append(refs, ref)
 	}
 	slices.SortFunc(refs, func(a, b PartRef) int { return strings.Compare(a.ID, b.ID) })
-	next := Manifest{Tenant: k.cfg.Tenant, Gen: k.gen, Seq: 1, Parts: refs, Sources: l.sources}
+	next := Manifest{Tenant: k.cfg.Tenant, Gen: k.gen, Seq: 1, Fence: k.fence, Parts: refs, Sources: l.sources}
 	if prev.Gen == k.gen {
 		if slices.EqualFunc(prev.Parts, refs, func(a, b PartRef) bool { return a.Key == b.Key }) && bytes.Equal(prev.Sources, l.sources) {
 			k.install(prev, hot, l)
@@ -307,7 +330,12 @@ func (k *Keeper) commit(ctx context.Context, l local) error {
 	if err := k.s.Put(ctx, manifestKey(k.cfg.Tenant, next.Gen, next.Seq), bytes.NewReader(b), int64(len(b))); err != nil {
 		return err
 	}
-	notBefore := time.Now().Add(k.cfg.GrantTTL + k.cfg.DeleteSlack)
+	// A router serves a manifest only while its last List, started at r, still
+	// shows it latest. A manifest that retires X was not visible at r, so its PUT
+	// returned after r; a grant issued before r+DeleteSlack/2 dies by
+	// r+GrantTTL+DeleteSlack/2, and its call by MaxCall later. notBefore counts
+	// from this PUT's return, so it is past all of them.
+	notBefore := time.Now().Add(k.fence.horizon())
 	live := liveKeys(next)
 	for _, p := range prev.Parts {
 		k.doom(p.Key, notBefore, live)
@@ -363,7 +391,7 @@ func (k *Keeper) doom(key obj.Key, notBefore time.Time, live map[obj.Key]bool) {
 func (k *Keeper) install(m Manifest, hot []PartRef, l local) {
 	k.mu.Lock()
 	old, oldChanged := *k.head.Load(), k.changed
-	k.head.Store(&Head{Manifest: m, Hot: hot, Parts: l.open, status: l.status, epoch: old.epoch + 1})
+	k.head.Store(&Head{Manifest: m, Hot: hot, Parts: l.open, epoch: old.epoch + 1})
 	k.stamp = l.stamp
 	moved := m.Gen != old.Manifest.Gen || m.Seq != old.Manifest.Seq
 	if moved {
@@ -529,12 +557,73 @@ func (k *Keeper) Wait(ctx context.Context, g Gen, s Seq) bool {
 	}
 }
 
-// IngestStatus answers get_ingest_status from the source rows of the head
-// the last install made, the snapshot every Read serves, under the same gate
-// as Read. It holds no lock.
-func (k *Keeper) IngestStatus(args json.RawMessage) (json.RawMessage, string, error) {
-	if err := k.admit(); err != nil {
-		return nil, "", err
+const (
+	restoreFanout = 16
+	restoreGrant  = 10 * time.Minute
+)
+
+// restore makes k.cfg.Local cover every part of m, restoreFanout parts at a
+// time, each fetched through a presigned GET and checked against its SHA256.
+// Cycle runs it until the first commit at k.gen; RestorePart makes a rerun
+// cheap. A part with no parse record is logged and skipped: its sources parse
+// from raw. Any other failure fails the cycle after the rest have finished.
+func (k *Keeper) restore(ctx context.Context, m Manifest) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		errs []error
+	)
+	sem := make(chan struct{}, restoreFanout)
+	for _, p := range m.Parts {
+		if ctx.Err() != nil {
+			break
+		}
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			_, err := k.restorePart(ctx, p)
+			switch {
+			case err == nil:
+			case errors.Is(err, trace.ErrNoParseRecord):
+				fmt.Fprintf(os.Stderr, "keep: restore part %s: %v\n", p.ID, err)
+			default:
+				mu.Lock()
+				errs = append(errs, fmt.Errorf("restore part %s: %w", p.ID, err))
+				mu.Unlock()
+				cancel()
+			}
+		}()
 	}
-	return trace.Call(k.head.Load().status, "get_ingest_status", args)
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil {
+		return err
+	}
+	return ctx.Err()
+}
+
+func (k *Keeper) restorePart(ctx context.Context, p PartRef) (int, error) {
+	return trace.RestorePart(k.cfg.Local, p.ID, p.SHA256, func(w io.Writer) error {
+		url, err := k.s.PresignGetUntil(p.Key, time.Now().Add(restoreGrant))
+		if err != nil {
+			return err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("GET %s: %s", p.Key, resp.Status)
+		}
+		_, err = io.Copy(w, resp.Body)
+		return err
+	})
 }

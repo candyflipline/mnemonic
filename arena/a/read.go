@@ -24,13 +24,13 @@ func runRead(args []string) error {
 	id := fs.String("id", "", "this reader's ID, one of -readers")
 	listen := fs.String("listen", "127.0.0.1:7101", "address for POST /v1/call")
 	dir := fs.String("cache", "", "blob cache dir")
-	keeper := fs.String("keeper", "", "keeper base URL")
+	router := fs.String("router", "", "router base URL")
 	readers := fs.String("readers", "", "comma-separated reader IDs")
 	prewarm := fs.Bool("prewarm", true, "fetch the owned parts when a view arrives; false fetches each part on the first call that needs it")
 	fs.Parse(args)
 	ids := strings.Split(*readers, ",")
-	if *id == "" || *dir == "" || *keeper == "" || !contains(ids, *id) {
-		return fmt.Errorf("read: -id, -cache, -keeper and -readers (naming -id) are required")
+	if *id == "" || *dir == "" || *router == "" || !contains(ids, *id) {
+		return fmt.Errorf("read: -id, -cache, -router and -readers (naming -id) are required")
 	}
 	cache, err := reader.NewCache(*id, *dir)
 	if err != nil {
@@ -48,7 +48,7 @@ func runRead(args []string) error {
 		srv.Shutdown(context.Background())
 	}()
 	if *prewarm {
-		go prewarmLoop(ctx, cache, *keeper, *id, ids, time.Now())
+		go prewarmLoop(ctx, cache, *router, *id, ids, time.Now())
 	}
 	log.Printf("read %s: listening on %s", *id, ln.Addr())
 	if err := srv.Serve(ln); err != http.ErrServerClosed {
@@ -66,12 +66,12 @@ func contains(ids []string, id string) bool {
 	return false
 }
 
-// prewarmLoop long-polls the keeper's views and fetches the cold parts this
-// reader owns as each one arrives.
-func prewarmLoop(ctx context.Context, cache *reader.Cache, keeper, id string, ids []string, joined time.Time) {
-	after := ""
+// prewarmLoop long-polls the router's views and fetches the cold parts this
+// reader owns as each one arrives, and again when its grants near expiry.
+func prewarmLoop(ctx context.Context, cache *reader.Cache, router, id string, ids []string, joined time.Time) {
+	var after route.Cursor
 	for ctx.Err() == nil {
-		v, err := nextView(ctx, keeper, after)
+		v, err := nextView(ctx, router, after)
 		if err != nil {
 			log.Printf("read %s: view: %v", id, err)
 			time.Sleep(time.Second)
@@ -80,7 +80,7 @@ func prewarmLoop(ctx context.Context, cache *reader.Cache, keeper, id string, id
 		if v == nil {
 			continue
 		}
-		after = fmt.Sprintf("%016x-%016x", uint64(v.Gen), uint64(v.Seq))
+		after = route.Cursor{Gen: v.Gen, Seq: v.Seq, Expires: v.Expires}
 		var own []route.GrantedPart
 		for _, p := range v.Parts {
 			if !p.Local && route.Owner(p.ID, ids)[0] == id {
@@ -95,10 +95,10 @@ func prewarmLoop(ctx context.Context, cache *reader.Cache, keeper, id string, id
 	}
 }
 
-func nextView(ctx context.Context, keeper, after string) (*route.View, error) {
-	u := keeper + "/v1/view"
-	if after != "" {
-		u += "?after=" + url.QueryEscape(after)
+func nextView(ctx context.Context, router string, after route.Cursor) (*route.View, error) {
+	u := router + "/v1/view"
+	if after != (route.Cursor{}) {
+		u += "?after=" + url.QueryEscape(after.String())
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
@@ -118,5 +118,5 @@ func nextView(ctx context.Context, keeper, after string) (*route.View, error) {
 		var v route.View
 		return &v, json.NewDecoder(res.Body).Decode(&v)
 	}
-	return nil, fmt.Errorf("keeper: %s", res.Status)
+	return nil, fmt.Errorf("router: %s", res.Status)
 }

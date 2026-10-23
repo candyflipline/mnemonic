@@ -108,6 +108,9 @@ func Owner(partID string, readerIDs []string) []string {
 
 // Do answers one tool call over v at rung.
 func Do(ctx context.Context, v View, readers []Reader, rung Rung, tool string, args json.RawMessage) (json.RawMessage, string, error) {
+	if answer := rules[tool].view; answer != nil {
+		return answer(v, args)
+	}
 	switch rung {
 	case Whole:
 		i := slices.IndexFunc(readers, func(r Reader) bool { return r.ID() == LocalID })
@@ -169,7 +172,7 @@ func scatter(ctx context.Context, v View, readers []Reader, tool, phase string, 
 		failed := map[string]error{}
 		for i, id := range ids {
 			if errs[i] != nil {
-				failed[id] = fmt.Errorf("reader %s: %w", id, errs[i])
+				failed[id] = InfraError{error: fmt.Errorf("reader %s: %w", id, errs[i]), Reader: id}
 			} else {
 				ok = append(ok, out[i])
 			}
@@ -184,7 +187,8 @@ func scatter(ctx context.Context, v View, readers []Reader, tool, phase string, 
 		return nil, ctx.Err()
 	}
 	retry := map[string][]GrantedPart{}
-	for id, ferr := range failed {
+	for _, id := range failedIDs(failed) {
+		ferr := failed[id]
 		for _, p := range assign[id] {
 			rk := rank[p.ID]
 			next := slices.IndexFunc(rk[slices.Index(rk, id)+1:], func(c string) bool { _, bad := failed[c]; return !bad })
@@ -196,11 +200,36 @@ func scatter(ctx context.Context, v View, readers []Reader, tool, phase string, 
 		}
 	}
 	more, failed := call(retry)
-	for _, ferr := range failed {
-		return nil, ferr
+	if len(failed) > 0 {
+		return nil, failed[failedIDs(failed)[0]]
 	}
 	return append(resps, more...), nil
 }
+
+// failedIDs lists the failed readers, the keeper's local reader first, so the
+// error a call reports does not depend on map order.
+func failedIDs(failed map[string]error) []string {
+	ids := make([]string, 0, len(failed))
+	for id := range failed {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		if (ids[i] == LocalID) != (ids[j] == LocalID) {
+			return ids[i] == LocalID
+		}
+		return ids[i] < ids[j]
+	})
+	return ids
+}
+
+// statusError is a reader server's non-200 answer; 500 carries a tool's own
+// error text.
+type statusError struct {
+	code int
+	msg  string
+}
+
+func (e statusError) Error() string { return e.msg }
 
 type httpReader struct {
 	id, base string
@@ -233,7 +262,7 @@ func (h *httpReader) Call(ctx context.Context, req CallRequest) (CallResponse, e
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-		return resp, fmt.Errorf("%s: %s", res.Status, bytes.TrimSpace(msg))
+		return resp, statusError{code: res.StatusCode, msg: fmt.Sprintf("%s: %s", res.Status, bytes.TrimSpace(msg))}
 	}
 	return resp, json.NewDecoder(res.Body).Decode(&resp)
 }
