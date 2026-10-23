@@ -49,7 +49,7 @@ var Relations = Schema{
 		{"value_text", TString, false}, {"source", TString, false}, {"author", TString, false}, {"ts", TTime, false},
 	}},
 	{"events", append(eventColumns(), []Column{
-		{"author", TString, false}, {"machine_id", TString, false}, {"ingested_at", TTime, false},
+		{"author", TString, false}, {"machine_id", TString, false},
 		{"tool_io_input_preview", TString, false}, {"tool_io_output_preview", TString, false},
 		{"tool_io_project_id", TString, false}, {"tool_io_repo_rel_path", TString, false},
 		{"tool_io_worktree_root", TString, false},
@@ -57,8 +57,7 @@ var Relations = Schema{
 	}...)},
 	{"sessions", []Column{
 		{"session_id", TString, false}, {"first_event_time", TTime, false}, {"last_event_time", TTime, false},
-		{"total_turns", TInt, false}, {"total_events", TInt, false}, {"tool_calls", TInt, false},
-		{"tool_results", TInt, false}, {"user_messages", TInt, false}, {"assistant_messages", TInt, false},
+		{"total_turns", TInt, false}, {"total_events", TInt, false},
 		{"completed", TInt, false},
 	}},
 	{"spans", []Column{
@@ -83,16 +82,38 @@ var clickHouseTypes = map[string]Type{
 	"Map(String, Float64)": TFloatMap,
 }
 
-var heavyEventColumns = []string{"payload_json", "token_usage_json"}
+// heavyEventColumns are events columns the engine's light row does not hold:
+// the binding reads them from the part's heavy record (payload_json,
+// token_usage_json), last and only when a predicate or an output needs them.
+var heavyEventColumns = []string{"payload_json", "token_usage_json", "model", "input_tokens",
+	"output_tokens", "latency_ms", "request_id", "trace_id"}
+
+// droppedEventColumns are ClickHouse contract columns neither the engine's
+// light row nor its heavy record holds: the parsers filled them at parse time
+// and the engine does not keep them, so the binding cannot answer them
+// without faking. A query naming one fails like any unknown column. The
+// engine coalesces op_status into tool_phase (Phase) and derives ingested_at
+// as one fixed stamp, so both are dropped rather than served wrong.
+var droppedEventColumns = map[string]bool{
+	"session_date": true, "record_ts": true, "op_kind": true, "op_status": true,
+	"parent_tool_call_id": true, "origin_event_id": true, "origin_tool_call_id": true,
+	"tool_error": true, "agent_run_id": true, "agent_label": true,
+	"coord_group_id": true, "coord_group_label": true, "is_substream": true,
+	"cache_read_tokens": true, "cache_write_tokens": true, "retry_count": true,
+	"service_tier": true, "has_reasoning": true, "ingested_at": true,
+}
 
 func eventColumns() []Column {
-	out := make([]Column, len(schema.EventColumns))
-	for i, c := range schema.EventColumns {
+	var out []Column
+	for _, c := range schema.EventColumns {
+		if droppedEventColumns[c.Name] {
+			continue
+		}
 		t, ok := clickHouseTypes[c.ClickHouse]
 		if !ok {
 			panic(fmt.Sprintf("ql: events column %s has ClickHouse type %s, which clickHouseTypes in internal/ql/schema.go does not map", c.Name, c.ClickHouse))
 		}
-		out[i] = Column{c.Name, t, slices.Contains(heavyEventColumns, c.Name)}
+		out = append(out, Column{c.Name, t, slices.Contains(heavyEventColumns, c.Name)})
 	}
 	return out
 }
