@@ -17,11 +17,20 @@ import (
 // from one line's outcome into the next and out through the returned State;
 // only a reader or emit failure fails the file.
 func ParseJSONL(r io.Reader, src normalize.SourceMeta, from normalize.State, s Source, emit func(*schema.Event) error) (normalize.State, error) {
-	br := bufio.NewReader(r)
+	br := bufio.NewReaderSize(r, 1<<16)
+	var long []byte
 	sessionHint, modelHint, cwdHint := from.SessionHint, from.ModelHint, from.CwdHint
 	offset, lineNo := from.Offset, from.LineNo
 	for {
-		raw, err := br.ReadBytes('\n')
+		raw, err := br.ReadSlice('\n')
+		if err == bufio.ErrBufferFull {
+			long = append(long[:0], raw...)
+			for err == bufio.ErrBufferFull {
+				raw, err = br.ReadSlice('\n')
+				long = append(long, raw...)
+			}
+			raw = long
+		}
 		if err != nil && err != io.EOF {
 			return from, err
 		}
