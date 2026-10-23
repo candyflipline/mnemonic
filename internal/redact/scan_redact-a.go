@@ -179,10 +179,13 @@ type (
 
 // scanToken is the shared shape of rules 0-7 and 11-12: an optional
 // leading \b, a prefix, a greedy run of minRun..maxRun class characters
-// (maxRun 0 means unbounded), an optional trailing \b. A greedy run meets
-// \b by giving back one character at a time, so the match ends at the
-// largest run length whose end satisfies the boundary; a fixed {n}
-// (maxRun == minRun) has nothing to give back and checks one length.
+// (maxRun 0 means unbounded), an optional trailing \b. The run scan stops
+// at maxRun — the regex cannot take more, so the rest of the run is
+// unread — which keeps a prefix followed by an unbounded class run linear.
+// A greedy run meets \b by giving back one character at a time, so the
+// match ends at the largest run length whose end satisfies the boundary; a
+// fixed {n} (maxRun == minRun) has nothing to give back and checks one
+// length.
 func scanToken(text []byte, out [][2]int, lead bool, prefix prefixFn, class classFn, minRun, maxRun int, trail bool) [][2]int {
 next:
 	for i := 0; i < len(text); {
@@ -193,7 +196,7 @@ next:
 		}
 		t := i + pl
 		run := 0
-		for t+run < len(text) && class(text[t+run]) {
+		for t+run < len(text) && (maxRun == 0 || run < maxRun) && class(text[t+run]) {
 			run++
 		}
 		if run < minRun {
@@ -201,9 +204,6 @@ next:
 			continue
 		}
 		e := t + run
-		if maxRun > 0 && e > t+maxRun {
-			e = t + maxRun
-		}
 		for {
 			if !trail || wordBoundary(text, e) {
 				out = append(out, [2]int{i, e})
@@ -246,8 +246,19 @@ func pemTail(text []byte, p int, tail []byte) int {
 // occurrence. For rule 8 begin is "-----BEGIN " and end is "-----END ",
 // each followed by the kind word and "PRIVATE KEY-----" via pemTail; for
 // rule 9 begin and end are the full literals and there is no kind.
+//
+// Which end occurrence a begin takes depends only on where the begin's own
+// tail ends, so the occurrences that carry their tail are collected once
+// and each begin takes the first at or after it — rescanning the tail ends
+// per begin is quadratic on lines that repeat a begin over end-less or
+// tail-less ends. The begins walk b strictly forward (an occurrence cannot
+// start inside a begin literal or kind word, so the next one is far enough
+// right), which lets one moving pointer serve them all. When no valid end
+// remains at or after a begin, none can remain for any later begin either.
 func scanPEM(text []byte, out [][2]int, begin, end []byte, kind bool, tail []byte) [][2]int {
-	for s := 0; ; {
+	var ends [][2]int
+	collected := false
+	for s, k := 0, 0; ; {
 		i := bytes.Index(text[s:], begin)
 		if i < 0 {
 			return out
@@ -260,28 +271,38 @@ func scanPEM(text []byte, out [][2]int, begin, end []byte, kind bool, tail []byt
 				continue
 			}
 		}
-		matched := false
-		for q := b; ; {
-			j := bytes.Index(text[q:], end)
-			if j < 0 {
-				break
-			}
-			q += j
-			e := q + len(end)
-			if kind {
-				if e = pemTail(text, e, tail); e < 0 {
-					q++
-					continue
-				}
-			}
-			out = append(out, [2]int{s, e})
-			s = e
-			matched = true
-			break
+		if !collected {
+			ends, collected = pemEnds(text, end, kind, tail), true
 		}
-		if !matched {
-			s++
+		for k < len(ends) && ends[k][0] < b {
+			k++
 		}
+		if k == len(ends) {
+			return out
+		}
+		out = append(out, [2]int{s, ends[k][1]})
+		s = ends[k][1]
+	}
+}
+
+// pemEnds lists in start order every end occurrence that carries the kind
+// word and tail, as [start, after-tail] pairs; laziness takes the first
+// one at or after where the begin's tail ended.
+func pemEnds(text []byte, end []byte, kind bool, tail []byte) [][2]int {
+	var ends [][2]int
+	for q := 0; ; q++ {
+		j := bytes.Index(text[q:], end)
+		if j < 0 {
+			return ends
+		}
+		q += j
+		e := q + len(end)
+		if kind {
+			if e = pemTail(text, e, tail); e < 0 {
+				continue
+			}
+		}
+		ends = append(ends, [2]int{q, e})
 	}
 }
 
@@ -289,6 +310,14 @@ func scanPEM(text []byte, out [][2]int, begin, end []byte, kind bool, tail []byt
 // not in the run class, so the maximal run before each dot cannot give
 // characters back and the dots are where greediness leaves them; only the
 // final unbounded run retreats for its \b.
+//
+// A failed attempt jumps to the attempt's first out-of-class byte p1
+// instead of one byte on: every eyJ starting before p1 has its run end at
+// the same p1 and, if it gets past the run checks at all, shares this
+// attempt's tail from the dot on, so it fails with this one — and none
+// starts at p1-2..p1, where "eyJ" would need the out-of-class byte. A
+// run of class characters can otherwise carry each attempt to the end of
+// the line, which made each of many eyJ prefixes pay for the whole line.
 func scanJWT(text []byte, out [][2]int) [][2]int {
 next:
 	for i := 0; i+3 <= len(text); {
@@ -297,40 +326,41 @@ next:
 			continue
 		}
 		t := i + 3
-		run1 := classRun(text, t, classWordDash)
-		if run1 < 5 || t+run1 >= len(text) || text[t+run1] != '.' {
-			i++
+		p1 := classRunEnd(text, t, classWordDash)
+		if p1-t < 5 || p1 == len(text) || text[p1] != '.' {
+			i = p1
 			continue
 		}
-		u := t + run1 + 1
+		u := p1 + 1
 		if u+3 > len(text) || text[u] != 'e' || text[u+1] != 'y' || text[u+2] != 'J' {
-			i++
+			i = p1
 			continue
 		}
 		v0 := u + 3
-		run2 := classRun(text, v0, classWordDash)
-		if run2 < 5 || v0+run2 >= len(text) || text[v0+run2] != '.' {
-			i++
+		p2 := classRunEnd(text, v0, classWordDash)
+		if p2-v0 < 5 || p2 == len(text) || text[p2] != '.' {
+			i = p1
 			continue
 		}
-		v := v0 + run2 + 1
-		run3 := classRun(text, v, classWordDash)
-		for e := v + run3; e >= v; e-- {
+		v := p2 + 1
+		p3 := classRunEnd(text, v, classWordDash)
+		for e := p3; e >= v; e-- {
 			if wordBoundary(text, e) {
 				out = append(out, [2]int{i, e})
 				i = e
 				continue next
 			}
 		}
-		i++
+		i = p1
 	}
 	return out
 }
 
-func classRun(text []byte, i int, class classFn) int {
-	n := 0
-	for i+n < len(text) && class(text[i+n]) {
-		n++
+// classRunEnd returns the first position at or after i whose byte is not
+// in the class: the end of the maximal run starting at i.
+func classRunEnd(text []byte, i int, class classFn) int {
+	for i < len(text) && class(text[i]) {
+		i++
 	}
-	return n
+	return i
 }
