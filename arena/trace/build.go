@@ -13,6 +13,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+
+	"github.com/candyflipline/mnemonic/internal/repo"
 )
 
 type built struct {
@@ -24,7 +26,7 @@ type built struct {
 
 // partFormat is hashed into every part ID, so a store built by an older layout
 // rebuilds its parts instead of opening them.
-const partFormat = 4
+const partFormat = 5
 
 // fingerprint names a part by what its members parsed, never by how a disk
 // laid the logs out, so a restored store names every part it did not change
@@ -33,22 +35,23 @@ func fingerprint(cks []ckpt) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "format %d\n", partFormat)
 	for _, c := range cks {
-		fmt.Fprintf(h, "%s %d %d %d %s %d\n", c.Key, c.Parser, c.Layout, c.ZstSize, c.WindowSHA, c.Rows)
+		fmt.Fprintf(h, "%s %d %d %d %s %d %s\n", c.Key, c.Parser, c.Layout, c.ZstSize, c.WindowSHA, c.Rows, c.State.RootsDigest)
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 
 type indexMeta struct {
-	Fingerprint string   `json:"fingerprint"`
-	Docs        int      `json:"docs"`
-	ScoredDocs  uint64   `json:"scored_docs"`
-	TotalLen    uint64   `json:"total_len"`
-	Harnesses   []string `json:"harnesses"`
-	SourceNames []string `json:"source_names"`
-	Sessions    int      `json:"sessions"`
-	Turns       int      `json:"turns"`
-	Terms       int      `json:"terms"`
-	Members     []member `json:"members,omitempty"`
+	Fingerprint string      `json:"fingerprint"`
+	Docs        int         `json:"docs"`
+	ScoredDocs  uint64      `json:"scored_docs"`
+	TotalLen    uint64      `json:"total_len"`
+	Harnesses   []string    `json:"harnesses"`
+	SourceNames []string    `json:"source_names"`
+	Sessions    int         `json:"sessions"`
+	Turns       int         `json:"turns"`
+	Terms       int         `json:"terms"`
+	Members     []member    `json:"members,omitempty"`
+	Roots       []repo.Seen `json:"roots,omitempty"`
 }
 
 // member is one source a part holds the rows of; a doc's src is its index in
@@ -278,6 +281,7 @@ func indexRows(bySession map[string][]built, place func(built) (*Row, int64, int
 	postings := map[string][]uint64{}
 	uids := make([]uint64, 0, 2*n)
 	var faExact []faEntry
+	var roots []repo.Seen
 	var faTio []uint32
 	var faBlob []byte
 	var faOffs []uint32
@@ -316,6 +320,9 @@ func indexRows(bySession map[string][]built, place func(built) (*Row, int64, int
 		if r.ToolPhase == "request" {
 			if r.ProjectID != "" && r.RepoRelPath != "" {
 				faExact = append(faExact, faEntry{r.RepoRelPath, uint32(d)})
+				if r.WorktreeRoot != "" {
+					roots = append(roots, repo.Seen{Root: r.WorktreeRoot, ProjectID: r.ProjectID})
+				}
 			}
 			if r.Bits&bitTio != 0 {
 				faTio = append(faTio, uint32(d))
@@ -436,7 +443,7 @@ func indexRows(bySession map[string][]built, place func(built) (*Row, int64, int
 	}
 
 	return indexMeta{Docs: n, ScoredDocs: scoredDocs, TotalLen: totalLen, Harnesses: harnesses.list,
-		SourceNames: sourceNames.list, Sessions: len(sessions), Turns: len(turns), Terms: len(terms)}, lsRecs, nil
+		SourceNames: sourceNames.list, Sessions: len(sessions), Turns: len(turns), Terms: len(terms), Roots: mergeSeen(roots)}, lsRecs, nil
 }
 
 type faEntry struct {

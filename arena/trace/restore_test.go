@@ -109,7 +109,7 @@ func TestRestoredStoreIngestsNothing(t *testing.T) {
 		t.Fatalf("ingest after restore: %v, want [2 0 0 0]", stats)
 	}
 	got, _, _ := packedParts(t, b)
-	want := []string{"96c8b91759814b14d49e2dadcadd56eced528d2d79fe65c8018dacb4a39931bc", "fdfbfe3689d5273907b008618890234d954a930a58145759ba6cef9326663979"}
+	want := []string{"36a9d9184acec604bbf1947d44bcbc095c439859781f3f788533965cf6aba64f", "d5dd677df4a2d0d6c9cbbce21b7426d43c0cfbe13b1435657293fa3956232a2a"}
 	if !slices.Equal(got, want) || !slices.Equal(ids, want) {
 		t.Fatalf("restored store names parts %v, original %v, want %v", got, ids, want)
 	}

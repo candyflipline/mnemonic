@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 	"github.com/candyflipline/mnemonic/internal/layout"
 	"github.com/candyflipline/mnemonic/internal/normalize"
 	_ "github.com/candyflipline/mnemonic/internal/normalize/all"
+	"github.com/candyflipline/mnemonic/internal/repo"
 	"github.com/candyflipline/mnemonic/internal/schema"
 	"github.com/candyflipline/mnemonic/internal/wire"
 	"github.com/klauspost/compress/zstd"
@@ -224,10 +226,18 @@ func wantCkpt(s source) ckpt {
 		Path: filepath.ToSlash(s.key.Events("")) /* lake path order */}}
 }
 
+func sourceMeta(root string, s source) (normalize.SourceMeta, error) {
+	book, err := readBook(s.key.Roots(root))
+	if err != nil {
+		return normalize.SourceMeta{}, fmt.Errorf("roots: %w", err)
+	}
+	return normalize.SourceMeta{SourceName: s.src.SourceName, Harness: s.src.Harness, SourceFile: s.src.Path, Roots: book}, nil
+}
+
 // extends reports whether raw up to end still holds the bytes prev was parsed
-// from, under the same parser and identity, so only the bytes past it parse.
-func extends(raw *os.File, end int64, want, prev ckpt) bool {
-	if prev.Parser != want.Parser || prev.Harness != want.Harness || prev.SourceName != want.SourceName ||
+// from, under the same parser, identity and roots, so only the bytes past it parse.
+func extends(raw *os.File, end int64, want, prev ckpt, meta normalize.SourceMeta) bool {
+	if !normalize.Resumable(prev.State, meta) || prev.Parser != want.Parser || prev.Harness != want.Harness || prev.SourceName != want.SourceName ||
 		prev.SourceFile != want.SourceFile || prev.Layout != want.Layout || prev.ZstSize > end {
 		return false
 	}
@@ -258,9 +268,13 @@ func ingestSource(root, store string, s source, pinned bool) (Outcome, error) {
 		return 0, err
 	}
 	defer raw.Close()
+	meta, err := sourceMeta(root, s)
+	if err != nil {
+		return 0, err
+	}
 	want := wantCkpt(s)
 	prev, has := readCkpt(store, key)
-	resumed := has && extends(raw, end, want, prev)
+	resumed := has && extends(raw, end, want, prev, meta)
 	if has && !resumed && pinned {
 		return 0, errMoved
 	}
@@ -299,25 +313,24 @@ func ingestSource(root, store string, s source, pinned bool) (Outcome, error) {
 	for _, s := range from.Sessions {
 		sessions[s] = true
 	}
-	state, err := parser.Parse(zr, normalize.SourceMeta{SourceName: s.src.SourceName, Harness: s.src.Harness, SourceFile: s.src.Path},
-		from.State, func(ev *schema.Event) error {
-			r := rowFrom(ev)
-			r.Version = uint64(rows)
-			sessions[r.Session] = true
-			var heavy []byte
-			heavy = appendStr(heavy, ev.PayloadJSON)
-			heavy = appendStr(heavy, ev.TokenUsageJSON)
-			fo, idx, err := hw.add(heavy)
-			if err != nil {
-				return err
-			}
-			r.HeavyFrame, r.HeavyIdx = uint64(fo), uint64(idx)
-			if _, _, err := lw.add(r.append(nil)); err != nil {
-				return err
-			}
-			rows++
-			return nil
-		})
+	state, err := parser.Parse(zr, meta, from.State, func(ev *schema.Event) error {
+		r := rowFrom(ev)
+		r.Version = uint64(rows)
+		sessions[r.Session] = true
+		var heavy []byte
+		heavy = appendStr(heavy, ev.PayloadJSON)
+		heavy = appendStr(heavy, ev.TokenUsageJSON)
+		fo, idx, err := hw.add(heavy)
+		if err != nil {
+			return err
+		}
+		r.HeavyFrame, r.HeavyIdx = uint64(fo), uint64(idx)
+		if _, _, err := lw.add(r.append(nil)); err != nil {
+			return err
+		}
+		rows++
+		return nil
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -354,6 +367,16 @@ func ingestSource(root, store string, s source, pinned bool) (Outcome, error) {
 		return Reparsed, nil
 	}
 	return Fresh, nil
+}
+
+// readBook decodes a source's pushed root facts; a source nobody has posted
+// facts for has no file and gets the empty Book.
+func readBook(path string) (repo.Book, error) {
+	b, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return repo.Book{}, err
+	}
+	return repo.DecodeBook(b)
 }
 
 func appendStr(b []byte, s string) []byte {
@@ -582,7 +605,11 @@ func startsOver(root string, s source, prev ckpt) bool {
 		return true
 	}
 	defer raw.Close()
-	return !extends(raw, end, wantCkpt(s), prev)
+	meta, err := sourceMeta(root, s)
+	if err != nil {
+		return true
+	}
+	return !extends(raw, end, wantCkpt(s), prev, meta)
 }
 
 // publish plans the parts of the sources' checkpoints, builds the missing ones
