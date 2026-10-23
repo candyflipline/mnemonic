@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode"
 
 	"github.com/candyflipline/mnemonic/internal/wire"
 )
@@ -58,7 +59,10 @@ func DecodeBook(b []byte) (Book, error) {
 		if f.Kind != wire.RootGit && f.Kind != wire.RootDir {
 			return Book{}, fmt.Errorf("repo: root kind %q", f.Kind)
 		}
-		if splitRemote(f.Remote).user != "" {
+		if slices.ContainsFunc([]string{f.Path, f.Key, f.Remote}, hasControl) {
+			return Book{}, fmt.Errorf("repo: root fact carries a control character")
+		}
+		if splitRemote(f.Remote).userinfo {
 			return Book{}, fmt.Errorf("repo: root remote carries userinfo")
 		}
 		if f.From < 0 {
@@ -91,6 +95,8 @@ func DecodeBook(b []byte) (Book, error) {
 	})
 	return book, nil
 }
+
+func hasControl(s string) bool { return strings.ContainsFunc(s, unicode.IsControl) }
 
 func boolFirst(a, b bool) int {
 	switch {
