@@ -21,28 +21,55 @@ const (
 	backfillBytes   = 64 << 20
 )
 
-// rootsSync reports root facts ahead of each raw PUT. A server that answers
-// 404 does not know the endpoint; the process then pushes raw alone.
+// rootsSync reports root facts ahead of each raw PUT. Raw is the source of
+// truth: a POST that fails never stops a PUT, it is counted and the source's
+// RootsTo trails until backfill posts the rest. A server that answers 404
+// does not know the endpoint; the rest of the pass pushes raw alone.
 type rootsSync struct {
 	red       Redactor
 	p         *prober
 	off       bool
 	unaligned map[string]int64
+	failed    map[string]bool
+	errs      int
+	firstErr  error
 }
 
 func newRootsSync(red Redactor) *rootsSync {
-	return &rootsSync{red: red, p: newProber(red), unaligned: make(map[string]int64)}
+	return &rootsSync{red: red, p: newProber(red), unaligned: make(map[string]int64), failed: make(map[string]bool)}
 }
 
-func (r *rootsSync) newPass() { r.p.reset() }
+func (r *rootsSync) newPass() {
+	r.p.reset()
+	r.off = false
+	clear(r.failed)
+}
+
+func (r *rootsSync) fail(srcID string, err error) {
+	r.failed[srcID] = true
+	r.errs++
+	if r.firstErr == nil {
+		r.firstErr = err
+	}
+}
+
+// drain moves the failures counted since the last drain into st.
+func (r *rootsSync) drain(st *Stats) {
+	st.RootsFailed += r.errs
+	if st.RootsErr == "" && r.firstErr != nil {
+		st.RootsErr = r.firstErr.Error()
+	}
+	r.errs, r.firstErr = 0, nil
+}
 
 // report posts the facts for body, whose first line starts at redacted offset from.
-func (r *rootsSync) report(ctx context.Context, cfg config.Client, hc *http.Client, f fileRef, srcID string, from int64, body []byte) error {
-	if r.off {
-		return nil
+func (r *rootsSync) report(ctx context.Context, cfg config.Client, hc *http.Client, f fileRef, srcID string, from int64, body []byte) {
+	if r.off || r.failed[srcID] {
+		return
 	}
-	_, err := r.post(ctx, cfg, hc, f, srcID, from, from+int64(len(body)), sniff(body, from, r.p))
-	return err
+	if _, err := r.post(ctx, cfg, hc, f, srcID, from, from+int64(len(body)), sniff(body, from, r.p)); err != nil {
+		r.fail(srcID, err)
+	}
 }
 
 // post sends facts as one or more POSTs with contiguous ranges covering
@@ -147,17 +174,17 @@ func (b *backfillBudget) spent() bool {
 // backfill reports the facts of [entry.RootsTo, entry.Size) for a source whose
 // file is still on disk. A file whose redaction no longer lands on the server's
 // Size is left alone until Size changes.
-func (r *rootsSync) backfill(ctx context.Context, cfg config.Client, hc *http.Client, f fileRef, entry *wire.Source, b *backfillBudget) error {
+func (r *rootsSync) backfill(ctx context.Context, cfg config.Client, hc *http.Client, f fileRef, entry *wire.Source, b *backfillBudget) {
 	if r.off || entry == nil || entry.Size == 0 || entry.RootsTo >= entry.Size || r.unaligned[entry.SrcID] == entry.Size {
-		return nil
+		return
 	}
 	if b.spent() {
 		b.deferred = true
-		return nil
+		return
 	}
 	file, err := redactComplete(f.path, r.red)
 	if err != nil || file == nil {
-		return nil
+		return
 	}
 	b.sources++
 	b.bytes += int64(len(file.body))
@@ -168,11 +195,13 @@ func (r *rootsSync) backfill(ctx context.Context, cfg config.Client, hc *http.Cl
 	}
 	if !ok || file.head != entry.HeadHash {
 		r.unaligned[entry.SrcID] = entry.Size
-		return nil
+		return
 	}
 	now, err := r.post(ctx, cfg, hc, f, entry.SrcID, entry.RootsTo, entry.Size, sniff(file.body[start:end], start, r.p))
 	if now != nil {
 		entry.RootsTo = now.RootsTo
 	}
-	return err
+	if err != nil {
+		r.fail(entry.SrcID, err)
+	}
 }

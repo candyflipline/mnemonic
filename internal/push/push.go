@@ -29,6 +29,8 @@ type Redactor interface {
 type Stats struct {
 	Scanned, Appended, Replaced, Unchanged, Failed int
 	Bytes                                          int64
+	RootsFailed                                    int
+	RootsErr                                       string
 }
 
 // skewMs is the mtime-vs-UpdatedMs margin the skip needs, because the client
@@ -58,20 +60,22 @@ func run(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client, 
 	for _, f := range scan(cfg.Sources) {
 		st.Scanned++
 		entry := manifest[wire.SrcID(f.path)]
-		if err := rs.backfill(ctx, cfg, hc, f, entry, &budget); err != nil {
-			st.Failed++
-			continue
-		}
+		rs.backfill(ctx, cfg, hc, f, entry, &budget)
 		if _, _, err := syncSource(ctx, cfg, red, hc, rs, entry, f, &st); err != nil {
 			st.Failed++
 		}
 	}
+	rs.drain(&st)
 	return st, nil
 }
 
 func (s Stats) String() string {
-	return fmt.Sprintf("scanned %d, appended %d, replaced %d, unchanged %d, failed %d, sent %d bytes",
+	line := fmt.Sprintf("scanned %d, appended %d, replaced %d, unchanged %d, failed %d, sent %d bytes",
 		s.Scanned, s.Appended, s.Replaced, s.Unchanged, s.Failed, s.Bytes)
+	if s.RootsFailed > 0 {
+		line += fmt.Sprintf(", roots failed %d (%s)", s.RootsFailed, s.RootsErr)
+	}
+	return line
 }
 
 func fetchManifest(ctx context.Context, cfg config.Client, hc *http.Client) (map[string]*wire.Source, error) {
@@ -173,9 +177,7 @@ func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.C
 		}
 		body = firstChunk(body, maxChunk)
 		if listed {
-			if err := rs.report(ctx, cfg, hc, f, srcID, offset, body); err != nil {
-				return held, conflicted, err
-			}
+			rs.report(ctx, cfg, hc, f, srcID, offset, body)
 		}
 		now, c, err := putSource(ctx, cfg, hc, f, srcID, offset, file.head, body, rawEndOf(file.rawEnds, file.body, offset, body))
 		if err != nil {
@@ -191,9 +193,7 @@ func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.C
 			continue
 		}
 		if !listed {
-			if err := rs.report(ctx, cfg, hc, f, srcID, offset, body); err != nil {
-				return held, conflicted, err
-			}
+			rs.report(ctx, cfg, hc, f, srcID, offset, body)
 		}
 		st.Bytes += int64(len(body))
 		sent, replaced = true, replaced || offset == 0
@@ -221,9 +221,7 @@ func syncTail(ctx context.Context, cfg config.Client, red Redactor, hc *http.Cli
 		chunk := firstChunk(body, maxChunk)
 		lines := bytes.Count(chunk, []byte{'\n'})
 		rawEnd := rawEnds[lines-1]
-		if err := rs.report(ctx, cfg, hc, f, srcID, entry.Size, chunk); err != nil {
-			return res, err
-		}
+		rs.report(ctx, cfg, hc, f, srcID, entry.Size, chunk)
 		now, conflicted, err := putSource(ctx, cfg, hc, f, srcID, entry.Size, tail.head, chunk, rawEnd)
 		if err != nil {
 			return res, err

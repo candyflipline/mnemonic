@@ -53,20 +53,8 @@ func DecodeBook(b []byte) (Book, error) {
 		return Book{}, fmt.Errorf("repo: %d roots, at most %d", len(facts), maxBookEntries)
 	}
 	for _, f := range facts {
-		if !strings.HasPrefix(f.Path, "/") || NormalizePath(f.Path) != f.Path {
-			return Book{}, fmt.Errorf("repo: root path %q is not absolute and normalized", f.Path)
-		}
-		if f.Kind != wire.RootGit && f.Kind != wire.RootDir {
-			return Book{}, fmt.Errorf("repo: root kind %q", f.Kind)
-		}
-		if slices.ContainsFunc([]string{f.Path, f.Key, f.Remote}, hasControl) {
-			return Book{}, fmt.Errorf("repo: root fact carries a control character")
-		}
-		if splitRemote(f.Remote).userinfo {
-			return Book{}, fmt.Errorf("repo: root remote carries userinfo")
-		}
-		if f.From < 0 {
-			return Book{}, fmt.Errorf("repo: root from %d", f.From)
+		if err := ValidRoot(f); err != nil {
+			return Book{}, err
 		}
 	}
 	facts = MergeRoots(nil, facts)
@@ -94,6 +82,26 @@ func DecodeBook(b []byte) (Book, error) {
 		)
 	})
 	return book, nil
+}
+
+// ValidRoot is the rule every root fact must pass to enter a Book.
+func ValidRoot(f wire.Root) error {
+	if !strings.HasPrefix(f.Path, "/") || NormalizePath(f.Path) != f.Path {
+		return fmt.Errorf("repo: root path %q is not absolute and normalized", f.Path)
+	}
+	if f.Kind != wire.RootGit && f.Kind != wire.RootDir {
+		return fmt.Errorf("repo: root kind %q", f.Kind)
+	}
+	if slices.ContainsFunc([]string{f.Path, f.Key, f.Remote}, hasControl) {
+		return fmt.Errorf("repo: root fact carries a control character")
+	}
+	if splitRemote(f.Remote).userinfo {
+		return fmt.Errorf("repo: root remote carries userinfo")
+	}
+	if f.From < 0 {
+		return fmt.Errorf("repo: root from %d", f.From)
+	}
+	return nil
 }
 
 func hasControl(s string) bool { return strings.ContainsFunc(s, unicode.IsControl) }

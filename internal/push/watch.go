@@ -162,7 +162,7 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 			fmt.Fprintln(out, "push:", w.watchErr)
 			w.watchErr = nil
 		}
-		if st.Appended+st.Replaced+st.Failed > 0 {
+		if st.Appended+st.Replaced+st.Failed+st.RootsFailed > 0 {
 			fmt.Fprintln(out, st)
 		}
 		if !w.stale {
@@ -221,24 +221,18 @@ func (w *watcher) reconcile(ctx context.Context) (Stats, error) {
 	for p := range w.files {
 		paths = append(paths, p)
 	}
-	var failed int
 	var budget backfillBudget
 	for _, p := range paths {
 		f := w.files[p]
 		if f == nil {
 			continue
 		}
-		if err := w.rs.backfill(ctx, w.cfg, w.hc, f.fileRef, w.held[wire.SrcID(p)], &budget); err != nil {
-			w.failed, w.stale = true, true
-			failed++
-		}
+		w.rs.backfill(ctx, w.cfg, w.hc, f.fileRef, w.held[wire.SrcID(p)], &budget)
 	}
 	if budget.deferred {
 		w.stale = true
 	}
-	st := w.sync(ctx, paths)
-	st.Failed += failed
-	return st, nil
+	return w.sync(ctx, paths), nil
 }
 
 // flush lists the dirty directories and any glob base not seen yet, then
@@ -365,5 +359,6 @@ func (w *watcher) sync(ctx context.Context, paths []string) Stats {
 		}
 		f.synced = now
 	}
+	w.rs.drain(&st)
 	return st
 }
