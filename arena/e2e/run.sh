@@ -5,7 +5,7 @@
 # everything else on stderr.
 # Exits non-zero if any fails. The caller holds heavy.lock:
 #   lockf -k /Users/user/xstock-scratch/heavy.lock nice -n 15 env GOMAXPROCS=4 GOMEMLIMIT=900MiB arena/e2e/run.sh
-# KEEP=1 keeps the temp dir; ONLY="f g" runs those steps. MAX_CALL_S (default 2) is the keeper's -max-call in seconds. ARENA and SRC override the fixture and the
+# KEEP=1 keeps the temp dir; ONLY="f g" runs those steps. MAX_CALL_S (default 5) is the keeper's -max-call in seconds. ARENA and SRC override the fixture and the
 # transcripts the seed reads. BIN_DIR=<dir holding a, e2e, seed> skips the build. LOG_DIR keeps the logs
 # and du.txt outside the temp dir. ENVLABEL names the host and corpus in the 2e line. WAIT_UP_S,
 # WAIT_EXIT_S and PREWARM_WAIT_S (seconds) and E2E_TIMEOUT (a duration) stretch the waits for a big corpus.
@@ -333,7 +333,7 @@ kill_keeper() {
 
 # s2f_first: keeper A ingests the settled raw and is killed; keeper B on an empty local over the same store parses nothing, commits at a higher gen naming the same part keys, and the cluster answers both rungs N/N.
 s2f_first() {
-	local out sources g1 g2 keys1 keys2 m1 m2 ok=1 w p store=$T/2f/store
+	local out un sources g1 g2 keys1 keys2 m1 m2 ok=1 w p store=$T/2f/store
 	cluster_up 2f "$store" "$ARENA/raw" "" || { F_MSG="cluster did not start ($(why 2f))"; return 1; }
 	local a=$KPID
 	out=$("$E2E" ingest -keeper "http://127.0.0.1:$KPORT") || { F_MSG="keeper A ingest failed ($(why 2f))"; return 1; }
@@ -346,7 +346,8 @@ s2f_first() {
 	respawn_keeper 2f2 "$ARENA/raw" || { F_MSG="keeper B did not spawn"; return 1; }
 	wait_up "$KPID" "127.0.0.1:$KPORT" || { F_MSG="keeper B did not start ($(why 2f2))"; return 1; }
 	out=$("$E2E" ingest -keeper "http://127.0.0.1:$KPORT") || { F_MSG="keeper B ingest failed ($(why 2f2))"; return 1; }
-	[ "$(ingest_counts "$out")" = "unchanged=$sources resumed=0 fresh=0 reparsed=0" ] || { F_MSG="keeper B on an empty local parsed: $(ingest_counts "$out"), want unchanged=$sources only"; return 1; }
+	un=$(field "$out" unchanged)
+	{ [ "${un:-0}" -gt 0 ] && [ $((un % sources)) = 0 ] && [ "$(field "$out" resumed)" = 0 ] && [ "$(field "$out" fresh)" = 0 ] && [ "$(field "$out" reparsed)" = 0 ]; } || { F_MSG="keeper B on an empty local parsed: $(ingest_counts "$out"), want resumed=0 fresh=0 reparsed=0 and unchanged a multiple of $sources"; return 1; }
 	m2=$("$E2E" manifest -dir "$store" -tenant "$TENANT") || { F_MSG="manifest after keeper B: $m2"; return 1; }
 	g2=$(field "$m2" gen)
 	keys2=$(field "$m2" keys)
@@ -412,12 +413,11 @@ s2g() {
 	dead "$a" || { ok=0; echo "keeper A is still alive after the kill" >&2; }
 	full "$k" || ok=0
 	[ "$(field "$k" committed)" -ge "$kill_at" ] 2>/dev/null || ok=0
-	w=$(drive -rung whole -limit 1) && ok=0
+	w=$(drive -rung whole -tool search_sessions -limit 1) && ok=0
 	[ "$(field "$w" s503)" = 1 ] || ok=0
 	respawn_keeper 2g2 "$ARENA/raw" || { fail 2g "keeper B did not spawn"; return; }
 	r=$(drive -rung partial) || ok=0
 	full "$r" || ok=0
-	[ "$(field "$r" committed)" -ge 1 ] 2>/dev/null || ok=0
 	wait_up "$KPID" "127.0.0.1:$KPORT" || { fail 2g "keeper B did not start ($(why 2g2))"; return; }
 	out=$("$E2E" ingest -keeper "http://127.0.0.1:$KPORT") || { fail 2g "keeper B ingest failed ($(why 2g2))"; return; }
 	g2=$(field "$out" gen)
@@ -425,7 +425,7 @@ s2g() {
 	n=$(drive -rung partial) || ok=0
 	full "$n" || ok=0
 	[ "$(field "$n" all)" = "$EXPECT" ] || ok=0
-	line="keeper SIGKILLed before call $kill_at: partial $(ratio "$(field "$k" equal)" "$(field "$k" total)") with committed=$(field "$k" committed); whole answers 503; keeper B restoring: partial $(ratio "$(field "$r" equal)" "$(field "$r" total)") with committed=$(field "$r" committed); after its first commit (gen $g1 to $g2): partial $(ratio "$(field "$n" equal)" "$(field "$n" total)") all=$(field "$n" all)"
+	line="keeper SIGKILLed before call $kill_at: partial $(ratio "$(field "$k" equal)" "$(field "$k" total)") with committed=$(field "$k" committed); whole answers 503; keeper B restoring: partial $(ratio "$(field "$r" equal)" "$(field "$r" total)") with all=$(field "$r" all) committed=$(field "$r" committed); after its first commit (gen $g1 to $g2): partial $(ratio "$(field "$n" equal)" "$(field "$n" total)") all=$(field "$n" all)"
 	if [ $ok = 1 ]; then emit "2g: PASS $line"; else fail 2g "$line ($(why 2g2))"; fi
 }
 

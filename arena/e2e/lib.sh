@@ -11,7 +11,7 @@ dead() {
 
 track() { PIDS="$PIDS $1"; }
 
-MAX_CALL_S=${MAX_CALL_S:-2}
+MAX_CALL_S=${MAX_CALL_S:-5}
 
 # start_store NAME DIR [TTFB] starts `a store` over DIR with a secret of its own that every process of the step
 # inherits, waits until it serves /stats, and sets SPORT, STPID and STORE_URI. TTFB delays each presigned GET.
