@@ -58,10 +58,12 @@ blank line is skipped. The reply's `id` echoes the call's `id` verbatim.
 
 `annotate`, `set_visibility` and `delete_session` write through the request
 context's store, exactly as the server does (`internal/server` puts identity,
-`store.WithStore` and `query.WithControls` on each request ctx). A write's
-effect becomes readable after the next `ingest` converges the store — the same
-cycle a server client observes after a PUT. A call sequence for the e2e lane is
-therefore expressed as:
+`store.WithStore` and `query.WithControls` on each request ctx). A write lands
+as a new raw source under `STORE/raw` (`harness=annotation` or
+`harness=control`), so the store's raw stays the source of truth; the effect
+becomes readable after the next `ingest` parses and converges that source —
+the same cycle a server client observes after a PUT. A call sequence for the
+e2e lane is therefore expressed as:
 
 1. `batch` with the write calls (annotate / set_visibility / delete_session),
 2. `ingest -root RAWROOT -store STORE`,
