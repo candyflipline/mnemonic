@@ -3,9 +3,10 @@ package shared
 import (
 	"encoding/json"
 	"math"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // JSON is one decoded JSON value. Objects decode to map[string]any, arrays to
@@ -21,93 +22,111 @@ func DecodeJSON(data []byte) (JSON, error) {
 // Compact serializes v the way serde_json::to_string does: object keys sorted,
 // no whitespace, numbers in their parsed form.
 func Compact(v JSON) string {
-	var b strings.Builder
-	writeCompact(&b, v)
-	return b.String()
+	bp := compactBufs.Get().(*[]byte)
+	b := appendCompact((*bp)[:0], v)
+	out := string(b)
+	if cap(b) <= 1<<20 {
+		*bp = b
+		compactBufs.Put(bp)
+	}
+	return out
 }
 
-func writeCompact(b *strings.Builder, v JSON) {
+var compactBufs = sync.Pool{New: func() any { b := make([]byte, 0, 4096); return &b }}
+
+func appendCompact(b []byte, v JSON) []byte {
 	switch t := v.(type) {
 	case nil:
-		b.WriteString("null")
+		return append(b, "null"...)
 	case bool:
 		if t {
-			b.WriteString("true")
-		} else {
-			b.WriteString("false")
+			return append(b, "true"...)
 		}
+		return append(b, "false"...)
 	case string:
-		writeJSONString(b, t)
+		return appendJSONString(b, t)
 	case json.Number:
-		b.WriteString(CanonicalNumber(t))
+		return append(b, CanonicalNumber(t)...)
 	case []any:
-		b.WriteByte('[')
+		b = append(b, '[')
 		for i, item := range t {
 			if i > 0 {
-				b.WriteByte(',')
+				b = append(b, ',')
 			}
-			writeCompact(b, item)
+			b = appendCompact(b, item)
 		}
-		b.WriteByte(']')
+		return append(b, ']')
 	case map[string]any:
 		keys := make([]string, 0, len(t))
 		for k := range t {
 			keys = append(keys, k)
 		}
-		sort.Strings(keys)
-		b.WriteByte('{')
+		slices.Sort(keys)
+		b = append(b, '{')
 		for i, k := range keys {
 			if i > 0 {
-				b.WriteByte(',')
+				b = append(b, ',')
 			}
-			writeJSONString(b, k)
-			b.WriteByte(':')
-			writeCompact(b, t[k])
+			b = appendJSONString(b, k)
+			b = append(b, ':')
+			b = appendCompact(b, t[k])
 		}
-		b.WriteByte('}')
+		return append(b, '}')
 	default:
-		b.WriteString("null")
+		return append(b, "null"...)
 	}
 }
 
-// writeJSONString escapes exactly what serde_json escapes: quote, backslash
+// appendJSONString escapes exactly what serde_json escapes: quote, backslash
 // and the C0 controls. Everything else, including non-ASCII, passes through
 // as UTF-8.
-func writeJSONString(b *strings.Builder, s string) {
-	b.Grow(len(s) + 2)
-	b.WriteByte('"')
+func appendJSONString(b []byte, s string) []byte {
+	const ones, highs = 0x0101010101010101, 0x8080808080808080
+	b = append(b, '"')
 	start := 0
 	for i := 0; i < len(s); i++ {
+		for i+8 <= len(s) {
+			x := uint64(s[i]) | uint64(s[i+1])<<8 | uint64(s[i+2])<<16 | uint64(s[i+3])<<24 |
+				uint64(s[i+4])<<32 | uint64(s[i+5])<<40 | uint64(s[i+6])<<48 | uint64(s[i+7])<<56
+			quote := x ^ (ones * '"')
+			slash := x ^ (ones * '\\')
+			if ((x-ones*0x20)&^x|(quote-ones)&^quote|(slash-ones)&^slash)&highs != 0 {
+				break
+			}
+			i += 8
+		}
+		if i >= len(s) {
+			break
+		}
 		c := s[i]
 		if c >= 0x20 && c != '"' && c != '\\' {
 			continue
 		}
-		b.WriteString(s[start:i])
+		b = append(b, s[start:i]...)
 		start = i + 1
 		switch {
 		case c == '"':
-			b.WriteString(`\"`)
+			b = append(b, `\"`...)
 		case c == '\\':
-			b.WriteString(`\\`)
+			b = append(b, `\\`...)
 		case c == '\n':
-			b.WriteString(`\n`)
+			b = append(b, `\n`...)
 		case c == '\r':
-			b.WriteString(`\r`)
+			b = append(b, `\r`...)
 		case c == '\t':
-			b.WriteString(`\t`)
+			b = append(b, `\t`...)
 		case c == '\b':
-			b.WriteString(`\b`)
+			b = append(b, `\b`...)
 		case c == '\f':
-			b.WriteString(`\f`)
+			b = append(b, `\f`...)
 		default:
 			const hex = "0123456789abcdef"
-			b.WriteString(`\u00`)
-			b.WriteByte(hex[c>>4])
-			b.WriteByte(hex[c&0xf])
+			b = append(b, `\u00`...)
+			b = append(b, hex[c>>4], hex[c&0xf])
 		}
 	}
-	b.WriteString(s[start:])
-	b.WriteByte('"')
+	b = append(b, s[start:]...)
+	return append(b, '"')
 }
 
 // CanonicalNumber re-serializes a numeric literal the way serde_json does:
