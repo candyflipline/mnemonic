@@ -36,14 +36,18 @@ for i in $(seq 1 "$RUNS"); do
 	RC=$?
 	set -e
 	[ "$RC" -eq 0 ] || { echo "batch run $i exited $RC, see $OUT/lat-$i.log" >&2; exit "$RC"; }
-	python3 -I - "$i" "$OUT/lat-$i.jsonl" >> "$OUT/call-latency-summary.tsv" <<'PYEOF'
+	python3 -I - "$i" "$OUT/lat-$i.jsonl" "$OUT/all-calls.jsonl" >> "$OUT/call-latency-summary.tsv" <<'PYEOF'
 import json, math, sys
-run, path = sys.argv[1], sys.argv[2]
+run, rpath, cpath = sys.argv[1], sys.argv[2], sys.argv[3]
+calls = [json.loads(l) for l in open(cpath)]
+replies = [json.loads(l) for l in open(rpath)]
+if len(calls) != len(replies):
+    sys.exit("%d replies for %d calls" % (len(replies), len(calls)))
 by = {}
-for line in open(path):
-    r = json.loads(line)
-    t = r.get("tool") or ""
-    by.setdefault(t, []).append(r)
+for c, r in zip(calls, replies):
+    if r.get("id") != c["id"]:
+        sys.exit("reply id %s for call id %s" % (r.get("id"), c["id"]))
+    by.setdefault(c["tool"], []).append(r)
 for tool in ("search_sessions", "file_attention"):
     us = sorted(x.get("us", 0) for x in by.get(tool, []))
     errs = sum(1 for x in by.get(tool, []) if x.get("error"))
