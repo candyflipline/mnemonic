@@ -93,9 +93,10 @@ func Run(dataDir string, yield func() bool, sweep Sweep) (Stats, error) {
 
 	var st Stats
 	parse := func(mpath string, key layout.Key, src manifest, parser normalize.Parser) {
+		parsedMs := inputMs(key, dataDir, src)
 		written, n, err := parseAndWrite(db, dataDir, key, src, parser, ingestedAt)
 		if err == nil {
-			err = stamp(written, src.UpdatedMs)
+			err = stamp(written, parsedMs)
 		}
 		if err != nil {
 			st.Failed++
@@ -120,7 +121,7 @@ func Run(dataDir string, yield func() bool, sweep Sweep) (Stats, error) {
 			fmt.Fprintf(os.Stderr, "lake: %s: %v\n", mpath, err)
 			continue
 		}
-		if lakeMtime(key, dataDir) >= src.UpdatedMs {
+		if lakeMtime(key, dataDir) >= inputMs(key, dataDir, src) {
 			if sweeping {
 				idles = append(idles, idle{mpath, key, src})
 			} else {
@@ -477,6 +478,18 @@ func lakeMtime(key layout.Key, dataDir string) int64 {
 	return ms
 }
 
+// inputMs is the newest input the lake reads for a source, in ms: the
+// manifest's UpdatedMs or the roots file's mtime. The store renames the roots
+// file before it bumps the manifest, so after a crash between the two the file
+// is newer than the UpdatedMs that should have vouched for it.
+func inputMs(key layout.Key, dataDir string, src manifest) int64 {
+	ms := src.UpdatedMs
+	if info, err := os.Stat(key.Roots(dataDir)); err == nil {
+		ms = max(ms, info.ModTime().UnixMilli())
+	}
+	return ms
+}
+
 // resume returns cp and true when it belongs to this binary and source and
 // raw still extends it: the window ending at its ZstSize hashes the same, a
 // zstd frame starts at ZstSize unless raw ends there, and the roots facts that
@@ -523,8 +536,8 @@ func readCheckpoint(db *sql.DB, eventsPath string) (checkpoint, bool) {
 	return cp, true
 }
 
-// stamp sets written's mtime to the millisecond of parsedMs, the manifest
-// UpdatedMs it was parsed from, and below it the write's own nanoseconds.
+// stamp sets written's mtime to the millisecond of parsedMs, the inputMs it
+// was parsed from, and below it the write's own nanoseconds.
 func stamp(written string, parsedMs int64) error {
 	t := time.UnixMilli(parsedMs).Add(time.Duration(time.Now().Nanosecond() % 1e6))
 	return os.Chtimes(written, t, t)
