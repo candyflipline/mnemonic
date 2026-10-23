@@ -29,6 +29,8 @@ type Redactor interface {
 type Stats struct {
 	Scanned, Appended, Replaced, Unchanged, Failed int
 	Bytes                                          int64
+	RootsFailed                                    int
+	RootsErr                                       string
 }
 
 // skewMs is the mtime-vs-UpdatedMs margin the skip needs, because the client
@@ -45,23 +47,35 @@ type fileRef struct {
 }
 
 func Run(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client) (Stats, error) {
+	return run(ctx, cfg, red, hc, newRootsSync(red))
+}
+
+func run(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client, rs *rootsSync) (Stats, error) {
 	manifest, err := fetchManifest(ctx, cfg, hc)
 	if err != nil {
 		return Stats{}, err
 	}
 	var st Stats
+	var budget backfillBudget
 	for _, f := range scan(cfg.Sources) {
 		st.Scanned++
-		if _, _, err := syncSource(ctx, cfg, red, hc, manifest[wire.SrcID(f.path)], f, &st); err != nil {
+		entry := manifest[wire.SrcID(f.path)]
+		rs.backfill(ctx, cfg, hc, f, entry, &budget)
+		if _, _, err := syncSource(ctx, cfg, red, hc, rs, entry, f, &st); err != nil {
 			st.Failed++
 		}
 	}
+	rs.drain(&st)
 	return st, nil
 }
 
 func (s Stats) String() string {
-	return fmt.Sprintf("scanned %d, appended %d, replaced %d, unchanged %d, failed %d, sent %d bytes",
+	line := fmt.Sprintf("scanned %d, appended %d, replaced %d, unchanged %d, failed %d, sent %d bytes",
 		s.Scanned, s.Appended, s.Replaced, s.Unchanged, s.Failed, s.Bytes)
+	if s.RootsFailed > 0 {
+		line += fmt.Sprintf(", roots failed %d (%s)", s.RootsFailed, s.RootsErr)
+	}
+	return line
 }
 
 func fetchManifest(ctx context.Context, cfg config.Client, hc *http.Client) (map[string]*wire.Source, error) {
@@ -92,8 +106,12 @@ func fetchManifest(ctx context.Context, cfg config.Client, hc *http.Client) (map
 
 // syncSource returns the server's state for the source as its last answer
 // reported it (nil when it sent nothing) and whether any answer was a 409.
-func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client, entry *wire.Source, f fileRef, st *Stats) (held *wire.Source, conflicted bool, err error) {
+// Roots are posted before the raw PUT for a source the manifest lists and after
+// it for a new one, because the server answers 404 to roots for a source it has
+// not seen, the same status an old server gives.
+func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client, rs *rootsSync, entry *wire.Source, f fileRef, st *Stats) (held *wire.Source, conflicted bool, err error) {
 	srcID := wire.SrcID(f.path)
+	listed := entry != nil
 	if entry != nil && entry.RawEnd > 0 && f.size == entry.RawEnd {
 		st.Unchanged++
 		return nil, false, nil
@@ -109,7 +127,7 @@ func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.C
 	legacy := entry != nil && entry.RawEnd == 0
 	sent, replaced := false, false
 	if entry != nil && entry.RawEnd > 0 && entry.Size > 0 {
-		tail, err := syncTail(ctx, cfg, red, hc, f, srcID, entry, st)
+		tail, err := syncTail(ctx, cfg, red, hc, rs, f, srcID, entry, st)
 		held, conflicted = tail.held, tail.conflicted
 		if err != nil {
 			return held, conflicted, err
@@ -158,6 +176,9 @@ func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.C
 			return held, conflicted, nil
 		}
 		body = firstChunk(body, maxChunk)
+		if listed {
+			rs.report(ctx, cfg, hc, f, srcID, offset, body)
+		}
 		now, c, err := putSource(ctx, cfg, hc, f, srcID, offset, file.head, body, rawEndOf(file.rawEnds, file.body, offset, body))
 		if err != nil {
 			return held, conflicted, err
@@ -171,6 +192,9 @@ func syncSource(ctx context.Context, cfg config.Client, red Redactor, hc *http.C
 			entry = &wire.Source{SrcID: srcID, Size: now.Size, HeadHash: now.HeadHash}
 			continue
 		}
+		if !listed {
+			rs.report(ctx, cfg, hc, f, srcID, offset, body)
+		}
 		st.Bytes += int64(len(body))
 		sent, replaced = true, replaced || offset == 0
 		entry = &wire.Source{SrcID: srcID, Size: offset + int64(len(body)), HeadHash: file.head}
@@ -183,7 +207,7 @@ type tailResult struct {
 	held             *wire.Source
 }
 
-func syncTail(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client, f fileRef, srcID string, entry *wire.Source, st *Stats) (tailResult, error) {
+func syncTail(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client, rs *rootsSync, f fileRef, srcID string, entry *wire.Source, st *Stats) (tailResult, error) {
 	tail, err := redactTail(f.path, red, entry, f.head)
 	if err != nil {
 		return tailResult{}, err
@@ -197,6 +221,7 @@ func syncTail(ctx context.Context, cfg config.Client, red Redactor, hc *http.Cli
 		chunk := firstChunk(body, maxChunk)
 		lines := bytes.Count(chunk, []byte{'\n'})
 		rawEnd := rawEnds[lines-1]
+		rs.report(ctx, cfg, hc, f, srcID, entry.Size, chunk)
 		now, conflicted, err := putSource(ctx, cfg, hc, f, srcID, entry.Size, tail.head, chunk, rawEnd)
 		if err != nil {
 			return res, err

@@ -46,7 +46,36 @@ type Source struct {
 	RawEnd     int64  `json:"raw_end"` // raw bytes of the client's file consumed into Size; 0 = unknown
 	HeadHash   string `json:"head_hash"`
 	UpdatedMs  int64  `json:"updated_ms"`
+	RootsTo    int64  `json:"roots_to"` // redacted offset through which the client has reported roots; 0 = never
 }
+
+type RootKind string
+
+const (
+	RootGit RootKind = "git"
+	RootDir RootKind = "dir"
+)
+
+// Root is one directory fact the pushing machine probed for a path its own
+// redacted lines name. Path is the root as the transcript spells it; Key is
+// the canonical git common dir (git) or the canonical Path (dir); Remote is
+// the origin URL without userinfo (git only); From is the redacted offset of
+// the first line of the source that named it.
+type Root struct {
+	Path   string   `json:"path"`
+	Kind   RootKind `json:"kind"`
+	Key    string   `json:"key"`
+	Remote string   `json:"remote,omitempty"`
+	From   int64    `json:"from"`
+}
+
+// POST /v1/roots/{machine}/{harness}/{src_id}?from=F&through=T
+// Body: JSON []Root, at most MaxRootsPerPost, each From in [F, T). F == 0
+// replaces the source's roots, F > 0 merges them. RootsTo advances to T when
+// F <= RootsTo. Success is 200 with the updated Source.
+const RootsPathPrefix = "/v1/roots/"
+
+const MaxRootsPerPost = 256
 
 const ManifestPath = "/v1/manifest"
 

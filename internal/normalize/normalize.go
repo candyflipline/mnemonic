@@ -3,17 +3,19 @@ package normalize
 import (
 	"io"
 
+	"github.com/candyflipline/mnemonic/internal/repo"
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
 // Version names the parsers' output. Lake files parsed under another
 // Version are parsed again.
-const Version = 1
+const Version = 2
 
 type SourceMeta struct {
 	SourceName string
 	Harness    string
 	SourceFile string
+	Roots      repo.Book
 }
 
 // State is where a parse stopped: the next line's number and byte offset and
@@ -26,6 +28,13 @@ type State struct {
 	SessionHint string `json:"session_hint"`
 	ModelHint   string `json:"model_hint"`
 	CwdHint     string `json:"cwd_hint"`
+	RootsDigest string `json:"roots_digest"`
+}
+
+// Resumable says whether a tail parse may start from State: the roots that
+// reach the lines before it are the ones it was produced with.
+func Resumable(from State, meta SourceMeta) bool {
+	return from.RootsDigest == meta.Roots.Digest(from.Offset)
 }
 
 type Parser interface {
