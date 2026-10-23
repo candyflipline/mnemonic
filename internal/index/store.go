@@ -8,7 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"syscall"
+
+	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
 // Part is a read-only view of one committed index. Its light and heavy logs
@@ -30,6 +33,11 @@ type Part struct {
 	scratch                   []byte
 	ls                        []lsRec
 	lsB                       []byte
+	spansB, annB, authB       []byte
+	secOnce                   sync.Once
+	spansSec                  map[string][]schema.Span
+	annSec                    map[string][]schema.Annotation
+	authSec                   map[string][]string
 }
 
 // frameCache holds the last decoded light and heavy frames of every part of
@@ -103,7 +111,8 @@ func openPart(meta []byte, load func(name string) ([]byte, error)) (*Part, error
 		"turns": &st.turns, "uids": &st.uids, "terms": &st.terms, "terms.idx": &st.termIdx, "terms.filter": &st.termFilter, "postings": &st.postings,
 		"fa.exact": &st.faExact, "fa.tio": &st.faTio, "fa.blob": &st.faBlob,
 		"hot": &st.hotB, "hot.off": &st.hotOff, "fa.tri": &st.faTri, "fa.trip": &st.faTrip,
-		"light": &st.lightB, "heavy": &st.heavyB, "ls.json": &st.lsB} {
+		"light": &st.lightB, "heavy": &st.heavyB, "ls.json": &st.lsB,
+		"spans": &st.spansB, "annotations": &st.annB, "authors": &st.authB} {
 		b, err := load(name)
 		if err != nil {
 			return st, err
@@ -122,6 +131,29 @@ func (st *Part) Close() {
 			syscall.Munmap(m)
 		}
 	}
+}
+
+// sections decodes the part's three section files on first use.
+func (st *Part) sections() (map[string][]schema.Span, map[string][]schema.Annotation, map[string][]string) {
+	st.secOnce.Do(func() {
+		st.spansSec, st.annSec, st.authSec = decodeSections(st.spansB, st.annB, st.authB)
+	})
+	return st.spansSec, st.annSec, st.authSec
+}
+
+func (st *Part) spansSection() map[string][]schema.Span {
+	spans, _, _ := st.sections()
+	return spans
+}
+
+func (st *Part) annSection() map[string][]schema.Annotation {
+	_, ann, _ := st.sections()
+	return ann
+}
+
+func (st *Part) authSection() map[string][]string {
+	_, _, auth := st.sections()
+	return auth
 }
 
 // segments reads a log held as an image and the delta appended after it.

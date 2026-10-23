@@ -110,11 +110,20 @@ const (
 )
 
 func TruncateChars(s string, max int) string {
-	if utf8.RuneCountInString(s) <= max {
+	if len(s) <= max {
 		return s
 	}
-	runes := []rune(s)
-	return string(runes[:max])
+	n := 0
+	for i := range s {
+		if n == max {
+			if prefix := s[:i]; utf8.ValidString(prefix) {
+				return prefix
+			}
+			return string([]rune(s)[:max])
+		}
+		n++
+	}
+	return s
 }
 
 func ExtractMessageText(content JSON) string {

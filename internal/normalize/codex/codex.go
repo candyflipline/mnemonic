@@ -72,7 +72,7 @@ type codexRecord struct {
 	modelHint   string
 	payload     shared.JSON
 	payloadObj  map[string]any
-	payloadJSON string
+	payloadJSON shared.CanonicalJSON
 }
 
 func buildCodexRecord(rec shared.JSON, topType, baseUID, modelHint string) codexRecord {
@@ -85,7 +85,7 @@ func buildCodexRecord(rec shared.JSON, topType, baseUID, modelHint string) codex
 		modelHint:   modelHint,
 		payload:     payload,
 		payloadObj:  payloadObj,
-		payloadJSON: shared.Compact(payloadObj),
+		payloadJSON: shared.CompactCanonical(payloadObj),
 	}
 }
 
@@ -153,7 +153,7 @@ func normalizeCodexResponseItem(r *codexRecord, em *shared.Emitter) {
 	}
 }
 
-func emitCodexMessage(item shared.JSON, eventUID, payloadJSON string, includeResponseFields bool, em *shared.Emitter) {
+func emitCodexMessage(item shared.JSON, eventUID string, payloadJSON shared.CanonicalJSON, includeResponseFields bool, em *shared.Emitter) {
 	role := shared.ToStr(shared.Get(item, "role"))
 	if role == "" {
 		role = "assistant"
@@ -169,7 +169,7 @@ func emitCodexMessage(item shared.JSON, eventUID, payloadJSON string, includeRes
 	em.PushEvent(row)
 }
 
-func handleCodexFunctionCall(item shared.JSON, eventUID, payloadJSON string, em *shared.Emitter) {
+func handleCodexFunctionCall(item shared.JSON, eventUID string, payloadJSON shared.CanonicalJSON, em *shared.Emitter) {
 	args := shared.ToStr(shared.Get(item, "arguments"))
 	callID := shared.ToStr(shared.Get(item, "call_id"))
 	name := shared.ToStr(shared.Get(item, "name"))
@@ -180,7 +180,7 @@ func handleCodexFunctionCall(item shared.JSON, eventUID, payloadJSON string, em 
 	em.PushToolRequest(eventUID, callID, "", name, args)
 }
 
-func handleCodexFunctionCallOutput(item shared.JSON, eventUID, payloadJSON string, em *shared.Emitter) {
+func handleCodexFunctionCallOutput(item shared.JSON, eventUID string, payloadJSON shared.CanonicalJSON, em *shared.Emitter) {
 	output := shared.ToStr(shared.Get(item, "output"))
 	callID := shared.ToStr(shared.Get(item, "call_id"))
 	outputJSON := shared.Compact(shared.Get(item, "output"))
@@ -235,7 +235,7 @@ func handleCodexWebSearchCall(r *codexRecord, em *shared.Emitter) {
 	em.PushEvent(row)
 }
 
-func handleCodexReasoning(item shared.JSON, eventUID, payloadJSON string, includeItemID bool, em *shared.Emitter) {
+func handleCodexReasoning(item shared.JSON, eventUID string, payloadJSON shared.CanonicalJSON, includeItemID bool, em *shared.Emitter) {
 	summary := shared.Get(item, "summary")
 	row := em.Event(eventUID, "reasoning", "reasoning", "assistant",
 		shared.ExtractMessageText(summary), payloadJSON).MarkReasoning()
@@ -293,7 +293,7 @@ func stampCodexTokenCount(r *codexRecord, row *shared.EventRow) {
 
 	accounting := shared.OpenAIGeneration(usage).
 		WithLegacyScalars(uint64(inputTokens), uint64(outputTokens), uint64(cacheReadTokens), uint64(cacheWriteTokens)).
-		WithRawUsageJSON(r.payloadJSON)
+		WithRawUsageJSON(r.payloadJSON.String())
 	row.SetTokenAccounting(accounting)
 	row.Event.ServiceTier = shared.ToStr(shared.Get(r.payloadField("rate_limits"), "plan_type"))
 
@@ -362,7 +362,7 @@ func normalizeCodexCompactedItem(r *codexRecord, item shared.JSON, idx int, em *
 	if actor == "" {
 		actor = "assistant"
 	}
-	row := em.Event(itemUID, kind, payloadType, actor, text, shared.Compact(item))
+	row := em.EventForJSON(itemUID, kind, payloadType, actor, text, item)
 	row.Event.OriginEventID = r.baseUID
 	if kind == "reasoning" {
 		row.MarkReasoning()
@@ -371,7 +371,7 @@ func normalizeCodexCompactedItem(r *codexRecord, item shared.JSON, idx int, em *
 }
 
 func normalizeCodexLegacyTopLevel(r *codexRecord, em *shared.Emitter) {
-	payloadJSON := shared.Compact(r.rec)
+	payloadJSON := shared.CompactCanonical(r.rec)
 	switch r.topType {
 	case "message":
 		emitCodexMessage(r.rec, r.baseUID, payloadJSON, false, em)
@@ -389,8 +389,8 @@ func normalizeCodexUnknownTopLevel(r *codexRecord, em *shared.Emitter) {
 	if payloadType == "" {
 		payloadType = "unknown"
 	}
-	row := em.Event(r.baseUID, "unknown", payloadType, "system",
-		shared.ExtractMessageText(r.rec), shared.Compact(r.rec))
+	row := em.EventForJSON(r.baseUID, "unknown", payloadType, "system",
+		shared.ExtractMessageText(r.rec), r.rec)
 	em.PushEvent(row)
 }
 

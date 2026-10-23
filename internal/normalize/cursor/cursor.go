@@ -385,8 +385,8 @@ func normalizeCursorContentBlock(r *cursorRecord, idx int, block shared.JSON, em
 }
 
 func emitCursorScalarMessage(r *cursorRecord, text string, em *shared.Emitter) {
-	em.PushEvent(r.stampCommon(em.Event(r.baseUID, "message", r.messagePayloadType(),
-		r.actor(), text, shared.Compact(r.message))))
+	em.PushEvent(r.stampCommon(em.EventForJSON(r.baseUID, "message", r.messagePayloadType(),
+		r.actor(), text, r.message)))
 }
 
 func emitCursorTextBlock(r *cursorRecord, idx int, block shared.JSON, blockType string, em *shared.Emitter) {

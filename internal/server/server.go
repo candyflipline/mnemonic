@@ -72,21 +72,33 @@ const (
 )
 
 // Run ingests at boot, after each push once pushes settle (1 s quiet, 3 s
-// at most), and every 5 min without one, until ctx is done.
+// at most), and every 5 min without one, until ctx is done. A parser version
+// bump leaves sources for the sweep: cycles then run back to back, each
+// parsing stale sources under the sweep budget, until none are left.
 func (s *Server) Run(ctx context.Context) {
+	pushPending := func() bool { return len(s.wake) > 0 }
 	s.cycle("boot")
+	reconciled := time.Now()
 	for {
-		reason := "reconcile"
-		select {
-		case <-ctx.Done():
-			return
-		case <-s.wake:
-			reason = "put"
-			settle(ctx, s.wake)
-		case <-time.After(reconcile):
+		reason := "sweep"
+		if due := time.Until(reconciled.Add(reconcile)); due <= 0 {
+			reason = "reconcile"
+		} else if s.ix.SweepStale() == 0 || pushPending() {
+			reason = "reconcile"
+			select {
+			case <-ctx.Done():
+				return
+			case <-s.wake:
+				reason = "put"
+				settle(ctx, s.wake)
+			case <-time.After(due):
+			}
 		}
 		if ctx.Err() != nil {
 			return
+		}
+		if reason == "reconcile" {
+			reconciled = time.Now()
 		}
 		s.cycle(reason)
 	}
@@ -114,7 +126,12 @@ func settle(ctx context.Context, wake <-chan struct{}) {
 func (s *Server) cycle(reason string) error {
 	start := time.Now()
 	st, err := s.ix.Ingest(s.dataDir, index.IngestOptions{Quiet: settleSource})
-	log.Printf("cycle %s: ingest unchanged=%d resumed=%d fresh=%d reparsed=%d in %s err=%v",
-		reason, st[index.Unchanged], st[index.Resumed], st[index.Fresh], st[index.Reparsed], time.Since(start).Round(time.Millisecond), err)
+	cs := s.ix.LastCycle()
+	log.Printf("cycle %s: sources unchanged=%d resumed=%d fresh=%d reparsed=%d failed=%d stale=%d; "+
+		"wrote logs=%d parts=%d built=%d hot=%d cold=%d in %s err=%v",
+		reason, st[index.Unchanged], st[index.Resumed], st[index.Fresh], st[index.Reparsed],
+		s.ix.CycleFailed(), s.ix.SweepStale(),
+		cs.LogBytes, cs.PartBytes, cs.PartsBuilt, cs.HotParts, cs.ColdParts,
+		time.Since(start).Round(time.Millisecond), err)
 	return err
 }
