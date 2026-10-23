@@ -50,6 +50,7 @@ type watcher struct {
 	failed   bool
 	retries  int
 	note     *notifier
+	rs       *rootsSync
 	held     map[string]*wire.Source
 	files    map[string]*watched
 	dirs     map[string]bool
@@ -66,7 +67,7 @@ func Watch(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client
 }
 
 func newWatcher(cfg config.Client, red Redactor, hc *http.Client) *watcher {
-	w := &watcher{cfg: cfg, red: red, hc: hc, quiet: quietFor, within: flushWithin, stale: true}
+	w := &watcher{cfg: cfg, red: red, rs: newRootsSync(red), hc: hc, quiet: quietFor, within: flushWithin, stale: true}
 	for _, src := range cfg.Sources {
 		glob, err := filepath.Abs(src.Glob)
 		if err != nil {
@@ -194,6 +195,7 @@ func (w *watcher) reconcile(ctx context.Context) (Stats, error) {
 		w.stale = true
 		return Stats{}, err
 	}
+	w.rs.newPass()
 	oldFiles, oldDirs := w.files, w.dirs
 	w.held = held
 	w.files = make(map[string]*watched)
@@ -219,12 +221,30 @@ func (w *watcher) reconcile(ctx context.Context) (Stats, error) {
 	for p := range w.files {
 		paths = append(paths, p)
 	}
-	return w.sync(ctx, paths), nil
+	var failed int
+	var budget backfillBudget
+	for _, p := range paths {
+		f := w.files[p]
+		if f == nil {
+			continue
+		}
+		if err := w.rs.backfill(ctx, w.cfg, w.hc, f.fileRef, w.held[wire.SrcID(p)], &budget); err != nil {
+			w.failed, w.stale = true, true
+			failed++
+		}
+	}
+	if budget.deferred {
+		w.stale = true
+	}
+	st := w.sync(ctx, paths)
+	st.Failed += failed
+	return st, nil
 }
 
 // flush lists the dirty directories and any glob base not seen yet, then
 // syncs the dirty files and the files those listings found.
 func (w *watcher) flush(ctx context.Context, dirty map[string]bool) Stats {
+	w.rs.newPass()
 	var paths []string
 	for p := range dirty {
 		if w.dirs[p] {
@@ -331,7 +351,7 @@ func (w *watcher) sync(ctx context.Context, paths []string) Stats {
 		st.Scanned++
 		f.size, f.mtimeMs = now.size, info.ModTime().UnixMilli()
 		srcID := wire.SrcID(path)
-		held, conflicted, err := syncSource(ctx, w.cfg, w.red, w.hc, w.held[srcID], f.fileRef, &st)
+		held, conflicted, err := syncSource(ctx, w.cfg, w.red, w.hc, w.rs, w.held[srcID], f.fileRef, &st)
 		if held != nil {
 			w.held[srcID] = held
 		}

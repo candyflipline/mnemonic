@@ -42,6 +42,9 @@ type fakeStore struct {
 	sources   map[string]*fakeSource
 	stale     map[string]int64
 	puts      []fakePut
+	rootsOn   bool
+	roots     []fakeRoots
+	order     []string
 	auth      string
 	machine   string
 	updatedMs int64
@@ -54,7 +57,10 @@ type fakeSource struct {
 	harness string
 	srcName string
 	path    string
+	rootsTo int64
 }
+
+type fakeRoots struct{ query, body string }
 
 type fakePut struct {
 	srcID      string
@@ -70,6 +76,7 @@ func newTestServer(t *testing.T) *fakeStore {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/manifest", s.serveManifest)
 	mux.HandleFunc("PUT /v1/raw/{machine}/{harness}/{srcid}", s.servePut)
+	mux.HandleFunc("POST /v1/roots/{machine}/{harness}/{srcid}", s.serveRoots)
 	s.srv = httptest.NewServer(mux)
 	t.Cleanup(s.srv.Close)
 	return s
@@ -88,11 +95,27 @@ func (s *fakeStore) serveManifest(w http.ResponseWriter, r *http.Request) {
 		}
 		man.Sources = append(man.Sources, wire.Source{
 			SrcID: id, Harness: src.harness, SourceName: src.srcName, Path: src.path,
-			Size: size, RawEnd: src.rawEnd, HeadHash: src.head, UpdatedMs: s.updatedMs,
+			Size: size, RawEnd: src.rawEnd, HeadHash: src.head, UpdatedMs: s.updatedMs, RootsTo: src.rootsTo,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(man)
+}
+
+func (s *fakeStore) serveRoots(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.order = append(s.order, "POST")
+	if !s.rootsOn {
+		http.NotFound(w, r)
+		return
+	}
+	s.roots = append(s.roots, fakeRoots{query: r.URL.RawQuery, body: string(body)})
+	through, _ := strconv.ParseInt(r.URL.Query().Get("through"), 10, 64)
+	src := s.sources[r.PathValue("srcid")]
+	src.rootsTo = max(src.rootsTo, through)
+	json.NewEncoder(w).Encode(wire.Source{SrcID: r.PathValue("srcid"), RootsTo: src.rootsTo})
 }
 
 func (s *fakeStore) servePut(w http.ResponseWriter, r *http.Request) {
@@ -118,6 +141,7 @@ func (s *fakeStore) servePut(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.order = append(s.order, "PUT")
 	src := s.sources[srcID]
 	if src == nil {
 		src = &fakeSource{}
@@ -291,6 +315,56 @@ func TestAppendSendsOnlyNewLine(t *testing.T) {
 	assertRaw(t, s, p, "alpha one\ngamma three\n")
 }
 
+func TestRootsAreReportedWithEachBody(t *testing.T) {
+	repo, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, repo, filepath.Join(".git", "config"), "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = https://u:tok@github.com/o/r.git\n")
+	if err := os.MkdirAll(filepath.Join(repo, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	first := `{"cwd":"` + repo + `/sub","type":"user"}` + "\n"
+	second := `{"cwd":"` + repo + `/sub","type":"assistant"}` + "\n"
+	p := writeFile(t, dir, "a.jsonl", first)
+	s := newTestServer(t)
+	s.rootsOn = true
+	fact := `[{"path":"` + repo + `","kind":"git","key":"` + repo + `/.git","remote":"https://github.com/o/r.git","from":%d}]`
+
+	runPass(t, s, dir)
+	writeFile(t, dir, "a.jsonl", first+second)
+	runPass(t, s, dir)
+
+	if got := strings.Join(s.order, " "); got != "PUT POST POST PUT" {
+		t.Fatalf("request order = %q, want %q", got, "PUT POST POST PUT")
+	}
+	n, m := len(first), len(first)+len(second)
+	want := []fakeRoots{
+		{"from=0&through=" + strconv.Itoa(n), fmtFact(fact, 0)},
+		{"from=" + strconv.Itoa(n) + "&through=" + strconv.Itoa(m), fmtFact(fact, n)},
+	}
+	if len(s.roots) != 2 || s.roots[0] != want[0] || s.roots[1] != want[1] {
+		t.Fatalf("roots = %+v, want %+v", s.roots, want)
+	}
+	for _, put := range s.puts {
+		if strings.Contains(put.body, "tok") {
+			t.Fatalf("PUT body carries the credential: %q", put.body)
+		}
+	}
+	assertRaw(t, s, p, first+second)
+}
+
+func runWithoutRoots(cfg config.Client, red Redactor, hc *http.Client) (Stats, error) {
+	rs := newRootsSync(red)
+	rs.off = true
+	return run(context.Background(), cfg, red, hc, rs)
+}
+
+func fmtFact(format string, from int) string {
+	return strings.Replace(format, "%d", strconv.Itoa(from), 1)
+}
+
 type realStore struct {
 	srv     *httptest.Server
 	dataDir string
@@ -402,7 +476,7 @@ func TestUnchangedFileBackfillsRawEndThenSkips(t *testing.T) {
 	}
 
 	red := &countingRedactor{}
-	st, err = Run(context.Background(), testConfig(rs.srv.URL, dir), red, rs.srv.Client())
+	st, err = runWithoutRoots(testConfig(rs.srv.URL, dir), red, rs.srv.Client())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -425,7 +499,7 @@ func TestAppendTailRedactsOnlyNewBytes(t *testing.T) {
 	body := "head line\n" + strings.Repeat("filler line\n", 999) + "new one\nnew two\n"
 	writeFile(t, dir, "a.jsonl", body)
 	red := &countingRedactor{}
-	st, err := Run(context.Background(), testConfig(rs.srv.URL, dir), red, rs.srv.Client())
+	st, err := runWithoutRoots(testConfig(rs.srv.URL, dir), red, rs.srv.Client())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -533,9 +607,11 @@ type countingTransport struct {
 }
 
 func (c *countingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	c.mu.Lock()
-	c.reqs = append(c.reqs, r.Method)
-	c.mu.Unlock()
+	if r.Method != http.MethodPost {
+		c.mu.Lock()
+		c.reqs = append(c.reqs, r.Method)
+		c.mu.Unlock()
+	}
 	return c.base.RoundTrip(r)
 }
 
@@ -638,6 +714,7 @@ func TestWatchReconcileSkipsLegacyEntryUnread(t *testing.T) {
 	tr := &countingTransport{base: rs.srv.Client().Transport}
 	red := &countingRedactor{}
 	w := newWatcher(testConfig(rs.srv.URL, dir), red, &http.Client{Transport: tr})
+	w.rs.off = true
 	n, err := newNotifier()
 	if err != nil {
 		t.Fatal(err)
