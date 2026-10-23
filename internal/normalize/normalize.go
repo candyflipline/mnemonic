@@ -3,6 +3,7 @@ package normalize
 import (
 	"io"
 
+	"github.com/candyflipline/mnemonic/internal/repo"
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
@@ -14,6 +15,7 @@ type SourceMeta struct {
 	SourceName string
 	Harness    string
 	SourceFile string
+	Roots      repo.Book
 }
 
 // State is where a parse stopped: the next line's number and byte offset and
