@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/candyflipline/mnemonic/internal/auth"
 	"github.com/candyflipline/mnemonic/internal/layout"
+	"github.com/candyflipline/mnemonic/internal/repo"
 	"github.com/candyflipline/mnemonic/internal/wire"
 )
 
@@ -62,6 +64,7 @@ func (s *Store) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET "+wire.ManifestPath, http.HandlerFunc(s.serveManifest))
 	mux.Handle("PUT "+wire.RawPathPrefix+"{machine}/{harness}/{src_id}", http.HandlerFunc(s.servePut))
+	mux.Handle("POST "+wire.RootsPathPrefix+"{machine}/{harness}/{src_id}", http.HandlerFunc(s.servePostRoots))
 	return mux
 }
 
@@ -173,9 +176,9 @@ func (s *Store) replaceRaw(k layout.Key, body []byte) (int64, error) {
 }
 
 func (s *Store) replace(w http.ResponseWriter, k layout.Key, headHash, sourceName, srcPath string, body []byte, rawEnd int64) {
-	var prevMs int64
+	var prevMs, prevRootsTo int64
 	if prev, err := readManifest(k.Manifest(s.DataDir)); err == nil {
-		prevMs = prev.UpdatedMs
+		prevMs, prevRootsTo = prev.UpdatedMs, prev.RootsTo
 	}
 	zst, err := s.replaceRaw(k, body)
 	if err != nil {
@@ -192,6 +195,7 @@ func (s *Store) replace(w http.ResponseWriter, k layout.Key, headHash, sourceNam
 			RawEnd:     rawEnd,
 			HeadHash:   headHash,
 			UpdatedMs:  max(time.Now().UnixMilli(), prevMs+1),
+			RootsTo:    prevRootsTo,
 		},
 		ZstSize: zst,
 	}
@@ -242,6 +246,116 @@ func (s *Store) append(w http.ResponseWriter, k layout.Key, offset int64, headHa
 	}
 	s.wake()
 	writeJSON(w, http.StatusOK, m.Source)
+}
+
+// servePostRoots stores the root facts a client probed for one source. The
+// .roots file is written before the manifest, so a crash between them leaves
+// facts the manifest does not yet vouch for: RootsTo and UpdatedMs are
+// unchanged, and the client's repeat of the same post finds the set already
+// stored and moves them.
+func (s *Store) servePostRoots(w http.ResponseWriter, r *http.Request) {
+	if !requireAuthor(w, r) {
+		return
+	}
+	author := auth.Author(r.Context())
+	machine, harness, srcID := r.PathValue("machine"), r.PathValue("harness"), r.PathValue("src_id")
+	for _, seg := range [...]string{machine, harness, srcID} {
+		if !wire.ValidSegment(seg) {
+			http.Error(w, "bad path segment", http.StatusBadRequest)
+			return
+		}
+	}
+	q := r.URL.Query()
+	from, ferr := strconv.ParseInt(q.Get("from"), 10, 64)
+	through, terr := strconv.ParseInt(q.Get("through"), 10, 64)
+	if ferr != nil || terr != nil || from < 0 || through <= from {
+		http.Error(w, "bad from or through", http.StatusBadRequest)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRootsBody))
+	if err != nil {
+		http.Error(w, "read body", http.StatusBadRequest)
+		return
+	}
+	var add []wire.Root
+	if err := json.Unmarshal(body, &add); err != nil || len(add) > wire.MaxRootsPerPost {
+		http.Error(w, "body must be a JSON array of at most 256 roots", http.StatusBadRequest)
+		return
+	}
+	for _, f := range add {
+		if f.From < from || f.From >= through {
+			http.Error(w, "root from outside [from, through)", http.StatusBadRequest)
+			return
+		}
+	}
+
+	key := layout.Key{Author: author, Machine: machine, Harness: harness, SrcID: srcID}
+	defer s.lockKey(key)()
+
+	m, err := readManifest(key.Manifest(s.DataDir))
+	if err != nil {
+		http.Error(w, "unknown source", http.StatusNotFound)
+		return
+	}
+	old, err := readRoots(key.Roots(s.DataDir))
+	if err != nil && from > 0 {
+		http.Error(w, "read roots", http.StatusInternalServerError)
+		return
+	}
+	next := repo.MergeRoots(nil, add)
+	if from > 0 {
+		next = repo.MergeRoots(old, add)
+	}
+	data, err := json.Marshal(next)
+	if err != nil {
+		http.Error(w, "encode roots", http.StatusInternalServerError)
+		return
+	}
+	if _, err := repo.DecodeBook(data); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	changed := !slices.Equal(old, next)
+	if changed {
+		if err := writeFileAtomic(key.Roots(s.DataDir), append(data, '\n')); err != nil {
+			http.Error(w, "write roots", http.StatusInternalServerError)
+			return
+		}
+	}
+	rootsTo := m.RootsTo
+	switch {
+	case from == 0:
+		rootsTo = through
+	case from <= m.RootsTo:
+		rootsTo = max(m.RootsTo, through)
+	}
+	if changed || rootsTo != m.RootsTo {
+		m.RootsTo = rootsTo
+		m.UpdatedMs = max(time.Now().UnixMilli(), m.UpdatedMs+1)
+		if err := writeManifest(key.Manifest(s.DataDir), *m); err != nil {
+			http.Error(w, "write manifest", http.StatusInternalServerError)
+			return
+		}
+		s.wake()
+	}
+	writeJSON(w, http.StatusOK, m.Source)
+}
+
+const maxRootsBody = 1 << 20
+
+func readRoots(path string) ([]wire.Root, error) {
+	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var facts []wire.Root
+	if err := json.Unmarshal(b, &facts); err != nil {
+		return nil, err
+	}
+	return facts, nil
 }
 
 func requireAuthor(w http.ResponseWriter, r *http.Request) bool {
@@ -337,7 +451,10 @@ func writeManifest(path string, m manifestBody) error {
 	if err != nil {
 		return err
 	}
-	b = append(b, '\n')
+	return writeFileAtomic(path, append(b, '\n'))
+}
+
+func writeFileAtomic(path string, b []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
