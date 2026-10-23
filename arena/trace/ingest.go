@@ -375,7 +375,7 @@ func (w *frameWriter) flush() error {
 	return nil
 }
 
-var decoder, _ = zstd.NewReader(nil, zstd.WithDecoderConcurrency(4), zstd.WithDecoderLowmem(true))
+var decoder, _ = zstd.NewReader(nil, zstd.WithDecoderConcurrency(runtime.GOMAXPROCS(0)), zstd.WithDecoderLowmem(true))
 
 // readFrame returns the records of the frame at off in r and the next offset.
 func readFrame(r io.ReaderAt, off int64, scratch []byte) ([][]byte, int64, error) {
