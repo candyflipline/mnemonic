@@ -80,7 +80,22 @@ func TestGoldens(t *testing.T) {
 				}
 				for i, o := range overlay {
 					for k, v := range o {
-						want[i][k] = v
+						if k != "moraine_tool_io" {
+							want[i][k] = v
+							continue
+						}
+						payload := decodeObject(t, want[i]["payload_json"])
+						tio, ok := payload[k].(map[string]any)
+						if !ok {
+							t.Fatalf("overlay row %d: golden %s payload has no %s", i, base, k)
+						}
+						for f, fv := range v.(map[string]any) {
+							tio[f] = fv
+						}
+						want[i]["payload_json"] = payload
+						if i < len(got) {
+							got[i]["payload_json"] = decodeObject(t, got[i]["payload_json"])
+						}
 					}
 				}
 			}
@@ -103,6 +118,7 @@ func TestGoldens(t *testing.T) {
 
 var outputs = map[int]string{
 	1: "86abac583cac7670c73428bd75331551c46e1459292091a644158c1ac5bf6c77",
+	2: "c08d0d222d2142d7ab65401cddf0c2a92d2836f94bb9c39eb969b8dc73d84166",
 }
 
 func TestVersionNamesOutput(t *testing.T) {
@@ -157,6 +173,16 @@ func parse(t *testing.T, harness, sourceName, fixture, sourceFile string, withRo
 		e["event_version"] = "<event_version>"
 	}
 	return got
+}
+
+func decodeObject(t *testing.T, v any) map[string]any {
+	t.Helper()
+	s, _ := v.(string)
+	var out map[string]any
+	if err := json.Unmarshal([]byte(s), &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 func roundTrip(t *testing.T, v any) []map[string]any {
