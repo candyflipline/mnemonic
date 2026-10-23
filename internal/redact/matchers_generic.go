@@ -1,7 +1,7 @@
 package redact
 
 // Builtin rule 25 (generic-api-key), hand-written — one scan over text,
-// no regexp. This is the hot rule: on the Oct 23 Mac measurement the
+// no regex engine. This is the hot rule: on the Oct 23 Mac measurement the
 // generic regex was about 70% of redact time.
 //
 // It reports exactly the secret-group spans of
@@ -12,7 +12,7 @@ package redact
 //
 // per the matcher contract in matchers.go (leftmost-first, non-
 // overlapping, ASCII \b, Go (?i) folding). The alternation's classes are
-// pairwise disjoint, so the only in-alternative backtrack Go regexp can
+// pairwise disjoint, so the only in-alternative backtrack Go regex can
 // take is auth(?:orization)? — tried long-form first, then short. Scanning
 // resumes after the whole match, whose tail ["']? is consumed but not
 // reported.
