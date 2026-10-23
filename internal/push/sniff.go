@@ -82,6 +82,9 @@ func sniff(body []byte, base int64, p *prober) []wire.Root {
 		}
 		have[k] = true
 		r.From = at
+		if repo.ValidRoot(r) != nil {
+			return
+		}
 		out = append(out, r)
 	}
 	for at := base; len(body) > 0; {

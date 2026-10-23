@@ -9,12 +9,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/klauspost/compress/zstd"
 
@@ -43,6 +45,8 @@ type fakeStore struct {
 	stale     map[string]int64
 	puts      []fakePut
 	rootsOn   bool
+	strict    bool
+	rejected  []string
 	roots     []fakeRoots
 	order     []string
 	auth      string
@@ -110,6 +114,17 @@ func (s *fakeStore) serveRoots(w http.ResponseWriter, r *http.Request) {
 	if !s.rootsOn {
 		http.NotFound(w, r)
 		return
+	}
+	if s.strict {
+		var facts []wire.Root
+		json.Unmarshal(body, &facts)
+		for _, f := range facts {
+			if slices.ContainsFunc([]string{f.Path, f.Key, f.Remote}, func(v string) bool { return strings.ContainsFunc(v, unicode.IsControl) }) {
+				s.rejected = append(s.rejected, string(body))
+				http.Error(w, "repo: root fact carries a control character", http.StatusBadRequest)
+				return
+			}
+		}
 	}
 	s.roots = append(s.roots, fakeRoots{query: r.URL.RawQuery, body: string(body)})
 	through, _ := strconv.ParseInt(r.URL.Query().Get("through"), 10, 64)
@@ -353,6 +368,35 @@ func TestRootsAreReportedWithEachBody(t *testing.T) {
 		}
 	}
 	assertRaw(t, s, p, first+second)
+}
+
+func TestRejectedRootFactDoesNotStopRaw(t *testing.T) {
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	odd := filepath.Join(tmp, "a\tb")
+	if err := os.Mkdir(odd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	first := `{"cwd":"` + tmp + `","type":"user"}` + "\n"
+	second := `{"cwd":"` + strings.ReplaceAll(odd, "\t", `\t`) + `","type":"assistant"}` + "\n"
+	dir := t.TempDir()
+	p := writeFile(t, dir, "a.jsonl", first)
+	s := newTestServer(t)
+	s.rootsOn, s.strict = true, true
+	runPass(t, s, dir)
+	writeFile(t, dir, "a.jsonl", first+second)
+
+	st := runPass(t, s, dir)
+
+	if len(s.rejected) != 0 {
+		t.Fatalf("POST bodies carried a control character: %q", s.rejected)
+	}
+	assertRaw(t, s, p, first+second)
+	if want := len(second); int(st.Bytes) != want || st.Failed != 0 {
+		t.Fatalf("stats = %+v, want %d bytes sent and none failed", st, want)
+	}
 }
 
 func runWithoutRoots(cfg config.Client, red Redactor, hc *http.Client) (Stats, error) {
