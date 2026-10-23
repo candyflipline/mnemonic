@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -65,16 +66,28 @@ func runKeep(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := k.Cycle(ctx); err != nil {
-		exitIfLost(k, err)
+	l, err := net.Listen("tcp", *listen)
+	if err != nil {
 		return err
 	}
 	ks := keepServer{k: k, s: s, readers: readers, ttl: *grantTTL}
-	srv := &http.Server{Addr: *listen, Handler: ks.mux()}
-	go func() { errc <- srv.ListenAndServe() }()
-	go func() { errc <- k.Run(ctx, *interval) }()
-	err = <-errc
-	exitIfLost(k, err)
+	return ks.serve(ctx, l, *interval, k.Cycle, errc)
+}
+
+// serve answers from the head Take installed while first, the startup cycle,
+// runs beside the k.Run loop, which keeps the gen checked meanwhile. An error
+// of first ends it; a clean first does not.
+func (ks keepServer) serve(ctx context.Context, l net.Listener, interval time.Duration, first func(context.Context) error, errc chan error) error {
+	srv := &http.Server{Handler: ks.mux()}
+	go func() { errc <- srv.Serve(l) }()
+	go func() {
+		if err := first(ctx); err != nil {
+			errc <- err
+		}
+	}()
+	go func() { errc <- ks.k.Run(ctx, interval) }()
+	err := <-errc
+	exitIfLost(ks.k, err)
 	srv.Close()
 	if ctx.Err() != nil {
 		return nil

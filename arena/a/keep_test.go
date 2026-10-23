@@ -144,3 +144,51 @@ func TestCallReadsThePartsOfItsPinnedHead(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestServesTheStoredHeadBeforeTheFirstCycleEnds(t *testing.T) {
+	s, ctx := servedFileStore(t)
+	m, _ := json.Marshal(keeper.Manifest{Tenant: "acme", Gen: 1, Seq: 1, Parts: []keeper.PartRef{{ID: "p1", Gen: 1, Key: "t/acme/p/p1.g1"}}})
+	if err := s.Put(ctx, "t/acme/m/0000000000000001-0000000000000001.json", bytes.NewReader(m), int64(len(m))); err != nil {
+		t.Fatal(err)
+	}
+	k, err := keeper.Take(ctx, s, keeper.Config{Tenant: "acme", GrantTTL: time.Minute, DeleteSlack: keeper.MinDeleteSlack})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, stop := context.WithCancel(ctx)
+	entered, release := make(chan struct{}), make(chan struct{})
+	first := func(context.Context) error {
+		close(entered)
+		<-release
+		return nil
+	}
+	done := make(chan error, 1)
+	ks := keepServer{k: k, s: s, ttl: time.Minute}
+	go func() { done <- ks.serve(ctx, l, time.Hour, first, make(chan error, 3)) }()
+	t.Cleanup(func() {
+		close(release)
+		stop()
+		if err := <-done; err != nil {
+			t.Errorf("serve returned %v", err)
+		}
+	})
+	<-entered
+
+	c := http.Client{Timeout: 10 * time.Second}
+	res, err := c.Get("http://" + l.Addr().String() + "/v1/view")
+	if err != nil {
+		t.Fatalf("GET /v1/view while the first cycle runs: %v", err)
+	}
+	defer res.Body.Close()
+	var v route.View
+	if err := json.NewDecoder(res.Body).Decode(&v); err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != http.StatusOK || len(v.Parts) != 1 || v.Parts[0].ID != "p1" {
+		t.Errorf("view = %d %+v, want 200 with part p1", res.StatusCode, v.Parts)
+	}
+}

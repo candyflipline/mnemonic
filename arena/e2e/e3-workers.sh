@@ -64,17 +64,6 @@ die() {
 
 run_go() { env GOMEMLIMIT="$STAGE_MEM" "$@"; }
 
-# The two builds are independent (the masks compare them), and each parses on one core, so they run at once.
-oracle_builds() {
-	local p rc
-	run_go "$BIN_DIR/oracle" build -raw "$ARENA/raw" -root "$WORK/oracle2" 2>"$LOG/oracle-build-2.log" &
-	p=$!
-	run_go "$BIN_DIR/oracle" build -raw "$ARENA/raw" -root "$WORK/oracle" 2>"$LOG/oracle-build.log"
-	rc=$?
-	wait $p || return 1
-	return $rc
-}
-
 oracle_masks() {
 	local set seed
 	for set in golden hidden; do
@@ -88,11 +77,12 @@ oracle_masks() {
 
 stage unpack run_go "$BIN_DIR/e2e" unpack -raw "$RAWDIR" -src "$SRC" >"$LOG/unpack.log" 2>&1 || die unpack
 stage seed run_go "$BIN_DIR/seed" -src "$SRC" -full "$ARENA/raw" 2>"$LOG/seed.log" || die seed
-stage oracle-builds oracle_builds || die oracle-builds
+stage oracle-build run_go "$BIN_DIR/oracle" build -raw "$ARENA/raw" -root "$WORK/oracle" 2>"$LOG/oracle-build.log" || die oracle-build
+stage oracle-build-2 run_go "$BIN_DIR/oracle" build -raw "$ARENA/raw" -root "$WORK/oracle2" 2>"$LOG/oracle-build-2.log" || die oracle-build-2
 stage gen-and-masks oracle_masks 2>"$LOG/gen.log" || die gen-and-masks
 rm -rf "$WORK/oracle2"
 
-ENVLABEL=${E3_ENVLABEL:-loyal-workers, real corpus} E2E_TIMEOUT=${E3_TIMEOUT:-3h} WAIT_UP_S=${E3_WAIT_UP_S:-900} WAIT_EXIT_S=${E3_WAIT_EXIT_S:-600} \
+ENVLABEL=${E3_ENVLABEL:-$(hostname -s), real corpus} E2E_TIMEOUT=${E3_TIMEOUT:-3h} WAIT_UP_S=${E3_WAIT_UP_S:-900} WAIT_EXIT_S=${E3_WAIT_EXIT_S:-600} \
 	PREWARM_WAIT_S=${E3_PREWARM_WAIT_S:-1800} GOMEMLIMIT=$CLUSTER_MEM \
 	ARENA="$ARENA" SRC="$SRC" BIN_DIR="$BIN_DIR" LOG_DIR="$LOG/e2e" TMPDIR="$WORK/tmp" \
 	stage run.sh "$HERE/run.sh" >"$LOG/lines.txt" 2>"$LOG/run.stderr"
