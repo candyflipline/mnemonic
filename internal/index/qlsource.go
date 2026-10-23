@@ -569,7 +569,7 @@ func (s *qlSource) scanSpans(req ql.ScanRequest, fn func(ql.Row) error) error {
 			if sp.Start.Before(s.from) || !sp.Start.Before(s.to) {
 				continue
 			}
-			if err := fn(spanRow{sp: sp, cells: cells}); err != nil {
+			if err := fn(qlSpanRow{sp: sp, cells: cells}); err != nil {
 				return err
 			}
 		}
@@ -577,12 +577,12 @@ func (s *qlSource) scanSpans(req ql.ScanRequest, fn func(ql.Row) error) error {
 	})
 }
 
-type spanRow struct {
+type qlSpanRow struct {
 	sp    schema.Span
 	cells []func(schema.Span) (ql.Value, error)
 }
 
-func (r spanRow) Get(i int) (ql.Value, error) { return r.cells[i](r.sp) }
+func (r qlSpanRow) Get(i int) (ql.Value, error) { return r.cells[i](r.sp) }
 
 var spanColumn = map[string]func(schema.Span) (ql.Value, error){
 	"session_id":        func(sp schema.Span) (ql.Value, error) { return str(sp.SessionID) },
