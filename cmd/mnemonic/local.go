@@ -9,17 +9,28 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"os/user"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/candyflipline/mnemonic/internal/auth"
 	"github.com/candyflipline/mnemonic/internal/config"
+	"github.com/candyflipline/mnemonic/internal/index"
+	"github.com/candyflipline/mnemonic/internal/layout"
+	"github.com/candyflipline/mnemonic/internal/mcp"
+	pushrun "github.com/candyflipline/mnemonic/internal/push"
+	"github.com/candyflipline/mnemonic/internal/redact"
+	"github.com/candyflipline/mnemonic/internal/store"
 	"github.com/candyflipline/mnemonic/internal/wire"
 )
 
@@ -49,12 +60,111 @@ func local(args []string) error {
 	return runLocal(ctx, opts, os.Stdout, os.Stderr)
 }
 
+// settleSource is how long a file's mtime must lag the newest one before it
+// settles into a cold part, what serve uses.
+const settleSource = 15 * time.Minute
+
 // runLocal indexes this machine's harness files in place under
 // opts.dataDir (the engine's KindPlain sources, no raw copy, no store, no HTTP
 // and no push loop), feeds push.Watch's file events to the index ingest, and
 // serves MCP with every tool result redacted at the output boundary.
+//
+// The files are config.DefaultSources; there is no config file and no server.
+// MCP is loopback-only (requireLoopback) and answers the bearer token "local"
+// as this machine's user with every scope. Session controls load from
+// dataDir, empty until a control tool writes its first record through the
+// store under the same dataDir.
 func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) error {
-	panic("lane U10")
+	if err := requireLoopback(opts.listen); err != nil {
+		return err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	if err := refuseClientDir(opts.dataDir, home); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(opts.dataDir, 0o755); err != nil {
+		return err
+	}
+	logger := log.New(logOut, "mnemonic local: ", log.LstdFlags)
+	author, machine := localIdentity()
+	red, err := redact.New(nil)
+	if err != nil {
+		return err
+	}
+	ix, err := index.Open(layout.IndexDir(opts.dataDir))
+	if err != nil {
+		return err
+	}
+	defer ix.Close()
+	ctl, err := index.LoadControls(opts.dataDir)
+	if err != nil {
+		return err
+	}
+	st := &store.Store{DataDir: opts.dataDir}
+	if err := firstIngest(ix, logger, author, machine); err != nil {
+		return err
+	}
+	tokens := auth.NewTokens(map[string]auth.Token{
+		auth.Hash("local"): {Author: author, Scopes: slices.Clone(auth.Scopes[:])},
+	})
+	tools := mcp.Handler(ix, index.Lookup, red)
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", tokens.Require(auth.Read)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tools.ServeHTTP(w, r.WithContext(index.WithControls(store.WithStore(r.Context(), st), ctl)))
+	})))
+	hs := &http.Server{Addr: opts.listen, Handler: mux}
+	sink := indexSink{ix: ix, author: author, machine: machine}
+	go func() {
+		if err := pushrun.WatchSink(ctx, config.Client{Sources: config.DefaultSources}, sink, out); err != nil {
+			logger.Printf("watch: %v", err)
+		}
+	}()
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := hs.Shutdown(shutdownCtx); err != nil {
+			logger.Printf("shutdown: %v", err)
+		}
+	}()
+	logger.Printf("listening on %s (data_dir %s, author %s, machine %s)", opts.listen, opts.dataDir, author, machine)
+	if err := hs.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("listen on %s: %w", opts.listen, err)
+	}
+	return nil
+}
+
+// firstIngest indexes the machine's files once before MCP serves, so the
+// store answers as soon as the socket is up; the watcher keeps it current.
+func firstIngest(ix *index.Index, logger *log.Logger, author, machine string) error {
+	start := time.Now()
+	st, err := ix.IngestPlain(config.DefaultSources, author, machine, index.IngestOptions{Quiet: settleSource})
+	logger.Printf("index: unchanged=%d resumed=%d fresh=%d reparsed=%d in %s err=%v",
+		st[index.Unchanged], st[index.Resumed], st[index.Fresh], st[index.Reparsed],
+		time.Since(start).Round(time.Millisecond), err)
+	return err
+}
+
+// indexSink is the watcher's sink: every changed path is subsumed by an
+// ingest of the whole machine, whose outcomes the printed stats line reports.
+// An ingest has no ctx (the server's cycles have none either); it runs to
+// completion and the next sync's stamp tests pick up whatever moved since.
+type indexSink struct {
+	ix      *index.Index
+	author  string
+	machine string
+}
+
+func (s indexSink) Sync(_ context.Context, _ []string) (pushrun.Stats, error) {
+	st, err := s.ix.IngestPlain(config.DefaultSources, s.author, s.machine, index.IngestOptions{Quiet: settleSource})
+	return pushrun.Stats{
+		Appended:  st[index.Resumed] + st[index.Fresh],
+		Replaced:  st[index.Reparsed],
+		Unchanged: st[index.Unchanged],
+	}, err
 }
 
 // publishToken replaces path with tok through a temp file and a rename, so a

@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/candyflipline/mnemonic/internal/config"
 	"github.com/candyflipline/mnemonic/internal/layout"
 	"github.com/candyflipline/mnemonic/internal/normalize"
 	_ "github.com/candyflipline/mnemonic/internal/normalize/all"
@@ -469,19 +470,36 @@ type IngestStats [4]int
 const sweepBudget = 5 * time.Second
 
 // Ingest brings store up to root's raw and reports what it did per source.
-func Ingest(root, store string, quiet time.Duration, settleAll bool) (stats IngestStats, err error) {
+func Ingest(root, store string, quiet time.Duration, settleAll bool) (IngestStats, error) {
+	sources, err := listSources(root)
+	if err != nil {
+		return IngestStats{}, err
+	}
+	return ingest(store, sources, quiet, settleAll)
+}
+
+// IngestPlain brings store up to the machine's harness files the client globs
+// match, indexed in place as KindPlain sources (local mode: no raw copy, no
+// push), and reports what it did per source.
+func IngestPlain(store string, globs []config.SourceGlob, author, machine string, quiet time.Duration, settleAll bool) (IngestStats, error) {
+	sources, err := listPlainSources(globs, author, machine)
+	if err != nil {
+		return IngestStats{}, err
+	}
+	return ingest(store, sources, quiet, settleAll)
+}
+
+// ingest is the cycle both entry points share: parse the sources, publish the
+// plan, and record the lap.
+func ingest(store string, sources []source, quiet time.Duration, settleAll bool) (stats IngestStats, err error) {
 	debug.SetGCPercent(25)
 	var rec cycleRecord
 	defer func() { recordCycle(store, rec) }()
 	if err = os.MkdirAll(srcDir(store), 0o755); err != nil {
 		return
 	}
-	sources, err := listSources(root)
-	if err != nil {
-		return
-	}
 	take := takeCycle(store)
-	outcomes, logBytes, stale, failSweep := parseSources(root, store, sources, take.failSweep)
+	outcomes, logBytes, stale, failSweep := parseSources("", store, sources, take.failSweep)
 	for _, o := range outcomes {
 		stats[o]++
 	}

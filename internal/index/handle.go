@@ -5,6 +5,8 @@ import (
 	"io/fs"
 	"sync"
 	"time"
+
+	"github.com/candyflipline/mnemonic/internal/config"
 )
 
 // Index is the engine handle the server, MCP and the harness hold: a store
@@ -36,6 +38,13 @@ func emptyDB() *DB { return &DB{sessPart: map[string]int{}} }
 // Ingest brings the store up to root's raw and serves the result.
 func (ix *Index) Ingest(root string, opts IngestOptions) (IngestStats, error) {
 	st, err := Ingest(root, ix.store, opts.Quiet, opts.SettleAll)
+	return st, errors.Join(err, ix.Refresh())
+}
+
+// IngestPlain brings the store up to the machine's harness files read in
+// place as KindPlain sources (local mode) and serves the result.
+func (ix *Index) IngestPlain(globs []config.SourceGlob, author, machine string, opts IngestOptions) (IngestStats, error) {
+	st, err := IngestPlain(ix.store, globs, author, machine, opts.Quiet, opts.SettleAll)
 	return st, errors.Join(err, ix.Refresh())
 }
 
