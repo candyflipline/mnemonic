@@ -39,10 +39,23 @@ type PartRef struct {
 	TotalLen   int64
 }
 
+// Fence is the timing a manifest's readers rely on: grants live GrantTTL, a
+// call lasts at most MaxCall, and a retired object outlives the commit that
+// retired it by GrantTTL + DeleteSlack + MaxCall.
+type Fence struct {
+	GrantTTL    time.Duration
+	DeleteSlack time.Duration
+	MaxCall     time.Duration
+}
+
+// DefaultFence is the fence of a manifest written before manifests carried one.
+var DefaultFence = Fence{GrantTTL: 10 * time.Minute, DeleteSlack: time.Minute, MaxCall: 30 * time.Second}
+
 type Manifest struct {
 	Tenant  string
 	Gen     Gen
 	Seq     Seq
+	Fence   Fence
 	Parts   []PartRef
 	Sources json.RawMessage
 }
@@ -120,7 +133,7 @@ func highestGen(ctx context.Context, s obj.Store, tenant string) (Gen, error) {
 
 // Latest reads the manifest with the highest (gen, seq); ok is false when the
 // tenant has none.
-func Latest(ctx context.Context, s obj.Store, tenant string) (m Manifest, ok bool, err error) {
+func Latest(ctx context.Context, s obj.ReadStore, tenant string) (m Manifest, ok bool, err error) {
 	es, err := s.List(ctx, manifestPrefix(tenant))
 	if err != nil {
 		return m, false, err
@@ -140,21 +153,34 @@ func Latest(ctx context.Context, s obj.Store, tenant string) (m Manifest, ok boo
 	if key == "" {
 		return m, false, nil
 	}
-	b, err := get(ctx, s, key)
-	if err != nil {
-		return m, false, err
-	}
-	if err := json.Unmarshal(b, &m); err != nil {
-		return m, false, fmt.Errorf("keeper: %s: %w", key, err)
-	}
-	if m.Tenant != tenant || m.Gen != g || m.Seq != q {
-		return m, false, fmt.Errorf("keeper: %s holds %s %d-%d", key, m.Tenant, m.Gen, m.Seq)
-	}
-	return m, true, nil
+	m, err = Load(ctx, s, tenant, g, q)
+	return m, err == nil, err
 }
 
-func get(ctx context.Context, s obj.Store, k obj.Key) ([]byte, error) {
-	url, err := s.PresignGet(k, time.Minute)
+// Load reads m/<gen>-<seq>.json. A manifest is immutable, so callers may cache
+// it by (gen, seq). One written before manifests carried a Fence loads with
+// DefaultFence.
+func Load(ctx context.Context, s obj.ReadStore, tenant string, g Gen, q Seq) (Manifest, error) {
+	var m Manifest
+	key := manifestKey(tenant, g, q)
+	b, err := get(ctx, s, key)
+	if err != nil {
+		return m, err
+	}
+	if err := json.Unmarshal(b, &m); err != nil {
+		return m, fmt.Errorf("keeper: %s: %w", key, err)
+	}
+	if m.Tenant != tenant || m.Gen != g || m.Seq != q {
+		return m, fmt.Errorf("keeper: %s holds %s %d-%d", key, m.Tenant, m.Gen, m.Seq)
+	}
+	if m.Fence == (Fence{}) {
+		m.Fence = DefaultFence
+	}
+	return m, nil
+}
+
+func get(ctx context.Context, s obj.ReadStore, k obj.Key) ([]byte, error) {
+	url, err := s.PresignGetUntil(k, time.Now().Add(time.Minute))
 	if err != nil {
 		return nil, err
 	}

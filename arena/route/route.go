@@ -38,7 +38,10 @@ const PhaseWhole = "whole"
 // InfraError is a scattered phase that got no answer: the router validates a
 // tool's arguments before it scatters, so a phase never returns the tool's own
 // error.
-type InfraError struct{ error }
+type InfraError struct {
+	error
+	Reader string
+}
 
 func (e InfraError) Unwrap() error { return e.error }
 
@@ -53,11 +56,15 @@ type GrantedPart struct {
 	Local bool
 }
 
+// View is one manifest with its parts granted: Sources are the manifest's
+// source rows, and every URL in Parts expires at Expires.
 type View struct {
-	Tenant string
-	Gen    keeper.Gen
-	Seq    keeper.Seq
-	Parts  []GrantedPart
+	Tenant  string
+	Gen     keeper.Gen
+	Seq     keeper.Seq
+	Parts   []GrantedPart
+	Sources json.RawMessage `json:",omitempty"`
+	Expires time.Time
 }
 
 type CallRequest struct {

@@ -191,14 +191,14 @@ func (f *fileStore) mac(k Key, exp int64) []byte {
 	return h.Sum(nil)
 }
 
-func (f *fileStore) PresignGet(k Key, ttl time.Duration) (string, error) {
+func (f *fileStore) PresignGetUntil(k Key, notAfter time.Time) (string, error) {
 	if err := checkKey(k, false); err != nil {
 		return "", err
 	}
 	if f.serve == nil {
 		return "", errors.New("obj: file store has no serve= address")
 	}
-	exp := time.Now().Add(ttl).Unix()
+	exp := notAfter.Unix()
 	u := *f.serve
 	u.Path = "/o/" + string(k)
 	u.RawQuery = "exp=" + strconv.FormatInt(exp, 10) + "&sig=" + hex.EncodeToString(f.mac(k, exp))

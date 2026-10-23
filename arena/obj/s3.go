@@ -212,15 +212,17 @@ func (s *s3Store) Delete(ctx context.Context, keys []Key) error {
 	return nil
 }
 
-func (s *s3Store) PresignGet(k Key, ttl time.Duration) (string, error) {
+func (s *s3Store) PresignGetUntil(k Key, notAfter time.Time) (string, error) {
 	if err := checkKey(k, false); err != nil {
 		return "", err
 	}
+	now := time.Now()
+	ttl := notAfter.Sub(now).Truncate(time.Second)
 	if ttl < time.Second || ttl > 7*24*time.Hour {
 		return "", fmt.Errorf("obj: presign ttl %s is outside 1s..7d", ttl)
 	}
 	esc := uriEncode(s.objPath(k), false)
-	return s.base.Scheme + "://" + s.base.Host + s.sg.presignGet(s.base.Host, esc, time.Now(), ttl), nil
+	return s.base.Scheme + "://" + s.base.Host + s.sg.presignGet(s.base.Host, esc, now, ttl), nil
 }
 
 const hashEmpty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"

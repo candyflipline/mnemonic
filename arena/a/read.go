@@ -32,7 +32,7 @@ func runRead(args []string) error {
 	if *id == "" || *dir == "" || *keeper == "" || !contains(ids, *id) {
 		return fmt.Errorf("read: -id, -cache, -keeper and -readers (naming -id) are required")
 	}
-	cache, err := reader.NewCache(*dir)
+	cache, err := reader.NewCache(*id, *dir)
 	if err != nil {
 		return err
 	}
@@ -42,7 +42,7 @@ func runRead(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	srv := &http.Server{Handler: cache.Handler()}
+	srv := &http.Server{Handler: reader.Serve(cache)}
 	go func() {
 		<-ctx.Done()
 		srv.Shutdown(context.Background())

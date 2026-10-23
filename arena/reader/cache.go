@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -29,6 +28,13 @@ type Cache struct {
 	h      *handler
 	mu     sync.Mutex
 	flight map[string]*flight
+	id     string
+}
+
+func (c *Cache) ID() string { return c.id }
+
+func (c *Cache) Call(ctx context.Context, req route.CallRequest) (route.CallResponse, error) {
+	return c.h.call(ctx, req)
 }
 
 type flight struct {
@@ -37,7 +43,7 @@ type flight struct {
 	err  error
 }
 
-func NewCache(dir string) (*Cache, error) {
+func NewCache(id, dir string) (*Cache, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
@@ -45,7 +51,7 @@ func NewCache(dir string) (*Cache, error) {
 	for _, f := range stale {
 		os.Remove(f)
 	}
-	c := &Cache{dir: dir, client: &http.Client{}, flight: map[string]*flight{}}
+	c := &Cache{id: id, dir: dir, client: &http.Client{}, flight: map[string]*flight{}}
 	c.h = &handler{resolve: c.Get}
 	return c, nil
 }
@@ -167,25 +173,4 @@ func (c *Cache) Prewarm(ctx context.Context, tenant string, parts []route.Grante
 	}
 	wg.Wait()
 	return errors.Join(errs...)
-}
-
-// Handler serves POST /v1/call: a CallRequest in, a CallResponse out, a text
-// body on any error.
-func (c *Cache) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/call", func(w http.ResponseWriter, r *http.Request) {
-		var req route.CallRequest
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody)).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		resp, err := c.h.call(r.Context(), req)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	})
-	return mux
 }

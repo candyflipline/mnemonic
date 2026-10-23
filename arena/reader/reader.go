@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 
@@ -141,4 +142,25 @@ func (l *local) ID() string { return route.LocalID }
 
 func (l *local) Call(ctx context.Context, req route.CallRequest) (route.CallResponse, error) {
 	return l.h.call(ctx, req)
+}
+
+// Serve is the one POST /v1/call handler: a CallRequest in, a CallResponse
+// out, a text body on any error.
+func Serve(r route.Reader) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/call", func(w http.ResponseWriter, hr *http.Request) {
+		var req route.CallRequest
+		if err := json.NewDecoder(http.MaxBytesReader(w, hr.Body, maxBody)).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		resp, err := r.Call(hr.Context(), req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	})
+	return mux
 }

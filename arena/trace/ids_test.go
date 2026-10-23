@@ -38,7 +38,7 @@ func TestIngestPartIDsAreContentAddressed(t *testing.T) {
 	var ids [2][]string
 	for i := range ids {
 		store := t.TempDir()
-		if err := Ingest(root, store, time.Minute, true); err != nil {
+		if _, err := Ingest(root, store, time.Minute, true); err != nil {
 			t.Fatal(err)
 		}
 		parts, _, err := ListParts(store)

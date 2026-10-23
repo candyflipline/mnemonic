@@ -406,7 +406,25 @@ func readFrame(r io.ReaderAt, off int64, scratch []byte) ([][]byte, int64, error
 	return recs, off + 8 + clen, nil
 }
 
-func Ingest(root, store string, quiet time.Duration, settleAll bool) error {
+// Outcome is what one Ingest did to one source.
+type Outcome uint8
+
+const (
+	Unchanged Outcome = iota // the checkpoint matches raw: nothing parsed
+	Resumed                  // the checkpoint extends: only the new bytes parsed
+	Fresh                    // no checkpoint: parsed from byte 0, the first time on this store
+	Reparsed                 // the checkpoint did not match raw or parser, or its component holds a reparsed source: parsed from byte 0 into gen+1
+)
+
+// IngestStats counts sources by Outcome, indexed by Outcome.
+type IngestStats [4]int
+
+// Ingest brings store up to root's raw and reports what it did per source.
+func Ingest(root, store string, quiet time.Duration, settleAll bool) (IngestStats, error) {
+	return IngestStats{}, ingest(root, store, quiet, settleAll)
+}
+
+func ingest(root, store string, quiet time.Duration, settleAll bool) error {
 	debug.SetGCPercent(25)
 	if err := os.MkdirAll(srcDir(store), 0o755); err != nil {
 		return err

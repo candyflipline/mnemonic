@@ -26,20 +26,27 @@ type Entry struct {
 	Size int64
 }
 
+// ReadStore is the part of a Store a router needs: it lists and presigns,
+// never writes.
+type ReadStore interface {
+	// List returns every key under prefix, sorted, strongly consistent with
+	// every Put and PutExclusive that returned before it.
+	List(ctx context.Context, prefix Key) ([]Entry, error)
+	// PresignGetUntil returns a URL that GETs k, Range allowed, until notAfter,
+	// with no credentials on the reader's side. The expiry is absolute so a
+	// late caller cannot mint a later window than the one it was given.
+	PresignGetUntil(k Key, notAfter time.Time) (string, error)
+}
+
 type Store interface {
+	ReadStore
 	// Put writes size bytes from r under k.
 	Put(ctx context.Context, k Key, r io.Reader, size int64) error
 	// PutExclusive writes k only if no object has it, and returns ErrExists
 	// otherwise.
 	PutExclusive(ctx context.Context, k Key, r io.Reader, size int64) error
-	// List returns every key under prefix, sorted, strongly consistent with
-	// every Put and PutExclusive that returned before it.
-	List(ctx context.Context, prefix Key) ([]Entry, error)
 	// Delete removes keys; a missing key is not an error.
 	Delete(ctx context.Context, keys []Key) error
-	// PresignGet returns a URL that GETs k, Range allowed, for ttl, with no
-	// credentials on the reader's side.
-	PresignGet(k Key, ttl time.Duration) (string, error)
 }
 
 // Open opens file:///abs/dir?serve=http://127.0.0.1:PORT or
@@ -56,6 +63,11 @@ func Open(uri string) (Store, error) {
 		return openS3(u)
 	}
 	return nil, fmt.Errorf("obj: scheme %q is not file or s3", u.Scheme)
+}
+
+// OpenRead opens uri as Open does, for a process that only lists and presigns.
+func OpenRead(uri string) (ReadStore, error) {
+	return Open(uri)
 }
 
 // Serve serves a file store's presigned GETs at its serve= address until ctx

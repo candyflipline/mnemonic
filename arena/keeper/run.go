@@ -137,6 +137,9 @@ func Take(ctx context.Context, s obj.Store, cfg Config) (*Keeper, error) {
 
 func (k *Keeper) Gen() Gen { return k.gen }
 
+// Totals is the sum of every Cycle's IngestStats since Take.
+func (k *Keeper) Totals() trace.IngestStats { panic("lane L2") }
+
 // check fails with ErrLost once a higher gen is claimed, and keeps failing.
 func (k *Keeper) check(ctx context.Context) (Gen, error) {
 	start := time.Now()
@@ -205,7 +208,7 @@ func (k *Keeper) Cycle(ctx context.Context) error {
 	}
 	k.cycle.Lock()
 	defer k.cycle.Unlock()
-	if err := trace.Ingest(k.cfg.Root, k.cfg.Local, k.cfg.Quiet, k.cfg.Settle); err != nil {
+	if _, err := trace.Ingest(k.cfg.Root, k.cfg.Local, k.cfg.Quiet, k.cfg.Settle); err != nil {
 		return err
 	}
 	stamp, ok := trace.CurrentStamp(k.cfg.Local)

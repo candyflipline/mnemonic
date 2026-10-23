@@ -60,7 +60,7 @@ func TestFileStore(t *testing.T) {
 		return strings.Join(parts, " ")
 	}
 	get := func(k string, ttl time.Duration, rng string, tamper bool) (int, string, string) {
-		u, err := s.PresignGet(Key(k), ttl)
+		u, err := s.PresignGetUntil(Key(k), time.Now().Add(ttl))
 		if err != nil {
 			t.Fatal(err)
 		}

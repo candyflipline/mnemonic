@@ -33,7 +33,7 @@ func TestOpenedPartListsSessionsAfterItsDirIsGone(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := t.TempDir()
-	if err := Ingest(root, store, time.Minute, true); err != nil {
+	if _, err := Ingest(root, store, time.Minute, true); err != nil {
 		t.Fatal(err)
 	}
 	parts, _, err := ListParts(store)

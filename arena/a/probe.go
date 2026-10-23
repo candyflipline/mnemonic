@@ -291,7 +291,7 @@ func rangeGet(size int) func(st obj.Store, run string, blob []byte) func(context
 	return func(st obj.Store, run string, blob []byte) func(context.Context, int) (bool, error) {
 		return func(ctx context.Context, i int) (bool, error) {
 			off := rand.IntN(blobSize - size + 1)
-			u, err := st.PresignGet(obj.Key(run+"blob"), 10*time.Minute)
+			u, err := st.PresignGetUntil(obj.Key(run+"blob"), time.Now().Add(10*time.Minute))
 			if err != nil {
 				return false, err
 			}

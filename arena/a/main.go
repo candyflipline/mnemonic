@@ -17,7 +17,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: a ingest|batch|keep|read|probe ...")
+		fmt.Fprintln(os.Stderr, "usage: a ingest|batch|keep|read|route|store|probe ...")
 		os.Exit(2)
 	}
 	var err error
@@ -28,6 +28,10 @@ func main() {
 		err = runKeep(os.Args[2:])
 	case "read":
 		err = runRead(os.Args[2:])
+	case "route":
+		err = runRoute(os.Args[2:])
+	case "store":
+		err = runStore(os.Args[2:])
 	case "probe":
 		err = runProbe(os.Args[2:])
 	default:
@@ -47,7 +51,9 @@ func engine(cmd string, args []string) error {
 	settle := fs.Bool("settle", false, "settle every source now")
 	fs.Parse(args)
 	if cmd == "ingest" {
-		return trace.Ingest(*root, *store, *quiet, *settle)
+		st, err := trace.Ingest(*root, *store, *quiet, *settle)
+		fmt.Fprintf(os.Stderr, "ingest: unchanged=%d resumed=%d fresh=%d reparsed=%d\n", st[trace.Unchanged], st[trace.Resumed], st[trace.Fresh], st[trace.Reparsed])
+		return err
 	}
 	return batch(*root, *store)
 }

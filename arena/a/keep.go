@@ -189,7 +189,7 @@ func (ks keepServer) mux() *http.ServeMux {
 func (ks keepServer) view(h keeper.Head) (route.View, error) {
 	v := route.View{Tenant: h.Manifest.Tenant, Gen: h.Manifest.Gen, Seq: h.Manifest.Seq, Parts: make([]route.GrantedPart, 0, len(h.Manifest.Parts)+len(h.Hot))}
 	for _, p := range h.Manifest.Parts {
-		u, err := ks.s.PresignGet(p.Key, ks.ttl)
+		u, err := ks.s.PresignGetUntil(p.Key, time.Now().Add(ks.ttl))
 		if err != nil {
 			return v, err
 		}
