@@ -334,7 +334,8 @@ func (k *Keeper) commit(ctx context.Context, l local) error {
 	// shows it latest. A manifest that retires X was not visible at r, so its PUT
 	// returned after r; a grant issued before r+DeleteSlack/2 dies by
 	// r+GrantTTL+DeleteSlack/2, and its call by MaxCall later. notBefore counts
-	// from this PUT's return, so it is past all of them.
+	// from this PUT's return, so it is past all of them. That holds only while
+	// the router, keeper and store clocks agree within DeleteSlack/2 + MaxCall.
 	notBefore := time.Now().Add(k.fence.horizon())
 	live := liveKeys(next)
 	for _, p := range prev.Parts {
@@ -450,7 +451,7 @@ func (k *Keeper) sweep(ctx context.Context, now time.Time) error {
 	}
 	live := liveKeys(m)
 	if k.scannedAt.IsZero() || now.Sub(k.scannedAt) >= rescanEvery {
-		notBefore := now.Add(k.cfg.GrantTTL + k.cfg.DeleteSlack)
+		notBefore := now.Add(k.fence.horizon())
 		if k.scannedAt.IsZero() {
 			notBefore = k.takenAt
 		}
