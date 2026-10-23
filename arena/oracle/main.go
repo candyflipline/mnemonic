@@ -26,8 +26,9 @@ func main() {
 		fail(fmt.Errorf("usage: oracle build|answer|ingest|batch"))
 	}
 	fs := flag.NewFlagSet(os.Args[1], flag.ExitOnError)
-	raw := fs.String("raw", "", "arena data root whose raw/ is copied")
-	root := fs.String("root", "", "oracle data root")
+	raw := fs.String("raw", "", "build: arena data root whose raw/ is copied")
+	root := fs.String("root", "", "build/answer: oracle data root; ingest/batch: candidate raw root")
+	store := fs.String("store", "", "ingest/batch: candidate store (data dir)")
 	author := fs.String("author", "", "who the tools act as (default: the first author=* dir under the data root's raw, else arena)")
 	fs.Parse(os.Args[2:])
 	var err error
@@ -37,9 +38,9 @@ func main() {
 	case "answer":
 		err = answer(*root, *author)
 	case "ingest":
-		err = ingest(*raw, *root)
+		err = ingest(*root, *store)
 	case "batch":
-		err = batch(*root, *author)
+		err = batch(*store, *author)
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}
