@@ -218,6 +218,10 @@ func (d *decoder) str() (string, error) {
 	start := d.i + 1
 	i := start
 	for i < len(s) {
+		i = skipPlainASCII(s, i)
+		if i >= len(s) {
+			break
+		}
 		c := s[i]
 		if c == '"' {
 			d.i = i + 1
@@ -238,6 +242,13 @@ func (d *decoder) str() (string, error) {
 	}
 	b := append(d.buf[:0], s[start:i]...)
 	for i < len(s) {
+		if j := skipPlainASCII(s, i); j > i {
+			b = append(b, s[i:j]...)
+			i = j
+			if i >= len(s) {
+				break
+			}
+		}
 		c := s[i]
 		switch {
 		case c == '"':
@@ -327,4 +338,19 @@ func hex4(s string, i int) rune {
 		r = r*16 + rune(c)
 	}
 	return r
+}
+
+func skipPlainASCII(s string, i int) int {
+	const ones, highs = 0x0101010101010101, 0x8080808080808080
+	for i+8 <= len(s) {
+		x := uint64(s[i]) | uint64(s[i+1])<<8 | uint64(s[i+2])<<16 | uint64(s[i+3])<<24 |
+			uint64(s[i+4])<<32 | uint64(s[i+5])<<40 | uint64(s[i+6])<<48 | uint64(s[i+7])<<56
+		quote := x ^ (ones * '"')
+		slash := x ^ (ones * '\\')
+		if (x|(x-ones*0x20)&^x|(quote-ones)&^quote|(slash-ones)&^slash)&highs != 0 {
+			return i
+		}
+		i += 8
+	}
+	return i
 }
