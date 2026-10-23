@@ -24,7 +24,7 @@ type built struct {
 
 // partFormat is hashed into every part ID, so a store built by an older layout
 // rebuilds its parts instead of opening them.
-const partFormat = 6
+const partFormat = 7
 
 // fingerprint names a part by what its members parsed, never by how a disk
 // laid the logs out, so a restored store names every part it did not change
@@ -84,6 +84,7 @@ func loadSourceRows(store string, si int, c ckpt, from int64) ([]built, error) {
 			if _, err := r.decode(rec); err != nil {
 				return nil, err
 			}
+			r.Author = c.Author
 			out = append(out, built{row: r, src: uint16(si)})
 		}
 		off = next
@@ -100,6 +101,7 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 	win := map[string]*winner{}
 	members := make([]member, len(cks))
 	cold := !slices.ContainsFunc(cks, ckpt.hot)
+	var all []built
 	for si, c := range cks {
 		members[si] = memberOf(c)
 		if cold {
@@ -109,6 +111,7 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 		if err != nil {
 			return fmt.Errorf("%s: %w", c.Key, err)
 		}
+		all = append(all, rows...)
 		local := map[string]int{}
 		for i := range rows {
 			r := rows[i].row
@@ -130,6 +133,8 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 		bySession[w.b.row.Session] = append(bySession[w.b.row.Session], w.b)
 	}
 	win = nil
+	authors := buildSessionAuthors(cks, all)
+	all = nil
 
 	heavy := newHeavyReader(store, cks)
 	defer heavy.close()
@@ -181,6 +186,15 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 	if err := writeLs(dir, lsRecs); err != nil {
 		return err
 	}
+	// The section build inside indexRows sees winner rows only; the session
+	// authors section is a function of every row, winner or not.
+	ab, err := json.Marshal(authors)
+	if err != nil {
+		return err
+	}
+	if err := write("authors", ab); err != nil {
+		return err
+	}
 	meta.Fingerprint, meta.Members = fp, members
 	mb, _ := json.Marshal(meta)
 	if err := os.WriteFile(filepath.Join(dir, "meta.json"), mb, 0o644); err != nil {
@@ -201,6 +215,7 @@ func indexRows(bySession map[string][]built, place func(built) (*Row, int64, int
 	sort.Strings(sessionIDs)
 
 	harnesses, sourceNames := dict{}, dict{}
+	secs := newSections()
 	var docs []built
 	type sess struct {
 		start, end  uint32
@@ -261,6 +276,7 @@ func indexRows(bySession map[string][]built, place func(built) (*Row, int64, int
 		s.end = uint32(len(docs))
 		sessions = append(sessions, s)
 		lsRecs = append(lsRecs, lsAggregate(evs, turnSeqs[start:], payload))
+		secs.addSession(sid, evs, turnSeqs[start:], payload)
 		seqs := make([]uint32, 0, len(perTurn))
 		for q := range perTurn {
 			seqs = append(seqs, q)
@@ -430,6 +446,12 @@ func indexRows(bySession map[string][]built, place func(built) (*Row, int64, int
 	ft = binary.LittleEndian.AppendUint32(ft, faOffs[len(faOffs)-1])
 	tri, trip := trigramIndex(faBlob, faOffs)
 	for name, b := range map[string][]byte{"fa.exact": fe, "fa.tio": ft, "fa.blob": faBlob, "fa.tri": tri, "fa.trip": trip} {
+		if err := write(name, b); err != nil {
+			return indexMeta{}, nil, err
+		}
+	}
+
+	for name, b := range secs.files() {
 		if err := write(name, b); err != nil {
 			return indexMeta{}, nil, err
 		}
