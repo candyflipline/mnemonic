@@ -150,30 +150,11 @@ func FoldToolPayloads(p *Partials) map[string]*FoldedIdentity {
 			continue
 		}
 		ev := p.Events[i]
-
-		var sourcePayload JSON
-		if s := ev.Event.PayloadJSON; s != "" {
-			if parsed, err := DecodeJSON([]byte(s)); err == nil {
-				sourcePayload = parsed
-			} else {
-				sourcePayload = s
-			}
-		}
-		canonical := map[string]any{}
-		if obj, isObj := sourcePayload.(map[string]any); isObj {
-			canonical = obj
-		} else if sourcePayload != nil {
-			canonical = map[string]any{"source_payload": sourcePayload}
-		}
-
-		semantic := make(map[string]any, len(canonical))
-		for k, v := range canonical {
-			semantic[k] = v
-		}
-		SanitizeSemanticPayload(semantic)
-		semanticPayload := Compact(semantic)
-
 		toolPayload := toolPayloadObject(tool)
+		semanticPayload, folded, ok := foldCanonicalPayload(ev.Event.PayloadJSON, Compact(toolPayload))
+		if !ok {
+			semanticPayload, folded = foldPayload(ev.Event.PayloadJSON, toolPayload)
+		}
 		identities[tool.EventUID] = &FoldedIdentity{
 			SemanticPayload: semanticPayload,
 			ToolFields:      ToolIdentityFields(tool),
@@ -192,10 +173,33 @@ func FoldToolPayloads(p *Partials) map[string]*FoldedIdentity {
 		if tool.WorktreeRoot != "" {
 			ev.Event.WorktreeRoot = tool.WorktreeRoot
 		}
-		canonical["moraine_tool_io"] = toolPayload
-		ev.Event.PayloadJSON = Compact(canonical)
+		ev.Event.PayloadJSON = folded
 	}
 	return identities
+}
+
+func foldPayload(payloadJSON string, toolPayload map[string]any) (string, string) {
+	var sourcePayload JSON
+	if payloadJSON != "" {
+		if parsed, err := DecodeJSON([]byte(payloadJSON)); err == nil {
+			sourcePayload = parsed
+		} else {
+			sourcePayload = payloadJSON
+		}
+	}
+	canonical := map[string]any{}
+	if obj, isObj := sourcePayload.(map[string]any); isObj {
+		canonical = obj
+	} else if sourcePayload != nil {
+		canonical = map[string]any{"source_payload": sourcePayload}
+	}
+	semantic := make(map[string]any, len(canonical))
+	for k, v := range canonical {
+		semantic[k] = v
+	}
+	SanitizeSemanticPayload(semantic)
+	canonical["moraine_tool_io"] = toolPayload
+	return Compact(semantic), Compact(canonical)
 }
 
 func toolPayloadObject(t *ToolRow) map[string]any {
