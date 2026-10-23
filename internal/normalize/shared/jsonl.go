@@ -19,7 +19,8 @@ import (
 // the returned State; while no line has carried a timestamp, lines are held
 // until one does and take it. Only a reader or emit failure fails the file.
 func ParseJSONL(r io.Reader, src normalize.SourceMeta, from normalize.State, s Source, emit func(*schema.Event) error) (normalize.State, error) {
-	br := bufio.NewReader(r)
+	br := bufio.NewReaderSize(r, 1<<16)
+	var long []byte
 	st := from
 	type line struct {
 		rec            JSON
@@ -58,7 +59,15 @@ func ParseJSONL(r io.Reader, src normalize.SourceMeta, from normalize.State, s S
 		return nil
 	}
 	for {
-		raw, err := br.ReadBytes('\n')
+		raw, err := br.ReadSlice('\n')
+		if err == bufio.ErrBufferFull {
+			long = append(long[:0], raw...)
+			for err == bufio.ErrBufferFull {
+				raw, err = br.ReadSlice('\n')
+				long = append(long, raw...)
+			}
+			raw = long
+		}
 		if err != nil && err != io.EOF {
 			return from, err
 		}

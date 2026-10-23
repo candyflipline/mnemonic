@@ -26,10 +26,22 @@ type Ctx struct {
 }
 
 // EventRow is one event under construction: the schema columns plus the
-// transient folded identity used to compute the canonical uid.
+// transient folded identity used to compute the canonical uid. Payload holds
+// the same bytes as Event.PayloadJSON, typed so the fast paths can trust them;
+// every payload mutation goes through SetPayload to keep the two in step.
 type EventRow struct {
-	Event  schema.Event
-	Folded *FoldedIdentity
+	Event   schema.Event
+	Folded  *FoldedIdentity
+	payload CanonicalJSON
+}
+
+// Payload returns the canonical payload the row was built with.
+func (r *EventRow) Payload() CanonicalJSON { return r.payload }
+
+// SetPayload replaces the payload with canonical bytes.
+func (r *EventRow) SetPayload(c CanonicalJSON) {
+	r.payload = c
+	r.Event.PayloadJSON = c.s
 }
 
 type Partials struct {
@@ -116,46 +128,48 @@ var payloadTypeDomain = map[string]bool{
 func eventKindInDomain(value string) bool   { return eventKindDomain[value] }
 func payloadTypeInDomain(value string) bool { return payloadTypeDomain[value] }
 
-func (e *Emitter) Event(eventUID, eventKind, payloadType, actorKind, textContent, payloadJSON string) *EventRow {
+func (e *Emitter) Event(eventUID, eventKind, payloadType, actorKind, textContent string, payload CanonicalJSON) *EventRow {
 	ctx := e.Ctx
 	text := TruncateChars(textContent, textLimit)
 	attention := EventFileAttentionFields(ctx.Cwd)
-	row := &EventRow{Event: schema.Event{
-		EventUID:              eventUID,
-		SessionID:             ctx.SessionID,
-		SessionDate:           ctx.SessionDate,
-		SourceName:            ctx.SourceName,
-		Harness:               ctx.Harness,
-		InferenceProvider:     ctx.InferenceProvider,
-		SourceFile:            ctx.SourceFile,
-		SourceInode:           wholeFile,
-		SourceGeneration:      wholeFile,
-		SourceLineNo:          ctx.SourceLineNo,
-		SourceOffset:          ctx.SourceOffset,
-		SourceRef:             ctx.SourceRef(),
-		RecordTS:              ctx.RecordTS,
-		EventTS:               ctx.EventTS,
-		EventKind:             canonicalEventKind(eventKind),
-		ActorKind:             actorKind,
-		PayloadType:           canonicalPayloadType(payloadType),
-		EndpointKind:          "generation",
-		ContentTypes:          []string{},
-		TextContent:           text,
-		TextPreview:           TruncateChars(text, previewLimit),
-		PayloadJSON:           payloadJSON,
-		TokenUsageBuckets:     zeroBuckets(),
-		TokenUsageNativeUnits: zeroNativeUnits(),
-		ProjectID:             attention.ProjectID,
-		RepoRelPath:           attention.RepoRelPath,
-		WorktreeRoot:          attention.WorktreeRoot,
-		EventVersion:          EventVersion(),
-		Cwd:                   ctx.Cwd,
-	}}
+	row := &EventRow{
+		payload: payload,
+		Event: schema.Event{
+			EventUID:              eventUID,
+			SessionID:             ctx.SessionID,
+			SessionDate:           ctx.SessionDate,
+			SourceName:            ctx.SourceName,
+			Harness:               ctx.Harness,
+			InferenceProvider:     ctx.InferenceProvider,
+			SourceFile:            ctx.SourceFile,
+			SourceInode:           wholeFile,
+			SourceGeneration:      wholeFile,
+			SourceLineNo:          ctx.SourceLineNo,
+			SourceOffset:          ctx.SourceOffset,
+			SourceRef:             ctx.SourceRef(),
+			RecordTS:              ctx.RecordTS,
+			EventTS:               ctx.EventTS,
+			EventKind:             canonicalEventKind(eventKind),
+			ActorKind:             actorKind,
+			PayloadType:           canonicalPayloadType(payloadType),
+			EndpointKind:          "generation",
+			ContentTypes:          []string{},
+			TextContent:           text,
+			TextPreview:           TruncateChars(text, previewLimit),
+			PayloadJSON:           payload.s,
+			TokenUsageBuckets:     zeroBuckets(),
+			TokenUsageNativeUnits: zeroNativeUnits(),
+			ProjectID:             attention.ProjectID,
+			RepoRelPath:           attention.RepoRelPath,
+			WorktreeRoot:          attention.WorktreeRoot,
+			EventVersion:          EventVersion(),
+			Cwd:                   ctx.Cwd,
+		}}
 	return row
 }
 
 func (e *Emitter) EventForJSON(eventUID, eventKind, payloadType, actorKind, textContent string, payload JSON) *EventRow {
-	return e.Event(eventUID, eventKind, payloadType, actorKind, textContent, Compact(payload))
+	return e.Event(eventUID, eventKind, payloadType, actorKind, textContent, CompactCanonical(payload))
 }
 
 func (e *Emitter) PushEvent(row *EventRow) { e.Partials.Events = append(e.Partials.Events, row) }

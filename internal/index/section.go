@@ -48,19 +48,19 @@ func (s *sections) addSession(sid string, evs []built, seqs []uint32, payload fu
 	slices.Sort(hs)
 	for _, h := range hs {
 		if f, ok := spanBuilders[h]; ok {
-			s.spans[sid] = append(s.spans[sid], f(h, perHarness[h])...)
+			if sp := f(h, perHarness[h]); len(sp) > 0 {
+				s.spans[sid] = append(s.spans[sid], sp...)
+			}
 		}
 	}
+	var anns []annRow
 	for _, b := range evs {
-		if b.row.Harness != schema.AnnotationHarness {
-			continue
+		if b.row.Harness == schema.AnnotationHarness {
+			anns = append(anns, annRow{row: b.row, payload: payload(b), author: b.row.Author})
 		}
-		a, err := schema.ParseAnnotation([]byte(payload(b)))
-		if err != nil {
-			continue
-		}
-		a.Author = b.row.Author
-		s.ann[sid] = append(s.ann[sid], a)
+	}
+	if len(anns) > 0 {
+		s.ann[sid] = buildAnnotations(anns)
 	}
 	set := s.auth[sid]
 	if set == nil {
@@ -72,6 +72,42 @@ func (s *sections) addSession(sid string, evs []built, seqs []uint32, payload fu
 			set[a] = true
 		}
 	}
+}
+
+// annFile is one stored annotation: the schema's JSON with the author beside
+// it, because the schema keeps Author out of its JSON (main holds it in a column).
+type annFile struct {
+	schema.Annotation
+	Author string `json:"author"`
+}
+
+func marshalAnn(ann map[string][]schema.Annotation) []byte {
+	out := make(map[string][]annFile, len(ann))
+	for sid, as := range ann {
+		fs := make([]annFile, len(as))
+		for i, a := range as {
+			fs[i] = annFile{Annotation: a, Author: a.Author}
+		}
+		out[sid] = fs
+	}
+	return mustJSON(out)
+}
+
+func unmarshalAnn(b []byte) map[string][]schema.Annotation {
+	var files map[string][]annFile
+	if json.Unmarshal(b, &files) != nil {
+		return nil
+	}
+	out := make(map[string][]schema.Annotation, len(files))
+	for sid, fs := range files {
+		as := make([]schema.Annotation, len(fs))
+		for i, f := range fs {
+			as[i] = f.Annotation
+			as[i].Author = f.Author
+		}
+		out[sid] = as
+	}
+	return out
 }
 
 // files encodes the three section files a part carries: spans and
@@ -90,7 +126,7 @@ func (s *sections) files() map[string][]byte {
 	}
 	return map[string][]byte{
 		"spans":       mustJSON(s.spans),
-		"annotations": mustJSON(s.ann),
+		"annotations": marshalAnn(s.ann),
 		"authors":     mustJSON(authors),
 	}
 }
@@ -136,10 +172,9 @@ func sortAnnotations(ann []schema.Annotation) {
 // was opened with.
 func decodeSections(spansB, annB, authB []byte) (map[string][]schema.Span, map[string][]schema.Annotation, map[string][]string) {
 	var spans map[string][]schema.Span
-	var ann map[string][]schema.Annotation
 	var auth map[string][]string
 	_ = json.Unmarshal(spansB, &spans)
-	_ = json.Unmarshal(annB, &ann)
+	ann := unmarshalAnn(annB)
 	_ = json.Unmarshal(authB, &auth)
 	return spans, ann, auth
 }

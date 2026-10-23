@@ -13,7 +13,7 @@ import (
 // emitted spans on a parent cycle the one with the smallest item_id is the
 // root. A chat carries its own usage; an invoke_agent carries the sum over
 // the chats beneath it, else its own. The parent link is origin_event_id, the
-// event_uid of the parent span's row. Walks run at most 64 edges out, the
+// event_uid of the parent span's row. Walks run at most 65 edges out, the
 // depth the derivation's recursive CTE walks.
 func otlpSpans(_ string, session []*Row) []schema.Span {
 	rows := map[string]*Row{}
@@ -135,6 +135,8 @@ func otlpSpans(_ string, session []*Row) []schema.Span {
 			u.tok.set(&s)
 			if u.hasCost {
 				s.cost = &u.cost
+			} else {
+				s.cost = otlpCostUsd(r)
 			}
 		} else {
 			tokens{r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheWriteTokens}.set(&s)
@@ -156,13 +158,13 @@ func otlpEmitted(r *Row) bool {
 }
 
 // otlpWalk follows each row's origin_event_id chain upward, calling yield on
-// every distinct strict ancestor, nearest first, at most 64 edges out, and
+// every distinct strict ancestor, nearest first, at most 65 edges out (the CTE's depth 0..64), and
 // stopping where yield returns false.
 func otlpWalk(rows map[string]*Row, yield func(from, uid string, anc *Row) bool) {
 	for from := range rows {
 		seen := map[string]bool{from: true}
 		cur := from
-		for i := 0; i < 64; i++ {
+		for i := 0; i <= 64; i++ {
 			next := rows[cur].OriginEventID
 			if next == "" || seen[next] {
 				break
