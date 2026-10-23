@@ -32,11 +32,11 @@ func TestFaStripRootRemovesPrefixWithOneSlash(t *testing.T) {
 }
 
 func TestFaResolveTailPassesUnscopedRelativePathsThrough(t *testing.T) {
-	tail := faResolveTail("crates/foo/tee.rs")
+	tail := faResolveTail("crates/foo/tee.rs", nil)
 	if tail.Rel != "crates/foo/tee.rs" || tail.Root != "" {
 		t.Fatalf("tail = %#v", tail)
 	}
-	tail = faResolveTail("./crates/foo/tee.rs")
+	tail = faResolveTail("./crates/foo/tee.rs", nil)
 	if tail.Rel != "crates/foo/tee.rs" || !tail.Normalized {
 		t.Fatalf("./ tail = %#v", tail)
 	}
@@ -48,7 +48,7 @@ func TestFaResolveTailNormalizesDotDotAndRepeatedSlashes(t *testing.T) {
 		{"crates//foo///bar.rs", "crates/foo/bar.rs"},
 		{"crates/foo dir/x.rs", "crates/foo dir/x.rs"},
 	} {
-		tail := faResolveTail(tc.in)
+		tail := faResolveTail(tc.in, nil)
 		if tail.Rel != tc.want {
 			t.Fatalf("%q -> %q, want %q", tc.in, tail.Rel, tc.want)
 		}
@@ -87,7 +87,7 @@ WHERE doc = (SELECT min(doc) FROM events WHERE tool_phase = 'request' AND event_
 	if data["stripped_root"] != "/w/repo" || data["tail"] != "a/b.go" || data["result_count"] != 1 {
 		t.Fatalf("data = %#v", data)
 	}
-	if got := fmt.Sprint(data["roots"]); got != `[map[root:/w/repo sessions:1 touches:1]]` {
+	if got := fmt.Sprint(data["roots"]); got != `[map[root:/w/repo session_count:1 touch_count:1]]` {
 		t.Fatalf("roots = %s", got)
 	}
 	touches, err := faTouches(context.Background(), db, faQuery{Rel: "a/b.go", NormalizedPID: "git:abc", ProjectScope: true, MaxRows: faScanCap})
@@ -101,7 +101,7 @@ WHERE doc = (SELECT min(doc) FROM events WHERE tool_phase = 'request' AND event_
 
 func TestFaResolveTailFallsBackToAbsoluteWhenNoMarker(t *testing.T) {
 	path := "/nonexistent-xyz/deep/unmarked/file.rs"
-	tail := faResolveTail(path)
+	tail := faResolveTail(path, nil)
 	if tail.Rel != path || tail.Root != "" {
 		t.Fatalf("tail = %#v", tail)
 	}

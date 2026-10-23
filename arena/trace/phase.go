@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	"github.com/candyflipline/mnemonic/internal/repo"
 )
 
 // Fan scatters one phase to the readers owning the view's parts, or only the
@@ -18,6 +20,7 @@ type phaseKey struct{ tool, phase string }
 var phases = map[phaseKey]func(db *DB, args, stats json.RawMessage) (any, error){
 	{"search_sessions", "df"}:     searchDFPhase,
 	{"search_sessions", "score"}:  searchScorePhase,
+	{"file_attention", "roots"}:   faRootsPhase,
 	{"file_attention", "touches"}: faPhase,
 	{"list_sessions", "page"}:     lsPhase,
 	{"open", "open"}:              openPhase,
@@ -136,6 +139,10 @@ func SearchPartial(args json.RawMessage, c Corpus, fan Fan) (json.RawMessage, st
 	return encodeAnswer(searchAnswer(a, mergeHits(q, hits)))
 }
 
+func faRootsPhase(db *DB, _, _ json.RawMessage) (any, error) {
+	return db.rootSeen(), nil
+}
+
 func faPhase(db *DB, _, stats json.RawMessage) (any, error) {
 	var q faQuery
 	if err := json.Unmarshal(stats, &q); err != nil {
@@ -146,7 +153,17 @@ func faPhase(db *DB, _, stats json.RawMessage) (any, error) {
 
 // AttentionPartial is file_attention at rung Partial.
 func AttentionPartial(args json.RawMessage, _ Corpus, fan Fan) (json.RawMessage, string, error) {
-	c, err := newFaCall(args)
+	c, err := newFaCall(args, func() ([]repo.Seen, error) {
+		answers, err := fan("roots", nil, "")
+		if err != nil {
+			return nil, err
+		}
+		lists, err := decodeAll[[]repo.Seen](answers)
+		if err != nil {
+			return nil, err
+		}
+		return mergeSeen(lists...), nil
+	})
 	if err != nil {
 		return nil, "", err
 	}

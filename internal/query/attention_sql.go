@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/candyflipline/mnemonic/internal/repo"
 )
 
 type faQuery struct {
@@ -67,6 +69,25 @@ func faTouches(ctx context.Context, db *sql.DB, q faQuery) ([]faTouch, error) {
 		return nil, err
 	}
 	return faMergeTouches(append(touches, suffix...), limitPlus), nil
+}
+
+func faRootSeen(ctx context.Context, db *sql.DB) ([]repo.Seen, error) {
+	rows, err := db.QueryContext(ctx, "SELECT DISTINCT worktree_root, project_id FROM events\n"+
+		"WHERE tool_phase = 'request' AND project_id != '' AND repo_rel_path != '' AND worktree_root != '' AND "+published+"\n"+
+		"ORDER BY worktree_root, project_id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []repo.Seen
+	for rows.Next() {
+		var s repo.Seen
+		if err := rows.Scan(&s.Root, &s.ProjectID); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
 }
 
 func faSinglePath(expr string) string {
