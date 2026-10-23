@@ -194,19 +194,23 @@ func above(g keeper.Gen, q keeper.Seq, og keeper.Gen, oq keeper.Seq) bool {
 
 func (r *Router) refresh(ctx context.Context) {
 	at := time.Now()
-	m, ok, err := keeper.Latest(ctx, r.s, r.tenant)
+	g, q, ok, err := keeper.Newest(ctx, r.s, r.tenant)
 	if err != nil || !ok {
 		return
 	}
 	prev := r.listed.Load()
 	switch {
-	case prev == nil || above(m.Gen, m.Seq, prev.m.Gen, prev.m.Seq):
+	case prev == nil || above(g, q, prev.m.Gen, prev.m.Seq):
+		m, err := r.manifest(ctx, g, q)
+		if err != nil {
+			return
+		}
 		r.listed.Store(&listed{m: m, at: at})
 		next := make(chan struct{})
 		if old := r.changed.Swap(&next); old != nil {
 			close(*old)
 		}
-	case m.Gen == prev.m.Gen && m.Seq == prev.m.Seq:
+	case g == prev.m.Gen && q == prev.m.Seq:
 		r.listed.Store(&listed{m: prev.m, at: at})
 	}
 }
