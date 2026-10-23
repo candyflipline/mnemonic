@@ -49,13 +49,8 @@ type redactionSpan struct {
 // Redactor is safe for concurrent use.
 type Redactor struct {
 	rules      []rule
-	keywords   []keyword
+	auto       *keywordAutomaton
 	alwaysScan []int
-}
-
-type keyword struct {
-	text  []byte
-	rules []int
 }
 
 const redactedMarker = "[REDACTED:"
@@ -159,22 +154,16 @@ func New(extraPatterns []string) (*Redactor, error) {
 }
 
 func (r *Redactor) buildPrefilter() {
-	seen := make(map[string]int)
+	need := false
 	for i := range r.rules {
-		kws := r.rules[i].keywords
-		if len(kws) == 0 {
+		if len(r.rules[i].keywords) == 0 {
 			r.alwaysScan = append(r.alwaysScan, i)
 			continue
 		}
-		for _, kw := range kws {
-			j, ok := seen[string(kw)]
-			if !ok {
-				j = len(r.keywords)
-				seen[string(kw)] = j
-				r.keywords = append(r.keywords, keyword{text: kw})
-			}
-			r.keywords[j].rules = append(r.keywords[j].rules, i)
-		}
+		need = true
+	}
+	if need {
+		r.auto = buildKeywordAutomaton(r.rules)
 	}
 }
 
@@ -454,16 +443,8 @@ func (r *Redactor) candidates(text []byte) []bool {
 	for _, i := range r.alwaysScan {
 		c[i] = true
 	}
-	if len(r.keywords) == 0 {
-		return c
-	}
-	lower := asciiLower(text)
-	for _, kw := range r.keywords {
-		if bytes.Contains(lower, kw.text) {
-			for _, i := range kw.rules {
-				c[i] = true
-			}
-		}
+	if r.auto != nil {
+		r.auto.scan(text, c)
 	}
 	return c
 }
