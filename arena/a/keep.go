@@ -74,15 +74,17 @@ func runKeep(args []string) error {
 	return ks.serve(ctx, l, *interval, k.Cycle, errc)
 }
 
-// serve runs first, the startup cycle, and the k.Run loop while the server
-// answers from the head Take installed. Only an error of first ends it early.
+// serve answers from the head Take installed while first, the startup cycle,
+// runs beside the k.Run loop, which keeps the gen checked meanwhile. An error
+// of first ends it; a clean first does not.
 func (ks keepServer) serve(ctx context.Context, l net.Listener, interval time.Duration, first func(context.Context) error, errc chan error) error {
-	if err := first(ctx); err != nil {
-		exitIfLost(ks.k, err)
-		return err
-	}
 	srv := &http.Server{Handler: ks.mux()}
 	go func() { errc <- srv.Serve(l) }()
+	go func() {
+		if err := first(ctx); err != nil {
+			errc <- err
+		}
+	}()
 	go func() { errc <- ks.k.Run(ctx, interval) }()
 	err := <-errc
 	exitIfLost(ks.k, err)
