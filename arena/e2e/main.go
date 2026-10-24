@@ -184,6 +184,8 @@ tenant = %q
 	if err := env.pushFixture(fixture); err != nil {
 		return fmt.Errorf("push fixture: %w", err)
 	}
+	env.detectQueryArg()
+	tr.step("boot", "query dialect from tools/list: %s", env.qArg)
 	env.waitFixtureVisible()
 
 	checks := []*check{
@@ -246,6 +248,7 @@ type env struct {
 	deletedID       string // session (f) deleted, kept out of (c)
 	otlpSession     string // alice's session:<...> id from (a)
 	lastTraceResult map[string]any
+	qArg            string // the query tool's statement arg: sql or query (ql)
 
 	faCandidates []string          // file_path values mined from the pushed raw, most named first
 	faPath       string            // the candidate file_attention answers for arena
@@ -430,23 +433,34 @@ func (e *env) forceSweep() {
 
 // ---- (d) query: refused without a time range, at most the row cap with one ----
 
+// queryArgs builds one query call in the side's dialect: the statement arg
+// detected from tools/list, the 31-day Oct window when withRange, the limit.
+func (e *env) queryArgs(withRange bool, limit int) map[string]any {
+	stmt := "SELECT session_id FROM events"
+	if e.qArg == "query" {
+		stmt = "from: events | select: session_id"
+	}
+	args := map[string]any{e.qArg: stmt}
+	if withRange {
+		args["from"], args["to"] = dayStart, dayEnd
+	}
+	if limit > 0 {
+		args["limit"] = limit
+	}
+	return args
+}
+
 func (e *env) checkD() *check {
 	c := &check{letter: "d", name: "query refused without a time range; at most the row cap with one", pass: true}
-	if e.side == "engine" {
-		e.queryEngine(c)
-		return c
-	}
-	_, rte := e.mcpCall(c, e.mcp, "query", map[string]any{"sql": "SELECT session_id FROM events"})
-	e.tr.step("d", "query without from/to (sql) as arena: refused=%v error=%q", rte.code != "", rte.message)
+	_, rte := e.mcpCall(c, e.mcp, "query", e.queryArgs(false, 0))
+	e.tr.step("d", "query without from/to (%s) as arena: refused=%v error=%q", e.qArg, rte.code != "", rte.message)
 	if rte.code == "" {
 		c.failf("query without a time range was not refused")
 	}
-	capped, _ := e.mcpCall(c, e.mcp, "query", map[string]any{
-		"sql": "SELECT session_id FROM events", "from": dayStart, "to": dayEnd, "limit": 3,
-	})
+	capped, _ := e.mcpCall(c, e.mcp, "query", e.queryArgs(true, 3))
 	rows := arr(mapGet(capped, "rows"))
-	e.tr.step("d", "query with from/to, limit 3 (sql) as arena: row_count=%v truncated=%v rows=%d",
-		mapGet(capped, "row_count"), mapGet(capped, "truncated"), len(rows))
+	e.tr.step("d", "query with from/to, limit 3 (%s) as arena: row_count=%v truncated=%v rows=%d",
+		e.qArg, mapGet(capped, "row_count"), mapGet(capped, "truncated"), len(rows))
 	if n := num(mapGet(capped, "row_count")); n > 3 {
 		c.failf("row_count %d above the cap 3", n)
 	}
@@ -457,28 +471,6 @@ func (e *env) checkD() *check {
 		c.failf("truncated is not true at the cap")
 	}
 	return c
-}
-
-// queryEngine speaks the ql dialect the engine's query tool takes; the
-// semantic assertions are the same ones.
-func (e *env) queryEngine(c *check) {
-	_, rte := e.mcpCall(c, e.mcp, "query", map[string]any{"query": "from: events"})
-	e.tr.step("d", "query without from/to (ql) as arena: refused=%v error=%q", rte.code != "", rte.message)
-	if rte.code == "" {
-		c.failf("query without a time range was not refused")
-	}
-	capped, _ := e.mcpCall(c, e.mcp, "query", map[string]any{
-		"query": "from: events | select: session_id", "from": dayStart, "to": dayEnd, "limit": 3,
-	})
-	rows := arr(mapGet(capped, "rows"))
-	e.tr.step("d", "query with from/to, limit 3 (ql) as arena: row_count=%v truncated=%v rows=%d",
-		mapGet(capped, "row_count"), mapGet(capped, "truncated"), len(rows))
-	if n := num(mapGet(capped, "row_count")); n > 3 {
-		c.failf("row_count %d above the cap 3", n)
-	}
-	if len(rows) == 0 {
-		c.failf("no rows for a range that holds thousands of fixture events")
-	}
 }
 
 // ---- (e) tenant B sees nothing of tenant A through any tool ----
@@ -544,9 +536,9 @@ func (e *env) checkE() *check {
 	if e.faPath == "" {
 		e.tr.step("e", "file_attention skipped: no file_path of the pushed sources answers for arena either")
 	}
-	q, _ := e.mcpCall(c, e.bob, "query", map[string]any{"sql": "SELECT session_id FROM events", "from": dayStart, "to": dayEnd, "limit": 5})
+	q, _ := e.mcpCall(c, e.bob, "query", e.queryArgs(true, 5))
 	bobRows := num(mapGet(q, "row_count"))
-	qa, _ := e.mcpCall(c, e.mcp, "query", map[string]any{"sql": "SELECT session_id FROM events", "from": dayStart, "to": dayEnd, "limit": 5})
+	qa, _ := e.mcpCall(c, e.mcp, "query", e.queryArgs(true, 5))
 	arenaRows := num(mapGet(qa, "row_count"))
 	e.tr.step("e", "query events as bob: %d rows; as arena: %d rows", bobRows, arenaRows)
 	if bobRows != 0 {

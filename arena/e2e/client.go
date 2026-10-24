@@ -468,6 +468,37 @@ func (e *env) mineFilePath() {
 	}
 }
 
+// detectQueryArg asks the server's tools/list how the query tool names its
+// statement argument: sql on 59796bc, query once the ql swap lands. (d) and
+// (e) speak whichever the side advertises; the semantic assertions are the
+// same either way.
+func (e *env) detectQueryArg() {
+	e.qArg = "sql"
+	req := map[string]any{"jsonrpc": "2.0", "id": 0, "method": "tools/list", "params": map[string]any{}}
+	b, _ := json.Marshal(req)
+	resp := e.mcp.post("/mcp", "application/json", b)
+	var outer struct {
+		Result struct {
+			Tools []struct {
+				Name   string         `json:"name"`
+				Schema map[string]any `json:"inputSchema"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(resp.body, &outer) != nil {
+		return
+	}
+	for _, t := range outer.Result.Tools {
+		if t.Name != "query" {
+			continue
+		}
+		props, _ := t.Schema["properties"].(map[string]any)
+		if _, ok := props["query"]; ok {
+			e.qArg = "query"
+		}
+	}
+}
+
 // ---- shared helpers ----
 
 const mcpRecordCap = 1200
