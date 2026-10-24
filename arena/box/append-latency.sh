@@ -24,8 +24,11 @@
 #   only — the lake indexes message text, not tool-use structure, so a token
 #   from anywhere else matches other sessions' rows and never proves the
 #   append landed) that a search_sessions call on the pristine store returns
-#   in its top hit WITHOUT the target session already among the hits; that
-#   top hit's session id is what must stay in the reply.
+#   in its top hit WITHOUT the target session already among the hits, keeping
+#   the candidate with the fewest pre-append hits (the search fetches only
+#   the top n+1 candidate docs and a broad term's docs crowd the appended
+#   copy out of it); that top hit's session id is what must stay in the
+#   reply.
 # - the pre-append reply of the timed call is saved against the base store.
 #
 # Each of RUNS rounds then does, timed only where marked:
@@ -168,17 +171,24 @@ for s in sorted(toks, key=lambda s: (-len(s), s))[:20]:
 PYEOF
 	# validate terms against the pristine store until one returns a top hit
 	# and the target session is NOT among the hits (else no new hit is
-	# possible post-append)
-	TERM=""; SESSION=""
+	# possible post-append), then keep the candidate with the FEWEST
+	# pre-append hits: the search fetches only the top n+1 candidate docs,
+	# and a broad term's docs crowd the appended copy (whose BM25 score ties
+	# its origin doc's) out of the candidate set
+	TERM=""; SESSION=""; BESTN=999999; BESTFILE=""
+	n=0
 	while IFS= read -r cand; do
+		n=$((n+1))
+		RF="$APP/term-reply-$n.jsonl"
 		printf '{"id":1,"tool":"search_sessions","args":{"query":"%s","n_hits":10}}\n' "$cand" \
-			| "$BIN" batch -root "$BOX" -store "$BASE_STORE" > "$APP/term-reply.jsonl" 2>/dev/null \
+			| "$BIN" batch -root "$BOX" -store "$BASE_STORE" > "$RF" 2>/dev/null \
 			|| continue
-		GOT=$(python3 -I - "$APP/term-reply.jsonl" "$TARGET_SID" <<'PYEOF'
+		OUT=$(python3 -I - "$RF" "$TARGET_SID" <<'PYEOF'
 import base64, json, sys
 target = sys.argv[2]
 forms = {target, "session:" + base64.b64encode(target.encode()).decode()}
 top = ""
+count = 0
 for line in open(sys.argv[1]):
     r = json.loads(line)
     if r.get("error"):
@@ -192,10 +202,18 @@ for line in open(sys.argv[1]):
             raise SystemExit  # target already searchable for this term
         if not top:
             top = sid
-print(top)
+        count += 1
+print("%s\t%d" % (top, count))
 PYEOF
 )
-		if [ -n "$GOT" ]; then TERM=$cand; SESSION=$GOT; break; fi
+		[ -n "$OUT" ] || continue
+		GOT=$(printf '%s' "$OUT" | cut -f1)
+		NRES=$(printf '%s' "$OUT" | cut -f2)
+		if [ -n "$GOT" ] && [ "$NRES" -lt "$BESTN" ]; then
+			TERM=$cand; SESSION=$GOT; BESTN=$NRES; BESTFILE=$RF
+		fi
+		[ "$BESTN" -le 2 ] && break
+		[ "$n" -ge 8 ] && break
 	done < "$APP/terms.txt"
 	[ -n "$TERM" ] || { echo "no candidate term matched the pristine store" >&2; exit 1; }
 	REL_MAN=${TGT_MAN#"$BOX/raw/"}
@@ -207,7 +225,7 @@ PYEOF
 		echo "session=$SESSION"
 		echo "target_sid=$TARGET_SID"
 	} > "$OUT/append-state.env"
-	cp -f "$APP/term-reply.jsonl" "$OUT/append-prereply.jsonl"
+	cp -f "$BESTFILE" "$OUT/append-prereply.jsonl"
 	printf '{"id":1,"tool":"search_sessions","args":{"query":"%s","n_hits":10}}\n' "$TERM" \
 		> "$OUT/append-call.jsonl"
 	echo "append setup: state rewritten for this bin"
