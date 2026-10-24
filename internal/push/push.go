@@ -323,3 +323,26 @@ func scan(sources []config.SourceGlob) []fileRef {
 	}
 	return files
 }
+
+// File is one file a scan matched: the part of a fileRef a local index needs
+// to name its plain sources.
+type File struct {
+	Path       string
+	Harness    string
+	SourceName string
+	MtimeMs    int64
+	Size       int64
+}
+
+// ScanFiles matches sources' globs the way a push scan does and returns the
+// regular files found, deduplicated by absolute path, in scan order. Local
+// mode names its plain sources from it, so their src ids and manifest fields
+// are what push would have sent for the same file.
+func ScanFiles(sources []config.SourceGlob) []File {
+	refs := scan(sources)
+	out := make([]File, 0, len(refs))
+	for _, f := range refs {
+		out = append(out, File{Path: f.path, Harness: f.harness, SourceName: f.sourceName, MtimeMs: f.mtimeMs, Size: f.size})
+	}
+	return out
+}

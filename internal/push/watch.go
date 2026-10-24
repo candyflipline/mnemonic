@@ -44,6 +44,7 @@ type watcher struct {
 	cfg      config.Client
 	red      Redactor
 	hc       *http.Client
+	sink     Sink
 	globs    []watchGlob
 	quiet    time.Duration
 	within   time.Duration
@@ -57,12 +58,31 @@ type watcher struct {
 	watchErr error
 }
 
+// Sink is where a watcher hands the paths whose (size, mtime) changed since
+// their last sync, instead of the HTTP push: local mode feeds them to the
+// index ingest. Sync brings the sink's index up to the named files and
+// reports what it did; an error fails the pass, and the watcher retries on
+// the same backoff a failed push gets.
+type Sink interface {
+	Sync(ctx context.Context, paths []string) (Stats, error)
+}
+
 // Watch runs until ctx ends. Paths named by file events are sent at the first
 // quietFor tick after the first unsent event that finds no newer event, or
 // flushWithin after it, whichever comes first; a stats line is printed when
 // something was sent or failed.
 func Watch(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client, out io.Writer) error {
 	return newWatcher(cfg, red, hc).run(ctx, out)
+}
+
+// WatchSink is Watch with every changed path handed to sink instead of pushed
+// over HTTP: no server is contacted, nothing is redacted, and the sink owns
+// its own sync state — it is told, it is not kept current. Syncing still
+// follows the watcher's quiet window and stamp tests.
+func WatchSink(ctx context.Context, cfg config.Client, sink Sink, out io.Writer) error {
+	w := newWatcher(cfg, nil, nil)
+	w.sink = sink
+	return w.run(ctx, out)
 }
 
 func newWatcher(cfg config.Client, red Redactor, hc *http.Client) *watcher {
@@ -189,13 +209,15 @@ func (w *watcher) retryDelay(reconcileErr error) time.Duration {
 }
 
 func (w *watcher) reconcile(ctx context.Context) (Stats, error) {
-	held, err := fetchManifest(ctx, w.cfg, w.hc)
-	if err != nil {
-		w.stale = true
-		return Stats{}, err
+	if w.sink == nil {
+		held, err := fetchManifest(ctx, w.cfg, w.hc)
+		if err != nil {
+			w.stale = true
+			return Stats{}, err
+		}
+		w.held = held
 	}
 	oldFiles, oldDirs := w.files, w.dirs
-	w.held = held
 	w.files = make(map[string]*watched)
 	w.dirs = make(map[string]bool)
 	w.stale = false
@@ -308,6 +330,9 @@ func (w *watcher) classify(path string) (watchGlob, bool) {
 // from its stamp at its last completed sync. A 409 or an error makes the next
 // wake reconcile, after conflictRetry or a backoff.
 func (w *watcher) sync(ctx context.Context, paths []string) Stats {
+	if w.sink != nil {
+		return w.syncSink(ctx, paths)
+	}
 	var st Stats
 	for _, path := range paths {
 		f := w.files[path]
@@ -344,6 +369,65 @@ func (w *watcher) sync(ctx context.Context, paths []string) Stats {
 			continue
 		}
 		f.synced = now
+	}
+	return st
+}
+
+// syncSink is sync's sink branch: the same per-path stamp tests, then one
+// Sync for every path whose (size, mtime) changed. A failed Sync marks the
+// pass failed and the watcher stale, so the next reconcile hands the paths
+// over again; nothing is marked synced until Sync succeeds.
+func (w *watcher) syncSink(ctx context.Context, paths []string) Stats {
+	type due struct {
+		path  string
+		mtime int64
+		at    stamp
+	}
+	var changed []due
+	var st Stats
+	for _, path := range paths {
+		f := w.files[path]
+		if f == nil {
+			continue
+		}
+		w.watch(path, false)
+		info, err := os.Stat(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			delete(w.files, path)
+			w.note.forget(path)
+			continue
+		}
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		now := stamp{size: info.Size(), mtimeNs: info.ModTime().UnixNano()}
+		if now == f.synced {
+			continue
+		}
+		st.Scanned++
+		f.size, f.mtimeMs = now.size, info.ModTime().UnixMilli()
+		changed = append(changed, due{path: path, mtime: f.mtimeMs, at: now})
+	}
+	if len(changed) == 0 {
+		return st
+	}
+	names := make([]string, len(changed))
+	for i, d := range changed {
+		names[i] = d.path
+	}
+	res, err := w.sink.Sync(ctx, names)
+	st.Appended, st.Replaced, st.Unchanged, st.Bytes = res.Appended, res.Replaced, res.Unchanged, res.Bytes
+	if err != nil {
+		w.failed = true
+		w.stale = true
+		st.Failed = len(changed)
+		return st
+	}
+	for _, d := range changed {
+		if f := w.files[d.path]; f != nil {
+			f.mtimeMs = d.mtime
+			f.synced = d.at
+		}
 	}
 	return st
 }
