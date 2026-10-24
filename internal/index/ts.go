@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-// duckTimestampUs approximates DuckDB's try_cast(s AS TIMESTAMPTZ) with
-// TimeZone=UTC: ISO dates with an optional time, fraction and offset.
+// duckTimestampUs approximates the 59796bc oracle's try_cast(s AS TIMESTAMPTZ)
+// with TimeZone=UTC: ISO dates with an optional time, fraction and offset.
 func duckTimestampUs(s string) (int64, bool) {
 	s = strings.TrimSpace(s)
 	if len(s) < 10 {

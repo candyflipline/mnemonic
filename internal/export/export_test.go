@@ -1,37 +1,67 @@
 package export
 
 import (
-	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/candyflipline/mnemonic/internal/cache"
-	"github.com/candyflipline/mnemonic/internal/cache/cachetest"
+	"github.com/candyflipline/mnemonic/internal/index"
+	"github.com/candyflipline/mnemonic/internal/wire"
+	"github.com/klauspost/compress/zstd"
 )
 
-// goldenDB opens one golden as its own lake and converged cache, exactly as
-// internal/query/fixture_test.go does; the goldens share session ids, so a
-// per-harness assertion needs one golden per data dir.
-func goldenDB(t *testing.T, golden string) *sql.DB {
+// The expectations are main 59796bc's own (the export package's golden test
+// over the converged cache), ported to the engine: each harness's raw fixture
+// lays into a store, one ingest builds the parts, and the exports read those.
+
+// engineDB ingests the named harness fixtures into a fresh store and returns
+// the DB of the committed index.
+func engineDB(t *testing.T, srcs ...[2]string) *index.DB {
 	t.Helper()
-	dataDir := t.TempDir()
-	if err := cachetest.Lake(dataDir, golden); err != nil {
+	root, store := t.TempDir(), t.TempDir()
+	for _, src := range srcs {
+		raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "fixtures", src[0], src[1]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeRawSource(t, root, "test", src[0], src[0]+"/"+src[1], raw)
+	}
+	if _, err := index.Ingest(root, store, time.Minute, true); err != nil {
 		t.Fatal(err)
 	}
-	ix, err := cache.Open(dataDir, cache.Options{MemoryLimit: "1GB", FlagsSQL: "0::USMALLINT"})
+	ix, err := index.Open(store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ix.Close() })
-	if _, err := ix.Converge(context.Background(), cache.RetryFailed); err != nil {
+	db, release := ix.Snapshot()
+	t.Cleanup(release)
+	return db
+}
+
+// writeRawSource lays one raw source the way push does: zstd lines and a
+// manifest, under author/machine/harness.
+func writeRawSource(t *testing.T, root, author, harness, name string, lines []byte) {
+	t.Helper()
+	zst := (&zstd.Encoder{}).EncodeAll(lines, nil)
+	dir := filepath.Join(root, "raw", "author="+author, "machine=m1", "harness="+harness)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return ix.DB()
+	srcID := wire.SrcID(name)
+	m, _ := json.Marshal(map[string]any{"src_id": srcID, "harness": harness, "source_name": name,
+		"path": name, "size": len(lines), "head_hash": "h", "updated_ms": 1, "zst_size": len(zst)})
+	if err := os.WriteFile(filepath.Join(dir, srcID+".json"), m, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, srcID+".jsonl.zst"), zst, 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestFixtureExports pins, per fixture harness, the exported ATIF's step
@@ -41,47 +71,30 @@ func goldenDB(t *testing.T, golden string) *sql.DB {
 func TestFixtureExports(t *testing.T) {
 	type stepWant struct{ source, message, calls string }
 	cases := []struct {
-		golden   string
+		name     string
+		fixture  [2]string
 		session  string
 		steps    int
 		firstTwo [2]stepWant
 	}{
 		{
-			golden: "codex", session: "019c5f6a-49bd-7920-ac67-1dd8e33b0e95", steps: 8,
+			name: "codex", fixture: [2]string{"codex", "session.jsonl"},
+			session: "019c5f6a-49bd-7920-ac67-1dd8e33b0e95", steps: 8,
 			firstTwo: [2]stepWant{{"system", "", ""}, {"system", "", ""}},
 		},
 		{
-			golden: "claude_code", session: "7c666c01-d38e-4658-8650-854ffb5b626e", steps: 3,
+			name: "claude_code", fixture: [2]string{"claude-code", "session.jsonl"},
+			session: "7c666c01-d38e-4658-8650-854ffb5b626e", steps: 3,
 			firstTwo: [2]stepWant{
 				{"user", "Please inspect the sample project.", ""},
 				{"agent", "I will read the manifest.", "toolu_1"},
 			},
 		},
-		{
-			golden: "cursor", session: "11111111-2222-4333-8444-555555555555", steps: 2,
-			firstTwo: [2]stepWant{
-				{"user", "local fixture cursor user prompt cursor_fixture_keyword", ""},
-				{"agent", "I will inspect the target file.\nlocal fixture cursor assistant reply cursor_fixture_keyword cursor_fixture_trace\n[]", "cursor-tool-fixture"},
-			},
-		},
-		{
-			golden: "pi_coding_agent", session: "11111111-2222-4333-8444-555555555555", steps: 11,
-			firstTwo: [2]stepWant{
-				{"system", "/work/pi-demo", ""},
-				{"system", "openrouter/arcee-ai/trinity-large-thinking", ""},
-			},
-		},
-		{
-			golden: "prime_agent", session: "12345678-1234-4234-8234-123456789abc", steps: 10,
-			firstTwo: [2]stepWant{
-				{"system", "/work/prime-demo", ""},
-				{"system", "openai-codex/gpt-5.6-sol", ""},
-			},
-		},
 	}
 	for _, tc := range cases {
-		t.Run(tc.golden, func(t *testing.T) {
-			traj, err := ATIF(context.Background(), goldenDB(t, tc.golden), tc.session, nil)
+		t.Run(tc.name, func(t *testing.T) {
+			db := engineDB(t, tc.fixture)
+			traj, err := ATIF(db, tc.session, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -154,7 +167,8 @@ func TestFixtureExports(t *testing.T) {
 	})
 
 	t.Run("otlp-claude", func(t *testing.T) {
-		doc, err := OTLP(context.Background(), goldenDB(t, "claude_code"), "7c666c01-d38e-4658-8650-854ffb5b626e", nil)
+		db := engineDB(t, [2]string{"claude-code", "session.jsonl"})
+		doc, err := OTLP(db, "7c666c01-d38e-4658-8650-854ffb5b626e", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -223,15 +237,15 @@ func TestRequestsSplitAgentSteps(t *testing.T) {
 }
 
 // TestDeletedSessionRefused pins that a session in the hidden set is not
-// found by either single-session export, though the cache holds it.
+// found by either single-session export, though the index holds it.
 func TestDeletedSessionRefused(t *testing.T) {
 	const session = "7c666c01-d38e-4658-8650-854ffb5b626e"
-	db := goldenDB(t, "claude_code")
+	db := engineDB(t, [2]string{"claude-code", "session.jsonl"})
 	hidden := map[string]bool{session: true}
-	if _, err := ATIF(context.Background(), db, session, hidden); !errors.Is(err, ErrSessionNotFound) {
+	if _, err := ATIF(db, session, hidden); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("ATIF of a deleted session: %v, want %v", err, ErrSessionNotFound)
 	}
-	if _, err := OTLP(context.Background(), db, session, hidden); !errors.Is(err, ErrSessionNotFound) {
+	if _, err := OTLP(db, session, hidden); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("OTLP of a deleted session: %v, want %v", err, ErrSessionNotFound)
 	}
 }

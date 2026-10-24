@@ -14,6 +14,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -24,10 +26,10 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/candyflipline/mnemonic/internal/auth"
-	"github.com/candyflipline/mnemonic/internal/cache"
+	"github.com/candyflipline/mnemonic/internal/index"
 	"github.com/candyflipline/mnemonic/internal/layout"
 	"github.com/candyflipline/mnemonic/internal/otlp"
-	"github.com/candyflipline/mnemonic/internal/query"
+	"github.com/candyflipline/mnemonic/internal/schema"
 	"github.com/candyflipline/mnemonic/internal/server"
 	"github.com/candyflipline/mnemonic/internal/store"
 	"github.com/candyflipline/mnemonic/internal/wire"
@@ -196,17 +198,15 @@ func TestReceiver(t *testing.T) {
 				t.Fatal(err)
 			}
 			srv.Close()
-			ix, err := cache.Open(dir, cache.Options{MemoryLimit: "1GB", FlagsSQL: query.SearchFlagsSQL()})
+			ix, err := index.Open(layout.IndexDir(dir))
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer ix.Close()
-			if got := dump(t, ix, `SELECT concat_ws('|', s.name, coalesce(p.name, '-'), s.kind, s.status, s.input_tokens, s.output_tokens,
-  s.cache_read_tokens, s.cache_write_tokens, coalesce(s.cost::VARCHAR, 'null'))
-FROM spans s LEFT JOIN spans p ON p.span_id = s.parent_span_id ORDER BY s.start_time`); got != wantSpans {
+			if got := spanLines(spansOf(t, ix, "conv-1", func(a, b schema.Span) bool { return a.Start.Before(b.Start) }), spanFullRow); got != wantSpans {
 				t.Fatalf("spans:\n%s\nwant:\n%s", got, wantSpans)
 			}
-			if got := dump(t, ix, `SELECT concat_ws('|', item_id, session_id, op_kind, latency_ms, agent_label) FROM events ORDER BY event_time`); got != wantEvents {
+			if got := eventsOf(t, ix, "conv-1"); got != wantEvents {
 				t.Fatalf("events:\n%s\nwant:\n%s", got, wantEvents)
 			}
 		})
@@ -230,27 +230,6 @@ func rawOf(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(b)
-}
-
-func dump(t *testing.T, ix *cache.Index, q string) string {
-	t.Helper()
-	rows, err := ix.DB().Query(q)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	var lines []string
-	for rows.Next() {
-		var s string
-		if err := rows.Scan(&s); err != nil {
-			t.Fatal(err)
-		}
-		lines = append(lines, s)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
-	}
-	return strings.Join(lines, "\n")
 }
 
 const (
@@ -331,18 +310,79 @@ func postJSON(t *testing.T, ts *httptest.Server, path, token string, body io.Rea
 	return res.StatusCode, res.Header, string(out)
 }
 
-func converge(t *testing.T, dir string, srv *server.Server) *cache.Index {
+func converge(t *testing.T, dir string, srv *server.Server) *index.Index {
 	t.Helper()
 	if err := srv.Cycle(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	srv.Close()
-	ix, err := cache.Open(dir, cache.Options{MemoryLimit: "1GB", FlagsSQL: query.SearchFlagsSQL()})
+	ix, err := index.Open(layout.IndexDir(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ix.Close() })
 	return ix
+}
+
+// spansOf returns the session's spans ordered by less.
+func spansOf(t *testing.T, ix *index.Index, session string, less func(a, b schema.Span) bool) []schema.Span {
+	t.Helper()
+	db, release := ix.Snapshot()
+	defer release()
+	spans := db.ExportSpans(session)
+	sort.Slice(spans, func(i, j int) bool { return less(spans[i], spans[j]) })
+	return spans
+}
+
+// spanLines renders each span as row, fed the parent's name or "-" when the
+// parent is missing or the span is a root.
+func spanLines(spans []schema.Span, row func(s schema.Span, parent string) string) string {
+	name := make(map[string]string, len(spans))
+	for _, s := range spans {
+		name[s.SpanID] = s.Name
+	}
+	lines := make([]string, len(spans))
+	for i, s := range spans {
+		parent := "-"
+		if s.ParentSpanID != "" {
+			parent = name[s.ParentSpanID]
+		}
+		lines[i] = row(s, parent)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// spanFullRow is name|parent name|kind|status|input|output|cache read|cache
+// write|cost, "-" for a missing cost, the rendering the 59796bc cache SQL
+// produced.
+func spanFullRow(s schema.Span, parent string) string {
+	cost := "null"
+	if s.Cost != nil {
+		cost = strconv.FormatFloat(*s.Cost, 'f', -1, 64)
+	}
+	return s.Name + "|" + parent + "|" + string(s.Kind) + "|" + string(s.Status) + "|" +
+		strconv.FormatUint(s.InputTokens, 10) + "|" + strconv.FormatUint(s.OutputTokens, 10) + "|" +
+		strconv.FormatUint(s.CacheReadTokens, 10) + "|" + strconv.FormatUint(s.CacheWriteTokens, 10) + "|" + cost
+}
+
+// eventsOf renders each winner row of the session as
+// item|session|op kind|latency ms|agent label, in event order.
+func eventsOf(t *testing.T, ix *index.Index, session string) string {
+	t.Helper()
+	db, release := ix.Snapshot()
+	defer release()
+	es, ok, err := db.ExportSession(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatalf("session %q missing from the index", session)
+	}
+	lines := make([]string, len(es.Rows))
+	for i, r := range es.Rows {
+		lines[i] = r.ItemID + "|" + r.Session + "|" + r.OpKind + "|" + strconv.FormatUint(r.LatencyMs, 10) + "|" + r.AgentLabel
+	}
+	return strings.Join(lines, "\n")
 }
 
 func TestReceiverRows(t *testing.T) {
@@ -384,9 +424,28 @@ func TestReceiverRows(t *testing.T) {
 			}
 		}
 		ix := converge(t, dir, srv)
-		const q = `SELECT concat_ws('|', author, count(*)) FROM events WHERE item_id = 'eee19b7ec3c1b175' GROUP BY author ORDER BY author`
-		if got, want := dump(t, ix, q), "alice|1\nbob|1"; got != want {
-			t.Fatalf("events of one span id:\n%s\nwant:\n%s", got, want)
+		db, release := ix.Snapshot()
+		defer release()
+		es, ok, err := db.ExportSession("conv-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok {
+			t.Fatal("session conv-1 missing from the index")
+		}
+		uids := map[string]bool{}
+		n := 0
+		for _, r := range es.Rows {
+			if r.ItemID == "eee19b7ec3c1b175" {
+				n++
+				uids[r.UID] = true
+			}
+		}
+		// 59796bc answered alice|1 and bob|1 for this grouping (per-row
+		// author was an events column); the engine keeps both rows too, and
+		// their uids stay distinct because the span uid names the author.
+		if n != 2 || len(uids) != 2 {
+			t.Fatalf("rows of one span id: %d rows, %d distinct uids, want 2 and 2", n, len(uids))
 		}
 	})
 
@@ -396,8 +455,9 @@ func TestReceiverRows(t *testing.T) {
 			t.Fatalf("%d %s", status, out)
 		}
 		ix := converge(t, dir, srv)
-		const q = `SELECT concat_ws('|', s.name, coalesce(p.name, '-')) FROM spans s LEFT JOIN spans p ON p.span_id = s.parent_span_id ORDER BY s.name`
-		if got, want := dump(t, ix, q), "b|-\nc|b\nself|-"; got != want {
+		got := spanLines(spansOf(t, ix, "conv-loop", func(a, b schema.Span) bool { return a.Name < b.Name }),
+			func(s schema.Span, parent string) string { return s.Name + "|" + parent })
+		if want := "b|-\nc|b\nself|-"; got != want {
 			t.Fatalf("spans:\n%s\nwant:\n%s", got, want)
 		}
 	})

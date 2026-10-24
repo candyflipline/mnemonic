@@ -1,12 +1,14 @@
 package export
 
 import (
-	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"time"
+
+	"github.com/candyflipline/mnemonic/internal/index"
+	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
 // Dataset is the JSONL export: sessions filtered by one annotation, capped
@@ -46,42 +48,65 @@ type SessionError struct {
 	Err       error
 }
 
+// sessionKey is one annotated session: the harness and cwd of its first
+// published event, its newest event_time, and its annotations.
+type sessionKey struct {
+	id, harness, task string
+	lastUs            int64
+	annotations       []schema.Annotation
+}
+
 // Dataset returns the sessions matching the annotation, at most perTask per
 // task, newest first. A task is the cwd of the session's first published
 // event. Sessions in hidden are left out. A session that fails validation does
 // not count toward its task's cap and comes back in skipped; Dataset errs only
 // when every matching session failed.
-func Dataset(ctx context.Context, db *sql.DB, f AnnotationFilter, perTask int, hidden map[string]bool) (rows []DatasetRow, skipped []SessionError, err error) {
+func Dataset(db *index.DB, f AnnotationFilter, perTask int, hidden map[string]bool) (rows []DatasetRow, skipped []SessionError, err error) {
 	if f.Name == "" {
 		return nil, nil, fmt.Errorf("export: --annotation needs a name")
 	}
 	if perTask < 1 {
 		return nil, nil, fmt.Errorf("export: --per-task must be at least 1")
 	}
-	sessions, err := annotatedSessions(ctx, db, f)
+	var sessions []sessionKey
+	err = db.EachSession(hidden, func(es index.ExportSession) error {
+		// A session the annotations relation targets but events never held
+		// is not among the export's sessions.
+		if len(es.Rows) == 0 {
+			return nil
+		}
+		for _, a := range es.Annotations {
+			if a.Name == f.Name && (!f.HasValue || annotationValueMatches(a.Value, f)) {
+				sessions = append(sessions, sessionKey{
+					id: es.ID, harness: es.Harness, task: es.FirstCwd,
+					lastUs: es.LastEventUs, annotations: es.Annotations,
+				})
+				return nil
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, nil, err
 	}
+	// Newest first; the session id breaks ties so the order is total.
+	sort.Slice(sessions, func(i, j int) bool { return sessionNewer(sessions[i], sessions[j]) })
 	tasks := map[string]int{}
 	for _, s := range sessions {
-		if hidden[s.id] || tasks[s.task] >= perTask {
+		if tasks[s.task] >= perTask {
 			continue
 		}
-		atif, err := MarshalATIF(ctx, db, s.id, hidden)
+		atif, err := MarshalATIF(db, s.id, hidden)
 		if err != nil {
 			skipped = append(skipped, SessionError{s.id, err})
 			continue
-		}
-		anns, err := sessionAnnotations(ctx, db, s.id)
-		if err != nil {
-			return nil, nil, err
 		}
 		tasks[s.task]++
 		rows = append(rows, DatasetRow{
 			SessionID:   s.id,
 			Harness:     s.harness,
 			Task:        s.task,
-			Annotations: anns,
+			Annotations: annotationOuts(s.annotations),
 			ATIF:        atif,
 		})
 	}
@@ -91,133 +116,54 @@ func Dataset(ctx context.Context, db *sql.DB, f AnnotationFilter, perTask int, h
 	return rows, skipped, nil
 }
 
-type sessionKey struct {
-	id, harness, task string
-	last              time.Time
-}
-
-// annotatedSessions lists the matching sessions newest first, with the
-// harness and cwd of each one's first published event.
-func annotatedSessions(ctx context.Context, db *sql.DB, f AnnotationFilter) ([]sessionKey, error) {
-	query := `SELECT target_session_id FROM annotations WHERE name = ?`
-	args := []any{f.Name}
-	if f.HasValue {
-		query += ` AND (value_label = ? OR value_text = ?`
-		args = append(args, f.Value, f.Value)
-		if n, err := strconv.ParseFloat(f.Value, 64); err == nil {
-			query += ` OR value_number = ?`
-			args = append(args, n)
-		}
-		query += `)`
-	}
-	ids, err := queryStrings(ctx, db, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	if len(ids) == 0 {
-		return nil, nil
-	}
-	in := "session_id IN (" + placeholders(len(ids)) + ")"
-	first, err := db.QueryContext(ctx, `SELECT e.session_id, e.harness, e.cwd, s.last_event_time
-FROM sessions s LEFT JOIN events e
-  ON e.session_id = s.session_id AND e.event_order = (SELECT min(event_order) FROM events WHERE session_id = s.session_id)
-WHERE s.`+in, stringsAsAny(ids)...)
-	if err != nil {
-		return nil, err
-	}
-	defer first.Close()
-	var sessions []sessionKey
-	for first.Next() {
-		var k sessionKey
-		var harness, cwd sql.NullString
-		if err := first.Scan(&k.id, &harness, &cwd, &k.last); err != nil {
-			return nil, err
-		}
-		k.harness, k.task = harness.String, cwd.String
-		sessions = append(sessions, k)
-	}
-	if err := first.Err(); err != nil {
-		return nil, err
-	}
-	// Newest first; the session id breaks ties so the order is total.
-	for i := 1; i < len(sessions); i++ {
-		for j := i; j > 0 && sessionNewer(sessions[j], sessions[j-1]); j-- {
-			sessions[j], sessions[j-1] = sessions[j-1], sessions[j]
-		}
-	}
-	return sessions, nil
-}
-
 func sessionNewer(a, b sessionKey) bool {
-	if !a.last.Equal(b.last) {
-		return a.last.After(b.last)
+	if a.lastUs != b.lastUs {
+		return a.lastUs > b.lastUs
 	}
 	return a.id > b.id
 }
 
-func placeholders(n int) string {
-	s := ""
-	for i := 0; i < n; i++ {
-		if i > 0 {
-			s += ", "
+// annotationValueMatches is the SQL the annotated-sessions list kept:
+// value_label = ? OR value_text = ? OR value_number = ? with the value
+// parsed as a float.
+func annotationValueMatches(v schema.Value, f AnnotationFilter) bool {
+	if n, ok := v.Number(); ok {
+		if p, err := strconv.ParseFloat(f.Value, 64); err == nil && n == p {
+			return true
 		}
-		s += "?"
 	}
-	return s
+	if s, ok := v.Label(); ok && s == f.Value {
+		return true
+	}
+	s, _ := v.Text()
+	return s == f.Value
 }
 
-// sessionAnnotations reads the session's annotations oldest first.
-func sessionAnnotations(ctx context.Context, db *sql.DB, sessionID string) ([]AnnotationOut, error) {
-	rows, err := db.QueryContext(ctx, `SELECT name, value_number, value_label, value_text, source, author, ts
-FROM annotations WHERE target_session_id = ? ORDER BY ts, annotation_id`, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []AnnotationOut
-	for rows.Next() {
-		var a AnnotationOut
-		var number sql.NullFloat64
-		var label, text, source sql.NullString
-		if err := rows.Scan(&a.Name, &number, &label, &text, &source, &a.Author, &a.TS); err != nil {
-			return nil, err
+// annotationOuts renders the session's annotations oldest first, each ts at
+// the TIMESTAMPTZ precision the annotations relation kept.
+func annotationOuts(ann []schema.Annotation) []AnnotationOut {
+	sorted := make([]schema.Annotation, len(ann))
+	copy(sorted, ann)
+	sort.Slice(sorted, func(i, j int) bool {
+		ti, tj := sorted[i].TS.Truncate(time.Microsecond), sorted[j].TS.Truncate(time.Microsecond)
+		if !ti.Equal(tj) {
+			return ti.Before(tj)
 		}
-		a.Source = source.String
-		switch {
-		case number.Valid:
-			a.Value, _ = json.Marshal(map[string]float64{"number": number.Float64})
-		case label.Valid:
-			a.Value, _ = json.Marshal(map[string]string{"label": label.String})
-		default:
-			a.Value, _ = json.Marshal(map[string]string{"text": text.String})
+		return sorted[i].ID < sorted[j].ID
+	})
+	out := make([]AnnotationOut, 0, len(sorted))
+	for _, a := range sorted {
+		o := AnnotationOut{Name: a.Name, Source: string(a.Source), Author: a.Author,
+			TS: a.TS.UTC().Truncate(time.Microsecond)}
+		if n, ok := a.Value.Number(); ok {
+			o.Value, _ = json.Marshal(map[string]float64{"number": n})
+		} else if s, ok := a.Value.Label(); ok {
+			o.Value, _ = json.Marshal(map[string]string{"label": s})
+		} else {
+			s, _ := a.Value.Text()
+			o.Value, _ = json.Marshal(map[string]string{"text": s})
 		}
-		out = append(out, a)
-	}
-	return out, rows.Err()
-}
-
-// queryStrings runs a one-string-column query.
-func queryStrings(ctx context.Context, db *sql.DB, query string, args ...any) ([]string, error) {
-	rows, err := db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var s string
-		if err := rows.Scan(&s); err != nil {
-			return nil, err
-		}
-		out = append(out, s)
-	}
-	return out, rows.Err()
-}
-
-func stringsAsAny(ss []string) []any {
-	out := make([]any, len(ss))
-	for i, s := range ss {
-		out[i] = s
+		out = append(out, o)
 	}
 	return out
 }

@@ -16,7 +16,7 @@ Every `/v1/*` request carries `Authorization: Bearer <token>`. The server stores
 |---|---|---|
 | segment | `[a-z0-9._-]+`, and not `.` or `..`. Used for machine, harness and src_id. | `internal/wire/wire.go:15-19` |
 | machine | a segment naming the sending host; the producer chooses it. A machine or harness reserved for server-owned sources is refused with 403 (see below). | `internal/store/store.go:150-153` |
-| harness | a segment naming the parser that reads the source, such as `claude-code` or `codex`. A harness with no registered parser is stored but not parsed. `annotation`, `otlp` and `control` are reserved for server-owned sources and refused with 403 (see below). | `internal/lake/lake.go:130-133` |
+| harness | a segment naming the parser that reads the source, such as `claude-code` or `codex`. A harness with no registered parser is stored but not parsed. `annotation`, `otlp` and `control` are reserved for server-owned sources and refused with 403 (see below). | `internal/index/ingest.go`, the parser lookup |
 | src_id | first 16 hex characters of `sha256(path)`, where `path` is the absolute path of the file on the producer. The same path always yields the same src_id. | `internal/wire/wire.go:21-26` |
 | head_hash | lowercase hex `sha256` of the source's first line, newline included, cut to the first 65536 bytes. It identifies the content: a file rewritten from the top changes it. | `internal/wire/wire.go:13`, `internal/wire/wire.go:28-36` |
 
@@ -104,4 +104,4 @@ Some sources are written by the server itself, such as those fed by [OTLP](otlp.
 
 ## What the server does next
 
-Each stored change wakes the parser loop, which reads the raw file, runs the harness's parser and writes [events](events.md) as parquet under `events/author=A/machine=M/harness=H/<src_id>.parquet` (`internal/layout/layout.go:1-9`), then converges them into the index MCP reads. A producer does not take part in that. A parser fix re-parses that harness's sources from raw, and no other's, so the raw lines are the durable thing: send them as the harness wrote them.
+Each stored change wakes the ingest loop, which reads the raw file, runs the harness's parser and ingests the [events](events.md) into the engine's store MCP reads (`internal/index/ingest.go`, `internal/index/handle.go`). A producer does not take part in that. A parser fix re-parses that harness's sources from raw, and no other's, so the raw lines are the durable thing: send them as the harness wrote them.

@@ -13,9 +13,9 @@ type annRow struct {
 
 // buildAnnotations is a part's annotations section: one per annotation_id
 // over the annotation harness rows of its sessions, the copy
-// internal/cache/index_annotations.go keeps. Rows arrive in (source key,
-// event) order, so the first row of an id is the one kept, the way the
-// cache's applyAnnotationBatch qualifies row_number over filename and
+// 59796bc:internal/cache/index_annotations.go kept. Rows arrive in (source
+// key, event) order, so the first row of an id is the one kept, the way the
+// oracle's applyAnnotationBatch qualifies row_number over filename and
 // file_row_number.
 func buildAnnotations(rows []annRow) []schema.Annotation {
 	out := make([]schema.Annotation, 0, len(rows))

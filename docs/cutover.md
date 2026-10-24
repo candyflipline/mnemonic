@@ -12,15 +12,14 @@ Client (any Mac, pure Go, no cgo):
 CGO_ENABLED=0 go build -o mnemonic ./cmd/mnemonic
 ```
 
-Server (needs DuckDB, so it needs cgo):
+The server is pure Go too; it needs the server build tag:
 
 ```
-go build -tags server -o mnemonic ./cmd/mnemonic
+CGO_ENABLED=0 go build -tags server -o mnemonic ./cmd/mnemonic
 ```
 
-Cross-compiling the server from a Mac does not work: DuckDB needs cgo, and
-cgo needs a target toolchain. Build the server on the server itself, or on
-any Linux box, and copy the binary over.
+The same command cross-compiles from a Mac (`GOOS=linux GOARCH=amd64`), or
+build on any Linux box and copy the binary over.
 
 ## Server install
 

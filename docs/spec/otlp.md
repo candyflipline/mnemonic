@@ -35,7 +35,7 @@ A span is rejected when its trace id is not 16 non-zero bytes or its span id is 
 
 The receiver appends the accepted records as JSON lines to a server-owned source through `store.Append` (`internal/store/append.go`). The source is per author, per `service.name` and per UTC day, named `otlp/<service>/<yyyy-mm-dd>` (`store.Today`, `internal/otlp/receiver.go:132`); `service.name` is lowercased and any character outside `a-z 0-9 . - _` becomes `_`, with `unknown_service` when it is missing (`internal/otlp/convert.go:167-184`). A client PUT naming harness `otlp` is refused with 403 (`internal/store/store.go:150`).
 
-The receiver passes `store.Append` no request key (`internal/otlp/receiver.go:132`), so nothing is recorded in the day's manifest and a request costs no more than its own lines, however many an exporter sends in a day. An exporter's retry of the same body is appended again, and the cache keeps one `events` row for it, because an `event_uid` is the same for every export of a span by that author (`internal/normalize/otlp/otlp.go:99`) and the cache keeps one row per `event_uid` (`internal/cache/index.go:233`). Spans derive from `events`, so a retry does not double a trace's totals.
+The receiver passes `store.Append` no request key (`internal/otlp/receiver.go:132`), so nothing is recorded in the day's manifest and a request costs no more than its own lines, however many an exporter sends in a day. An exporter's retry of the same body is appended again, and the engine keeps one row for it, because an `event_uid` is the same for every export of a span by that author (`internal/normalize/otlp/otlp.go:99`) and the winner rule keeps one row per `event_uid` (`internal/index/build.go`). Spans derive from `events`, so a retry does not double a trace's totals.
 
 One line per record (`Record`, `internal/otlp/record.go:19`):
 
@@ -69,7 +69,7 @@ Message content is stored only when the server config has
 store_content = false
 ```
 
-set to `true` (`internal/config/config.go:60-65`); the default is false, which matches the OTel GenAI convention that message content SHOULD NOT be captured by default. With it false, the receiver keeps only the attributes named in `allowed` (`internal/otlp/mapping.go:73`) and drops every other one, from the resource, each span, each span event and each log record, before the first byte is written, so raw, parquet and the index never hold the rest (`gate`, `internal/otlp/mapping.go:94`). A key that is allowed keeps only a scalar value: an array or a key-value list is dropped under any key. A log record's `body` and a span's status message are dropped too (`internal/otlp/convert.go:77`, `:103-105`).
+set to `true` (`internal/config/config.go:60-65`); the default is false, which matches the OTel GenAI convention that message content SHOULD NOT be captured by default. With it false, the receiver keeps only the attributes named in `allowed` (`internal/otlp/mapping.go:73`) and drops every other one, from the resource, each span, each span event and each log record, before the first byte is written, so raw and the index never hold the rest (`gate`, `internal/otlp/mapping.go:94`). A key that is allowed keeps only a scalar value: an array or a key-value list is dropped under any key. A log record's `body` and a span's status message are dropped too (`internal/otlp/convert.go:77`, `:103-105`).
 
 The table is a list, not a guess about what content looks like, because the conventions keep adding keys (`ai.prompt.messages`, `traceloop.entity.input`, `pydantic_ai.all_messages`, `langfuse.observation.input`) and a deny-list stores each of them until it is told. `allowed` is built from the key lists the parser and the span derivation read, so an attribute is read only if it is kept:
 
@@ -123,7 +123,7 @@ All mappings of attribute names live in `internal/otlp/mapping.go`; the conventi
 
 ## Spans
 
-`cache.RegisterSpans("otlp", ...)` (`internal/cache/index_spans_otlp.go:3`) derives spans from the events of sessions whose lake file is under `harness=otlp`.
+The span builder registered for `otlp` (`internal/index/spans_otlp.go`) derives spans from the events of `harness=otlp` sessions.
 
 - A span row is an event with `payload_type = 'span'` and an `op_kind` of `chat`, `execute_tool` or `invoke_agent`. The kind is `gen_ai.operation.name` (`chat`, `text_completion`, `generate_content` to `chat`; `execute_tool`; `invoke_agent`, `create_agent` to `invoke_agent`), else `openinference.span.kind` (`LLM`, `TOOL`, `AGENT`), else the span name `claude_code.llm_request`, `claude_code.tool`, `claude_code.interaction` (`KindOf`, `internal/otlp/mapping.go:54`). Other spans are not emitted.
 - `span_id` is the first 16 hex characters of sha256 over `otlp`, the author, the trace id and the OTLP span id, joined by U+001F (the rule of [spans](spans.md)).
