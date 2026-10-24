@@ -245,9 +245,10 @@ func (t *transcript) norm(s string) string {
 func (t *transcript) render() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "mnemonic e2e transcript (normalized)\n")
-	fmt.Fprintf(&b, "mask list (applied in this order at render time):\n")
+	fmt.Fprintf(&b, "mask list (applied in this order at render time; the volatile\n")
+	fmt.Fprintf(&b, "entries below show their <MASK>, not this run's values):\n")
 	for _, m := range t.masks {
-		fmt.Fprintf(&b, "  %-22s /%s/ -> %s\n", m.name, m.re, m.repl)
+		fmt.Fprintf(&b, "  %-22s %s -> %s\n", m.name, t.norm(m.re.String()), m.repl)
 	}
 	fmt.Fprintf(&b, "tool responses are recorded to their first %d bytes; push and export bodies to a fixed excerpt\n\n", mcpRecordCap)
 	step := ""
