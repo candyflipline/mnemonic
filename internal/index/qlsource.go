@@ -15,7 +15,7 @@ import (
 
 // qlSource implements ql.RowSource over the engine: it enumerates the rows of
 // one relation that the caller may read (scope.go) inside from..to, the rows
-// the old tool's temp views held (internal/query/sqltool.go sqlScopeDDL):
+// the old tool's temp views held (59796bc:internal/query/sqltool.go sqlScopeDDL):
 // events by event_ts, spans by start_time, sessions overlapping the range,
 // turns and annotations of the sessions in scope. A session the caller may
 // not list never reaches the evaluator, which no clause can change.
