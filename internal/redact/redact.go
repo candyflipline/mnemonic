@@ -32,7 +32,7 @@ const (
 
 type rule struct {
 	id          string
-	re          *regexp.Regexp
+	m           matcher // extra patterns: regex-backed; builtins use matchers[i]
 	keywords    [][]byte
 	secretGroup int
 	gate        entropyGate
@@ -49,13 +49,8 @@ type redactionSpan struct {
 // Redactor is safe for concurrent use.
 type Redactor struct {
 	rules      []rule
-	keywords   []keyword
+	auto       *keywordAutomaton
 	alwaysScan []int
-}
-
-type keyword struct {
-	text  []byte
-	rules []int
 }
 
 const redactedMarker = "[REDACTED:"
@@ -118,16 +113,14 @@ var builtinRules = []ruleSpec{
 // Extra patterns get the ids upstream would give them (extra-pattern-1, ...)
 // and, having no keywords, are always scanned rather than prefiltered.
 func New(extraPatterns []string) (*Redactor, error) {
+	if len(matchers) != len(builtinRules) {
+		panic(fmt.Sprintf("redact: %d matchers for %d builtin rules", len(matchers), len(builtinRules)))
+	}
 	r := &Redactor{}
 	for i := range builtinRules {
 		spec := &builtinRules[i]
-		re, err := regexp.Compile(spec.pattern)
-		if err != nil {
-			return nil, fmt.Errorf("failed to compile builtin redaction rule %s: %w", spec.id, err)
-		}
 		r.rules = append(r.rules, rule{
 			id:          spec.id,
-			re:          re,
 			keywords:    lowerKeywords(spec.keywords),
 			secretGroup: spec.secretGroup,
 			gate:        spec.gate,
@@ -142,7 +135,7 @@ func New(extraPatterns []string) (*Redactor, error) {
 		}
 		r.rules = append(r.rules, rule{
 			id:       fmt.Sprintf("extra-pattern-%d", i+1),
-			re:       re,
+			m:        regexMatcher(re, 0),
 			minLen:   1,
 			priority: len(builtinRules) + i,
 		})
@@ -159,22 +152,16 @@ func New(extraPatterns []string) (*Redactor, error) {
 }
 
 func (r *Redactor) buildPrefilter() {
-	seen := make(map[string]int)
+	need := false
 	for i := range r.rules {
-		kws := r.rules[i].keywords
-		if len(kws) == 0 {
+		if len(r.rules[i].keywords) == 0 {
 			r.alwaysScan = append(r.alwaysScan, i)
 			continue
 		}
-		for _, kw := range kws {
-			j, ok := seen[string(kw)]
-			if !ok {
-				j = len(r.keywords)
-				seen[string(kw)] = j
-				r.keywords = append(r.keywords, keyword{text: kw})
-			}
-			r.keywords[j].rules = append(r.keywords[j].rules, i)
-		}
+		need = true
+	}
+	if need {
+		r.auto = buildKeywordAutomaton(r.rules)
 	}
 }
 
@@ -402,14 +389,19 @@ func (r *Redactor) nonOverlappingSpans(text []byte) []redactionSpan {
 	}
 	ph := placeholderRanges(text)
 	var spans []redactionSpan
+	var raw [][2]int
 	for i := range r.rules {
 		if !cands[i] {
 			continue
 		}
 		ru := &r.rules[i]
-		for _, loc := range ru.re.FindAllSubmatchIndex(text, -1) {
-			g0, g1 := loc[2*ru.secretGroup], loc[2*ru.secretGroup+1]
-			if g0 < 0 || overlapsAny(ph, g0, g1) || !utf8.Valid(text[g0:g1]) {
+		m := ru.m
+		if i < len(matchers) {
+			m = matchers[i]
+		}
+		for _, sp := range m(text, raw[:0]) {
+			g0, g1 := sp[0], sp[1]
+			if overlapsAny(ph, g0, g1) || !utf8.Valid(text[g0:g1]) {
 				continue
 			}
 			if !r.shouldRedact(ru, text[g0:g1]) {
@@ -454,16 +446,8 @@ func (r *Redactor) candidates(text []byte) []bool {
 	for _, i := range r.alwaysScan {
 		c[i] = true
 	}
-	if len(r.keywords) == 0 {
-		return c
-	}
-	lower := asciiLower(text)
-	for _, kw := range r.keywords {
-		if bytes.Contains(lower, kw.text) {
-			for _, i := range kw.rules {
-				c[i] = true
-			}
-		}
+	if r.auto != nil {
+		r.auto.scan(text, c)
 	}
 	return c
 }
