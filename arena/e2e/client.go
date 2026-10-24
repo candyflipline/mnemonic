@@ -196,9 +196,10 @@ func (c *mcpClient) call(tool string, args map[string]any) (data map[string]any,
 // ---- transcript ----
 
 type mask struct {
-	name string
-	re   *regexp.Regexp
-	repl string
+	name     string
+	re       *regexp.Regexp
+	repl     string
+	volatile bool // a per-run value: rendered without its regex source
 }
 
 type entry struct {
@@ -214,11 +215,11 @@ type transcript struct {
 func newTranscript() *transcript {
 	re := func(s string) *regexp.Regexp { return regexp.MustCompile(s) }
 	return &transcript{masks: []mask{
-		{"rfc3339 timestamps", re(`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})`), "<TS>"},
-		{"unix millis", re(`\b1[0-9]{12}\b`), "<MS>"},
-		{"unix nanos", re(`\b1[0-9]{17,18}\b`), "<NS>"},
-		{"elapsed_ms", re(`"elapsed_ms":\d+`), `"elapsed_ms":<ELAPSED>`},
-		{"bm25 scores", re(`"score":(-?[0-9.eE+]+)`), `"score":<SCORE>`},
+		{name: "rfc3339 timestamps", re: re(`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})`), repl: "<TS>"},
+		{name: "unix millis", re: re(`\b1[0-9]{12}\b`), repl: "<MS>"},
+		{name: "unix nanos", re: re(`\b1[0-9]{17,18}\b`), repl: "<NS>"},
+		{name: "elapsed_ms", re: re(`"elapsed_ms":\d+`), repl: `"elapsed_ms":<ELAPSED>`},
+		{name: "bm25 scores", re: re(`"score":(-?[0-9.eE+]+)`), repl: `"score":<SCORE>`},
 	}}
 }
 
@@ -230,8 +231,8 @@ func (t *transcript) step(step, format string, args ...any) {
 // normalizer can mask them wherever they appear.
 func (t *transcript) noteScratch(dir, port string) {
 	t.masks = append(t.masks,
-		mask{"scratch data dir", regexp.MustCompile(regexp.QuoteMeta(dir)), "<DATA>"},
-		mask{"loopback host:port", regexp.MustCompile(`127\.0\.0\.1:` + port), "<HOST>"},
+		mask{name: "scratch data dir", re: regexp.MustCompile(regexp.QuoteMeta(dir)), repl: "<DATA>", volatile: true},
+		mask{name: "loopback host:port", re: regexp.MustCompile(`127\.0\.0\.1:` + port), repl: "<HOST>", volatile: true},
 	)
 }
 
@@ -248,6 +249,10 @@ func (t *transcript) render() string {
 	fmt.Fprintf(&b, "mask list (applied in this order at render time; the volatile\n")
 	fmt.Fprintf(&b, "entries below show their <MASK>, not this run's values):\n")
 	for _, m := range t.masks {
+		if m.volatile {
+			fmt.Fprintf(&b, "  %-22s (this run's value) -> %s\n", m.name, m.repl)
+			continue
+		}
 		fmt.Fprintf(&b, "  %-22s %s -> %s\n", m.name, t.norm(m.re.String()), m.repl)
 	}
 	fmt.Fprintf(&b, "tool responses are recorded to their first %d bytes; push and export bodies to a fixed excerpt\n\n", mcpRecordCap)
