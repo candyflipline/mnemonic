@@ -3,7 +3,6 @@
 package main
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -12,9 +11,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/candyflipline/mnemonic/internal/cache"
 	"github.com/candyflipline/mnemonic/internal/export"
-	"github.com/candyflipline/mnemonic/internal/query"
+	"github.com/candyflipline/mnemonic/internal/index"
+	"github.com/candyflipline/mnemonic/internal/layout"
 )
 
 func init() { commands["export"] = exportCmd }
@@ -29,7 +28,7 @@ unless --include-private is given. A session that fails ATIF validation is
 skipped by dataset with its id and error on stderr; dataset fails only when
 every matching session did.`
 
-// exportCmd writes sessions out of the cache: one ATIF trajectory or OTLP
+// exportCmd writes sessions out of the index: one ATIF trajectory or OTLP
 // trace per session, or a JSONL dataset filtered by annotation.
 func exportCmd(args []string) error {
 	if len(args) == 0 {
@@ -42,7 +41,7 @@ func exportCmd(args []string) error {
 		return fmt.Errorf("export: unknown kind %q; %s", kind, exportUsage)
 	}
 	fs := flag.NewFlagSet("export "+kind, flag.ContinueOnError)
-	dataDir := fs.String("data-dir", "", "data directory holding cache/index.duckdb (required)")
+	dataDir := fs.String("data-dir", "", "data directory holding raw/ and index/ (required)")
 	session := fs.String("session", "", "session id (atif, otlp)")
 	annotation := fs.String("annotation", "", "name[=value] to filter sessions by (dataset)")
 	perTask := fs.Int("per-task", 3, "at most this many sessions per task (dataset)")
@@ -71,7 +70,7 @@ func exportCmd(args []string) error {
 		return errors.New("export: --session is required")
 	}
 
-	controls, err := query.LoadControls(*dataDir)
+	controls, err := index.LoadControls(*dataDir)
 	if err != nil {
 		return err
 	}
@@ -79,26 +78,28 @@ func exportCmd(args []string) error {
 	// private ones.
 	hidden := controls.ExportHidden(kind != "dataset" || *includePrivate)
 
-	ix, err := cache.Open(*dataDir, cache.Options{MemoryLimit: "1GB", FlagsSQL: query.SearchFlagsSQL()})
+	// One-shot: bring the raw under the data dir into the index, everything
+	// settled, as the converge before an export did.
+	ix, err := index.Open(layout.IndexDir(*dataDir))
 	if err != nil {
 		return err
 	}
 	defer ix.Close()
-	ctx := context.Background()
-	if _, err := ix.Converge(ctx, cache.SkipFailed); err != nil {
+	if _, err := ix.Ingest(*dataDir, index.IngestOptions{SettleAll: true}); err != nil {
 		return err
 	}
-	db := ix.DB()
+	db, release := ix.Snapshot()
+	defer release()
 
 	var body []byte
 	switch kind {
 	case "atif":
-		if body, err = export.MarshalATIF(ctx, db, sessionID, hidden); err == nil {
+		if body, err = export.MarshalATIF(db, sessionID, hidden); err == nil {
 			body = indent(body)
 		}
 	case "otlp":
 		var doc any
-		if doc, err = export.OTLP(ctx, db, sessionID, hidden); err == nil {
+		if doc, err = export.OTLP(db, sessionID, hidden); err == nil {
 			body, err = json.MarshalIndent(doc, "", "  ")
 		}
 	case "dataset":
@@ -106,7 +107,7 @@ func exportCmd(args []string) error {
 		if parseErr != nil {
 			return parseErr
 		}
-		rows, skipped, dsErr := export.Dataset(ctx, db, f, *perTask, hidden)
+		rows, skipped, dsErr := export.Dataset(db, f, *perTask, hidden)
 		for _, s := range skipped {
 			fmt.Fprintf(os.Stderr, "export: skipped session %s: %v\n", s.SessionID, s.Err)
 		}

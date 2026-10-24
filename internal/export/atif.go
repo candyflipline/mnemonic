@@ -1,4 +1,4 @@
-// Package export writes sessions out of the cache in the interchange formats
+// Package export writes sessions out of the index in the interchange formats
 // the design doc names under HTTP export: ATIF trajectories validated against
 // the ported Harbor rules, OTLP/JSON traces built from the spans relation, and
 // JSONL datasets filtered by annotation (docs/design-open-source-at-scale.md
@@ -6,8 +6,6 @@
 package export
 
 import (
-	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/candyflipline/mnemonic/internal/index"
 	"github.com/candyflipline/mnemonic/internal/normalize"
 )
 
@@ -104,12 +103,7 @@ type eventRow struct {
 	CacheWrite      uint64
 }
 
-const atifEventsSQL = `SELECT event_time, coalesce(request_id, ''), coalesce(trace_id, ''), coalesce(item_id, ''), event_kind, actor_kind, tool_call_id, tool_name,
-  text_content, coalesce(tool_io_input_json, ''), model,
-  input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
-FROM events WHERE session_id = ? AND event_order IS NOT NULL ORDER BY event_order`
-
-// ErrSessionNotFound is what an export answers for a session the cache does
+// ErrSessionNotFound is what an export answers for a session the index does
 // not know and for one in hidden, so the two cannot be told apart.
 var ErrSessionNotFound = errors.New("session not found")
 
@@ -117,48 +111,48 @@ func notFound(sessionID string) error {
 	return fmt.Errorf("export: %w: %q", ErrSessionNotFound, sessionID)
 }
 
-// ATIF builds one session's trajectory from the cache. Only published rows
-// take part (`event_order IS NOT NULL`, internal/query/query.go:21), in
-// event_order. The harness of the first event names the agent. A session in
+// ATIF builds one session's trajectory from the index. Only published rows
+// take part (the events table's rows, in event order, which EachSession's
+// rows are). The harness of the first event names the agent. A session in
 // hidden (deleted, per the server's session controls) is not found.
-func ATIF(ctx context.Context, db *sql.DB, sessionID string, hidden map[string]bool) (*Trajectory, error) {
+func ATIF(db *index.DB, sessionID string, hidden map[string]bool) (*Trajectory, error) {
 	if hidden[sessionID] {
 		return nil, notFound(sessionID)
 	}
-	rows, err := db.QueryContext(ctx, atifEventsSQL, sessionID)
+	es, ok, err := db.ExportSession(sessionID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var evs []eventRow
-	harness := ""
-	for rows.Next() {
-		var r eventRow
-		if err := rows.Scan(&r.EventTime, &r.RequestID, &r.TraceID, &r.ItemID, &r.EventKind, &r.ActorKind, &r.ToolCallID, &r.ToolName,
-			&r.TextContent, &r.ToolIOInputJSON, &r.Model,
-			&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWrite); err != nil {
-			return nil, err
+	if !ok || len(es.Rows) == 0 {
+		return nil, notFound(sessionID)
+	}
+	evs := make([]eventRow, len(es.Rows))
+	for i, r := range es.Rows {
+		evs[i] = eventRow{
+			EventTime:       r.EventTime(),
+			RequestID:       r.RequestID,
+			TraceID:         r.TraceID,
+			ItemID:          r.ItemID,
+			EventKind:       r.EventKind,
+			ActorKind:       r.ActorKind,
+			ToolCallID:      r.ToolCallID,
+			ToolName:        r.ToolName,
+			TextContent:     r.Text,
+			ToolIOInputJSON: r.TioInput,
+			Model:           r.Model,
+			InputTokens:     r.InputTokens,
+			OutputTokens:    r.OutputTokens,
+			CacheReadTokens: r.CacheReadTokens,
+			CacheWrite:      r.CacheWriteTokens,
 		}
-		evs = append(evs, r)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if err := db.QueryRowContext(ctx,
-		`SELECT harness FROM events WHERE session_id = $1 AND event_order IS NOT NULL ORDER BY event_order LIMIT 1`,
-		sessionID).Scan(&harness); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, notFound(sessionID)
-		}
-		return nil, err
-	}
-	return buildTrajectory(sessionID, harness, evs), nil
+	return buildTrajectory(sessionID, es.Harness, evs), nil
 }
 
 // MarshalATIF builds the trajectory and returns its JSON, but only once the
 // ported validator accepts it; a failed rule comes back as the error.
-func MarshalATIF(ctx context.Context, db *sql.DB, sessionID string, hidden map[string]bool) ([]byte, error) {
-	t, err := ATIF(ctx, db, sessionID, hidden)
+func MarshalATIF(db *index.DB, sessionID string, hidden map[string]bool) ([]byte, error) {
+	t, err := ATIF(db, sessionID, hidden)
 	if err != nil {
 		return nil, err
 	}

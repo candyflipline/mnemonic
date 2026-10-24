@@ -1,13 +1,11 @@
 package export
 
 import (
-	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
-	"errors"
 	"strconv"
-	"time"
+
+	"github.com/candyflipline/mnemonic/internal/index"
 )
 
 // OTLP/JSON export: one ExportTraceServiceRequest per session, built from the
@@ -110,59 +108,42 @@ func intAttr(key string, value uint64) otlpAttr {
 // no parentSpanId. Only chat spans carry gen_ai.usage.*: the spans relation
 // rolls usage up onto invoke_agent and turn spans, so a sum over the trace
 // would count it twice. A session in hidden is not found.
-func OTLP(ctx context.Context, db *sql.DB, sessionID string, hidden map[string]bool) (*otlpRequest, error) {
+func OTLP(db *index.DB, sessionID string, hidden map[string]bool) (*otlpRequest, error) {
 	if hidden[sessionID] {
 		return nil, notFound(sessionID)
 	}
-	if ok, err := sessionExists(ctx, db, sessionID); err != nil {
-		return nil, err
-	} else if !ok {
+	if !db.ExportHasSession(sessionID) {
 		return nil, notFound(sessionID)
 	}
-	rows, err := db.QueryContext(ctx, `SELECT span_id, parent_span_id, kind, name,
-  start_time, end_time, status, model, input_tokens, output_tokens
-FROM spans WHERE session_id = ? ORDER BY start_time, span_id`, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 
 	sum := sha256.Sum256([]byte(tracePrefix + sessionID))
 	traceID := hex.EncodeToString(sum[:16])
 
 	spans := []otlpSpan{}
-	for rows.Next() {
-		var (
-			s                      otlpSpan
-			kind, status, model    string
-			start, end             time.Time
-			inputTokens, outTokens uint64
-		)
-		if err := rows.Scan(&s.SpanID, &s.ParentSpanID, &kind, &s.Name, &start, &end, &status,
-			&model, &inputTokens, &outTokens); err != nil {
-			return nil, err
-		}
+	for _, row := range db.ExportSpans(sessionID) {
+		var s otlpSpan
+		kind := string(row.Kind)
+		s.SpanID = row.SpanID
+		s.ParentSpanID = row.ParentSpanID
+		s.Name = row.Name
 		s.TraceID = traceID
 		s.Kind = spanKindInt(kind)
-		s.StartTimeUnixNano = strconv.FormatInt(start.UnixNano(), 10)
-		s.EndTimeUnixNano = strconv.FormatInt(end.UnixNano(), 10)
-		s.Status = otlpStatus{Code: statusCode(status)}
+		s.StartTimeUnixNano = strconv.FormatInt(row.Start.UnixNano(), 10)
+		s.EndTimeUnixNano = strconv.FormatInt(row.End.UnixNano(), 10)
+		s.Status = otlpStatus{Code: statusCode(string(row.Status))}
 		s.Attributes = []otlpAttr{
 			strAttr("gen_ai.operation.name", kind),
 			strAttr("gen_ai.conversation.id", sessionID),
 		}
-		if model != "" {
-			s.Attributes = append(s.Attributes, strAttr("gen_ai.request.model", model))
+		if row.Model != "" {
+			s.Attributes = append(s.Attributes, strAttr("gen_ai.request.model", row.Model))
 		}
 		if kind == "chat" {
 			s.Attributes = append(s.Attributes,
-				intAttr("gen_ai.usage.input_tokens", inputTokens),
-				intAttr("gen_ai.usage.output_tokens", outTokens))
+				intAttr("gen_ai.usage.input_tokens", row.InputTokens),
+				intAttr("gen_ai.usage.output_tokens", row.OutputTokens))
 		}
 		spans = append(spans, s)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 	return &otlpRequest{ResourceSpans: []otlpResourceSpans{{
 		Resource: otlpResource{Attributes: []otlpAttr{strAttr("service.name", "mnemonic")}},
@@ -171,14 +152,4 @@ FROM spans WHERE session_id = ? ORDER BY start_time, span_id`, sessionID)
 			Spans: spans,
 		}},
 	}}}, nil
-}
-
-// sessionExists reports whether the cache knows the session.
-func sessionExists(ctx context.Context, db *sql.DB, sessionID string) (bool, error) {
-	var one int
-	err := db.QueryRowContext(ctx, `SELECT 1 FROM sessions WHERE session_id = ?`, sessionID).Scan(&one)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	return err == nil, err
 }
