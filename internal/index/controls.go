@@ -2,8 +2,13 @@ package index
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +21,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 
+	"github.com/candyflipline/mnemonic/internal/auth"
 	"github.com/candyflipline/mnemonic/internal/store"
 )
 
@@ -216,4 +222,69 @@ func WithControls(ctx context.Context, c *Controls) context.Context {
 func controlsFrom(ctx context.Context) *Controls {
 	c, _ := ctx.Value(controlsKey{}).(*Controls)
 	return c
+}
+
+// controlArgs is the input both control tools parse.
+type controlArgs struct {
+	SessionID  string     `json:"session_id"`
+	Visibility visibility `json:"visibility"`
+	RequestKey string     `json:"request_key"`
+}
+
+func parseControlArgs(raw json.RawMessage) (controlArgs, string, error) {
+	var a controlArgs
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&a); err != nil {
+		return a, "", argErrorf("invalid arguments: %s", err)
+	}
+	id, err := parseMcpID(a.SessionID)
+	if err != nil {
+		return a, "", err
+	}
+	if id.kind != kindSession {
+		return a, "", argErrorf("session_id must be a session id")
+	}
+	if len(a.RequestKey) > 128 {
+		return a, "", argErrorf("request_key must be at most 128 characters")
+	}
+	return a, id.session, nil
+}
+
+// actor is the caller on ctx when it may act on session: every author of
+// the session is in the caller's tenant, and the caller is its sole author or
+// holds an admin token. Any other session is not found.
+func actor(ctx context.Context, db *DB, c *Controls, session string) (auth.Identity, error) {
+	id, ok := auth.From(ctx)
+	if !ok || c == nil || store.From(ctx) == nil {
+		return id, errors.New("index: control tools need an identity, controls and a store on ctx")
+	}
+	return actorOn(id, db.sessionAuthors(session))
+}
+
+// actorOn is actor's decision over one session's authors, the part's session
+// authors entry, so the checks are testable on an injected list.
+func actorOn(id auth.Identity, authors []string) (auth.Identity, error) {
+	members := id.Members()
+	if len(authors) == 0 || slices.ContainsFunc(authors, func(a string) bool { return !members.Has(a) }) {
+		return id, argErrorf("session not found")
+	}
+	if !slices.Equal(authors, []string{id.Author()}) && !id.Can(auth.Admin) {
+		return id, argErrorf("only the session's author or an admin token may change it")
+	}
+	return id, nil
+}
+
+// recordKey is the key a control record is appended under: the client's key
+// bound to what it asks for, so the key reused for another action is
+// another record and only an exact retry is a duplicate.
+func recordKey(action controlAction, session string, v visibility, client string) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{string(action), session, string(v), client}, "\x1f")))
+	return hex.EncodeToString(sum[:])
+}
+
+func randomKey() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }
