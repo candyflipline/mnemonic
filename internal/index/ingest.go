@@ -489,14 +489,25 @@ func Ingest(root, store string, quiet time.Duration, settleAll bool) (IngestStat
 }
 
 // IngestPlain brings store up to the machine's harness files the client globs
-// match, indexed in place as KindPlain sources (local mode: no raw copy, no
-// push), and reports what it did per source.
+// match, indexed in place as KindPlain sources, plus the sources under the
+// data dir around store — the records the write tools append through its
+// store (local mode: raw/ there holds only what they wrote, never a copy of
+// harness files, and the archive glob finds nothing). One list and one cycle,
+// so the manifest publish writes covers both and neither ingest drops the
+// other's sources. store is the index dir under the data dir
+// (layout.IndexDir), so root is its parent and the store sources' raw opens
+// under it.
 func IngestPlain(store string, globs []config.SourceGlob, author, machine string, quiet time.Duration, settleAll bool) (IngestStats, error) {
-	sources, err := listPlainSources(globs, author, machine)
+	plain, err := listPlainSources(globs, author, machine)
 	if err != nil {
 		return IngestStats{}, err
 	}
-	return ingest("", store, sources, quiet, settleAll)
+	root := filepath.Dir(store)
+	tool, err := listSources(root)
+	if err != nil {
+		return IngestStats{}, err
+	}
+	return ingest(root, store, append(plain, tool...), quiet, settleAll)
 }
 
 // ingest is the cycle both entry points share: parse the sources, publish the

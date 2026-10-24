@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -50,7 +51,7 @@ func local(args []string) error {
 		return err
 	}
 	var opts localOptions
-	fs.StringVar(&opts.dataDir, "data-dir", filepath.Join(home, ".mnemonic-local"), "where raw, parquet and the index live")
+	fs.StringVar(&opts.dataDir, "data-dir", filepath.Join(home, ".mnemonic-local"), "where the index and the tools' raw records live")
 	fs.StringVar(&opts.listen, "listen", "127.0.0.1:7781", "loopback address for MCP")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -65,9 +66,16 @@ func local(args []string) error {
 const settleSource = 15 * time.Minute
 
 // runLocal indexes this machine's harness files in place under
-// opts.dataDir (the engine's KindPlain sources, no raw copy, no store, no HTTP
-// and no push loop), feeds push.Watch's file events to the index ingest, and
-// serves MCP with every tool result redacted at the output boundary.
+// opts.dataDir (the engine's KindPlain sources, no raw copy, no HTTP and no
+// push loop), feeds push.Watch's file events to the index ingest, and serves
+// MCP with every tool result redacted at the output boundary.
+//
+// The data dir holds the index and raw/ for the write tools only: annotate,
+// set_visibility and delete_session append their records through the store
+// there, and nothing copies a harness file into it. IngestPlain lists those
+// records with the harness files, and the store's Wake runs the same ingest
+// the watcher's sink runs, so a tool write is searchable without waiting for
+// a harness change.
 //
 // The files are config.DefaultSources; there is no config file and no server.
 // MCP is loopback-only (requireLoopback) and answers the bearer token "local"
@@ -107,7 +115,8 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 	if err != nil {
 		return err
 	}
-	st := &store.Store{DataDir: opts.dataDir}
+	wake := make(chan struct{}, 1)
+	st := &store.Store{DataDir: opts.dataDir, Wake: wake}
 	if err := firstIngest(ix, srcs, logger, author, machine); err != nil {
 		return err
 	}
@@ -120,10 +129,23 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 		tools.ServeHTTP(w, r.WithContext(index.WithControls(store.WithStore(r.Context(), st), ctl)))
 	})))
 	hs := &http.Server{Addr: opts.listen, Handler: mux}
-	sink := indexSink{ix: ix, srcs: srcs, author: author, machine: machine}
+	sink := &indexSink{ix: ix, srcs: srcs, author: author, machine: machine}
 	go func() {
 		if err := pushrun.WatchSink(ctx, config.Client{Sources: srcs}, sink, out); err != nil {
 			logger.Printf("watch: %v", err)
+		}
+	}()
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-wake:
+			}
+			settleWake(ctx, wake)
+			if _, err := sink.Sync(ctx, nil); err != nil {
+				logger.Printf("wake sync: %v", err)
+			}
 		}
 	}()
 	go func() {
@@ -158,8 +180,9 @@ func expandSources(srcs []config.SourceGlob) ([]config.SourceGlob, error) {
 	return out, nil
 }
 
-// firstIngest indexes the machine's files once before MCP serves, so the
-// store answers as soon as the socket is up; the watcher keeps it current.
+// firstIngest indexes the machine's files, and the tool records the data
+// dir's raw already holds, once before MCP serves, so the store answers as
+// soon as the socket is up; the watcher and the store's Wake keep it current.
 func firstIngest(ix *index.Index, srcs []config.SourceGlob, logger *log.Logger, author, machine string) error {
 	start := time.Now()
 	st, err := ix.IngestPlain(srcs, author, machine, index.IngestOptions{Quiet: settleSource})
@@ -169,18 +192,52 @@ func firstIngest(ix *index.Index, srcs []config.SourceGlob, logger *log.Logger, 
 	return err
 }
 
+// wakeQuiet and wakeMax settle a burst of tool writes into one ingest: the
+// wake sync waits for wakeQuiet without another write, at most wakeMax after
+// the first, the way serve settles a push burst.
+const (
+	wakeQuiet = time.Second
+	wakeMax   = 3 * time.Second
+)
+
+// settleWake drains what is left of a burst: it returns when the wake channel
+// has sat empty for wakeQuiet or wakeMax passed since it was called, so one
+// ingest answers the writes instead of one per record.
+func settleWake(ctx context.Context, wake <-chan struct{}) {
+	quiet := time.NewTimer(wakeQuiet)
+	defer quiet.Stop()
+	limit := time.NewTimer(wakeMax)
+	defer limit.Stop()
+	for {
+		select {
+		case <-wake:
+			quiet.Reset(wakeQuiet)
+		case <-quiet.C:
+			return
+		case <-limit.C:
+			return
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 // indexSink is the watcher's sink: every changed path is subsumed by an
 // ingest of the whole machine, whose outcomes the printed stats line reports.
-// An ingest has no ctx (the server's cycles have none either); it runs to
-// completion and the next sync's stamp tests pick up whatever moved since.
+// The store's Wake runs the same Sync, and the mutex keeps one ingest at a
+// time. An ingest has no ctx (the server's cycles have none either); it runs
+// to completion and the next sync's stamp tests pick up whatever moved since.
 type indexSink struct {
 	ix      *index.Index
 	srcs    []config.SourceGlob
 	author  string
 	machine string
+	mu      sync.Mutex
 }
 
-func (s indexSink) Sync(_ context.Context, _ []string) (pushrun.Stats, error) {
+func (s *indexSink) Sync(_ context.Context, _ []string) (pushrun.Stats, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	st, err := s.ix.IngestPlain(s.srcs, s.author, s.machine, index.IngestOptions{Quiet: settleSource})
 	return pushrun.Stats{
 		Appended:  st[index.Resumed] + st[index.Fresh],
