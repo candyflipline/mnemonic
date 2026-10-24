@@ -183,7 +183,7 @@ PYEOF
 		printf '{"id":1,"tool":"search_sessions","args":{"query":"%s","n_hits":10}}\n' "$cand" \
 			| "$BIN" batch -root "$BOX" -store "$BASE_STORE" > "$RF" 2>/dev/null \
 			|| continue
-		OUT=$(python3 -I - "$RF" "$TARGET_SID" <<'PYEOF'
+		PICKED=$(python3 -I - "$RF" "$TARGET_SID" <<'PYEOF'
 import base64, json, sys
 target = sys.argv[2]
 forms = {target, "session:" + base64.b64encode(target.encode()).decode()}
@@ -206,9 +206,9 @@ for line in open(sys.argv[1]):
 print("%s\t%d" % (top, count))
 PYEOF
 )
-		[ -n "$OUT" ] || continue
-		GOT=$(printf '%s' "$OUT" | cut -f1)
-		NRES=$(printf '%s' "$OUT" | cut -f2)
+		[ -n "$PICKED" ] || continue
+		GOT=$(printf '%s' "$PICKED" | cut -f1)
+		NRES=$(printf '%s' "$PICKED" | cut -f2)
 		if [ -n "$GOT" ] && [ "$NRES" -lt "$BESTN" ]; then
 			TERM=$cand; SESSION=$GOT; BESTN=$NRES; BESTFILE=$RF
 		fi
