@@ -137,9 +137,11 @@ func ingestArchive(store string, s source) (Outcome, int64, error) {
 		return 0, 0, err
 	}
 	prevGen := map[string]int{}
+	prevLen := map[string]int64{}
 	for _, sid := range prev.Sessions {
 		if c, ok := readCkpt(store, archiveMemberKey(key, sid)); ok {
 			prevGen[sid] = c.Gen
+			prevLen[sid] = c.LightLen + c.HeavyLen
 		}
 	}
 	ws := &archiveWriters{store: store, fileKey: key, prevGen: prevGen,
@@ -162,7 +164,7 @@ func ingestArchive(store string, s source) (Outcome, int64, error) {
 		if err := writeFileAtomic(ckptPath(store, w.key), b); err != nil {
 			return 0, 0, err
 		}
-		written += w.lightLen + w.heavyLen
+		written += w.lightLen + w.heavyLen - prevLen[sid]
 		rows += w.rows
 		sessions = append(sessions, sid)
 	}
@@ -239,7 +241,10 @@ func removeMember(store, key string) error {
 			}
 		}
 	}
-	return os.Remove(ckptPath(store, key))
+	if err := os.Remove(ckptPath(store, key)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 // archiveWriter is one session's frame logs while a file parses.
