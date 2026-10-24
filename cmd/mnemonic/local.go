@@ -189,25 +189,6 @@ func (s indexSink) Sync(_ context.Context, _ []string) (pushrun.Stats, error) {
 	}, err
 }
 
-// publishToken replaces path with tok through a temp file and a rename, so a
-// reader sees the old token or the new one, never a torn file.
-func publishToken(path, tok string) error {
-	f, err := os.CreateTemp(filepath.Dir(path), ".token.*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	defer os.Remove(tmp)
-	_, err = f.WriteString(tok + "\n")
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}
-
 // refuseClientDir fails when dir is home's .mnemonic or anything inside it, by
 // absolute path with symlinks resolved, and ignoring case on darwin, whose
 // default volumes do not tell ~/.Mnemonic from ~/.mnemonic.
