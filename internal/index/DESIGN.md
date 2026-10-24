@@ -148,3 +148,155 @@ Every stub panics with `lane <unit>`. Oracle is main 59796bc unless named.
 
 The five old tools are ported with main's Oct 22 scope (`scope.go`); there
 are no U4 stubs. U4 lanes own their tool's parity diffs (see the U0 report).
+
+## Archive kind (U11)
+
+`mnemonic import-ch` wrote the retired ClickHouse events into lake-shaped
+parquet under `events/author=<a>/machine=archive-ch/harness=<h>/ch-<export>.parquet`
+(59796bc `internal/lake/lake.go:217,240-246`); on prod that is 16 files,
+14.3 GB, 4,495 sessions / 6,759,894 rows with no raw copy. The engine reads
+those files in place as source kind `KindArchive`, with `github.com/parquet-go/parquet-go`
+as its only new direct dependency (pure Go; chosen over the arrow-go that
+duckdb already drags in transitively because the engine needs a row reader,
+not a columnar analytics runtime). The kind and its three functions live in
+`archive.go`; `kind.go` (U10's file) is not modified — nothing above ingest
+looks at the kind (kind.go:10-12).
+
+### (a) Discovery
+
+`listArchiveSources(root)` globs `<root>/events/author=*/machine=archive-ch/harness=*/ch-*.parquet`
+— the machine segment pinned to `layout.ArchiveMachine` because import-ch
+writes nowhere else (lake.go:243) — and appends one source per file to
+`listSources`' result (ingest.go:479), key `{path author, archive-ch, path
+harness, ch-<base>}` so `sourceKey` (ingest.go:92-94) and the ckpt/log names
+are per file, and `wantCkpt`'s `Path` (ingest.go:219, layout.go:32-34) is the
+file's exact lake path. This is the cache's own discovery: `EventsGlob`
+matches ch-* names (layout.go:20) and `diffLake` notices a file by size+mtime
+(cache index.go:349-352,367-371).
+
+The engine's identity is size + bytes, not mtime, because import-ch rewrites
+whole files on rerun (lake.go:216-218): a ckpt's `ZstSize` is the file size
+and `WindowSHA` the SHA-256 of its last 64 KB (ingest.go:190-197). An
+unchanged file on the next ingest is `Unchanged` (ingest.go:266-268): no log
+append, same member bytes → same part fingerprint (build.go:32-38) → the part
+exists and is not rebuilt (ingest.go:717-723), and CURRENT's bytes are equal
+so it is not rewritten (ingest.go:645-647). A changed file (any size change or
+window change) fails `extends` (ingest.go:225-231) and reparses from byte 0;
+KindArchive's byte test is "same size AND same window" — no zstd-magic check
+(storeExtends's, ingest.go:235-246), a parquet file is never appended.
+
+### (b) Row mapping
+
+Rows stream one row group at a time (`Rows().ReadRows`, parquet-go; groups
+are 64 MB, lake.go:325,608-610) into a `schema.Event` by column name, then go
+through `rowFrom` (row.go:109-160) exactly as raw rows do: the two MAP columns
+marshal into `Buckets`/`Native` JSON (row.go:129-136), emission_index/tool_io/
+meta bits derive from payload_json (row.go:144-158), `TimeUs` from the
+record_ts VARCHAR and `TsMs` from event_ts (row.go:137-143). The probe fixed
+the decode shapes: LIST needs parquet-go's `,list` struct tag (DuckDB writes
+the 3-level `content_types list element`, standard MAPs decode into Go maps
+untagged), DATE is int32 days → "2006-01-02" (events.go:11-13), event_ts and
+ingested_at are int64 micros with `isAdjustedToUTC=false` → read as UTC, which
+is what the cache's session `TimeZone='UTC'` pins (sql.go:54-59, index.go:229).
+
+Dropped, the same columns `rowFrom` never copies because `Row` has no fields
+for them (row.go:14-40) — the raw path drops them identically: session_date,
+source_inode, origin_tool_call_id, coord_group_id, coord_group_label,
+retry_count, service_tier, content_types, has_reasoning. Archive-only
+columns: `author` (stamped = path author, lake.go:633-644) is taken from the
+ckpt instead (b below); `machine_id` is the literal "archive-ch" (lake.go:639)
+and `ingested_at` the epoch literal (lake.go:31,641) — the engine's rows carry
+neither field and no tool reads them from events (the cache tools read
+machine_id/updated_ms from `sources` only, get_ingest_status.go:58-60); the
+`machine` column is the hive partition, not in the files (the cache reads
+`hive_partitioning=false`, sql.go:66-73). `payload_json` and `token_usage_json`
+go to the heavy log like every source (ingest.go:305-308).
+
+### (c) uid and dedup with raw-derived rows
+
+The cache picks one winner per event_uid across all lake files: `row_number()
+OVER (PARTITION BY event_uid ORDER BY event_version DESC, <non-archive first>,
+ingested_at DESC, lake_file, lake_row) = 1` (index.go:231,233,572);
+event_version is the parse wall clock (normalize/shared/pipeline.go:306), so
+the rule is "the most recently parsed copy wins; ties → non-archive; ties →
+later ingested_at; ties → path". import-ch also never imported rows whose
+source_file already lived in a non-archive parquet of that author
+(lake.go:532-556,587-588), so overlap copies exist only where raw landed after
+the import ran (2,358 sessions on the box).
+
+The engine compares per source, not per row: highest `Version` within a source
+(build.go:116-122), greatest `parsed.Path` across sources (build.go:123-129).
+`Version` on raw rows is log place (ingest.go:303) — incomparable with an
+event_version — so the cross-source compare becomes kind-aware: **a raw member
+beats an archive member of the same uid unconditionally; archive vs archive
+falls back to greater Path.** That matches the cache wherever the answers can
+differ: the copies' content differs observably only when raw re-parsed at a
+newer parser version (higher event_version, raw wins in the cache too), and at
+equal versions the cache hands the tie to the non-archive copy
+(index.go:231,233) whose content equals the archive copy's (same parser era)
+— with ingested_at DESC agreeing (parse wall clock vs the 1970 literal,
+lake.go:31; the open path's own tie-break, lake_heavy.go:91, agrees the same
+way). Archive rows keep the event_version column as `Version` (no
+ingest.go:303 overwrite), so within an archive source the winner is max
+event_version — the cache's first key. The same uid in two archive files does
+not occur (one row per uid in ClickHouse, reruns rewrite); Path makes it
+deterministic if it ever does. Overlapping sessions land in one component via
+shared ckpt session ids (ingest.go:780-810), so winners see both copies;
+losers still feed the session authors section (authors.go:13-31), which is the
+cache's union of file author and path author (index_session_authors.go:28-37)
+— the same literal for archive rows by construction (lake.go:583,639).
+
+### (d) Parts, components, winners — no parser, no Version
+
+The archive ingest branch sits before `normalize.For` in `ingestSource`
+(ingest.go:253-256), since archive harnesses do have parsers: it opens the
+parquet (no manifest — no `src.kind.open`), maps rows through `rowFrom`, and
+appends to the same light/heavy frame logs (ingest.go:294-318). Its ckpt
+records `Parser: 0`, `Layout: logLayout` (the row encoding is shared), and the
+parser-version machinery skips it by construction: `versionStale` is false for
+any kind but KindStore (ingest.go:584-589), `parserVersion` is never reached
+for it, and `extends`' identity check compares 0 == 0 (ingest.go:226).
+`publish` treats it like any member: `ZstSize == ColdZst` from the first ckpt
+(ingest.go:73), so it is always cold, shards into the 256 cold parts by least
+session id (ingest.go:807-811), and joins hot components as a cold member of a
+hot part when a raw source of the same session is hot (ingest.go:802-806).
+Sections (spans, annotations, authors) are functions of the part's rows
+(DESIGN.md:114-117) and build from winner rows as for any source.
+
+### (e) Tenancy, authors, controls
+
+`Author` is the path author, via the ckpt (ingest.go:217) into
+`Row.Author` (build.go:87) and `buildSessionAuthors` (authors.go:13-31) — the
+same derivation the cache makes from the lake path
+(index_session_authors.go:19-24); the file's author column is the same value
+by construction (selectList stamps the import author, lake.go:583,633-644) and
+is not read. No machine: ch rows' machine_id is the "archive-ch" literal
+(lake.go:639), and no engine row carries a machine. Controls are session-id
+records through `Controls.record` with identity from ctx (controls.go:212),
+never from rows; archive sessions are ordinary session ids to scope checks
+(scope.go:17,:27). One publish hook: archive sources are NOT appended to
+CURRENT's `sources` rows (ingest.go:599-614) — the cache's `sources` table
+skips archive files (index.go:814-816), so get_ingest_status and list_sessions
+must not count them as sources either; their rows still count in parts and
+ls rollups. GC is unaffected: the ckpt and logs of every member are kept
+whatever the sources rows say (ingest.go:846-863).
+
+### (f) Memory
+
+`parquet.OpenFile` reads footer + metadata only; rows stream row group at a
+time, so peak memory is one decompressed group's columns plus the row slice —
+never a 6 GB file, never an mmap. One archive source per worker with only its
+own logs, like today's parse (ingest.go:62-64). The engine never writes these
+files; no writer exists outside tests.
+
+### (g) Fixture
+
+The probe (scratch, gitignored, run under heavy.lock) extracted 59796bc to a
+mktemp dir, synthesized a 2-row export parquet with DuckDB (cgo build of
+59796bc itself) and ran `lake.ImportClickHouse`, then decoded the resulting
+ch-schema file with parquet-go CGO_ENABLED=0: 2 rows, 62 leaf columns, 2 list
+elements, 2+2 map keys, correct event_ts micros and session_date days —
+counts only. Phase 2's committed `archive_test.go` writes its small ch-schema
+fixture with parquet-go's writer inside the test (no writer in non-test code)
+and asserts literal rows, winner outcomes (raw over archive; archive-only
+session) and ckpt stability across a re-ingest.
