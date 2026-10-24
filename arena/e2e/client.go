@@ -220,6 +220,9 @@ func newTranscript() *transcript {
 		{name: "unix nanos", re: re(`\b1[0-9]{17,18}\b`), repl: "<NS>"},
 		{name: "elapsed_ms", re: re(`"elapsed_ms":\d+`), repl: `"elapsed_ms":<ELAPSED>`},
 		{name: "bm25 scores", re: re(`"score":(-?[0-9.eE+]+)`), repl: `"score":<SCORE>`},
+		{name: "hex addresses in panic stacks", re: re(`0x[0-9a-f]{4,}`), repl: "<ADDR>"},
+		{name: "goroutine ids in panic stacks", re: re(`goroutine \d+`), repl: "goroutine <N>"},
+		{name: "byte offsets in panic stacks", re: re(`\+0x[0-9a-f]+`), repl: "+<OFF>"},
 	}}
 }
 
@@ -520,6 +523,13 @@ func (e *env) mcpCall(c *check, cl *mcpClient, tool string, args map[string]any)
 		e.tr.step(c.letter, "tools/call %s %s -> %s: %s", tool, ab, terr.code, terr.message)
 		if terr.code == "transport" {
 			c.failf("%s failed: %s", tool, terr.message)
+			if e.srv != nil {
+				tail := e.srv.logTail()
+				if i := strings.LastIndex(tail, "\n"); i > 0 && len(tail)-i < 300 {
+					tail = tail[max(0, i-600):]
+				}
+				e.tr.step(c.letter, "server stderr at the transport failure: %s", tail)
+			}
 		}
 		return data, terr
 	}

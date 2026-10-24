@@ -16,21 +16,24 @@
 //	-keep     keep the scratch data dir instead of removing it
 //
 // What a run does: scratch data dir, server.toml with three tokens (arena in
-// tenant default, alice in acme with the annotate scope, bob in other); serve
-// on a free loopback port; push 3 fixture sources over PUT /v1/raw as arena;
-// (a) POST /v1/traces as alice with a gen_ai chat span and an execute_tool
-// child, then get_trace; (b) annotate + get_trace, then a forced parser sweep
-// (events/.parser-version rewritten with lowered otlp/annotation versions and
-// the derived events parquet of alice's otlp and annotation sources removed,
-// so serve re-parses them from raw) and get_trace again; (d) query refused
-// without a time range, at most the row cap with one (per-side dialect);
-// (e) bob's token sees nothing of alice's or arena's sessions through
-// search_sessions, list_sessions, open, get_trace, query and file_attention;
-// (f) delete_session hides a fixture session from search_sessions and open at
-// once, and alice's otlp session from open and get_trace; then serve is
-// stopped and (c) `export atif` for one claude-code and one codex fixture
-// session is validated with internal/export.ValidateJSON, the same validator
-// the binary links.
+// tenant default, alice in acme with annotate+admin, bob in other); serve on
+// a free loopback port; push 3 fixture sources over PUT /v1/raw as arena;
+// tools/list names the query tool's statement arg (sql on 59796bc, query once
+// the ql swap lands); (a) POST /v1/traces as alice with a gen_ai chat span
+// and an execute_tool child, then get_trace; (b) annotate + get_trace, then a
+// forced parser sweep (events/.parser-version rewritten with lowered
+// otlp/annotation versions, the derived events parquet of alice's otlp and
+// annotation sources removed, and one pushed source re-sent to wake the
+// cycle, since file edits alone wait out the 5 min reconcile) and get_trace
+// again; (d) query refused without a time range, at most the row cap with
+// one, in the detected dialect; (e) bob's token sees nothing of alice's or
+// arena's sessions through search_sessions, list_sessions, open, get_trace,
+// query and file_attention (the path probed at scope all until arena's
+// answers); (f) delete_session hides a fixture session from search_sessions
+// and open at once, and alice's otlp session from open and get_trace; then
+// serve is stopped and (c) `export atif` for one claude-code and one codex
+// fixture session is validated with internal/export.ValidateJSON, the same
+// validator the binary links.
 //
 // Normalization masks volatile fields (ports, the scratch dir, wall-clock
 // times, elapsed milliseconds, bm25 scores); the mask list heads the
@@ -174,7 +177,7 @@ tenant = %q
 	}
 
 	env := &env{
-		tr: tr, side: side, dataDir: dataDir,
+		tr: tr, side: side, dataDir: dataDir, srv: srv,
 		mcp:   &mcpClient{token: tokArena},
 		alice: &mcpClient{token: tokAlice},
 		bob:   &mcpClient{token: tokBob},
@@ -236,6 +239,7 @@ tenant = %q
 type env struct {
 	tr   *transcript
 	side string
+	srv  *serverProc
 
 	dataDir string
 	mcp     *mcpClient // arena, tenant default
