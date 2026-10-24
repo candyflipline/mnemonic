@@ -1,11 +1,10 @@
 // mnemonic collects agent session traces and serves them over MCP.
 //
 //	mnemonic push [--watch] [--config ~/.mnemonic/config.toml]   one pass, or resident and woken by file writes
-//	mnemonic serve --config server.toml                HTTP /v1 + /mcp, one lake and index loop
-//	mnemonic import-ch --config server.toml --author A <export_dir>
+//	mnemonic serve --config server.toml                HTTP /v1 + /mcp, one ingest and serve loop
 //
-// push builds with CGO_ENABLED=0; serve and import-ch need the server build
-// tag (DuckDB): go build -tags server ./cmd/mnemonic
+// Both build with CGO_ENABLED=0; serve needs the server build tag:
+// go build -tags server ./cmd/mnemonic
 package main
 
 import (
@@ -32,7 +31,7 @@ var commands = map[string]func(args []string) error{
 
 func main() {
 	if len(os.Args) < 2 || commands[os.Args[1]] == nil {
-		fmt.Fprintln(os.Stderr, "usage: mnemonic init|push|serve|import-ch|token [flags]")
+		fmt.Fprintln(os.Stderr, "usage: mnemonic init|push|serve|token [flags]")
 		os.Exit(2)
 	}
 	if err := commands[os.Args[1]](os.Args[2:]); err != nil {
