@@ -14,18 +14,23 @@
 # - target and donor are two different sources of the FIRST author=* dir (the
 #   author the contract's batch acts as), same harness= dir, both >= 1 MiB;
 #   picked deterministically from the sorted manifest list.
-# - 10 whole plain lines (lines 2-11) are decompressed from the donor with the
-#   zstd CLI; the search term is the longest [a-z][a-z0-9_]{5,} token among
-#   them that a search_sessions call on the pristine store returns in its top
-#   hit; that top hit's session id is what must stay in the reply.
+# - the target session id is the target source's own sessionId (its first
+#   user/assistant line). 10 whole user/assistant lines are decompressed from
+#   the donor with the zstd CLI and their sessionId REWRITTEN to the target's:
+#   appended as-is they would only land on the donor session (already
+#   searchable — EventUID hashes the source file, so the copies are new rows
+#   of whatever session their sessionId names). The search term is the longest
+#   [a-z][a-z0-9_]{5,} token among them that a search_sessions call on the
+#   pristine store returns in its top hit WITHOUT the target session already
+#   among the hits; that top hit's session id is what must stay in the reply.
 # - the pre-append reply of the timed call is saved against the base store.
 #
 # Each of RUNS rounds then does, timed only where marked:
 #   1. fresh overlay dataroot: cp -al of the frozen raw; the target's
 #      .jsonl.zst and .json hardlinks are replaced by real writable copies —
 #      the frozen corpus itself is never written;
-#   2. the 10 lines are re-compressed as ONE NEW zstd frame (zstd CLI) and
-#      appended to the target's .jsonl.zst; its manifest is updated:
+#   2. the 10 rewritten lines are re-compressed as ONE NEW zstd frame (zstd
+#      CLI) and appended to the target's .jsonl.zst; its manifest is updated:
 #      zst_size = new file size, size += appended plain bytes, raw_end = size,
 #      updated_ms = now ms (head_hash untouched: first line unchanged);
 #   3. fresh run store: a real cp -a of the base store (a hardlink clone would
@@ -34,11 +39,17 @@
 #      -v with 1 s vmstat (and pidstat when installed) alongside;
 #   5. timed: `BIN batch` with ONE search_sessions call (query = term,
 #      n_hits = 10); correctness = the pre-append top-hit session is still in
-#      the reply, and the reply's data must differ from the pre-append reply
-#      (evidence the append reached the index);
+#      the reply (session_found), the TARGET session is in the reply but was
+#      NOT in the pre-append one (target_new — the 10 rows landed and became
+#      searchable under their rewritten session), and the ingest's own
+#      summary line reports at least one parsed source (oracle rewrote,
+#      engine resumed+reparsed). A round failing any of the three writes its
+#      row, then exits nonzero: the round's numbers time a no-op, not an
+#      append.
 #   6. overlay and run store deleted; one TSV line appended.
 # Summary: $BOX/out/append-summary.tsv (run ingest_wall_s ingest_rss_mib
-# batch_wall_s call_us session_found hits differs) plus a median/range footer.
+# batch_wall_s call_us session_found hits new_hit new_count parsed events
+# differs target_new) plus a median/range footer.
 set -eu
 
 BOX=${BOX:-/var/lib/mnemonic-e3}
@@ -55,6 +66,7 @@ mkdir -p "$OUT"
 state_fresh() {
 	[ -s "$OUT/append-state.env" ] || return 1
 	[ "$(grep '^bin=' "$OUT/append-state.env" | cut -d= -f2-)" = "$BIN" ] || return 1
+	[ "$(grep '^base=' "$OUT/append-state.env" | cut -d= -f2-)" = "$BASE_STORE" ] || return 1
 	return 0
 }
 
@@ -91,7 +103,43 @@ PYEOF
 	TGT_MAN=$(echo "$PICK" | sed -n 1p)
 	TGT_ZST=$(echo "$PICK" | sed -n 2p)
 	DON_ZST=$(echo "$PICK" | sed -n 3p)
-	zstd -q -dc "$DON_ZST" | sed -n '2,11p' > "$APP/lines.jsonl"
+	# helpers: piped decompressed lines on stdin, so the python lives in files
+	cat > "$APP/first_sid.py" <<'PYEOF'
+import json, sys
+for line in sys.stdin:
+    try:
+        o = json.loads(line)
+    except Exception:
+        continue
+    if o.get("type") in ("user", "assistant") and o.get("sessionId"):
+        print(o["sessionId"])
+        break
+PYEOF
+	cat > "$APP/donor10.py" <<'PYEOF'
+import json, sys
+sid = sys.argv[1]
+n = 0
+for line in sys.stdin:
+    if n >= 10:
+        break
+    line = line.rstrip("\n")
+    if not line:
+        continue
+    try:
+        o = json.loads(line)
+    except Exception:
+        continue
+    if o.get("type") not in ("user", "assistant") or not o.get("sessionId"):
+        continue
+    o["sessionId"] = sid
+    sys.stdout.write(json.dumps(o, separators=(",", ":"), ensure_ascii=False) + "\n")
+    n += 1
+if n < 10:
+    sys.exit("donor gave fewer than 10 user/assistant lines")
+PYEOF
+	TARGET_SID=$(zstd -q -dc "$TGT_ZST" | python3 -I "$APP/first_sid.py")
+	[ -n "$TARGET_SID" ] || { echo "no target session id in the target source" >&2; exit 1; }
+	zstd -q -dc "$DON_ZST" | python3 -I "$APP/donor10.py" "$TARGET_SID" > "$APP/lines.jsonl"
 	[ "$(wc -l < "$APP/lines.jsonl")" -eq 10 ] || { echo "donor gave fewer than 10 lines" >&2; exit 1; }
 	python3 -I - "$APP/lines.jsonl" > "$APP/terms.txt" <<'PYEOF'
 import re, sys
@@ -100,23 +148,33 @@ toks = sorted(set(re.findall(r"[a-z][a-z0-9_]{5,}", t)), key=lambda s: (-len(s),
 for s in toks[:10]:
     print(s)
 PYEOF
-	# validate terms against the pristine store until one returns a hit
+	# validate terms against the pristine store until one returns a top hit
+	# and the target session is NOT among the hits (else no new hit is
+	# possible post-append)
 	TERM=""; SESSION=""
 	while IFS= read -r cand; do
 		printf '{"id":1,"tool":"search_sessions","args":{"query":"%s","n_hits":10}}\n' "$cand" \
 			| "$BIN" batch -root "$BOX" -store "$BASE_STORE" > "$APP/term-reply.jsonl" 2>/dev/null \
 			|| continue
-		GOT=$(python3 -I - "$APP/term-reply.jsonl" <<'PYEOF'
-import json, sys
+		GOT=$(python3 -I - "$APP/term-reply.jsonl" "$TARGET_SID" <<'PYEOF'
+import base64, json, sys
+target = sys.argv[2]
+forms = {target, "session:" + base64.b64encode(target.encode()).decode()}
+top = ""
 for line in open(sys.argv[1]):
     r = json.loads(line)
     if r.get("error"):
         continue
     for res in ((r.get("data") or {}).get("results") or []):
         o = res.get("open") or {}
-        if o.get("session_id"):
-            print(o["session_id"])
-            raise SystemExit
+        sid = o.get("session_id")
+        if not sid:
+            continue
+        if sid in forms:
+            raise SystemExit  # target already searchable for this term
+        if not top:
+            top = sid
+print(top)
 PYEOF
 )
 		if [ -n "$GOT" ]; then TERM=$cand; SESSION=$GOT; break; fi
@@ -125,9 +183,11 @@ PYEOF
 	REL_MAN=${TGT_MAN#"$BOX/raw/"}
 	{
 		echo "bin=$BIN"
+		echo "base=$BASE_STORE"
 		echo "target_rel=$REL_MAN"
 		echo "term=$TERM"
 		echo "session=$SESSION"
+		echo "target_sid=$TARGET_SID"
 	} > "$OUT/append-state.env"
 	cp -f "$APP/term-reply.jsonl" "$OUT/append-prereply.jsonl"
 	printf '{"id":1,"tool":"search_sessions","args":{"query":"%s","n_hits":10}}\n' "$TERM" \
@@ -189,10 +249,10 @@ PYEOF
 		echo "append run $i: ingest=$IRC batch=$BRC, see $LOG" >&2
 		exit 1
 	fi
-	python3 -I - "$i" "$LOG" "$APP/reply-$i.jsonl" "$OUT/append-prereply.jsonl" "$SESSION" \
+	python3 -I - "$i" "$LOG" "$APP/reply-$i.jsonl" "$OUT/append-prereply.jsonl" "$SESSION" "$TARGET_SID" \
 		>> "$OUT/append-summary.tsv" <<'PYEOF'
-import json, re, sys
-run, log, reply, pre, session = sys.argv[1:6]
+import base64, json, re, sys
+run, log, reply, pre, session, target = sys.argv[1:7]
 t = open(log, encoding="utf-8", errors="replace").read()
 m = re.search(r"Elapsed \(wall clock\) time[^\n]*: (\S+)", t)
 secs = 0.0
@@ -202,21 +262,43 @@ m = re.search(r"Maximum resident set size \(kbytes\): (\d+)", t)
 rss = int(m.group(1)) / 1024 if m else 0.0
 m = re.search(r"batch_stats ([\d.]+) (\d+)", t)
 bwall = float(m.group(1)) if m else 0.0
-r = [json.loads(l) for l in open(reply)]
-p = [json.loads(l) for l in open(pre)]
-found, hits = 0, 0
-for x in r:
-    for res in ((x.get("data") or {}).get("results") or []):
+# the append must have reached the index: the oracle counts rewritten
+# sources, the engine resumed+reparsed ones; only the oracle prints events
+m = re.search(r"ingest: sources=(\d+) rewrote=(\d+) failed=(\d+) events=(\d+)", t)
+if m:
+    parsed, events = int(m.group(2)), int(m.group(4))
+else:
+    m = re.search(r"ingest: unchanged=(\d+) resumed=(\d+) fresh=(\d+) reparsed=(\d+)", t)
+    parsed = int(m.group(2)) + int(m.group(4)) if m else -1
+    events = -1
+def ids(line):
+    out = []
+    for res in ((line.get("data") or {}).get("results") or []):
         o = res.get("open") or {}
         if o.get("session_id"):
-            hits += 1
-            if o["session_id"] == session:
-                found = 1
+            out.append(o["session_id"])
+    return out
+r = [json.loads(l) for l in open(reply)]
+p = [json.loads(l) for l in open(pre)]
+post = ids(r[0]) if r else []
+pre_ids = set(ids(p[0])) if p else set()
+hits = len(post)
+found = 1 if session in post else 0
+new = [s for s in post if s not in pre_ids]
 same = (json.dumps(r[0].get("data"), sort_keys=True) ==
         json.dumps(p[0].get("data"), sort_keys=True)) if r and p else True
+tforms = {target, "session:" + base64.b64encode(target.encode()).decode()}
+tnew = any(s in tforms for s in post) and not any(s in tforms for s in pre_ids)
 print("\t".join([run, "%.1f" % secs, "%.1f" % rss, "%.2f" % bwall,
                  str(r[0].get("us", 0) if r else 0),
-                 str(found), str(hits), str(int(not same))]))
+                 str(found), str(hits), str(int(bool(new))), str(len(new)),
+                 str(parsed), str(events), str(int(not same)), str(int(tnew))]))
+if parsed < 1 or not tnew:
+    sys.stderr.write(
+        "append run %s INVALID: parsed=%d target_new=%s new_hits=%d — the "
+        "append did not become searchable under the target session; see %s\n"
+        % (run, parsed, bool(tforms & set(post)), len(new), log))
+    raise SystemExit(3)
 PYEOF
 	rm -rf "$OVL" "$RST"
 done
@@ -232,5 +314,8 @@ print("range_ingest_wall_s\t%.1f-%.1f" % (ing[0], ing[-1]))
 print("median_call_us\t%d" % med(call))
 print("range_call_us\t%d-%d" % (call[0], call[-1]))
 print("session_found_all_runs\t%s" % all(r[5] == "1" for r in rows))
-print("reply_differs_all_runs\t%s" % all(r[7] == "1" for r in rows))
+print("new_hit_all_runs\t%s" % all(r[7] == "1" for r in rows))
+print("min_parsed_sources\t%d" % min(int(r[9]) for r in rows))
+print("reply_differs_all_runs\t%s" % all(r[11] == "1" for r in rows))
+print("target_new_all_runs\t%s" % all(r[12] == "1" for r in rows))
 PYEOF

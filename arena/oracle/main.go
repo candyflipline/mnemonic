@@ -102,9 +102,11 @@ func batch(dataDir, author string) error {
 }
 
 // copyRaw refreshes dataDir/raw from rawRoot/raw: the first call copies it,
-// later calls overwrite each file so appends since the last ingest are seen.
+// later calls merge into the existing dataDir/raw (cp -T: no target
+// directory, so the tree never nests into dataDir/raw/raw) and overwrite
+// each file so appends since the last ingest are seen.
 func copyRaw(rawRoot, dataDir string) error {
-	out, err := exec.Command("cp", "-Rp", filepath.Join(rawRoot, "raw")+"/", filepath.Join(dataDir, "raw")+"/").CombinedOutput()
+	out, err := exec.Command("cp", "-RpT", filepath.Join(rawRoot, "raw")+"/", filepath.Join(dataDir, "raw")).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("copy raw: %v: %s", err, out)
 	}
