@@ -267,6 +267,7 @@ type pushedSource struct {
 	manifestPath string
 	manifest     map[string]any
 	rawBytes     int
+	raw          []byte
 }
 
 // pushFixture picks three fixture sources (the first two claude-code and the
@@ -278,11 +279,6 @@ func (e *env) pushFixture(fixtureRoot string) error {
 		harness string
 		index   int
 	}{{"claude-code", 0}, {"claude-code", 1}, {"codex", 1}}
-	zr, err := zstd.NewReader(nil)
-	if err != nil {
-		return err
-	}
-	defer zr.Close()
 	var terms []string
 	for _, w := range wants {
 		dir := filepath.Join(fixtureRoot, "author="+authorArena, "machine="+machine, "harness="+w.harness)
@@ -298,36 +294,10 @@ func (e *env) pushFixture(fixtureRoot string) error {
 		if len(band) <= w.index {
 			return fmt.Errorf("only %d sources under %s", len(band), dir)
 		}
-		man := band[w.index]
-		b, err := os.ReadFile(man)
-		if err != nil {
+		if err := e.pushManifest(band[w.index], true); err != nil {
 			return err
 		}
-		var m map[string]any
-		if err := json.Unmarshal(b, &m); err != nil {
-			return fmt.Errorf("%s: %w", man, err)
-		}
-		zst := strings.TrimSuffix(man, ".json") + ".jsonl.zst"
-		comp, err := os.ReadFile(zst)
-		if err != nil {
-			return err
-		}
-		raw, err := zr.DecodeAll(comp, nil)
-		if err != nil {
-			return fmt.Errorf("%s: %w", zst, err)
-		}
-		q := fmt.Sprintf("/v1/raw/%s/%s/%s?offset=0&head_hash=%s&source_name=%s&path=%s&raw_end=%d",
-			url.QueryEscape(machine), url.QueryEscape(str(m["harness"])), url.QueryEscape(str(m["src_id"])),
-			url.QueryEscape(str(m["head_hash"])), url.QueryEscape(str(m["source_name"])),
-			url.QueryEscape(str(m["path"])), int64(num(m["raw_end"])))
-		resp := e.mcp.do("PUT", q, "application/octet-stream", raw)
-		e.pushed = append(e.pushed, pushedSource{manifestPath: man, manifest: m, rawBytes: len(raw)})
-		e.tr.step("push", "PUT /v1/raw/%s/%s (src_id %s): status %d, %d raw bytes",
-			machine, str(m["harness"]), str(m["src_id"]), resp.status, len(raw))
-		if resp.status != 200 {
-			return fmt.Errorf("PUT %s: status %d: %s", q, resp.status, resp.text)
-		}
-		if w := searchWords(raw); w != "" {
+		if w := searchWords(e.pushed[len(e.pushed)-1].raw); w != "" {
 			terms = append(terms, w)
 		}
 	}
@@ -336,6 +306,48 @@ func (e *env) pushFixture(fixtureRoot string) error {
 	}
 	e.searchTerm = terms[0]
 	e.tr.step("push", "search term for the smoke probe: %q", e.searchTerm)
+	return nil
+}
+
+// pushManifest PUTs one fixture source: the manifest's own head_hash,
+// source_name and path, with the decompressed raw as the body. record=false
+// re-sends a source already pushed, to wake the server's cycle.
+func (e *env) pushManifest(man string, record bool) error {
+	zr, err := zstd.NewReader(nil)
+	if err != nil {
+		return err
+	}
+	defer zr.Close()
+	b, err := os.ReadFile(man)
+	if err != nil {
+		return err
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		return fmt.Errorf("%s: %w", man, err)
+	}
+	zst := strings.TrimSuffix(man, ".json") + ".jsonl.zst"
+	comp, err := os.ReadFile(zst)
+	if err != nil {
+		return err
+	}
+	raw, err := zr.DecodeAll(comp, nil)
+	if err != nil {
+		return fmt.Errorf("%s: %w", zst, err)
+	}
+	q := fmt.Sprintf("/v1/raw/%s/%s/%s?offset=0&head_hash=%s&source_name=%s&path=%s&raw_end=%d",
+		url.QueryEscape(machine), url.QueryEscape(str(m["harness"])), url.QueryEscape(str(m["src_id"])),
+		url.QueryEscape(str(m["head_hash"])), url.QueryEscape(str(m["source_name"])),
+		url.QueryEscape(str(m["path"])), int64(num(m["raw_end"])))
+	resp := e.mcp.do("PUT", q, "application/octet-stream", raw)
+	if record {
+		e.pushed = append(e.pushed, pushedSource{manifestPath: man, manifest: m, rawBytes: len(raw), raw: raw})
+	}
+	e.tr.step("push", "PUT /v1/raw/%s/%s (src_id %s): status %d, %d raw bytes",
+		machine, str(m["harness"]), str(m["src_id"]), resp.status, len(raw))
+	if resp.status != 200 {
+		return fmt.Errorf("PUT %s: status %d: %s", q, resp.status, resp.text)
+	}
 	return nil
 }
 

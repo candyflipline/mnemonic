@@ -66,9 +66,17 @@ const (
 	tenantAlice = "acme"
 	tenantBob   = "other"
 
-	machine   = "m1"
+	machine = "m1"
+	// wideStart/wideEnd bound every list_sessions and file_attention call: the
+	// fixture's claude-code sessions ran in Oct 2026, its codex ones in Aug
+	// 2026, and neither tool caps the span. The query tool caps it at 31 days,
+	// so (d) and (e) query over dayStart..dayEnd, which holds the Oct
+	// claude-code events.
+	wideStart = "2026-08-01T00:00:00Z"
+	wideEnd   = "2026-11-01T00:00:00Z"
 	dayStart  = "2026-10-01T00:00:00Z"
 	dayEnd    = "2026-11-01T00:00:00Z"
+
 	otlpConv  = "e2e-conv-alice-1"
 	otlpWord  = "e2ee2ealphaspan"
 	otlpModel = "claude-sonnet-4-5"
@@ -191,7 +199,7 @@ tenant = %q
 	} else {
 		tr.step("shutdown", "serve stopped cleanly (SIGTERM)")
 	}
-	env.checkC(bin)
+	checks = append(checks, env.checkC(bin))
 
 	pass := 0
 	for _, c := range checks {
@@ -304,7 +312,7 @@ func (e *env) waitAliceSession(c *check) (string, bool) {
 	deadline := time.Now().Add(90 * time.Second)
 	for {
 		list, _ := e.mcpCall(c, e.alice, "list_sessions", map[string]any{
-			"start_datetime": dayStart, "end_datetime": dayEnd, "harness": "otlp", "limit": 25,
+			"start_datetime": wideStart, "end_datetime": wideEnd, "harness": "otlp", "limit": 25,
 		})
 		for _, s := range arr(mapGet(list, "sessions")) {
 			m, _ := s.(map[string]any)
@@ -339,19 +347,15 @@ func (e *env) checkB() *check {
 	}
 	annID := str(ann["annotation_id"])
 	e.tr.step("b", "annotate: annotation_id=%s duplicate=%v", annID, ann["duplicate"])
-	if !e.traceHasAnnotation(annID) {
+	if !e.waitAnnotation(annID, 60*time.Second) {
 		c.failf("annotation %s not visible in get_trace within 60s", annID)
 		return c
 	}
 
 	e.forceSweep()
-	deadline := time.Now().Add(120 * time.Second)
-	for !e.traceHasAnnotation(annID) {
-		if time.Now().After(deadline) {
-			c.failf("annotation %s gone after the forced sweep (120s)", annID)
-			return c
-		}
-		time.Sleep(2 * time.Second)
+	if !e.waitAnnotation(annID, 120*time.Second) {
+		c.failf("annotation %s gone after the forced sweep (120s)", annID)
+		return c
 	}
 	trace := e.lastTraceResult
 	if tree, _ := trace["tree"].([]any); len(tree) != 1 || kind(tree[0]) != "chat" {
@@ -363,23 +367,33 @@ func (e *env) checkB() *check {
 	return c
 }
 
-func (e *env) traceHasAnnotation(annID string) bool {
-	trace, _ := e.mcpCall(e.scratchCheck(), e.alice, "get_trace", map[string]any{"session_id": e.otlpSession, "include_annotations": true})
-	e.lastTraceResult = trace
-	for _, a := range arr(mapGet(trace, "annotations")) {
-		m, _ := a.(map[string]any)
-		if str(m["id"]) == annID {
-			return true
+// waitAnnotation polls get_trace until annID shows, within max. The cache
+// converges only after a cycle, so first sight lags the annotate call.
+func (e *env) waitAnnotation(annID string, max time.Duration) bool {
+	deadline := time.Now().Add(max)
+	for {
+		trace, _ := e.mcpCall(e.scratchCheck(), e.alice, "get_trace", map[string]any{"session_id": e.otlpSession, "include_annotations": true})
+		e.lastTraceResult = trace
+		for _, a := range arr(mapGet(trace, "annotations")) {
+			m, _ := a.(map[string]any)
+			if str(m["id"]) == annID {
+				return true
+			}
 		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(2 * time.Second)
 	}
-	return false
 }
 
 // forceSweep is the black-box parser-version sweep: the marker file the lake
 // reads (events/.parser-version) records a lower version for the otlp and
 // annotation parsers, and the derived events parquet of alice's otlp and
-// annotation sources is removed, so the next cycle's sweep lap re-parses both
-// from raw.
+// annotation sources is removed, so the next cycle re-parses both from raw.
+// A pushed source wakes the cycle — file edits alone would wait out the 5 min
+// reconcile — and the sweep lap then revisits the unchanged sources and
+// rewrites the marker, exactly the path a real parser bump takes.
 func (e *env) forceSweep() {
 	marker := filepath.Join(e.dataDir, "events", ".parser-version")
 	if err := os.WriteFile(marker, []byte(`{"otlp":0,"annotation":0}`+"\n"), 0o644); err != nil {
@@ -395,7 +409,14 @@ func (e *env) forceSweep() {
 		}
 		return nil
 	})
-	e.tr.step("b", "forced sweep: marker {otlp:0,annotation:0}, removed %d derived parquet under events/author=alice", removed)
+	wakeErr := "(no pushed source to re-send)"
+	if len(e.pushed) > 0 {
+		wakeErr = "(re-push failed)"
+		if err := e.pushManifest(e.pushed[0].manifestPath, false); err == nil {
+			wakeErr = "(woke with a re-push of " + filepath.Base(e.pushed[0].manifestPath) + ")"
+		}
+	}
+	e.tr.step("b", "forced sweep: marker {otlp:0,annotation:0}, removed %d derived parquet under events/author=alice %s", removed, wakeErr)
 }
 
 // ---- (d) query: refused without a time range, at most the row cap with one ----
@@ -455,7 +476,7 @@ func (e *env) queryEngine(c *check) {
 
 func (e *env) checkE() *check {
 	c := &check{letter: "e", name: "tenant B's token sees none of tenant A's sessions via any tool", pass: true}
-	bobList, _ := e.mcpCall(c, e.bob, "list_sessions", map[string]any{"start_datetime": dayStart, "end_datetime": dayEnd, "limit": 25})
+	bobList, _ := e.mcpCall(c, e.bob, "list_sessions", map[string]any{"start_datetime": wideStart, "end_datetime": wideEnd, "limit": 25})
 	bobIDs := 0
 	for _, s := range arr(mapGet(bobList, "sessions")) {
 		if m, _ := s.(map[string]any); str(m["id"]) != "" {
@@ -492,9 +513,9 @@ func (e *env) checkE() *check {
 		}
 	}
 	if e.faPath != "" {
-		fa, _ := e.mcpCall(c, e.bob, "file_attention", map[string]any{"path": e.faPath, "start_datetime": dayStart, "end_datetime": dayEnd})
+		fa, _ := e.mcpCall(c, e.bob, "file_attention", map[string]any{"path": e.faPath, "start_datetime": wideStart, "end_datetime": wideEnd})
 		bobSessions := len(arr(mapGet(fa, "sessions")))
-		faArena, _ := e.mcpCall(c, e.mcp, "file_attention", map[string]any{"path": e.faPath, "start_datetime": dayStart, "end_datetime": dayEnd})
+		faArena, _ := e.mcpCall(c, e.mcp, "file_attention", map[string]any{"path": e.faPath, "start_datetime": wideStart, "end_datetime": wideEnd})
 		arenaSessions := len(arr(mapGet(faArena, "sessions")))
 		e.tr.step("e", "file_attention %s: bob=%d sessions, arena=%d sessions", e.faPath, bobSessions, arenaSessions)
 		if bobSessions != 0 {
@@ -547,42 +568,69 @@ func (e *env) checkF() *check {
 	if mapGet(del, "deleted") != true {
 		c.failf("delete_session did not report deleted=true (%s)", dte.message)
 	}
-	after, _ := e.mcpCall(c, e.mcp, "search_sessions", map[string]any{"query": e.searchTerm, "n_hits": 20})
-	for _, h := range arr(mapGet(after, "results")) {
-		m, _ := h.(map[string]any)
-		s, _ := m["session"].(map[string]any)
-		if str(s["id"]) == target {
-			c.failf("deleted session still in search_sessions")
-		}
-	}
-	_, ote := e.mcpCall(c, e.mcp, "open", map[string]any{"id": target})
-	e.tr.step("f", "after delete: search hits=%d, open refused=%v error=%q",
-		num(mapGet(after, "result_count")), ote.code != "", ote.message)
-	if ote.code == "" {
-		c.failf("open still answers the deleted session")
+	if !e.waitGone(target, 45*time.Second) {
+		c.failf("deleted session %s still answers search or open after 45s", target)
 	}
 	// and alice's otlp session hides from open and get_trace the same way
 	if e.otlpSession != "" {
 		d2, _ := e.mcpCall(c, e.alice, "delete_session", map[string]any{"session_id": e.otlpSession})
 		e.tr.step("f", "delete_session %s as alice: deleted=%v", e.otlpSession, mapGet(d2, "deleted"))
-		_, o2 := e.mcpCall(c, e.alice, "open", map[string]any{"id": e.otlpSession})
-		_, t2 := e.mcpCall(c, e.alice, "get_trace", map[string]any{"session_id": e.otlpSession})
-		if o2.code == "" || t2.code == "" {
-			c.failf("alice's deleted otlp session still answers open or get_trace")
+		deadline := time.Now().Add(45 * time.Second)
+		for {
+			_, o2 := e.mcpCall(c, e.alice, "open", map[string]any{"id": e.otlpSession})
+			_, t2 := e.mcpCall(c, e.alice, "get_trace", map[string]any{"session_id": e.otlpSession})
+			if o2.code != "" && t2.code != "" {
+				e.tr.step("f", "alice's otlp session now refused by open and get_trace")
+				break
+			}
+			if time.Now().After(deadline) {
+				c.failf("alice's deleted otlp session still answers open or get_trace after 45s")
+				break
+			}
+			time.Sleep(2 * time.Second)
 		}
 	}
 	return c
+}
+
+// waitGone polls until target is out of the fixture search and open refuses
+// it, within max: the delete lands as a control record the cache converges
+// a cycle later.
+func (e *env) waitGone(target string, max time.Duration) bool {
+	deadline := time.Now().Add(max)
+	for {
+		after, _ := e.mcpCall(e.scratchCheck(), e.mcp, "search_sessions", map[string]any{"query": e.searchTerm, "n_hits": 20})
+		still := false
+		for _, h := range arr(mapGet(after, "results")) {
+			m, _ := h.(map[string]any)
+			s, _ := m["session"].(map[string]any)
+			if str(s["id"]) == target {
+				still = true
+			}
+		}
+		_, ote := e.mcpCall(e.scratchCheck(), e.mcp, "open", map[string]any{"id": target})
+		if !still && ote.code != "" {
+			e.tr.step("f", "after delete: search hits=%d, open refused (%s)", num(mapGet(after, "result_count")), ote.code)
+			return true
+		}
+		if time.Now().After(deadline) {
+			e.tr.step("f", "after delete (deadline): search hits=%d, open refused=%v", num(mapGet(after, "result_count")), ote.code != "")
+			return false
+		}
+		time.Sleep(2 * time.Second)
+	}
 }
 
 // pickExport records, while the server is still up, one exportable session id
 // per harness (the first in list order that (f) did not delete).
 func (e *env) pickExport() {
 	c := &check{letter: "c", pass: true}
-	list, _ := e.mcpCall(c, e.mcp, "list_sessions", map[string]any{"start_datetime": dayStart, "end_datetime": dayEnd, "limit": 25})
+	list, _ := e.mcpCall(c, e.mcp, "list_sessions", map[string]any{"start_datetime": wideStart, "end_datetime": wideEnd, "limit": 25})
 	e.exportPick = map[string]string{}
 	for _, s := range arr(mapGet(list, "sessions")) {
 		m, _ := s.(map[string]any)
-		id, h := str(m["id"]), str(m["harness"])
+		sess, _ := m["session"].(map[string]any)
+		id, h := str(m["id"]), str(sess["harness"])
 		if id == "" || id == e.deletedID || e.exportPick[h] != "" {
 			continue
 		}
