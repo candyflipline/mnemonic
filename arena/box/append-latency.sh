@@ -20,9 +20,12 @@
 #   appended as-is they would only land on the donor session (already
 #   searchable — EventUID hashes the source file, so the copies are new rows
 #   of whatever session their sessionId names). The search term is the longest
-#   [a-z][a-z0-9_]{5,} token among them that a search_sessions call on the
-#   pristine store returns in its top hit WITHOUT the target session already
-#   among the hits; that top hit's session id is what must stay in the reply.
+#   [a-z][a-z0-9_]{5,} token of the lines' MESSAGE TEXT (message.content text
+#   only — the lake indexes message text, not tool-use structure, so a token
+#   from anywhere else matches other sessions' rows and never proves the
+#   append landed) that a search_sessions call on the pristine store returns
+#   in its top hit WITHOUT the target session already among the hits; that
+#   top hit's session id is what must stay in the reply.
 # - the pre-append reply of the timed call is saved against the base store.
 #
 # Each of RUNS rounds then does, timed only where marked:
@@ -142,10 +145,25 @@ PYEOF
 	zstd -q -dc "$DON_ZST" | python3 -I "$APP/donor10.py" "$TARGET_SID" > "$APP/lines.jsonl"
 	[ "$(wc -l < "$APP/lines.jsonl")" -eq 10 ] || { echo "donor gave fewer than 10 lines" >&2; exit 1; }
 	python3 -I - "$APP/lines.jsonl" > "$APP/terms.txt" <<'PYEOF'
-import re, sys
-t = open(sys.argv[1], encoding="utf-8", errors="replace").read()
-toks = sorted(set(re.findall(r"[a-z][a-z0-9_]{5,}", t)), key=lambda s: (-len(s), s))
-for s in toks[:10]:
+import json, re, sys
+toks = set()
+for line in open(sys.argv[1], encoding="utf-8"):
+    try:
+        o = json.loads(line)
+    except Exception:
+        continue
+    m = o.get("message")
+    texts = []
+    if isinstance(m, dict):
+        c = m.get("content")
+        if isinstance(c, str):
+            texts.append(c)
+        elif isinstance(c, list):
+            texts.extend(i.get("text", "") for i in c
+                         if isinstance(i, dict) and i.get("type") == "text")
+    for t in texts:
+        toks.update(re.findall(r"[a-z][a-z0-9_]{5,}", t))
+for s in sorted(toks, key=lambda s: (-len(s), s))[:20]:
     print(s)
 PYEOF
 	# validate terms against the pristine store until one returns a top hit
