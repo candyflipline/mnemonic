@@ -18,10 +18,10 @@ import (
 )
 
 // The sections' expectations are main 59796bc's own: the spans goldens and
-// the claude-code literal tree are internal/cache/index_spans_test.go's, the
-// two-day annotation is index_annotations_test.go's, the two-author session
-// is index_session_authors_test.go's, ported to rows the engine builds parts
-// from.
+// the claude-code literal tree are 59796bc:internal/cache/index_spans_test.go's,
+// the two-day annotation is 59796bc:internal/cache/index_annotations_test.go's,
+// the two-author session is 59796bc:internal/cache/index_session_authors_
+// test.go's, ported to rows the engine builds parts from.
 
 // goldenRows reads one parser golden, the input main's cache derives its
 // spans from, into rows grouped by session, in event order with turn_seq
@@ -146,8 +146,8 @@ func TestSpansGoldens(t *testing.T) {
 	}
 }
 
-// TestClaudeCodeSpanTree is internal/cache/index_spans_test.go's literal
-// tree for the claude_code golden's session.
+// TestClaudeCodeSpanTree is 59796bc:internal/cache/index_spans_test.go's
+// literal tree for the claude_code golden's session.
 func TestClaudeCodeSpanTree(t *testing.T) {
 	harness, bySession := goldenRows(t, "claude_code")
 	const session = "7c666c01-d38e-4658-8650-854ffb5b626e"
@@ -213,9 +213,9 @@ func writeSource(t *testing.T, root, author, harness, srcID, sourceName string, 
 	}
 }
 
-// TestAnnotationSentOnTwoDaysIsOneRow is internal/cache/
-// index_annotations_test.go's case: the same annotation line in two sources
-// is one annotation row carrying its author.
+// TestAnnotationSentOnTwoDaysIsOneRow is
+// 59796bc:internal/cache/index_annotations_test.go's case: the same
+// annotation line in two sources is one annotation row carrying its author.
 func TestAnnotationSentOnTwoDaysIsOneRow(t *testing.T) {
 	line := `{"id":"a1","target":{"session_id":"s1"},"name":"quality","value":{"number":4},"source":"human","ts":"2026-10-21T10:00:00Z"}` + "\n"
 	root, store := t.TempDir(), t.TempDir()
@@ -240,9 +240,9 @@ func TestAnnotationSentOnTwoDaysIsOneRow(t *testing.T) {
 	}
 }
 
-// TestSessionAuthorsEverySource is internal/cache/index_session_authors_
-// test.go's case: a session two authors hold copies of keeps both authors,
-// winner or not.
+// TestSessionAuthorsEverySource is
+// 59796bc:internal/cache/index_session_authors_test.go's case: a session two
+// authors hold copies of keeps both authors, winner or not.
 func TestSessionAuthorsEverySource(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "fixtures", "claude-code", "session.jsonl"))
 	if err != nil {

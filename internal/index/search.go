@@ -36,7 +36,8 @@ func searchFlags(r *Row) int {
 	return f
 }
 
-// sqlInternalTool is mcpInternalToolPredicate: DuckDB trim strips spaces only.
+// sqlInternalTool is mcpInternalToolPredicate: the 59796bc oracle's trim
+// strips spaces only.
 func sqlInternalTool(name string) bool {
 	n := strings.ToLower(strings.Trim(name, " "))
 	if slices.Contains(mcpInternalToolNames, n) {

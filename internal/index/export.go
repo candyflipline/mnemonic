@@ -27,7 +27,8 @@ type ExportSession struct {
 //
 // The rows are the winner rows the part holds, minus the annotation harness's:
 // its files land in the annotations relation and never in events (the copy
-// internal/cache/index_annotations.go keeps), so no export sees them here.
+// 59796bc:internal/cache/index_annotations.go kept), so no export sees them
+// here.
 func (db *DB) EachSession(hidden map[string]bool, fn func(ExportSession) error) error {
 	type ref struct {
 		id string

@@ -12,20 +12,20 @@ import (
 
 var lakeStampedColumns = map[string]bool{"ingested_at": true, "author": true}
 
-type mapping struct{ goType, duckType string }
+type mapping struct{ goType string }
 
 var types = map[string]mapping{
-	"String":                 {"string", "VARCHAR"},
-	"LowCardinality(String)": {"string", "VARCHAR"},
-	"DateTime64(3)":          {"string", "TIMESTAMP"},
-	"Date":                   {"string", "DATE"},
-	"UInt8":                  {"uint8", "UTINYINT"},
-	"UInt16":                 {"uint16", "USMALLINT"},
-	"UInt32":                 {"uint32", "UINTEGER"},
-	"UInt64":                 {"uint64", "UBIGINT"},
-	"Array(String)":          {"[]string", "VARCHAR[]"},
-	"Map(String, UInt64)":    {"map[string]uint64", "MAP(VARCHAR, UBIGINT)"},
-	"Map(String, Float64)":   {"map[string]float64", "MAP(VARCHAR, DOUBLE)"},
+	"String":                 {"string"},
+	"LowCardinality(String)": {"string"},
+	"DateTime64(3)":          {"string"},
+	"Date":                   {"string"},
+	"UInt8":                  {"uint8"},
+	"UInt16":                 {"uint16"},
+	"UInt32":                 {"uint32"},
+	"UInt64":                 {"uint64"},
+	"Array(String)":          {"[]string"},
+	"Map(String, UInt64)":    {"map[string]uint64"},
+	"Map(String, Float64)":   {"map[string]float64"},
 }
 
 func main() {
@@ -46,7 +46,7 @@ func main() {
 		if !ok {
 			log.Fatalf("column %s: unmapped ClickHouse type %q; add it to genschema's types table", name, chType)
 		}
-		fmt.Fprintf(&cols, "\t{%q, %q, %q},\n", name, chType, m.duckType)
+		fmt.Fprintf(&cols, "\t{%q, %q},\n", name, chType)
 		fmt.Fprintf(&fields, "\t%s %s `json:%q`\n", goName(name), m.goType, name)
 	}
 	if err := sc.Err(); err != nil {
@@ -58,7 +58,7 @@ func main() {
 package schema
 
 type Column struct {
-	Name, ClickHouse, DuckDB string
+	Name, ClickHouse string
 }
 
 // EventColumns are the columns every parser fills, in ClickHouse order.

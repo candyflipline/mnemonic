@@ -130,7 +130,7 @@ func spansToTrace(spans []schema.Span) []*traceSpan {
 		if !a.Start.Equal(b.Start) {
 			return a.Start.Before(b.Start)
 		}
-		// kind is a DuckDB ENUM in the oracle, so it sorts in declaration
+		// kind is an ENUM in the 59796bc oracle, so it sorts in declaration
 		// order, not lexicographically.
 		if ra, rb := spanKindRank(string(a.Kind)), spanKindRank(string(b.Kind)); ra != rb {
 			return ra < rb

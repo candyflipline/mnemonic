@@ -1,8 +1,8 @@
 # Events
 
-An event is one row of one thing an agent did or said: a message, a tool call, a tool result, a piece of reasoning, a system notice. A parser turns each raw line of a [pushed source](wire.md) into zero or more events. This page lists every column, its type and what fills it, and the golden format that pins the parsers. A stranger can write a parser, or read the parquet files, from it alone.
+An event is one row of one thing an agent did or said: a message, a tool call, a tool result, a piece of reasoning, a system notice. A parser turns each raw line of a [pushed source](wire.md) into zero or more events. This page lists every column, its type and what fills it, and the golden format that pins the parsers. A stranger can write a parser from it alone.
 
-The column list is generated from `docs/clickhouse/events.tsv` into `internal/schema/events.go` and is a contract: it changes only with the owner (`AGENTS.md`, Contracts). Types below are the ClickHouse type in the TSV and the DuckDB type in `internal/schema/events.go:12-70`.
+The column list is generated from `docs/clickhouse/events.tsv` into `internal/schema/events.go` and is a contract: it changes only with the owner (`AGENTS.md`, Contracts). Types below are the ClickHouse type in the TSV, which `internal/schema/events.go` carries verbatim.
 
 Related specs: [wire](wire.md), [spans](spans.md) (a tree derived from these columns), [mcp](mcp.md), [otlp](otlp.md).
 
@@ -10,31 +10,30 @@ Related specs: [wire](wire.md), [spans](spans.md) (a tree derived from these col
 
 | Place | What | Source |
 |---|---|---|
-| lake | one parquet per source, `events/author=A/machine=M/harness=H/<src_id>.parquet`, plus `<src_id>.tail.parquet` for rows appended since | `internal/layout/layout.go:1-9` |
-| index | the `events` table of `cache/index.duckdb`, which is what MCP reads | `internal/cache/sql.go:80-102` |
+| raw | one zstd frame log per source, `raw/author=A/machine=M/harness=H/<src_id>.jsonl.zst`, the source of truth | `internal/layout/layout.go` |
+| index | the engine's store `index/`: per-source light and heavy frame logs, immutable parts, `CURRENT` (`internal/index/DESIGN.md`); what MCP reads | `internal/index/handle.go` |
 
-The lake stamps three columns onto every parsed row, so the parquet has the 57 parser columns below plus these (`internal/lake/lake.go:621-628`):
+Ingest stamps two facts of the source onto every parsed row, so a session's rows carry its 57 parser columns plus these:
 
 | Column | Type | Meaning |
 |---|---|---|
-| `author` | String | the token's author, taken from the source's path and never from a payload |
+| `author` | String | the token's author, taken from the source's path and never from a payload (`internal/index/build.go`, the part reader) |
 | `machine_id` | String | the `machine` segment of the source's path |
-| `ingested_at` | DateTime64(3) | when the lake wrote the row; rows imported from the retired ClickHouse store carry `1970-01-01 00:00:00.000` (`internal/lake/lake.go:31`) |
 
-When two rows share an `event_uid` the one with the highest `event_version` wins (`internal/lake/lake.go:321-322`, `internal/cache/index.go:217`).
+When two rows share an `event_uid` the one with the highest `event_version` wins (`internal/index/build.go`, the winner rule).
 
-The index adds columns of its own: `doc`, `lake_file`, `lake_row`, `event_time`, `event_order`, `turn_seq`, `event_ordinal` and a few derived ones (`internal/cache/sql.go:80-102`). The index does not keep `payload_json` or `token_usage_json`; read those from the parquet (`internal/cache/sql.go:78`). The ordering columns:
+The engine derives the ordering columns at part build and keeps them in the part's `docs` array (`internal/index/build.go`). `payload_json` and `token_usage_json` live in the source's heavy frame log, read only by `open` and session_meta. The ordering columns:
 
 | Column | Meaning |
 |---|---|
-| `event_time` | `record_ts` parsed as a timestamp, else `ingested_at` (`internal/cache/index.go:213`) |
-| `event_order` | 1-based position in the session, ordered by `event_time`, `source_file`, `source_generation`, `source_offset`, `source_line_no`, `emission_index`, then `event_uid` (`internal/cache/index.go:692-704`) |
-| `turn_seq` | `turn_index` when it is above 0; otherwise 1 plus the number of user messages seen so far, at least 1 (`internal/cache/index.go:699-701`) |
-| `event_ordinal` | 1-based position within the turn |
+| `event_time` | `record_ts` parsed as a timestamp, else the fixed stamp `ingestedAtUs` that stands in for an ingested_at, later than any record_ts and never the wall clock (`internal/index/build.go`, `eventTimeUs`; `internal/index/export.go`, `Row.EventTime`) |
+| `event_order` | 1-based position in the session, ordered by `event_time`, `source_file`, `source_generation`, `source_offset`, `source_line_no`, `emission_index`, then `event_uid` (`internal/index/build.go`) |
+| `turn_seq` | `turn_index` when it is above 0; otherwise 1 plus the number of user messages seen so far, at least 1 (`internal/index/build.go`, `turnSeqs`) |
+| `event_ordinal` | 1-based position within the turn (`internal/index/build.go`, `ordinals`) |
 
 ## Columns
 
-Dates and times are text in the parser output: a DateTime64(3) is `YYYY-MM-DD HH:MM:SS.mmm` in UTC and a Date is `YYYY-MM-DD` (`internal/schema/events.go:9-10`, `internal/normalize/shared/time.go:76-78`). A column a parser has nothing for is `""`, `0`, `[]` or a zero map; no column is null.
+Dates and times are text in the parser output: a DateTime64(3) is `YYYY-MM-DD HH:MM:SS.mmm` in UTC and a Date is `YYYY-MM-DD` (`internal/schema/events.go`, its `EventColumns` comment; `internal/normalize/shared/time.go:76-78`). A column a parser has nothing for is `""`, `0`, `[]` or a zero map; no column is null.
 
 ### Identity and time
 
@@ -48,7 +47,7 @@ Dates and times are text in the parser output: a DateTime64(3) is `YYYY-MM-DD HH
 | `inference_provider` | LowCardinality(String) | who served the model; a per-harness default, `anthropic` for claude-code (`internal/normalize/claudecode/claudecode.go:27`) |
 | `record_ts` | String | the line's own timestamp, trimmed, as written; empty when the line has none, except that codex falls back to the timestamp in a `rollout-YYYY-MM-DDTHH-MM-SS-` file name (`internal/normalize/shared/pipeline.go:112-125`) |
 | `event_ts` | DateTime64(3) | `record_ts` as UTC; `1970-01-01 00:00:00.000` when it does not parse. RFC 3339 and `YYYY-MM-DDTHH:MM:SS[.frac]` (taken as UTC) parse (`internal/normalize/shared/time.go:10`, `internal/normalize/shared/time.go:60-74`). |
-| `event_version` | UInt64 | version of this parse of the row; the highest wins when a uid repeats (`internal/normalize/shared/pipeline.go:306`, `internal/lake/lake.go:321-322`) |
+| `event_version` | UInt64 | version of this parse of the row; the highest wins when a uid repeats (`internal/normalize/shared/pipeline.go:306`, `internal/index/build.go`, the winner rule) |
 
 ### Where the row came from
 
@@ -133,13 +132,13 @@ Dates and times are text in the parser output: a DateTime64(3) is `YYYY-MM-DD HH
 
 ## Writing a parser
 
-A parser is `Parse(r io.Reader, src SourceMeta, from State, emit func(*Event) error) (State, error)` (`internal/normalize/normalize.go:39-42`). It registers under its harness name and the lake calls it with the raw source (`internal/normalize/normalize.go:46-56`).
+A parser is `Parse(r io.Reader, src SourceMeta, from State, emit func(*Event) error) (State, error)` (`internal/normalize/normalize.go:39-42`). It registers under its harness name and ingest calls it with the raw source (`internal/normalize/normalize.go:46-56`, `internal/index/ingest.go`).
 
 - `State` is where a parse stopped: next `LineNo`, byte `Offset`, and the session, model and cwd carried to the next line. Parsing the tail of a file from the `State` its head ended in must give the rows a whole-file parse gives those lines (`internal/normalize/normalize.go:19-32`).
 - The reference helper `shared.ParseJSONL` does the line walking; a new harness supplies the per-record mapping (`internal/normalize/shared/jsonl.go:13-21`, `internal/normalize/shared/pipeline.go:8-18`).
 - A parser change that changes a harness's output must bump that parser's `Version()`, and `TestVersionNamesOutput` fails, naming the harness, when its goldens moved and the version did not (`internal/normalize/all/golden_test.go`). The server then re-parses that harness's sources recorded at an earlier version, and no other.
 
-Registered harnesses: `claude-code`, `codex`, `cursor`, `pi-coding-agent`, `prime-agent` (`internal/normalize/*/*.go`, each file's `Harness()`). A source whose harness has no parser is stored and counted `raw_only`, not parsed (`internal/lake/lake.go:130-133`).
+Registered harnesses: `claude-code`, `codex`, `cursor`, `pi-coding-agent`, `prime-agent` (`internal/normalize/*/*.go`, each file's `Harness()`). A source whose harness has no parser is stored raw and never parsed; the `control` harness's rows are server-owned and skipped everywhere above ingest (`internal/index/controls.go`).
 
 ## Golden format
 

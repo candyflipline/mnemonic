@@ -43,10 +43,10 @@ The coding harnesses export OTel themselves. Content is off by default:
 
 What is already right, and is the precedent everyone else converged on:
 
-- **Raw is truth, the rest is derived.** Parquet and the cache rebuild from raw, and a parser change bumps that parser's `Version()` (`AGENTS.md`, `internal/normalize/normalize.go`).
+- **Raw is truth, the rest is derived.** The engine's store rebuilds from raw, and a parser change bumps that parser's `Version()` (`AGENTS.md`, `internal/normalize/normalize.go`).
 - **Redaction on the client** (`internal/redact`).
 - **The author comes from the token,** never the request (`internal/auth/auth.go`).
-- **Lake partitioned by author, machine, harness** (`internal/lake/lake.go:521`).
+- **Raw partitioned by author, machine, harness** (`internal/layout/layout.go`).
 - **The push protocol is already a generic append-only stream.** A source is `src_id` + `offset` + `head_hash`. An append must start at the server's size or get a 409. Offset 0 replaces the source (`internal/wire/wire.go:22-73`). Nothing in it needs the source to be a file on the client.
 - **Parsers are a registry** over `io.Reader` with a resumable `State` (`internal/normalize/normalize.go:23-43`).
 
@@ -54,10 +54,10 @@ What is already right, and is the precedent everyone else converged on:
 
 | Lie underneath | The one fix | What gets deleted |
 |---|---|---|
-| A trace is a flat list of events. `trace_id` is only filled for Claude Code and Cursor (`claudecode.go:204`, `cursor.go:126`). The tree lives implicitly in `parent_tool_call_id`, `agent_run_id`, `turn_index` (`internal/schema/events.go:33-48`). | A `spans` relation in the cache, derived from the columns each parser already writes: session root, turn, model call, tool call (request and response paired), subagent. OTel GenAI operation names as the span kinds. | Per-tool tree rebuilding in `open` and the prose formatters once they read `spans`. |
-| Only files can feed it. | An OTLP/HTTP receiver that appends each request's spans and logs as JSON lines to a server-side source (`harness=otlp`, one source per tenant, service and day), parsed by one more registered parser. Same raw, lake and cache path. | Nothing. No second pipeline exists. |
-| The author is the tenant. | Token maps to (tenant, author, scopes). The lake path gains `tenant=` above `author=`. Each session gets a visibility (private, team, unlisted link), like Amp's after it ended public threads [25]. | The implicit one-team-per-server assumption in config. |
-| One DuckDB file is the store. Every tool takes `*sql.DB` (`internal/query/query.go:13`). One process, 1 GB memory limit (`cmd/mnemonic/server.go:49`). | The Store seam from the Oct 21 outline (S3 there), then immutable search segments and lake files on object storage. A manifest commits last (Tempo). Readers merge the uncompacted tail (Brainstore). DuckDB stays as the SQL engine over the lake, not as the store. | `cache/index.duckdb` as the search index, after a shadow period. |
+| A trace is a flat list of events. `trace_id` is only filled for Claude Code and Cursor (`claudecode.go:204`, `cursor.go:126`). The tree lives implicitly in `parent_tool_call_id`, `agent_run_id`, `turn_index` (`internal/schema/events.go:33-48`). | A spans part section in the engine (`internal/index`), derived from the columns each parser already writes: session root, turn, model call, tool call (request and response paired), subagent. OTel GenAI operation names as the span kinds. | Per-tool tree rebuilding in `open` and the prose formatters once they read `spans`. |
+| Only files can feed it. | An OTLP/HTTP receiver that appends each request's spans and logs as JSON lines to a server-side source (`harness=otlp`, one source per tenant, service and day), parsed by one more registered parser. Same raw and index path. | Nothing. No second pipeline exists. |
+| The author is the tenant. | Token maps to (tenant, author, scopes). The raw path gains `tenant=` above `author=`. Each session gets a visibility (private, team, unlisted link), like Amp's after it ended public threads [25]. | The implicit one-team-per-server assumption in config. |
+| One DuckDB file is the store, every tool taking `*sql.DB`. | The engine (`internal/index`): mmapped parts, postings and frame logs in pure Go, one snapshot per call. The Store seam from the Oct 21 outline (S3 there), then immutable segments on object storage, stays future work. A manifest commits last (Tempo). Readers merge the uncompacted tail (Brainstore). | `cache/index.duckdb`, `internal/lake`, `internal/cache`, `internal/query` and the go-duckdb dependency. |
 | A trace is only read, never judged. | An append-only annotations stream (score, label, feedback, outcome such as tests passed or the commit made) keyed by session and span. Scores are records, never in-place overwrites; Braintrust writes each scorer run as its own span [26]. | Nothing. |
 
 ## Target design
@@ -82,12 +82,12 @@ What is already right, and is the precedent everyone else converged on:
 ### Store
 
 - **Raw.** Today's append-only files, later seekable-zstd frames. The Oct 21 outline measured about 4.4x on real traces with 64 KB frames at level 3. Raw goes on local disk or object storage behind one interface.
-- **Lake.** Parquet per (tenant, author, machine, harness), base plus tail, as now. Add Logfire-style per-file shredding of `payload_json`'s largest keys, so analytics over tool inputs stop parsing JSON.
+- **Index.** The engine's immutable parts over per-source frame logs, hot and cold (`internal/index`). Logfire-style per-file shredding of `payload_json`'s largest keys stays an idea, so analytics over tool inputs could stop parsing JSON.
 - **Search.** Pure-Go postings segments with block-max MAXSCORE (Oct 21 outline S2). These are immutable, one set per tenant, with a manifest written last. Brainstore's numbers are the argument for a real inverted index over bloom-filter skipping when the query is ranked full-text. Blooms (Tempo, VictoriaLogs) fit needle filters on logs, not BM25 recall.
 - **Large payloads.** Tool outputs over a cap are stored once by content hash and referenced from the event. Search indexes their first N KB. Braintrust caps attachments at 20 MB and keeps JSON attachments out of search [29].
 - **Deletion.** Two kinds:
   - a delete request is a record;
-  - queries filter it at once, and compaction drops it from segments and lake files after a cancel window.
+  - queries filter it at once, and compaction drops it from segments and parts after a cancel window.
 
   Loki works this way, with a 24 h default window and per-tenant modes [30]. Raw deletion is the same rewrite of the source.
 - **Redaction version.** Each source records the rule version its bytes were redacted under, so a rule change can find what to re-redact. Today a stored prefix is never re-redacted, an accepted risk recorded Oct 20.
@@ -98,7 +98,7 @@ What is already right, and is the precedent everyone else converged on:
 - **New MCP tools:**
   - `get_trace`, a span tree with token and cost totals;
   - `annotate`, which writes an annotation;
-  - `query`, read-only SQL over the lake and `spans`. It requires a time range and a row cap, and returns 429 with Retry-After when busy. Braintrust and Logfire both bound queries this way: a 30 s sync timeout and a required range filter for Braintrust [31], a 100 default and 10,000 max rows for Logfire [32].
+  - `query`, read-only queries over the engine's rows and `spans`. It requires a time range and a row cap, and returns 429 with Retry-After when busy. Braintrust and Logfire both bound queries this way: a 30 s sync timeout and a required range filter for Braintrust [31], a 100 default and 10,000 max rows for Logfire [32].
 - **HTTP export:**
   - ATIF per session, validated against Harbor's rules [19];
   - OTLP forwarding to any collector, so a team can also see sessions in Langfuse, Phoenix or Braintrust;
@@ -108,7 +108,7 @@ What is already right, and is the precedent everyone else converged on:
 
 1. **`mnemonic local`.** A laptop, one user, no server. It tails, indexes into a local data dir and serves MCP on localhost. This is the zero-config door. Phoenix's SQLite default is the precedent [9].
 2. **`mnemonic serve`.** One box, the team server. This is today's mode.
-3. **`mnemonic serve --store s3://...`.** Raw, lake and segments in a bucket. Writers append, compactors run in the background, readers are stateless and scale out. This is Brainstore's shape [1].
+3. **`mnemonic serve --store s3://...`.** Raw and index parts in a bucket. Writers append, compactors run in the background, readers are stateless and scale out. This is Brainstore's shape [1].
 
 The data layout is the same in all three, so moving up a mode is a copy.
 
@@ -142,12 +142,12 @@ Each stage ends on a countable check against the real server, never a self-repor
 | Stage | Done when |
 |---|---|
 | S0 replay harness (Oct 21 outline) | a recorded day of pushes and probes replays against a lab and prints p50, p95 and errors |
-| S3 Store seam | every tool reads through the seam, with no `*sql.DB` in `internal/query`; the replay matches byte for byte |
+| S3 Store seam | every tool reads through the seam; the replay matches byte for byte |
 | P1 spans + `get_trace` + ATIF export | 100 sampled sessions per harness validate as ATIF; one imports into Phoenix and renders |
 | P2 OTLP receiver | Claude Code and Codex OTel exports land and join their transcript sessions (Claude Code by `message.uuid`); cost totals appear in `get_trace` |
 | P3 annotations + `query` | an annotation written over MCP is readable after a parser-version sweep; `query` rejects a missing range |
 | P4 tenant + visibility + delete requests | two tenants on one server cannot read each other (scripted probe); a delete request disappears from search at once and from disk after compaction |
-| S2 segments in shadow, then on object storage | shadow search matches DuckDB on the replay probes; one reader on another box serves from the bucket |
+| S2 segments in shadow, then on object storage | shadow search matches the engine on the replay probes; one reader on another box serves from the bucket |
 | P5 `mnemonic local` + public specs + release | a fresh machine goes from download to a working MCP recall in one command |
 
 ## What this does not build

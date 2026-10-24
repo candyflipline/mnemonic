@@ -14,7 +14,7 @@ Every request carries `Authorization: Bearer <token>`. A missing or unknown toke
 
 Each token entry names a tenant, `default` when it names none, and every author no token entry names is in `default` too, so a `default` token reads those authors' sessions (`internal/auth/auth.go:106-116`). This is the owner's call, not an oversight.
 
-The cache derives `session_authors(session_id, author)` in each converge: every author of a lake row that carries one of the session's event uids, whether or not that row won (`internal/cache/index_session_authors.go`). A session id comes from the pushed file, so any author can put lines in any session; the rules below read only this relation, never which author pushed one event (`internal/query/scope.go`).
+The engine derives `session_authors(session_id, author)` as a part section: every author of a source whose rows carry one of the session's event uids, whether or not that row won (`internal/index/authors.go`). A session id comes from the pushed file, so any author can put lines in any session; the rules below read only this section, never which author pushed one event (`internal/index/scope.go`).
 
 | Read or act | Allowed when |
 |---|---|
@@ -23,9 +23,9 @@ The cache derives `session_authors(session_id, author)` in each converge: every 
 | a `private` session | the caller is its only author |
 | `set_visibility`, `delete_session` | every author is in the caller's tenant, and the caller is the only author or holds `admin` |
 
-A session whose authors sit in two tenants is no one's: no read shows it and no control tool finds it. That covers a line pushed into another tenant's session and an exact copy of its lines, which can win the cache's per-uid dedup and move the rows to the copier's author. A single `default` tenant filters nothing, as before.
+A session whose authors sit in two tenants is no one's: no read shows it and no control tool finds it. That covers a line pushed into another tenant's session and an exact copy of its lines, which can win the engine's per-uid dedup and move the rows to the copier's author. A single `default` tenant filters nothing, as before.
 
-The control tools append each record under a key bound to the action, session, visibility and the client's `request_key` (`internal/query/controls_tools.go`), so only an exact retry reports `duplicate`. Control records ignore fields a later build added and record the build that wrote them; malformed JSON or a missing required field still stops `serve` from starting, since a skipped delete would show a deleted session (`internal/query/controls.go`).
+The control tools append each record under a key bound to the action, session, visibility and the client's `request_key` (`internal/index/q_set_visibility.go`, `internal/index/q_delete_session.go`), so only an exact retry reports `duplicate`. Control records ignore fields a later build added and record the build that wrote them; malformed JSON or a missing required field still stops `serve` from starting, since a skipped delete would show a deleted session (`internal/index/controls.go`).
 
 ## Request rules
 
@@ -93,7 +93,7 @@ An unknown tool name is `isError:true` with only the prose `unknown tool: <name>
 
 ## Ids
 
-`open`, `search_sessions` and `list_sessions` hand back typed ids and accept them (`internal/query/common.go:36-110`):
+`open`, `search_sessions` and `list_sessions` hand back typed ids and accept them (59796bc:internal/query/common.go:36-110):
 
 | Form | Meaning |
 |---|---|

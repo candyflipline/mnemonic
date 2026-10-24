@@ -9,8 +9,8 @@ import (
 )
 
 // buildSpans is a part's spans section for one session: the spans
-// internal/cache/index_spans_<harness>.go derives from the session's winner
-// rows of that harness, in event order with turn_seq current.
+// 59796bc:internal/cache/index_spans_<harness>.go derives from the session's
+// winner rows of that harness, in event order with turn_seq current.
 func buildSpans(harness string, session []*Row) []schema.Span {
 	f, ok := spanBuilders[harness]
 	if !ok || len(session) == 0 {

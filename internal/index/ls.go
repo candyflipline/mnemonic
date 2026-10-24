@@ -11,7 +11,7 @@ import (
 )
 
 // lsRec is one session's list_sessions rollup, computed at build over the
-// session's winners (internal/query/list_sql.go lsSummarizePage).
+// session's winners (59796bc:internal/query/list_sql.go lsSummarizePage).
 type lsRec struct {
 	LastUs        int64  `json:"last_us"`
 	TotalTurns    int    `json:"turns"`

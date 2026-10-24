@@ -104,8 +104,8 @@ func (r *Row) decode(b []byte) ([]byte, error) {
 	return b, nil
 }
 
-// rowFrom derives the light row from a parsed event the way the cache's
-// converge derives its event columns (internal/cache/sql.go).
+// rowFrom derives the light row from a parsed event the way the 59796bc
+// cache's converge derives its event columns (59796bc:internal/cache/sql.go).
 func rowFrom(ev *schema.Event) Row {
 	r := Row{
 		UID: ev.EventUID, Session: ev.SessionID, SourceName: ev.SourceName, Harness: ev.Harness,
@@ -203,8 +203,9 @@ func parseUintStrict(s string) (uint64, bool) {
 	return n, true
 }
 
-// jsonExtractString renders a JSON value the way DuckDB json_extract_string
-// does: strings unescaped, everything else as its JSON text.
+// jsonExtractString renders a JSON value the way the 59796bc oracle's
+// json_extract_string does: strings unescaped, everything else as its JSON
+// text.
 func jsonExtractString(v json.RawMessage) string {
 	t := strings.TrimSpace(string(v))
 	if strings.HasPrefix(t, `"`) {

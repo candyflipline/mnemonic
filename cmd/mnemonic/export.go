@@ -172,8 +172,8 @@ func parseAnnotation(s string) (export.AnnotationFilter, error) {
 	return export.AnnotationFilter{Name: name, Value: value, HasValue: hasValue}, nil
 }
 
-// rawSessionID accepts the raw cache id and the MCP-facing session:<base64>
-// form (internal/query/common.go:166).
+// rawSessionID accepts the raw session id and the MCP-facing
+// session:<base64> form (59796bc:internal/query/common.go:166).
 func rawSessionID(s string) (string, error) {
 	raw, ok := strings.CutPrefix(s, "session:")
 	if !ok {

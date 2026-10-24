@@ -1,1 +1,7 @@
-`events.tsv` is the column source for `internal/schema` (regenerate with `go run ./scripts/genschema`). The top-level `*.sql` here are the views/relations mnemonic mirrors. The retired ClickHouse schema (DDL of every table and view) is in git history at commit cc9aac9 under `docs/clickhouse/archive/`. Its data was exported as parquet on the agent-memory host and imported into the lake under `machine=archive-ch` (`mnemonic import-ch`).
+`events.tsv` is the column list source for the Event columns contract: the
+column names, their order and their ClickHouse type strings, which
+`go run ./scripts/genschema` generates into `internal/schema/events.go`.
+It is not a ClickHouse integration; the name is the types' origin. The
+ClickHouse DDL of the retired store is in git history (cc9aac9, under
+`docs/clickhouse/`), and the rows imported from it live on as the
+`machine=archive-ch` parquet under `events/`.

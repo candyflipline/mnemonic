@@ -167,10 +167,10 @@ func MarshalATIF(db *index.DB, sessionID string, hidden map[string]bool) ([]byte
 }
 
 // requestKey names the model request an assistant row belongs to, the way the
-// spans derivations name a chat (internal/cache/index_spans_claudecode.go:
-// request_id, else trace_id; the pi family: the record id in item_id). It is
-// "" for harnesses whose rows carry no request boundary (codex, cursor), whose
-// assistant runs stay one step.
+// 59796bc spans derivations name a chat (59796bc:internal/cache/
+// index_spans_claudecode.go: request_id, else trace_id; the pi family: the
+// record id in item_id). It is "" for harnesses whose rows carry no request
+// boundary (codex, cursor), whose assistant runs stay one step.
 func requestKey(harness string, ev eventRow) string {
 	switch harness {
 	case "claude-code":
@@ -283,8 +283,8 @@ func isAssistantKind(kind string) bool {
 // absorbAssistant folds one assistant row into its step: reasoning rows feed
 // reasoning_content, message rows the message, tool_call rows the tool_calls,
 // and every row of one request carries that request's usage, so each token
-// column keeps the max over the step's rows (the rule the spans derivation states,
-// internal/cache/index_spans_claudecode.go:10-13).
+// column keeps the max over the step's rows (the rule the 59796bc spans
+// derivation states, 59796bc:internal/cache/index_spans_claudecode.go:10-13).
 func absorbAssistant(s *Step, ev eventRow) {
 	switch ev.EventKind {
 	case "reasoning":
