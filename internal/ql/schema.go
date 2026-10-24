@@ -83,23 +83,17 @@ var clickHouseTypes = map[string]Type{
 }
 
 // heavyEventColumns are events columns the engine's light row does not hold:
-// the binding reads them from the part's heavy record (payload_json,
-// token_usage_json), last and only when a predicate or an output needs them.
-var heavyEventColumns = []string{"payload_json", "token_usage_json", "model", "input_tokens",
-	"output_tokens", "latency_ms", "request_id", "trace_id"}
+// the binding reads them from the part's heavy record, last and only when a
+// predicate or an output needs them.
+var heavyEventColumns = []string{"payload_json", "token_usage_json"}
 
 // droppedEventColumns are ClickHouse contract columns neither the engine's
 // light row nor its heavy record holds: the parsers filled them at parse time
 // and the engine does not keep them, so the binding cannot answer them
-// without faking. A query naming one fails like any unknown column. The
-// engine coalesces op_status into tool_phase (Phase) and derives ingested_at
-// as one fixed stamp, so both are dropped rather than served wrong.
+// without faking. A query naming one fails like any unknown column.
 var droppedEventColumns = map[string]bool{
-	"session_date": true, "record_ts": true, "op_kind": true, "op_status": true,
-	"parent_tool_call_id": true, "origin_event_id": true, "origin_tool_call_id": true,
-	"tool_error": true, "agent_run_id": true, "agent_label": true,
-	"coord_group_id": true, "coord_group_label": true, "is_substream": true,
-	"cache_read_tokens": true, "cache_write_tokens": true, "retry_count": true,
+	"session_date": true, "record_ts": true, "origin_tool_call_id": true,
+	"coord_group_id": true, "coord_group_label": true, "retry_count": true,
 	"service_tier": true, "has_reasoning": true, "ingested_at": true,
 }
 
