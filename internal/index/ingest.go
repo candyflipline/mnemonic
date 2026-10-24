@@ -131,7 +131,11 @@ func listSources(root string) ([]source, error) {
 			SrcID:   strings.TrimSuffix(parts[3], ".json"),
 		}})
 	}
-	return out, nil
+	archive, err := listArchiveSources(root)
+	if err != nil {
+		return nil, err
+	}
+	return append(out, archive...), nil
 }
 
 func readCkpt(store, key string) (ckpt, bool) {
@@ -250,6 +254,12 @@ func storeExtends(raw *os.File, end int64, prev ckpt) bool {
 // bytes past its checkpoint when the input still extends it, and reports what
 // it did and how many log bytes it appended.
 func ingestSource(root, store string, s source) (Outcome, int64, error) {
+	if s.kind == KindArchive {
+		// Before normalize.For: archive harnesses do have parsers, but the
+		// parquet is read by the archive kind, not parsed as raw (DESIGN.md,
+		// Archive kind (d)).
+		return ingestArchive(store, s)
+	}
 	key := sourceKey(s.key)
 	parser, ok := normalize.For(s.src.Harness)
 	if !ok {
@@ -616,7 +626,38 @@ func publish(store string, sources []source, quiet time.Duration, settleAll bool
 	}
 	var cks []ckpt
 	var srcs []stSource
+	var keepExtra []string
 	for _, s := range sources {
+		if s.kind == KindArchive {
+			// The archive file's checkpoint expands into its per-session
+			// member checkpoints, which plan and build like any member; the
+			// file itself never joins planning, and its sources row is
+			// omitted — the cache's sources table skips archive files too,
+			// so get_ingest_status and list_sessions must not count them.
+			// Its rows still count in parts and ls rollups.
+			fk := sourceKey(s.key)
+			fc, ok := readCkpt(store, fk)
+			if !ok {
+				continue
+			}
+			keepExtra = append(keepExtra, ckptPath(store, fk))
+			for _, sid := range fc.Sessions {
+				mk := archiveMemberKey(fk, sid)
+				c, ok := readCkpt(store, mk)
+				if !ok {
+					continue
+				}
+				if c.hot() && (settleAll || s.src.UpdatedMs <= newest-quiet.Milliseconds()) {
+					c.ColdZst = c.ZstSize
+					b, _ := json.Marshal(c)
+					if err := writeFileAtomic(ckptPath(store, c.Key), b); err != nil {
+						return CycleStats{}, err
+					}
+				}
+				cks = append(cks, c)
+			}
+			continue
+		}
 		row := stSource{Author: s.key.Author, Machine: s.key.Machine, Harness: s.key.Harness, UpdatedMs: s.src.UpdatedMs, Size: s.src.Size}
 		if c, ok := readCkpt(store, sourceKey(s.key)); ok {
 			if c.hot() && (settleAll || s.src.UpdatedMs <= newest-quiet.Milliseconds()) {
@@ -669,7 +710,7 @@ func publish(store string, sources []source, quiet time.Duration, settleAll bool
 	}
 	gcParts(store, keep)
 	gcDeltas(store, images)
-	return cs, gcLogs(store, cks)
+	return cs, gcLogs(store, cks, keepExtra)
 }
 
 type builtPart struct {
@@ -861,13 +902,18 @@ func gcParts(store string, want map[string]bool) {
 	}
 }
 
-// gcLogs removes log generations no checkpoint names.
-func gcLogs(store string, cks []ckpt) error {
+// gcLogs removes log generations no checkpoint names, plus any file in
+// keepExtra: the archive files' checkpoints, which name member checkpoints
+// rather than logs.
+func gcLogs(store string, cks []ckpt, keepExtra []string) error {
 	keep := map[string]bool{}
 	for _, c := range cks {
 		keep[filepath.Base(logPath(store, c.Key, c.Gen, "light"))] = true
 		keep[filepath.Base(logPath(store, c.Key, c.Gen, "heavy"))] = true
 		keep[filepath.Base(ckptPath(store, c.Key))] = true
+	}
+	for _, p := range keepExtra {
+		keep[filepath.Base(p)] = true
 	}
 	ents, err := os.ReadDir(srcDir(store))
 	if err != nil {

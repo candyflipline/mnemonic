@@ -97,6 +97,7 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 	type winner struct {
 		b    built
 		path string
+		kind Kind
 	}
 	win := map[string]*winner{}
 	members := make([]member, len(cks))
@@ -123,8 +124,8 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 		for _, i := range local {
 			b := rows[i]
 			w, ok := win[b.row.UID]
-			if !ok || c.Path > w.path {
-				win[b.row.UID] = &winner{b: b, path: c.Path}
+			if !ok || memberBeats(c, w.kind, w.path) {
+				win[b.row.UID] = &winner{b: b, path: c.Path, kind: c.Kind}
 			}
 		}
 	}
