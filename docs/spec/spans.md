@@ -1,34 +1,34 @@
 # Spans and annotations
 
-An [event](events.md) list is flat; a trace is a tree. A span is one node of that tree: a session, a turn, a model request, a tool call, a subagent. The server derives spans from events in the index and never stores them in the lake, so a change to a derivation re-derives them without re-parsing anything.
+An [event](events.md) list is flat; a trace is a tree. A span is one node of that tree: a session, a turn, a model request, a tool call, a subagent. The engine derives spans from events as a part section, built with the part and read at query time, so a change to a derivation re-derives them when the part rebuilds and nothing re-parses.
 
 An annotation is a judgment attached to a session or a span: a score, a label or a note, written by a person, a scorer or a CI job.
 
 Related specs: [events](events.md), [wire](wire.md), [mcp](mcp.md), [otlp](otlp.md).
 
-## The spans relation
+## The spans section
 
-`spans` is a table in `cache/index.duckdb` (`internal/schema/spans.go:51-68`). One row per span. It has no tenant column: whose session a span belongs to comes from `session_authors`, which every read filters on (`internal/query/scope.go:86-88`).
+`schema.Span` (`internal/schema/spans.go`) is one span. A part holds the spans of its sessions in a section written at build (`internal/index/spans.go`, `buildSpans`); `get_trace` and the exports read them through the DB (`internal/index/spans.go`, `sessionSpans`; `internal/index/export.go`, `ExportSpans`). A span has no tenant column: whose session a span belongs to comes from `session_authors`, which every read filters on (`internal/index/scope.go`, `sessionAuthors`).
 
-| Column | Type | Meaning |
+| Field | Type | Meaning |
 |---|---|---|
-| `session_id` | VARCHAR | the [event](events.md) `session_id` |
-| `span_id` | VARCHAR | first 16 hex characters of `sha256` over the span's source key. It is the same after every re-parse. |
-| `parent_span_id` | VARCHAR | the parent's `span_id`; `""` on the session root |
-| `kind` | ENUM | `invoke_agent`, `chat`, `execute_tool` or `turn` (`internal/schema/spans.go:8-18`) |
-| `name` | VARCHAR | a label for display |
-| `start_time`, `end_time` | TIMESTAMP | the smallest and largest `event_time` of the span's events (`internal/cache/index_spans.go:34-37`) |
-| `status` | ENUM | `ok` or `error` (`internal/schema/spans.go:20-27`) |
-| `model` | VARCHAR | the model of a `chat` span, `""` otherwise |
-| `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens` | UBIGINT | token counts; see the claude-code rules below |
-| `cost` | DOUBLE | null when the source reports none. The claude-code derivation always leaves it null. |
-| `first_event_uid`, `last_event_uid` | VARCHAR | the `event_uid` of the span's first and last event in `event_order` |
+| `SessionID` | string | the [event](events.md) `session_id` |
+| `SpanID` | string | first 16 hex characters of `sha256` over the span's source key. It is the same after every re-parse. |
+| `ParentSpanID` | string | the parent's `span_id`; `""` on the session root |
+| `Kind` | SpanKind | `invoke_agent`, `chat`, `execute_tool` or `turn` (`internal/schema/spans.go`) |
+| `Name` | string | a label for display |
+| `Start`, `End` | time.Time | the smallest and largest `event_time` of the span's events (`internal/index/spans.go`, `spanBounds`) |
+| `Status` | SpanStatus | `ok` or `error` (`internal/schema/spans.go`) |
+| `Model` | string | the model of a `chat` span, `""` otherwise |
+| `InputTokens`, `OutputTokens`, `CacheReadTokens`, `CacheWriteTokens` | uint64 | token counts; see the claude-code rules below |
+| `Cost` | *float64 | nil when the source reports none. The claude-code derivation always leaves it nil. |
+| `FirstEventUID`, `LastEventUID` | string | the `event_uid` of the span's first and last event in `event_order` |
 
-The kinds follow the OpenTelemetry GenAI operation names: `invoke_agent` for an agent run, `chat` for a model request, `execute_tool` for a tool call, and `turn` for one user prompt and everything that follows it (`internal/schema/spans.go:9`).
+The kinds follow the OpenTelemetry GenAI operation names: `invoke_agent` for an agent run, `chat` for a model request, `execute_tool` for a tool call, and `turn` for one user prompt and everything that follows it (`internal/schema/spans.go`).
 
 ### Span ids
 
-A `span_id` is `substr(sha256(concat_ws(U+001F, parts...)), 1, 16)` in lowercase hex, where the parts are the span's source key (`internal/cache/index_spans.go:28-32`). For claude-code the key is a tag followed by ids from the events (`internal/cache/index_spans_claudecode.go:24-40`):
+A `span_id` is the first 16 hex characters of `sha256` over U+001F-joined key parts (`internal/index/spans.go`, `spanIDHex`). For claude-code the key is a tag followed by ids from the events (`internal/index/spans_claudecode.go`, the key builders):
 
 | Span | Key parts |
 |---|---|
@@ -40,17 +40,15 @@ A `span_id` is `substr(sha256(concat_ws(U+001F, parts...)), 1, 16)` in lowercase
 
 ### When spans are built
 
-Spans for a session are deleted and rebuilt whenever the session's events change. The step that recomputes `event_order` and `turn_seq` queues each session it touched in `pending_spans` once (`internal/cache/index.go:774`), and `Converge` derives the queued sessions' spans in a transaction of their own after the events batch, so a failure costs spans, never events (`internal/cache/index.go:313`, `internal/cache/index_spans.go:78-106`). A derivation sees only the events of one harness, matched by the `harness=<h>` segment of the lake path (`internal/cache/index_spans.go:48-56`). A harness with no derivation has no spans; today `claude-code` (`internal/cache/index_spans_claudecode.go:3`), `codex` (`internal/cache/index_spans_codex.go:4`), `cursor` (`internal/cache/index_spans_cursor.go:3`), `pi-coding-agent` (`internal/cache/index_spans_pi.go:4`) and `prime-agent` (`internal/cache/index_spans_primeagent.go:3`) and `otlp` (`internal/cache/index_spans_otlp.go:3`) have one.
-
-The index records a fingerprint of all derivations. When the set changes, the next `Converge` re-derives every session's spans without a full rebuild (`internal/cache/index_spans.go:58-63`, `internal/cache/index_spans.go:82-91`, called at `internal/cache/index.go:313`).
+A part section is a function of the part's members: build derives each session's spans from that session's winner rows of one harness while the part is written, and query time only reads (`internal/index/build.go`, the section build; `internal/index/DESIGN.md`, decision 3). A part rebuilds when a member joins or leaves it, so spans track their events through the same rebuild the events get. A harness with no derivation has no spans; `claude-code`, `codex`, `cursor`, `pi-coding-agent`, `prime-agent` and `otlp` have one (`internal/index/spans.go`, `spanBuilders`, and `internal/index/spans_<harness>.go`).
 
 ### Writing a derivation
 
-A derivation is registered per harness name with `cache.RegisterSpans(harness, derive)` from an `init` (`internal/cache/index_spans.go:23-26`). `derive(where)` returns one `SELECT` that yields every column of the table, matched by name; `where` selects the events of the sessions being rebuilt, with `event_order` and `turn_seq` already current (`internal/cache/index_spans.go:15-19`). The `events` table in the index has no `payload_json`, so a derivation reads values from columns ([events](events.md)).
+A derivation is `func(harness string, session []*Row) []schema.Span`, registered per harness name in `spanBuilders` from an `init` (`internal/index/spans.go:22`). It receives one session's winner rows in event order with `turn_seq` and `event_ordinal` current, the rows the part stores; the heavy columns are not among them, so a derivation reads values from columns ([events](events.md)).
 
 ### claude-code tree
 
-`internal/cache/index_spans_claudecode.go:5-13` states the rules and `TestClaudeCodeSpanTree` (`internal/cache/index_spans_test.go:15`) pins them.
+`internal/index/spans_claudecode.go` states the rules and `TestClaudeCodeSpanTree` (`internal/index/sections_golden_test.go`) pins them against the 59796bc oracle's tree.
 
 - The session is the root `invoke_agent`, named `claude-code`, with no parent.
 - Each `turn_seq` of the main thread (rows with `is_substream = 0`) is a `turn` span named `turn N`, under the root.
@@ -61,7 +59,7 @@ A derivation is registered per harness name with `cache.RegisterSpans(harness, d
 
 ## Annotations
 
-An annotation is one append-only line of JSON (`internal/schema/annotations.go:110-120`):
+An annotation is one append-only line of JSON (`internal/schema/annotations.go`):
 
 ```json
 {"id":"a1","target":{"session_id":"S","span_id":"optional"},"name":"helpfulness",
@@ -78,28 +76,16 @@ An annotation is one append-only line of JSON (`internal/schema/annotations.go:1
 | `source` | one of `human`, `scorer`, `ci` |
 | `ts` | required RFC 3339 timestamp |
 
-`ParseAnnotation` rejects a line that breaks any rule, and unknown keys inside `value` (`internal/schema/annotations.go:83-108`, `internal/schema/annotations.go:122-144`). The author is not in the line; it is the author of the source the line was appended to, so a caller can annotate only as itself (`internal/schema/annotations.go:110-111`).
+`ParseAnnotation` rejects a line that breaks any rule, and unknown keys inside `value` (`internal/schema/annotations.go`). The author is not in the line; it is the author of the source the line was appended to, so a caller can annotate only as itself.
 
-### The annotations relation
+### The annotations section
 
-The index holds a table `annotations`, rebuilt from the lake files of each changed annotation source (`internal/schema/annotations.go:146-159`, `internal/cache/index_annotations.go:56-102`). It has one row per `annotation_id`: the same annotation appended on two days, which the store's one-day look-back does not merge, is indexed once, from the first lake file the index applied that holds it (`internal/cache/index_annotations.go:82-85`).
+The engine holds the annotations of its sessions as a part section, built with the part (`internal/index/annotations.go`, `buildAnnotations`). It has one row per `annotation_id`: the same annotation appended on two days, which the store's one-day look-back does not merge, is indexed once, from the first row the build saw, the way the 59796bc cache qualified `row_number` over filename and file row number. The row is the `schema.Annotation`: `id`, target, `name`, the one key of `value`, `source`, `ts` as UTC, and the source's `author` from its path.
 
-| Column | Type | From |
-|---|---|---|
-| `annotation_id` | VARCHAR | `id` |
-| `target_session_id` | VARCHAR | `target.session_id` |
-| `target_span_id` | VARCHAR | `target.span_id`; null when absent |
-| `name` | VARCHAR | `name` |
-| `value_number`, `value_label`, `value_text` | DOUBLE, VARCHAR, VARCHAR | the one key of `value`; the other two are null |
-| `source` | ENUM | `source` |
-| `author` | VARCHAR | the source's author, from the lake path |
-| `ts` | TIMESTAMP | `ts`, as UTC |
-| `lake_file`, `lake_row` | VARCHAR, UBIGINT | where the row came from |
-
-Annotations never enter `events`, the search index, `sessions` or `turns` (`internal/cache/index_annotations.go:18-27`, `internal/cache/index_annotations.go:52-54`).
+Annotations never enter `events`, the search index, `sessions` or `turns`: the export paths skip the annotation harness's rows (`internal/index/export.go`, `exportSession`), and the annotation rows feed only the section.
 
 ### How an annotation reaches the server
 
-Annotations are written to sources the server owns, not pushed by a client (see "Sources owned by the server" in [wire](wire.md)). The raw lines of such a source are annotation JSON, one per line, in a source whose harness is `annotation`. Its parser follows this row contract (`internal/schema/annotations.go:12-22`): one event per line, with `event_uid` the annotation `id`, `session_id` the target session and `payload_json` the annotation as JSON. The harness name `annotation` and the right to write it are reserved for server-owned sources.
+Annotations are written to sources the server owns, not pushed by a client (see "Sources owned by the server" in [wire](wire.md)). The raw lines of such a source are annotation JSON, one per line, in a source whose harness is `annotation`. Its parser follows this row contract (`internal/schema/annotations.go`, the `AnnotationHarness` comment): one event per line, with `event_uid` the annotation `id`, `session_id` the target session and `payload_json` the annotation as JSON. The harness name `annotation` and the right to write it are reserved for server-owned sources.
 
-The tool that writes annotations is defined by the change that adds it and, like every tool, appears in `tools/list` ([mcp](mcp.md)); this page defines only the data.
+The `annotate` tool writes them (`internal/index/q_annotate.go`); like every tool it appears in `tools/list` ([mcp](mcp.md)).
