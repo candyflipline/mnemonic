@@ -21,11 +21,14 @@
 // tools/list names the query tool's statement arg (sql on 59796bc, query once
 // the ql swap lands); (a) POST /v1/traces as alice with a gen_ai chat span
 // and an execute_tool child, then get_trace; (b) annotate + get_trace, then a
-// forced parser sweep (events/.parser-version rewritten with lowered
-// otlp/annotation versions, the derived events parquet of alice's otlp and
-// annotation sources removed, and one pushed source re-sent to wake the
-// cycle, since file edits alone wait out the 5 min reconcile) and get_trace
-// again; (d) query refused without a time range, at most the row cap with
+// forced parser sweep — the on-disk record of which parser version alice's
+// otlp and annotation sources were parsed at is lowered to 0 (59796bc: the
+// events/.parser-version marker, plus their derived events parquet removed;
+// engine: index/src/**.ckpt parser fields — whichever exists, both when both
+// do), one pushed source re-sent to wake the cycle since file edits alone
+// wait out the 5 min reconcile, and the lowered records must read current
+// versions again before the check asserts the annotation survived; (d) query
+// refused without a time range, at most the row cap with
 // one, in the detected dialect; (e) bob's token sees nothing of alice's or
 // arena's sessions through search_sessions, list_sessions, open, get_trace,
 // query and file_attention (the path probed at scope all until arena's
@@ -43,6 +46,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -257,6 +261,9 @@ type env struct {
 	faCandidates []string          // file_path values mined from the pushed raw, most named first
 	faPath       string            // the candidate file_attention answers for arena
 	exportPick   map[string]string // one session id per harness for (c)
+
+	sweepMarker string   // events/.parser-version when the write landed (59796bc's lake)
+	sweepCkpts  []string // index/src/**.ckpt whose parser the sweep lowered to 0 (engine)
 }
 
 // ---- (a) OTLP chat span with an execute_tool child, get_trace shows it ----
@@ -369,6 +376,10 @@ func (e *env) checkB() *check {
 	}
 
 	e.forceSweep()
+	if !e.waitSwept(120 * time.Second) {
+		c.failf("sweep not consumed: the lowered parser records were not rewritten within 120s")
+		return c
+	}
 	if !e.waitAnnotation(annID, 120*time.Second) {
 		c.failf("annotation %s gone after the forced sweep (120s)", annID)
 		return c
@@ -378,7 +389,7 @@ func (e *env) checkB() *check {
 		c.failf("tree changed after the sweep: %d roots", len(tree))
 	}
 	if c.pass {
-		e.tr.step("b", "after sweep (marker rewritten, alice's otlp+annotation parquet removed): annotation %s still in get_trace, tree intact", annID)
+		e.tr.step("b", "after sweep (parser records rewritten, derived state rebuilt): annotation %s still in get_trace, tree intact", annID)
 	}
 	return c
 }
@@ -403,17 +414,23 @@ func (e *env) waitAnnotation(annID string, max time.Duration) bool {
 	}
 }
 
-// forceSweep is the black-box parser-version sweep: the marker file the lake
-// reads (events/.parser-version) records a lower version for the otlp and
-// annotation parsers, and the derived events parquet of alice's otlp and
-// annotation sources is removed, so the next cycle re-parses both from raw.
-// A pushed source wakes the cycle — file edits alone would wait out the 5 min
-// reconcile — and the sweep lap then revisits the unchanged sources and
-// rewrites the marker, exactly the path a real parser bump takes.
+// forceSweep is the black-box parser-version sweep: it rewrites the on-disk
+// record of which parser version alice's otlp and annotation sources were
+// parsed at — down to 0, below every real version — so the next cycle
+// re-parses both from byte 0, exactly what a real parser bump triggers. Where
+// that record lives differs by binary, and the driver does whichever exists:
+// 59796bc's lake keeps one marker file (events/.parser-version) plus derived
+// events parquet the re-parse rebuilds; the engine keeps it per source in
+// index/src/**.ckpt and its sweep rebuilds the parts itself. A pushed source
+// wakes the cycle — file edits alone would wait out the 5 min reconcile. The
+// check then requires the server to have consumed the edit: the rewritten
+// records must read current versions again (waitSwept).
 func (e *env) forceSweep() {
 	marker := filepath.Join(e.dataDir, "events", ".parser-version")
 	if err := os.WriteFile(marker, []byte(`{"otlp":0,"annotation":0}`+"\n"), 0o644); err != nil {
 		e.tr.step("b", "marker write failed: %v", err)
+	} else {
+		e.sweepMarker = marker
 	}
 	removed := 0
 	root := filepath.Join(e.dataDir, "events", "author="+authorAlice)
@@ -425,6 +442,30 @@ func (e *env) forceSweep() {
 		}
 		return nil
 	})
+	e.sweepCkpts = nil
+	srcRoot := filepath.Join(e.dataDir, "index", "src")
+	_ = filepath.WalkDir(srcRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".ckpt") ||
+			!strings.HasPrefix(filepath.Base(path), authorAlice+"__") {
+			return nil
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		var ck map[string]any
+		if json.Unmarshal(b, &ck) != nil {
+			return nil
+		}
+		if h, _ := ck["harness"].(string); h != "otlp" && h != "annotation" {
+			return nil
+		}
+		ck["parser"] = 0
+		if b, err := json.Marshal(ck); err == nil && os.WriteFile(path, b, 0o644) == nil {
+			e.sweepCkpts = append(e.sweepCkpts, path)
+		}
+		return nil
+	})
 	wakeErr := "(no pushed source to re-send)"
 	if len(e.pushed) > 0 {
 		wakeErr = "(re-push failed)"
@@ -432,7 +473,46 @@ func (e *env) forceSweep() {
 			wakeErr = "(woke with a re-push of " + filepath.Base(e.pushed[0].manifestPath) + ")"
 		}
 	}
-	e.tr.step("b", "forced sweep: marker {otlp:0,annotation:0}, removed %d derived parquet under events/author=alice %s", removed, wakeErr)
+	e.tr.step("b", "forced sweep: marker {otlp:0,annotation:0} written=%v, removed %d derived parquet under events/author=alice, lowered parser to 0 in %d ckpt under index/src/author=alice %s",
+		e.sweepMarker != "", removed, len(e.sweepCkpts), wakeErr)
+}
+
+// waitSwept polls the records forceSweep lowered until the server's sweep lap
+// has rewritten them with current versions (marker values and ckpt parser
+// fields back above 0), so survival is asserted after a re-parse that really
+// happened, not after an edit nothing consumed.
+func (e *env) waitSwept(max time.Duration) bool {
+	deadline := time.Now().Add(max)
+	for {
+		markerOK := e.sweepMarker == "" || func() bool {
+			b, err := os.ReadFile(e.sweepMarker)
+			if err != nil {
+				return false
+			}
+			var m map[string]any
+			return json.Unmarshal(b, &m) == nil && num(m["otlp"]) > 0 && num(m["annotation"]) > 0
+		}()
+		ckOK := 0
+		for _, path := range e.sweepCkpts {
+			b, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			var ck map[string]any
+			if json.Unmarshal(b, &ck) == nil && num(ck["parser"]) > 0 {
+				ckOK++
+			}
+		}
+		if markerOK && ckOK == len(e.sweepCkpts) {
+			e.tr.step("b", "sweep consumed: marker rewritten=%v, ckpts back at current versions %d/%d", markerOK, ckOK, len(e.sweepCkpts))
+			return true
+		}
+		if time.Now().After(deadline) {
+			e.tr.step("b", "sweep not consumed within %s: marker rewritten=%v, ckpts %d/%d", max, markerOK, ckOK, len(e.sweepCkpts))
+			return false
+		}
+		time.Sleep(2 * time.Second)
+	}
 }
 
 // ---- (d) query: refused without a time range, at most the row cap with one ----
