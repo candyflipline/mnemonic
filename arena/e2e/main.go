@@ -504,15 +504,24 @@ func (e *env) waitSwept(max time.Duration) bool {
 			}
 		}
 		if markerOK && ckOK == len(e.sweepCkpts) {
-			e.tr.step("b", "sweep consumed: marker rewritten=%v, ckpts back at current versions %d/%d", markerOK, ckOK, len(e.sweepCkpts))
+			e.tr.step("b", "sweep consumed: %s, ckpts back at current versions %d/%d", e.markerPart(markerOK), ckOK, len(e.sweepCkpts))
 			return true
 		}
 		if time.Now().After(deadline) {
-			e.tr.step("b", "sweep not consumed within %s: marker rewritten=%v, ckpts %d/%d", max, markerOK, ckOK, len(e.sweepCkpts))
+			e.tr.step("b", "sweep not consumed within %s: %s, ckpts %d/%d", max, e.markerPart(markerOK), ckOK, len(e.sweepCkpts))
 			return false
 		}
 		time.Sleep(2 * time.Second)
 	}
+}
+
+// markerPart words the marker half of the sweep-consumed line: the engine has
+// no lake marker, so there the line names the ckpt record alone.
+func (e *env) markerPart(ok bool) string {
+	if e.sweepMarker == "" {
+		return "no lake marker on this side"
+	}
+	return fmt.Sprintf("marker rewritten=%v", ok)
 }
 
 // ---- (d) query: refused without a time range, at most the row cap with one ----
