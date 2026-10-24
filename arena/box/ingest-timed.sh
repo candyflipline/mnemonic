@@ -88,9 +88,15 @@ print("\t".join([run, "%.1f" % secs, "%.1f" % rss, "%.1f" % user, "%.1f" % sys_,
 PYEOF
 done
 
-python3 -I - "$OUT/ingest-cold-summary.tsv" <<'PYEOF'
+python3 -I - "$OUT/ingest-cold-summary.tsv" "$FIRST" "$RUNS" <<'PYEOF'
 import sys
+# Only this invocation's runs: the tsv accumulates rows across binaries
+# (oracle FIRST=1..., engine FIRST=11...), and a median over mixed rows lies.
+first, runs = int(sys.argv[2]), int(sys.argv[3])
 rows = [l.split("\t") for l in open(sys.argv[1]).read().splitlines() if l.strip()]
+rows = [r for r in rows if first <= int(r[0]) < first + runs]
+if not rows:
+    sys.exit("no summary rows for runs %d..%d" % (first, first + runs - 1))
 wall = sorted(float(r[1]) for r in rows)
 rss = sorted(float(r[2]) for r in rows)
 med = lambda xs: xs[len(xs) // 2] if len(xs) % 2 else (xs[len(xs)//2 - 1] + xs[len(xs)//2]) / 2
