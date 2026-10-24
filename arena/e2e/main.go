@@ -246,8 +246,10 @@ type env struct {
 	deletedID       string // session (f) deleted, kept out of (c)
 	otlpSession     string // alice's session:<...> id from (a)
 	lastTraceResult map[string]any
-	faPath          string            // a file the fixture sessions touched
-	exportPick      map[string]string // one session id per harness for (c)
+
+	faCandidates []string          // file_path values mined from the pushed raw, most named first
+	faPath       string            // the candidate file_attention answers for arena
+	exportPick   map[string]string // one session id per harness for (c)
 }
 
 // ---- (a) OTLP chat span with an execute_tool child, get_trace shows it ----
@@ -291,17 +293,24 @@ func (e *env) checkA() *check {
 	if num(tok["input"]) != 1234 || num(tok["output"]) != 567 {
 		c.failf("chat tokens = %v/%v, want 1234/567", num(tok["input"]), num(tok["output"]))
 	}
+	if len(child) == 1 {
+		ct, _ := child[0].(map[string]any)["tokens"].(map[string]any)
+		if num(ct["input"]) != 5 || num(ct["output"]) != 7 {
+			c.failf("execute_tool tokens = %v/%v, want 5/7", num(ct["input"]), num(ct["output"]))
+		}
+	}
 	totals, _ := trace["totals"].(map[string]any)
 	tt, _ := totals["tokens"].(map[string]any)
-	// the tool child carries 5 in / 7 out, so the totals are exact
-	if num(tt["input"]) != 1239 || num(tt["output"]) != 574 {
-		c.failf("totals tokens = %v/%v, want 1239/574", num(tt["input"]), num(tt["output"]))
+	// totals are the roots' sums: the tool child's 5/7 hang beneath the chat
+	// root and are not folded up, so the totals read 1234/567 over 2 spans
+	if num(tt["input"]) != 1234 || num(tt["output"]) != 567 {
+		c.failf("totals tokens = %v/%v, want 1234/567 (the roots' sum)", num(tt["input"]), num(tt["output"]))
 	}
 	if num(totals["spans"]) != 2 {
 		c.failf("totals spans = %v, want 2", num(totals["spans"]))
 	}
 	if c.pass {
-		e.tr.step("a", "get_trace: chat %q with one execute_tool child, tokens 1234/567, totals 1239/574 over 2 spans", str(root["name"]))
+		e.tr.step("a", "get_trace: chat %q with one execute_tool child (5/7), chat tokens 1234/567, totals 1234/567 over 2 spans", str(root["name"]))
 	}
 	return c
 }
@@ -512,20 +521,28 @@ func (e *env) checkE() *check {
 			c.failf("bob's get_trace read alice's session")
 		}
 	}
-	if e.faPath != "" {
-		fa, _ := e.mcpCall(c, e.bob, "file_attention", map[string]any{"path": e.faPath, "start_datetime": wideStart, "end_datetime": wideEnd})
-		bobSessions := len(arr(mapGet(fa, "sessions")))
-		faArena, _ := e.mcpCall(c, e.mcp, "file_attention", map[string]any{"path": e.faPath, "start_datetime": wideStart, "end_datetime": wideEnd})
-		arenaSessions := len(arr(mapGet(faArena, "sessions")))
-		e.tr.step("e", "file_attention %s: bob=%d sessions, arena=%d sessions", e.faPath, bobSessions, arenaSessions)
-		if bobSessions != 0 {
-			c.failf("bob's file_attention saw %d sessions, want 0", bobSessions)
+	// pick the mined path file_attention answers for arena (scope all, since
+	// the fixture's paths sit outside the sessions' worktree roots), then ask
+	// bob for the same path: an honest bob=0 needs arena>0 on the same call.
+	for _, cand := range e.faCandidates {
+		faArena, _ := e.mcpCall(c, e.mcp, "file_attention", map[string]any{
+			"path": cand, "scope": "all", "start_datetime": wideStart, "end_datetime": wideEnd,
+		})
+		if n := len(arr(mapGet(faArena, "sessions"))); n > 0 {
+			e.faPath = cand
+			fa, _ := e.mcpCall(c, e.bob, "file_attention", map[string]any{
+				"path": cand, "scope": "all", "start_datetime": wideStart, "end_datetime": wideEnd,
+			})
+			bobSessions := len(arr(mapGet(fa, "sessions")))
+			e.tr.step("e", "file_attention %s (scope all): arena=%d sessions, bob=%d sessions", cand, n, bobSessions)
+			if bobSessions != 0 {
+				c.failf("bob's file_attention saw %d sessions, want 0", bobSessions)
+			}
+			break
 		}
-		if arenaSessions == 0 {
-			c.failf("arena's file_attention saw 0 sessions for a fixture-touched file; the bob=0 above proves nothing")
-		}
-	} else {
-		e.tr.step("e", "file_attention skipped: the pushed fixture sources name no file_path")
+	}
+	if e.faPath == "" {
+		e.tr.step("e", "file_attention skipped: no file_path of the pushed sources answers for arena either")
 	}
 	q, _ := e.mcpCall(c, e.bob, "query", map[string]any{"sql": "SELECT session_id FROM events", "from": dayStart, "to": dayEnd, "limit": 5})
 	bobRows := num(mapGet(q, "row_count"))

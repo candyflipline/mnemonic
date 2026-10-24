@@ -429,28 +429,36 @@ func (e *env) waitFixtureVisible() {
 	}
 }
 
-// mineFilePath pulls a file_path out of the pushed sources' raw, for the
-// file_attention half of (e); empty when none names one.
+// mineFilePath collects the distinct file_path values of the pushed sources'
+// raw, most-named first, as candidates for the file_attention half of (e).
 func (e *env) mineFilePath() {
 	zr, err := zstd.NewReader(nil)
 	if err != nil {
 		return
 	}
 	defer zr.Close()
+	counts := map[string]int{}
 	for _, p := range e.pushed {
-		zst := strings.TrimSuffix(p.manifestPath, ".json") + ".jsonl.zst"
-		comp, err := os.ReadFile(zst)
-		if err != nil {
-			continue
+		for _, m := range regexp.MustCompile(`"file_path"\s*:\s*"([^"]+)"`).FindAllSubmatch(p.raw, -1) {
+			counts[string(m[1])]++
 		}
-		raw, err := zr.DecodeAll(comp, nil)
-		if err != nil {
-			continue
+	}
+	type named struct {
+		path string
+		n    int
+	}
+	var cands []named
+	for path, n := range counts {
+		cands = append(cands, named{path, n})
+	}
+	sort.Slice(cands, func(i, j int) bool {
+		if cands[i].n != cands[j].n {
+			return cands[i].n > cands[j].n
 		}
-		if m := regexp.MustCompile(`"file_path"\s*:\s*"([^"]+)"`).FindSubmatch(raw); m != nil {
-			e.faPath = string(m[1])
-			return
-		}
+		return cands[i].path < cands[j].path
+	})
+	for _, c := range cands {
+		e.faCandidates = append(e.faCandidates, c.path)
 	}
 }
 
