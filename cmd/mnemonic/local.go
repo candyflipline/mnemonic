@@ -89,6 +89,10 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 		return err
 	}
 	logger := log.New(logOut, "mnemonic local: ", log.LstdFlags)
+	srcs, err := expandSources(config.DefaultSources)
+	if err != nil {
+		return err
+	}
 	author, machine := localIdentity()
 	red, err := redact.New(nil)
 	if err != nil {
@@ -104,7 +108,7 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 		return err
 	}
 	st := &store.Store{DataDir: opts.dataDir}
-	if err := firstIngest(ix, logger, author, machine); err != nil {
+	if err := firstIngest(ix, srcs, logger, author, machine); err != nil {
 		return err
 	}
 	tokens := auth.NewTokens(map[string]auth.Token{
@@ -116,9 +120,9 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 		tools.ServeHTTP(w, r.WithContext(index.WithControls(store.WithStore(r.Context(), st), ctl)))
 	})))
 	hs := &http.Server{Addr: opts.listen, Handler: mux}
-	sink := indexSink{ix: ix, author: author, machine: machine}
+	sink := indexSink{ix: ix, srcs: srcs, author: author, machine: machine}
 	go func() {
-		if err := pushrun.WatchSink(ctx, config.Client{Sources: config.DefaultSources}, sink, out); err != nil {
+		if err := pushrun.WatchSink(ctx, config.Client{Sources: srcs}, sink, out); err != nil {
 			logger.Printf("watch: %v", err)
 		}
 	}()
@@ -137,11 +141,28 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 	return nil
 }
 
+// expandSources resolves the ~ in the client's source globs against this
+// machine's HOME. A config file load expands them on the way in; local mode
+// runs on DefaultSources with no config file, and neither the watcher nor a
+// glob expands ~ itself.
+func expandSources(srcs []config.SourceGlob) ([]config.SourceGlob, error) {
+	out := make([]config.SourceGlob, len(srcs))
+	for i, src := range srcs {
+		glob, err := config.ExpandHome(src.Glob)
+		if err != nil {
+			return nil, err
+		}
+		src.Glob = glob
+		out[i] = src
+	}
+	return out, nil
+}
+
 // firstIngest indexes the machine's files once before MCP serves, so the
 // store answers as soon as the socket is up; the watcher keeps it current.
-func firstIngest(ix *index.Index, logger *log.Logger, author, machine string) error {
+func firstIngest(ix *index.Index, srcs []config.SourceGlob, logger *log.Logger, author, machine string) error {
 	start := time.Now()
-	st, err := ix.IngestPlain(config.DefaultSources, author, machine, index.IngestOptions{Quiet: settleSource})
+	st, err := ix.IngestPlain(srcs, author, machine, index.IngestOptions{Quiet: settleSource})
 	logger.Printf("index: unchanged=%d resumed=%d fresh=%d reparsed=%d in %s err=%v",
 		st[index.Unchanged], st[index.Resumed], st[index.Fresh], st[index.Reparsed],
 		time.Since(start).Round(time.Millisecond), err)
@@ -154,12 +175,13 @@ func firstIngest(ix *index.Index, logger *log.Logger, author, machine string) er
 // completion and the next sync's stamp tests pick up whatever moved since.
 type indexSink struct {
 	ix      *index.Index
+	srcs    []config.SourceGlob
 	author  string
 	machine string
 }
 
 func (s indexSink) Sync(_ context.Context, _ []string) (pushrun.Stats, error) {
-	st, err := s.ix.IngestPlain(config.DefaultSources, s.author, s.machine, index.IngestOptions{Quiet: settleSource})
+	st, err := s.ix.IngestPlain(s.srcs, s.author, s.machine, index.IngestOptions{Quiet: settleSource})
 	return pushrun.Stats{
 		Appended:  st[index.Resumed] + st[index.Fresh],
 		Replaced:  st[index.Reparsed],

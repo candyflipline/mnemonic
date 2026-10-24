@@ -294,6 +294,8 @@ func redactValue(out *redact.Redactor, v any) any {
 		return json.RawMessage(out.Line(t))
 	case json.Number:
 		return t
+	case bool:
+		return t
 	case map[string]any:
 		for k, vv := range t {
 			t[k] = redactValue(out, vv)
