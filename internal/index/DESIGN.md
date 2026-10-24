@@ -158,9 +158,23 @@ parquet under `events/author=<a>/machine=archive-ch/harness=<h>/ch-<export>.parq
 those files in place as source kind `KindArchive`, with `github.com/parquet-go/parquet-go`
 as its only new direct dependency (pure Go; chosen over the arrow-go that
 duckdb already drags in transitively because the engine needs a row reader,
-not a columnar analytics runtime). The kind and its three functions live in
+not a columnar analytics runtime). The kind and its functions live in
 `archive.go`; `kind.go` (U10's file) is not modified — nothing above ingest
 looks at the kind (kind.go:10-12).
+
+**Member granularity is (file, session_id) (foreman amendment, Oct 24).**
+One ch-* file holds up to ~2,800 sessions and ~6.2M rows; as one member it
+would union all of them, plus every raw source sharing any of them, into one
+component, so the lies-table bound — an append rebuilds only the hot part of
+the touched component, bounded by the component, not the corpus — would be
+broken: a 10-row append to such a raw source would rebuild a hot part that
+carries millions of archive rows, and the 256-way cold sharding would put one
+giant component into one shard. So one pass over a changed file streams its
+rows into per-session members (`sourceKey(file) + "~" + session_id`; uuids
+never carry `~`), each member's ckpt carrying the parent file's identity
+(size and window): an unchanged file is skipped after reading only its size
+and last window, and a changed file re-parses all of its members in one pass.
+Components stay session-sized exactly as for raw.
 
 ### (a) Discovery
 
@@ -168,27 +182,31 @@ looks at the kind (kind.go:10-12).
 — the machine segment pinned to `layout.ArchiveMachine` because import-ch
 writes nowhere else (lake.go:243) — and appends one source per file to
 `listSources`' result (ingest.go:479), key `{path author, archive-ch, path
-harness, ch-<base>}` so `sourceKey` (ingest.go:92-94) and the ckpt/log names
-are per file, and `wantCkpt`'s `Path` (ingest.go:219, layout.go:32-34) is the
-file's exact lake path. This is the cache's own discovery: `EventsGlob`
+harness, ch-<base>}` so `sourceKey` (ingest.go:92-94) names the file, and
+`wantCkpt`'s `Path` (ingest.go:219, layout.go:32-34) is the file's exact lake
+path. Discovery is per file; the members are not discovered from the tree but
+from the file's checkpoint, which names the member sessions and expands into
+them in `publish` (d below). This is the cache's own discovery: `EventsGlob`
 matches ch-* names (layout.go:20) and `diffLake` notices a file by size+mtime
 (cache index.go:349-352,367-371).
 
 The engine's identity is size + bytes, not mtime, because import-ch rewrites
 whole files on rerun (lake.go:216-218): a ckpt's `ZstSize` is the file size
 and `WindowSHA` the SHA-256 of its last 64 KB (ingest.go:190-197). An
-unchanged file on the next ingest is `Unchanged` (ingest.go:266-268): no log
-append, same member bytes → same part fingerprint (build.go:32-38) → the part
-exists and is not rebuilt (ingest.go:717-723), and CURRENT's bytes are equal
-so it is not rewritten (ingest.go:645-647). A changed file (any size change or
-window change) fails `extends` (ingest.go:225-231) and reparses from byte 0;
-KindArchive's byte test is "same size AND same window" — no zstd-magic check
-(storeExtends's, ingest.go:235-246), a parquet file is never appended.
+unchanged file on the next ingest is `Unchanged` (archive.go, the kind's byte
+test): no log append, same member bytes → same part fingerprint
+(build.go:32-38) → the part exists and is not rebuilt (ingest.go:717-723),
+and CURRENT's bytes are equal so it is not rewritten (ingest.go:645-647). A
+changed file (any size change or window change) re-parses in one pass into
+the members' next generation (archive.go `ingestArchive`); KindArchive's byte
+test is "same size AND same window" — no zstd-magic check (storeExtends's,
+ingest.go:235-246), a parquet file is never appended.
 
 ### (b) Row mapping
 
-Rows stream one row group at a time (`Rows().ReadRows`, parquet-go; groups
-are 64 MB, lake.go:325,608-610) into a `schema.Event` by column name, then go
+Rows stream one row group at a time (`NewGenericRowGroupReader[chRow]` over
+each `RowGroup`, parquet-go; groups are 64 MB, lake.go:325,608-610) into the
+typed `chRow` whose parquet tags the probe pinned, then go
 through `rowFrom` (row.go:109-160) exactly as raw rows do: the two MAP columns
 marshal into `Buckets`/`Native` JSON (row.go:129-136), emission_index/tool_io/
 meta bits derive from payload_json (row.go:144-158), `TimeUs` from the
@@ -249,19 +267,30 @@ cache's union of file author and path author (index_session_authors.go:28-37)
 ### (d) Parts, components, winners — no parser, no Version
 
 The archive ingest branch sits before `normalize.For` in `ingestSource`
-(ingest.go:253-256), since archive harnesses do have parsers: it opens the
-parquet (no manifest — no `src.kind.open`), maps rows through `rowFrom`, and
-appends to the same light/heavy frame logs (ingest.go:294-318). Its ckpt
-records `Parser: 0`, `Layout: logLayout` (the row encoding is shared), and the
-parser-version machinery skips it by construction: `versionStale` is false for
-any kind but KindStore (ingest.go:584-589), `parserVersion` is never reached
-for it, and `extends`' identity check compares 0 == 0 (ingest.go:226).
-`publish` treats it like any member: `ZstSize == ColdZst` from the first ckpt
-(ingest.go:73), so it is always cold, shards into the 256 cold parts by least
-session id (ingest.go:807-811), and joins hot components as a cold member of a
-hot part when a raw source of the same session is hot (ingest.go:802-806).
-Sections (spans, annotations, authors) are functions of the part's rows
-(DESIGN.md:114-117) and build from winner rows as for any source.
+(ingest.go:253-256), since archive harnesses do have parsers: `ingestArchive`
+opens the parquet (no manifest — no `src.kind.open`), maps rows through
+`rowFrom`, and streams them into the per-session members' light/heavy frame
+logs (ingest.go:294-318) — one pass over the file, whichever session a row
+belongs to. Member ckpts record `Parser: 0`, `Layout: logLayout` (the row
+encoding is shared), and the parser-version machinery skips the kind by
+construction: `versionStale` is false for any kind but KindStore
+(ingest.go:584-589), `parserVersion` is never reached for it, and the kind's
+own byte test replaces `extends` (a parquet has no parse-resume state; the
+whole file re-parses into the members' next gen). The file ckpt is the commit
+point: it is written last, after every member's logs are synced and member
+ckpts renamed, so it never names a member whose rows are not durable, and it
+names the sessions the file held so a session the file lost has its member
+ckpt and logs removed (archive.go `removeMember`).
+
+`publish` expands the file ckpt into its member ckpts and plans those; the
+file itself never joins planning (its ckpt is kept from gc by
+`gcLogs`' keepExtra). A member is hot exactly like a raw source
+(`ColdZst` set at its first settle), shards into the 256 cold parts by least
+session id once settled, and joins a raw source's hot component as a cold
+member when they share a session — so a hot part holds one session's rows of
+raw + archive, never the file's (the committed test asserts the literal
+count). Sections (spans, annotations, authors) are functions of the part's
+rows (DESIGN.md:114-117) and build from winner rows as for any source.
 
 ### (e) Tenancy, authors, controls
 
@@ -283,11 +312,17 @@ whatever the sources rows say (ingest.go:846-863).
 
 ### (f) Memory
 
-`parquet.OpenFile` reads footer + metadata only; rows stream row group at a
-time, so peak memory is one decompressed group's columns plus the row slice —
-never a 6 GB file, never an mmap. One archive source per worker with only its
-own logs, like today's parse (ingest.go:62-64). The engine never writes these
-files; no writer exists outside tests.
+`parquet.OpenFile` reads footer + metadata only; rows stream one row group at
+a time into a bounded slice (`archiveReadRows`), so peak memory is one
+decompressed group's columns plus the slice — never a 6 GB file, never an
+mmap. A file's rows are not sorted by session, so the per-session members'
+frame logs are held behind an LRU of `archiveOpenLogs` open pairs: the least
+recently used member is flushed and closed, and reopens at its recorded
+lengths (same gen — the gen bump is per parse run, not per open) if a later
+row needs it, so ~2,800 sessions cost 64 open files, and the committed test's
+70-session file exercises the reopen. One archive source per worker, like
+today's parse (ingest.go:62-64). The engine never writes these files; no
+writer exists outside tests.
 
 ### (g) Fixture
 
@@ -298,5 +333,10 @@ ch-schema file with parquet-go CGO_ENABLED=0: 2 rows, 62 leaf columns, 2 list
 elements, 2+2 map keys, correct event_ts micros and session_date days —
 counts only. Phase 2's committed `archive_test.go` writes its small ch-schema
 fixture with parquet-go's writer inside the test (no writer in non-test code)
-and asserts literal rows, winner outcomes (raw over archive; archive-only
-session) and ckpt stability across a re-ingest.
+and asserts, with literal values: per-session member ckpts carrying the
+parent file's identity; the raw copy winning the shared uid; archive-only
+sessions listed and searched; session authors = path author; get_ingest_status
+counting one source, not the members; an unchanged re-ingest rewriting
+nothing (store tree digest equal); a changed file re-parsing all members in
+one pass; the append bound (the hot part holds 13 docs — the session's — not
+the file's rows); and a 70-session file driving the LRU, including a reopen.

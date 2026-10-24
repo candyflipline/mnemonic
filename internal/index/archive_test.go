@@ -3,8 +3,8 @@ package index
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -53,7 +53,7 @@ func TestArchiveKind(t *testing.T) {
 			// The columns search's default event-type mask reads; the real
 			// files carry them filled, as the raw parse stamps them.
 			EventKind: "message", ActorKind: "user", PayloadType: "message",
-			TextContent:  text, TextPreview: text,
+			TextContent: text, TextPreview: text,
 			EventVersion: ver, Author: "a", MachineID: "archive-ch",
 		}
 	}
@@ -110,7 +110,10 @@ func TestArchiveKind(t *testing.T) {
 		mc.ZstSize != fc.ZstSize || mc.WindowSHA != fc.WindowSHA || mc.Author != "a" || mc.Gen != 0 {
 		t.Fatalf("shared member: %+v", mc.parsed)
 	}
-	for _, c := range []struct{ sid string; rows int64 }{{archS2, 2}, {archS3, 1}} {
+	for _, c := range []struct {
+		sid  string
+		rows int64
+	}{{archS2, 2}, {archS3, 1}} {
 		m, ok := readCkpt(store, chKey+"~"+c.sid)
 		if !ok || m.Rows != c.rows {
 			t.Fatalf("member %s: rows %d ok %v, want %d", c.sid, m.Rows, ok, c.rows)
