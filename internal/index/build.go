@@ -125,7 +125,9 @@ func holderIndexOf(holder *Part, key string) int {
 // length the holder recorded, or, for a cold holder (a full part zeroes its
 // members' lengths), no tail at all when the member provably has not parsed
 // since — any resume grows Rows and any re-parse changes a parsed field or
-// bumps the generation a hot holder records. ok is false when c must be read
+// bumps the generation a hot holder records — or the tail past the length the
+// checkpoint recorded at the settle the cold holder was built from: a resume
+// keeps the generation and a re-parse clears those fields. ok is false when c must be read
 // from its logs whole: the holder does not name it, or is left behind by a
 // growth or re-parse it does not cover.
 func memberFrom(c ckpt, holder *Part) (from int64, ok bool) {
@@ -142,6 +144,13 @@ func memberFrom(c ckpt, holder *Part) (from int64, ok bool) {
 	}
 	if sameParsed(hm.parsed, c.parsed) && hm.Rows == c.Rows {
 		return c.LightLen, true
+	}
+	if c.ColdLight > 0 {
+		at := c.parsed
+		at.ZstSize, at.Rows, at.WindowSHA, at.State = c.ColdZst, c.ColdRows, c.ColdSHA, hm.State
+		if sameParsed(hm.parsed, at) && c.Rows > c.ColdRows && c.LightLen >= c.ColdLight {
+			return c.ColdLight, true
+		}
 	}
 	return 0, false
 }

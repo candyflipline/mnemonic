@@ -65,6 +65,10 @@ type ckpt struct {
 	LightLen int64 `json:"light_len"`
 	HeavyLen int64 `json:"heavy_len"`
 	ColdZst  int64 `json:"cold_zst"`
+
+	ColdRows  int64  `json:"cold_rows,omitempty"`
+	ColdLight int64  `json:"cold_light,omitempty"`
+	ColdSHA   string `json:"cold_sha,omitempty"`
 }
 
 // logLayout is the shape of the rows a log holds. Layout 1 numbers a row's
@@ -333,6 +337,7 @@ func ingestSource(root, store string, s source, cur *ckpt, red *redact.Redactor)
 	if resumed {
 		from = prev
 		next.Gen, next.ColdZst = prev.Gen, prev.ColdZst
+		next.ColdRows, next.ColdLight, next.ColdSHA = prev.ColdRows, prev.ColdLight, prev.ColdSHA
 	} else if has {
 		next.Gen = prev.Gen + 1
 	}
@@ -792,7 +797,7 @@ func publish(store string, sources []source, cur []*ckpt, quiet time.Duration, s
 		if !settle[i] {
 			continue
 		}
-		cks[i].ColdZst = cks[i].ZstSize
+		cks[i].ColdZst, cks[i].ColdRows, cks[i].ColdLight, cks[i].ColdSHA = cks[i].ZstSize, cks[i].Rows, cks[i].LightLen, cks[i].WindowSHA
 		b, _ := json.Marshal(cks[i])
 		if err := writeFileAtomic(ckptPath(store, cks[i].Key), b); err != nil {
 			return CycleStats{}, deferred, err
