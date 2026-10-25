@@ -8,6 +8,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -271,6 +273,94 @@ func TestHolderPartBytesMatchTheLogsPath(t *testing.T) {
 		t.Fatalf("shard holds %d members, want c and d", len(cks2))
 	}
 	buildBoth(t, store2, cks2, mustManifest(t, store2))
+}
+
+// TestMemberRowsReadsEachHolderFrameOnce reads one member of 2,400 rows two
+// ways, from the hot part that holds it and from its frame logs, and fails
+// unless the rows agree and the holder read allocates no more than twice the
+// logs read: memberRows decodes each light frame of the holder once, not once
+// per row. (The heavy records go through holder.fc.heavyFrame, which already
+// caches.) The two heavy coordinate fields are holder-relative — they name the
+// holder part's own heavy log, and the built part's bytes are pinned by
+// TestHolderPartBytesMatchTheLogsPath — so rowsEqual skips them.
+func TestMemberRowsReadsEachHolderFrameOnce(t *testing.T) {
+	const n = 2400
+	root, store := t.TempDir(), t.TempDir()
+	sid := "6f0d9a52-1c3b-4e5f-8a7b-9d2e4f6a8b0c"
+	var raw []byte
+	for i := 1; i <= n; i++ {
+		raw = append(raw, []byte(fmt.Sprintf(`{"type":"user","sessionId":%q,"cwd":"/work/win","uuid":"row-%d","timestamp":"2026-03-02T10:%02d:%02dZ","message":{"role":"user","content":"member rows frame cache filler %d shared question"}}`+"\n",
+			sid, i, i/60, i%60, i))...)
+	}
+	writeRawSource(t, root, "a", "m", "claude-code", "big", "/p/big.jsonl", raw, 1)
+	if _, err := Ingest(root, store, 15*time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	mf := mustManifest(t, store)
+	if len(mf.Parts) != 1 || len(mf.Hot) != 1 {
+		t.Fatalf("%d parts (%d hot), want the one hot image", len(mf.Parts), len(mf.Hot))
+	}
+	cks := memberCks(t, store, mf.Parts[0])
+	if len(cks) != 1 {
+		t.Fatalf("%d members, want 1", len(cks))
+	}
+	c := cks[0]
+	holder, err := OpenPartDir(partDir(store, mf.Parts[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	from, ok := memberFrom(c, holder)
+	if !ok {
+		t.Fatalf("%s: the hot part does not cover the member", c.Key)
+	}
+	rowsEqual := func(a, b *Row) bool {
+		x, y := *a, *b
+		x.HeavyFrame, x.HeavyIdx, y.HeavyFrame, y.HeavyIdx = 0, 0, 0, 0
+		return reflect.DeepEqual(x, y)
+	}
+	holderRun := func() ([]built, error) { return memberRows(store, 0, c, holder, from) }
+	logsRun := func() ([]built, error) { return memberRows(store, 0, c, nil, 0) }
+	logsRows, err := logsRun()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logsRows) < 2000 {
+		t.Fatalf("logs read holds %d rows, want the member's >= 2000", len(logsRows))
+	}
+	holderRows, err := holderRun()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(holderRows) != len(logsRows) {
+		t.Fatalf("holder read holds %d rows, logs read %d", len(holderRows), len(logsRows))
+	}
+	for i := range logsRows {
+		if !rowsEqual(holderRows[i].row, logsRows[i].row) {
+			t.Fatalf("row %d differs: holder uid %q, logs uid %q", i, holderRows[i].row.UID, logsRows[i].row.UID)
+		}
+	}
+	// allocOf warms fn once (the zstd decoder's buffers) and reports the
+	// TotalAlloc of a second run, GC before it.
+	allocOf := func(fn func() error) uint64 {
+		if err := fn(); err != nil {
+			t.Fatal(err)
+		}
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		if err := fn(); err != nil {
+			t.Fatal(err)
+		}
+		runtime.ReadMemStats(&after)
+		return after.TotalAlloc - before.TotalAlloc
+	}
+	holderAlloc := allocOf(func() error { _, err := holderRun(); return err })
+	logsAlloc := allocOf(func() error { _, err := logsRun(); return err })
+	if holderAlloc > 2*logsAlloc {
+		t.Fatalf("holder read allocated %d B, %.1fx the logs read's %d B; want <= 2x", holderAlloc, float64(holderAlloc)/float64(logsAlloc), logsAlloc)
+	}
+	t.Logf("holder read %d B, logs read %d B (%.2fx), %d rows", holderAlloc, logsAlloc, float64(holderAlloc)/float64(logsAlloc), len(logsRows))
 }
 
 // writeRawZst rewrites a raw source's manifest and zst, the zst the old
