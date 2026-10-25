@@ -41,6 +41,13 @@ type listed struct {
 	TotalLen   int64    `json:"total_len"`
 }
 
+// deltaWinner is a uid's winning row in openDelta and the member it came
+// from, so a later row for the uid competes under the full build's rule.
+type deltaWinner struct {
+	b built
+	m member
+}
+
 func listedOf(st *Part) listed {
 	l := listed{ScoredDocs: int64(st.meta.ScoredDocs), TotalLen: int64(st.meta.TotalLen)}
 	for s := 0; s < st.nSessions; s++ {
@@ -323,15 +330,25 @@ func openDelta(dir string, d delta) (*Part, error) {
 	}
 	lightD, heavyD, srcD = lightD[:d.LightLen], heavyD[:d.HeavyLen], srcD[:2*d.Rows]
 
-	win := map[string]built{}
+	// offer keeps, per uid, the row a full build would pick (buildIndex's
+	// loop): within a member the higher version wins, last on a tie; across
+	// members memberBeats, so a raw member's copy beats an archive member's
+	// whatever their paths sort like.
+	win := map[string]deltaWinner{}
 	var all []built
 	offer := func(b built) {
 		b.row.Author = d.Members[b.src].Author
 		all = append(all, b)
-		if w, ok := win[b.row.UID]; ok && w.src != b.src && d.Members[w.src].Path >= d.Members[b.src].Path {
-			return
+		if w, ok := win[b.row.UID]; ok {
+			if w.b.src == b.src {
+				if b.row.Version < w.b.row.Version {
+					return
+				}
+			} else if !memberBeats(ckpt{parsed: d.Members[b.src].parsed}, w.m.Kind, w.m.Path) {
+				return
+			}
 		}
-		win[b.row.UID] = b
+		win[b.row.UID] = deltaWinner{b: b, m: d.Members[b.src]}
 	}
 	doc := 0
 	if err := eachFrame(img.lightB, 0, func(b built) {
@@ -356,8 +373,8 @@ func openDelta(dir string, d delta) (*Part, error) {
 		return fail(fmt.Errorf("%s: delta holds %d rows, %s says %d", dd, k, deltaFile, d.Rows))
 	}
 	bySession := map[string][]built{}
-	for _, b := range win {
-		bySession[b.row.Session] = append(bySession[b.row.Session], b)
+	for _, w := range win {
+		bySession[w.b.row.Session] = append(bySession[w.b.row.Session], w.b)
 	}
 	win = nil
 	authors := authorsOf(all, func(src uint16) string { return d.Members[src].Author })
