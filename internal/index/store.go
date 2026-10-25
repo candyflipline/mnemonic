@@ -30,8 +30,9 @@ type Part struct {
 	fc                        *frameCache
 	maps                      [][]byte
 	nSessions, nTurns, nTerms int
-	scratch                   []byte
 	ls                        []lsRec
+	lsOnce                    sync.Once
+	lsErr                     error
 	lsB                       []byte
 	spansB, annB, authB       []byte
 	secOnce                   sync.Once
@@ -42,11 +43,17 @@ type Part struct {
 
 // frameCache holds the last decoded light and heavy frames of every part of
 // one DB, so batch memory is bounded by the cache sizes, not by the part count.
+// The MCP handler pins one snapshot per request and serializes nothing between
+// two of them, so the cache owns its lock: each lookup-and-fill is atomic and
+// the lock is never held across a tool call. scratch is the decode buffer the
+// fills share, safe because a fill runs under the lock.
 type frameCache struct {
+	mu         sync.Mutex
 	light      map[frameKey][]*Row
 	lightOrder []frameKey
 	heavy      map[frameKey][][]byte
 	heavyOrder []frameKey
+	scratch    []byte
 }
 
 func newFrameCache() *frameCache {
@@ -56,6 +63,57 @@ func newFrameCache() *frameCache {
 type frameKey struct {
 	part  *Part
 	frame uint64
+}
+
+// lightFrame returns key's decoded rows, decoding the frame on first use.
+func (fc *frameCache) lightFrame(st *Part, frame uint64) ([]*Row, error) {
+	k := frameKey{part: st, frame: frame}
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if rows, ok := fc.light[k]; ok {
+		return rows, nil
+	}
+	recs, _, err := readFrame(segments{st.lightB, st.lightD}, int64(k.frame), fc.scratch)
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]*Row, len(recs))
+	for i, b := range recs {
+		r := new(Row)
+		if _, err := r.decode(b); err != nil {
+			return nil, err
+		}
+		rows[i] = r
+	}
+	fc.light[k] = rows
+	fc.lightOrder = append(fc.lightOrder, k)
+	if len(fc.lightOrder) > 48 {
+		delete(fc.light, fc.lightOrder[0])
+		fc.lightOrder = fc.lightOrder[1:]
+	}
+	return rows, nil
+}
+
+// heavyFrame returns key's decoded heavy records, decoding the frame on first
+// use. The records are shared read-only.
+func (fc *frameCache) heavyFrame(st *Part, frame uint64) ([][]byte, error) {
+	k := frameKey{part: st, frame: frame}
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if recs, ok := fc.heavy[k]; ok {
+		return recs, nil
+	}
+	recs, _, err := readFrame(segments{st.heavyB, st.heavyD}, int64(k.frame), nil)
+	if err != nil {
+		return nil, err
+	}
+	fc.heavy[k] = recs
+	fc.heavyOrder = append(fc.heavyOrder, k)
+	if len(fc.heavyOrder) > 16 {
+		delete(fc.heavy, fc.heavyOrder[0])
+		fc.heavyOrder = fc.heavyOrder[1:]
+	}
+	return recs, nil
 }
 
 func mmapFile(path string) ([]byte, error) {
@@ -257,28 +315,11 @@ func (st *Part) turn(session int, seq uint32) (turnInfo, bool) {
 
 func (st *Part) row(d int) (*Row, error) {
 	rec := st.docRec(d)
-	k := frameKey{part: st, frame: binary.LittleEndian.Uint64(rec[0:])}
+	frame := binary.LittleEndian.Uint64(rec[0:])
 	idx := int(binary.LittleEndian.Uint16(rec[8:]))
-	rows, ok := st.fc.light[k]
-	if !ok {
-		recs, _, err := readFrame(segments{st.lightB, st.lightD}, int64(k.frame), st.scratch)
-		if err != nil {
-			return nil, err
-		}
-		rows = make([]*Row, len(recs))
-		for i, b := range recs {
-			r := new(Row)
-			if _, err := r.decode(b); err != nil {
-				return nil, err
-			}
-			rows[i] = r
-		}
-		st.fc.light[k] = rows
-		st.fc.lightOrder = append(st.fc.lightOrder, k)
-		if len(st.fc.lightOrder) > 48 {
-			delete(st.fc.light, st.fc.lightOrder[0])
-			st.fc.lightOrder = st.fc.lightOrder[1:]
-		}
+	rows, err := st.fc.lightFrame(st, frame)
+	if err != nil {
+		return nil, err
 	}
 	if idx >= len(rows) {
 		return nil, fmt.Errorf("row %d: index past frame", d)
@@ -288,20 +329,9 @@ func (st *Part) row(d int) (*Row, error) {
 
 // heavyOf returns payload_json and token_usage_json of row r.
 func (st *Part) heavyOf(r *Row) (string, string, error) {
-	k := frameKey{part: st, frame: r.HeavyFrame}
-	recs, ok := st.fc.heavy[k]
-	if !ok {
-		var err error
-		recs, _, err = readFrame(segments{st.heavyB, st.heavyD}, int64(r.HeavyFrame), nil)
-		if err != nil {
-			return "", "", err
-		}
-		st.fc.heavy[k] = recs
-		st.fc.heavyOrder = append(st.fc.heavyOrder, k)
-		if len(st.fc.heavyOrder) > 16 {
-			delete(st.fc.heavy, st.fc.heavyOrder[0])
-			st.fc.heavyOrder = st.fc.heavyOrder[1:]
-		}
+	recs, err := st.fc.heavyFrame(st, r.HeavyFrame)
+	if err != nil {
+		return "", "", err
 	}
 	if int(r.HeavyIdx) >= len(recs) {
 		return "", "", fmt.Errorf("heavy index past frame")

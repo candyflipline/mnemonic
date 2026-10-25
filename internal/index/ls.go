@@ -177,16 +177,21 @@ func writeLs(dir string, recs []lsRec) error {
 	return os.WriteFile(filepath.Join(dir, "ls.json"), b, 0o644)
 }
 
+// lsRecs decodes the part's rollups once: like sections, the part's bytes are
+// immutable, so the first decode decides, under lsOnce.
 func (st *Part) lsRecs() ([]lsRec, error) {
-	if st.ls != nil {
-		return st.ls, nil
+	st.lsOnce.Do(func() {
+		var recs []lsRec
+		if err := json.Unmarshal(st.lsB, &recs); err != nil {
+			st.lsErr = err
+			return
+		}
+		st.ls = recs
+	})
+	if st.lsErr != nil {
+		return nil, st.lsErr
 	}
-	var recs []lsRec
-	if err := json.Unmarshal(st.lsB, &recs); err != nil {
-		return nil, err
-	}
-	st.ls = recs
-	return recs, nil
+	return st.ls, nil
 }
 
 func (db *DB) lsCandidates(a *lsArgs, cursor *lsCursor, listed SessionFilter) ([]lsCand, error) {
