@@ -6,12 +6,17 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
+
+	"github.com/candyflipline/mnemonic/internal/auth"
 	"github.com/candyflipline/mnemonic/internal/config"
 	"github.com/candyflipline/mnemonic/internal/redact"
 	"github.com/candyflipline/mnemonic/internal/schema"
@@ -82,6 +87,103 @@ func TestIngestPlainReportsToolRecords(t *testing.T) {
 	}
 	if label, ok := notes[0].Value.Label(); !ok || label != "pass" {
 		t.Fatalf("annotation value is %v, want label pass", notes[0].Value)
+	}
+}
+
+// TestAnnotateStoresOnlyRedactedText pins the write path's redaction: the
+// annotation's user text goes through the redactor push uploads with before
+// the record is appended, so raw/ holds only redacted text on every write
+// path; the result text carries the redacted value, and a retried identical
+// call is the duplicate of the stored (redacted) record.
+func TestAnnotateStoresOnlyRedactedText(t *testing.T) {
+	db, dir := newQueryDB(t)
+	const session = "7c666c01-d38e-4658-8650-854ffb5b626e"
+	const awsKey = "AKIAIOSFODNN7EXAMPLE"
+	const ghToken = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef1234"
+	args, err := json.Marshal(map[string]any{
+		"session_id": formatSessionID(session),
+		"name":       "deploy-note",
+		"text":       "Deploy with " + awsKey + " using " + ghToken + " today.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens := auth.NewTokens(map[string]auth.Token{
+		auth.Hash("tok-a"): {Author: "a", Scopes: []auth.Scope{auth.Read, auth.Annotate}},
+	})
+	ctl, err := LoadControls(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, ok := tokens.Context(WithControls(context.Background(), ctl), "tok-a")
+	if !ok {
+		t.Fatal("token")
+	}
+	ctx = store.WithStore(ctx, &store.Store{DataDir: dir})
+
+	data, text, err := Call(ctx, db, "annotate", args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte(`"duplicate":false`)) {
+		t.Fatalf("first annotate is not fresh: %s", data)
+	}
+	for _, secret := range []string{awsKey, ghToken} {
+		if bytes.Contains(data, []byte(secret)) || bytes.Contains([]byte(text), []byte(secret)) {
+			t.Fatalf("annotate result carries the secret %q:\n%s\n%s", secret, data, text)
+		}
+	}
+
+	// The record the write appended under the data dir.
+	var stored []byte
+	root := filepath.Join(dir, "raw", "author=a", "machine="+store.ServerMachine, "harness="+schema.AnnotationHarness)
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".jsonl.zst") {
+			return nil
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		dec, err := zstd.NewReader(bytes.NewReader(b))
+		if err != nil {
+			return err
+		}
+		defer dec.Close()
+		line, err := io.ReadAll(dec)
+		if err != nil {
+			return err
+		}
+		stored = append(stored, line...)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(stored, []byte(`"name":"deploy-note"`)) {
+		t.Fatalf("the annotation record is missing:\n%s", stored)
+	}
+	for _, secret := range []string{awsKey, ghToken} {
+		if bytes.Contains(stored, []byte(secret)) {
+			t.Fatalf("raw/ holds the secret %q:\n%s", secret, stored)
+		}
+	}
+	for _, marker := range []string{"[REDACTED:aws-access-token]", "[REDACTED:github-token]"} {
+		if !bytes.Contains(stored, []byte(marker)) {
+			t.Fatalf("the record lost the %s redaction:\n%s", marker, stored)
+		}
+	}
+
+	// The same call again is the duplicate of the stored record.
+	_, text, err = Call(ctx, db, "annotate", args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains([]byte(text), []byte("Already annotated")) {
+		t.Fatalf("the retried call is not a duplicate: %s", text)
 	}
 }
 
