@@ -33,7 +33,7 @@ set -eu
 BOX=${BOX:-/var/lib/mnemonic-e3}
 OUT=${OUT:-$BOX/out/u9e}
 BIN=${BIN:-$(ls -d "$BOX"/bin-333fbd6* 2>/dev/null | head -1)}
-ENG=${ENG:-}
+ENG=${ENG:-$(ls -d "$BOX"/bin-dcfe552* 2>/dev/null | head -1)}
 MIN_ARCH=${MIN_ARCH:-10}
 SEEDS=${SEEDS:-"3 4"}
 RUNS=${RUNS:-3}
