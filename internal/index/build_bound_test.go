@@ -44,6 +44,7 @@ func buildPeak(t *testing.T, n int) uint64 {
 	var raw []byte
 	var sb strings.Builder
 	var lastText string
+	const turnRows = 50
 	for i := 1; i <= n; i++ {
 		sb.Reset()
 		for sb.Len() < 1000 {
@@ -51,8 +52,14 @@ func buildPeak(t *testing.T, n int) uint64 {
 			sb.WriteByte(' ')
 		}
 		lastText = sb.String()
-		raw = append(raw, fmt.Sprintf(`{"type":"user","sessionId":%q,"cwd":"/work/win","uuid":"row-%d","timestamp":%q,"message":{"role":"user","content":%q}}`+"\n",
-			sid, i, t0.Add(time.Duration(i)*time.Second).Format("2006-01-02T15:04:05Z"), sb.String())...)
+		ts := t0.Add(time.Duration(i) * time.Second).Format("2006-01-02T15:04:05Z")
+		if (i-1)%turnRows == 0 {
+			raw = append(raw, fmt.Sprintf(`{"type":"user","sessionId":%q,"cwd":"/work/win","uuid":"row-%d","timestamp":%q,"message":{"role":"user","content":%q}}`+"\n",
+				sid, i, ts, sb.String())...)
+		} else {
+			raw = append(raw, fmt.Sprintf(`{"type":"assistant","sessionId":%q,"cwd":"/work/win","uuid":"row-%d","requestId":"req-%d","timestamp":%q,"message":{"model":"claude-test","role":"assistant","content":[{"type":"text","text":%q}]}}`+"\n",
+				sid, i, i/turnRows, ts, sb.String())...)
+		}
 	}
 	writeRawSource(t, root, "a", "m", "claude-code", "big", "/p/big.jsonl", raw, 1)
 	raw = nil
@@ -72,6 +79,7 @@ func buildPeak(t *testing.T, n int) uint64 {
 	runtime.GC()
 	debug.FreeOSMemory()
 	var peak uint64
+	base := heapBytes()
 	stop, done := make(chan struct{}), make(chan struct{})
 	sample := []metrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}}
 	go func() {
@@ -110,5 +118,12 @@ func buildPeak(t *testing.T, n int) uint64 {
 	if r.Session != sid || r.Text != lastText {
 		t.Fatalf("last doc: session %q, %d text bytes, want %q and %d", r.Session, len(r.Text), sid, len(lastText))
 	}
+	t.Logf("%d rows: heap %d B before the build, peak %d B", n, base, peak)
 	return peak
+}
+
+func heapBytes() uint64 {
+	s := []metrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}}
+	metrics.Read(s)
+	return s[0].Value.Uint64()
 }

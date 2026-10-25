@@ -1,6 +1,8 @@
 package index
 
 import (
+	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -81,33 +83,53 @@ func memberOf(c ckpt) member {
 	return member{parsed: c.parsed, Gen: c.Gen, LightLen: c.LightLen, HeavyLen: c.HeavyLen}
 }
 
-func loadSourceRows(store string, si int, c ckpt, from int64) ([]built, error) {
+// rowLoc says where a row's light record is: the member's light log at frame
+// lf, or, for a row its holder part supplies, the holder part's light log.
+type rowLoc struct {
+	lf     int64
+	li     uint16
+	holder bool
+}
+
+// walkLog calls fn with every light record of c's log from the frame at from,
+// with the record's frame offset and index in the frame.
+func walkLog(store string, c ckpt, from int64, fn func(rec []byte, off int64, i int) error) error {
 	if from >= c.LightLen {
-		return nil, nil
+		return nil
 	}
 	f, err := os.Open(logPath(store, c.Key, c.Gen, "light"))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer f.Close()
-	var out []built
 	var scratch []byte
 	for off := from; off < c.LightLen; {
 		recs, next, err := readFrame(f, off, scratch)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		for _, rec := range recs {
-			r := new(Row)
-			if _, err := r.decode(rec); err != nil {
-				return nil, err
+		for i, rec := range recs {
+			if err := fn(rec, off, i); err != nil {
+				return err
 			}
-			r.Author = c.Author
-			out = append(out, built{row: r, src: uint16(si)})
 		}
 		off = next
 	}
-	return out, nil
+	return nil
+}
+
+func loadSourceRows(store string, si int, c ckpt, from int64) ([]built, error) {
+	var out []built
+	err := walkLog(store, c, from, func(rec []byte, _ int64, _ int) error {
+		r := new(Row)
+		if _, err := r.decode(rec); err != nil {
+			return err
+		}
+		r.Author = c.Author
+		out = append(out, built{row: r, src: uint16(si)})
+		return nil
+	})
+	return out, err
 }
 
 // holderIndexOf is the index of c's member entry in holder's members, -1 when
@@ -166,23 +188,22 @@ func sameParsed(a, b parsed) bool {
 		a.ZstSize == b.ZstSize && a.WindowSHA == b.WindowSHA && a.State == b.State && a.Rows == b.Rows
 }
 
-// memberRows returns one member's rows for a part build: the rows the holder
-// part holds for it — the winners of the rows it covered, their heavy records
-// resolved from the holder — plus the tail past the holder's copy, read from
-// the member's frame logs. holder is the part of the previous manifest that
-// holds the member, nil to read every row from the logs (a cold build's first
-// run, or a holder a re-parse left behind); from is the tail start, memberFrom
-// when holder is not nil. A member fully covered by its holder is read from
-// the holder alone and its logs are never opened.
-func memberRows(store string, si int, c ckpt, holder *Part, from int64) ([]built, error) {
+// walkMember calls fn with the light record of every row a part build reads
+// of one member, in the order the rows are offered: the rows the holder part
+// holds for it, then the tail past the holder's copy, read from the member's
+// frame logs. holder is the part of the previous manifest that holds the
+// member, nil to read every row from the logs (a cold build's first run, or a
+// holder a re-parse left behind); from is the tail start, memberFrom when
+// holder is not nil. A member fully covered by its holder is read from the
+// holder alone and its logs are never opened. rec is valid until fn returns.
+func walkMember(store string, c ckpt, holder *Part, from int64, fn func(rec []byte, loc rowLoc) error) error {
 	if holder == nil && c.retired() {
-		return nil, fmt.Errorf("%s: retired member read without a holder", c.Key)
+		return fmt.Errorf("%s: retired member read without a holder", c.Key)
 	}
-	var out []built
 	if holder != nil {
 		hs := holderIndexOf(holder, c.Key)
 		if hs < 0 {
-			return nil, fmt.Errorf("%s: holder does not hold the member", c.Key)
+			return fmt.Errorf("%s: holder does not hold the member", c.Key)
 		}
 		// The light frame the previous doc read: a frame's docs are
 		// contiguous in the part's docs, so one member read decodes each
@@ -198,39 +219,57 @@ func memberRows(store string, si int, c ckpt, holder *Part, from int64) ([]built
 			if lf != frameLF {
 				rows, _, err := readFrame(segments{holder.lightB, holder.lightD}, lf, nil)
 				if err != nil {
-					return nil, fmt.Errorf("%s: holder %s: %w", c.Key, holder.meta.Fingerprint, err)
+					return fmt.Errorf("%s: holder %s: %w", c.Key, holder.meta.Fingerprint, err)
 				}
 				frameLF, frameRows = lf, rows
 			}
-			rows := frameRows
-			if li >= len(rows) {
-				return nil, fmt.Errorf("%s: holder %s: light index past frame", c.Key, holder.meta.Fingerprint)
+			if li >= len(frameRows) {
+				return fmt.Errorf("%s: holder %s: light index past frame", c.Key, holder.meta.Fingerprint)
 			}
-			r := new(Row)
-			if _, err := r.decode(rows[li]); err != nil {
-				return nil, fmt.Errorf("%s: holder %s: %w", c.Key, holder.meta.Fingerprint, err)
+			if err := fn(frameRows[li], rowLoc{lf: lf, li: uint16(li), holder: true}); err != nil {
+				return err
 			}
-			// The light record does not carry the author (strs skips it);
-			// rows off the logs get it from the checkpoint, so do these.
-			r.Author = c.Author
-			hrecs, err := holder.fc.heavyFrame(holder, r.HeavyFrame)
-			if err != nil {
-				return nil, fmt.Errorf("%s: holder %s: %w", c.Key, holder.meta.Fingerprint, err)
-			}
-			if int(r.HeavyIdx) >= len(hrecs) {
-				return nil, fmt.Errorf("%s: holder %s: heavy index past frame", c.Key, holder.meta.Fingerprint)
-			}
-			out = append(out, built{row: r, src: uint16(si), lf: lf, li: li, hrec: hrecs[r.HeavyIdx]})
 		}
 	}
-	if from >= c.LightLen {
-		return out, nil
-	}
-	tail, err := loadSourceRows(store, si, c, from)
+	err := walkLog(store, c, from, func(rec []byte, off int64, i int) error {
+		return fn(rec, rowLoc{lf: off, li: uint16(i)})
+	})
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", c.Key, err)
+		return fmt.Errorf("%s: %w", c.Key, err)
 	}
-	return append(out, tail...), nil
+	return nil
+}
+
+// memberRows returns one member's rows for a delta image: walkMember's
+// records decoded, the holder's with their heavy records resolved from it.
+func memberRows(store string, si int, c ckpt, holder *Part, from int64) ([]built, error) {
+	var out []built
+	err := walkMember(store, c, holder, from, func(rec []byte, loc rowLoc) error {
+		r := new(Row)
+		if _, err := r.decode(rec); err != nil {
+			if loc.holder {
+				return fmt.Errorf("%s: holder %s: %w", c.Key, holder.meta.Fingerprint, err)
+			}
+			return err
+		}
+		// The light record does not carry the author (strs skips it);
+		// rows off the logs get it from the checkpoint, so do these.
+		r.Author = c.Author
+		b := built{row: r, src: uint16(si)}
+		if loc.holder {
+			hrecs, err := holder.fc.heavyFrame(holder, r.HeavyFrame)
+			if err != nil {
+				return fmt.Errorf("%s: holder %s: %w", c.Key, holder.meta.Fingerprint, err)
+			}
+			if int(r.HeavyIdx) >= len(hrecs) {
+				return fmt.Errorf("%s: holder %s: heavy index past frame", c.Key, holder.meta.Fingerprint)
+			}
+			b.lf, b.li, b.hrec = loc.lf, int(loc.li), hrecs[r.HeavyIdx]
+		}
+		out = append(out, b)
+		return nil
+	})
+	return out, err
 }
 
 // prevPartsMap is the previous manifest's key -> part id map, the one scan of
@@ -330,7 +369,6 @@ func mergeAuthors(dst, src map[string][]string) {
 
 func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]string) error {
 	sort.Slice(cks, func(i, j int) bool { return cks[i].Key < cks[j].Key })
-	win := map[string]winner{}
 	members := make([]member, len(cks))
 	cold := !slices.ContainsFunc(cks, ckpt.hot)
 	holders, closeHolders, err := openHolders(store, cks, byPrev)
@@ -341,6 +379,11 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 	authors := map[string][]string{}
 	plan := planMembers(cks, holders)
 	merged := map[*Part]bool{}
+	rows := 0
+	for _, c := range cks {
+		rows += int(c.Rows)
+	}
+	kp := newKeyPass(members, rows)
 	for si, c := range cks {
 		members[si] = memberOf(c)
 		if cold {
@@ -351,20 +394,17 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 			merged[holder] = true
 			mergeAuthors(authors, plan.holderAuthors(holder))
 		}
-		rows, err := memberRows(store, si, c, holder, plan.from[si])
+		err := walkMember(store, c, holder, plan.from[si], func(rec []byte, loc rowLoc) error {
+			return kp.offer(uint16(si), c.Author, rec, loc)
+		})
 		if err != nil {
 			return err
 		}
-		for _, b := range rows {
-			offerRow(win, b, members[si])
-		}
-		mergeAuthors(authors, authorsOf(rows, func(src uint16) string { return c.Author }))
 	}
-	bySession := map[string][]built{}
-	for _, w := range win {
-		bySession[w.b.row.Session] = append(bySession[w.b.row.Session], w.b)
-	}
-	win = nil
+	mergeAuthors(authors, kp.authorsBySession(cks))
+	locs := kp.sorted()
+	sessionIDs := kp.sessions.list
+	kp = nil
 
 	heavy := newHeavyReader(store, cks)
 	defer heavy.close()
@@ -383,30 +423,88 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 		return err
 	}
 	defer heavyF.Close()
-	lw := &frameWriter{f: lightF, target: lightFrame, enc: partEncoder}
-	hw := &frameWriter{f: heavyF, target: heavyFrame, enc: partHeavyEncoder}
-	place := func(b built) (*Row, int64, int, error) {
-		hrec := b.hrec
-		if hrec == nil {
-			var err error
-			if hrec, err = heavy.record(b); err != nil {
-				return nil, 0, 0, err
-			}
-		}
-		hf, hi, err := hw.add(hrec)
-		if err != nil {
-			return nil, 0, 0, err
-		}
-		own := *b.row
-		own.HeavyFrame, own.HeavyIdx = uint64(hf), uint64(hi)
-		lf, li, err := lw.add(own.append(nil))
-		return &own, lf, li, err
-	}
-	write := func(name string, b []byte) error { return os.WriteFile(filepath.Join(dir, name), b, 0o644) }
-	meta, lsRecs, err := indexRows(bySession, place, heavy.payload, write)
+	hotF, err := os.Create(filepath.Join(dir, "hot"))
 	if err != nil {
 		return err
 	}
+	defer hotF.Close()
+	hotOffF, err := os.Create(filepath.Join(dir, "hot.off"))
+	if err != nil {
+		return err
+	}
+	defer hotOffF.Close()
+	docsF, err := os.Create(filepath.Join(dir, "docs"))
+	if err != nil {
+		return err
+	}
+	defer docsF.Close()
+	blobF, err := os.Create(filepath.Join(dir, "fa.blob"))
+	if err != nil {
+		return err
+	}
+	defer blobF.Close()
+	buffered := func(f *os.File) *bufio.Writer { return bufio.NewWriterSize(f, 1<<18) }
+	hot, hotOff, docs, blob := buffered(hotF), buffered(hotOffF), buffered(docsF), buffered(blobF)
+	lw := &frameWriter{f: lightF, target: lightFrame, enc: partEncoder}
+	hw := &frameWriter{f: heavyF, target: heavyFrame, enc: partHeavyEncoder}
+
+	// Doc pass: each winner's light record is decoded once, in doc order.
+	acc := newPartAcc(len(locs), hot, hotOff, docs, blob)
+	lights := &lightSource{store: store, cks: cks, holders: plan.holder, frames: newFrameLRU(lightFrames)}
+	var r Row
+	var recBuf []byte
+	curSession := ^uint32(0)
+	for i := range locs {
+		k := locs[i]
+		loc := k.rowLoc()
+		rec, err := lights.record(k.src, loc)
+		if err != nil {
+			return err
+		}
+		r = Row{}
+		if _, err := r.decode(rec); err != nil {
+			return fmt.Errorf("%s: %w", cks[k.src].Key, err)
+		}
+		r.Author = cks[k.src].Author
+		var hrec []byte
+		if loc.holder {
+			h := plan.holder[k.src]
+			hrecs, err := h.fc.heavyFrame(h, r.HeavyFrame)
+			if err != nil {
+				return fmt.Errorf("%s: holder %s: %w", cks[k.src].Key, h.meta.Fingerprint, err)
+			}
+			if int(r.HeavyIdx) >= len(hrecs) {
+				return fmt.Errorf("%s: holder %s: heavy index past frame", cks[k.src].Key, h.meta.Fingerprint)
+			}
+			hrec = hrecs[r.HeavyIdx]
+		} else if hrec, err = heavy.record(built{row: &r, src: k.src}); err != nil {
+			return err
+		}
+		hf, hi, err := hw.add(hrec)
+		if err != nil {
+			return err
+		}
+		r.HeavyFrame, r.HeavyIdx = uint64(hf), uint64(hi)
+		recBuf = r.append(recBuf[:0])
+		lf, li, err := lw.add(recBuf)
+		if err != nil {
+			return err
+		}
+		if k.session != curSession {
+			if curSession != ^uint32(0) {
+				acc.endSession()
+			}
+			acc.beginSession(sessionIDs[k.session])
+			curSession = k.session
+		}
+		if _, err := acc.add(&r, k.src, lf, li); err != nil {
+			return err
+		}
+	}
+	if curSession != ^uint32(0) {
+		acc.endSession()
+	}
+	locs = nil
 	if heavy.err != nil {
 		return heavy.err
 	}
@@ -416,11 +514,51 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 	if err := lw.flush(); err != nil {
 		return err
 	}
+	if err := docs.Flush(); err != nil {
+		return err
+	}
+
+	// Section pass: the derived sections read each session's winners back
+	// from the part's own logs.
+	secs := newSections()
+	var lsRecs []lsRec
+	view := &partView{acc: acc, cks: cks, docs: docsF, light: lightF,
+		frames: newFrameLRU(sectionFrames), heavy: &heavyReader{logs: []io.ReaderAt{heavyF}, recs: map[heavyKey][][]byte{}}}
+	for si := range acc.sessions {
+		view.begin(si)
+		lsRecs = append(lsRecs, lsAggregate(view.withSeqs(), view.payload))
+		secs.addSession(acc.sessionIDs[si], view.rows(), view.payload)
+		if view.err != nil {
+			return view.err
+		}
+	}
+	if view.heavy.err != nil {
+		return view.heavy.err
+	}
+
+	write := func(name string, b []byte) error { return os.WriteFile(filepath.Join(dir, name), b, 0o644) }
+	meta, err := acc.finish(write)
+	if err != nil {
+		return err
+	}
+	for _, w := range []*bufio.Writer{hot, hotOff, blob} {
+		if err := w.Flush(); err != nil {
+			return err
+		}
+	}
+	for name, b := range secs.files() {
+		if name == "authors" {
+			continue
+		}
+		if err := write(name, b); err != nil {
+			return err
+		}
+	}
 	if err := writeLs(dir, lsRecs); err != nil {
 		return err
 	}
-	// The section build inside indexRows sees winner rows only; the session
-	// authors section is a function of every row, winner or not.
+	// The section build sees winner rows only; the session authors section
+	// is a function of every row, winner or not.
 	ab, err := json.Marshal(authors)
 	if err != nil {
 		return err
@@ -436,9 +574,10 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 	return commitPart(dir, partDir)
 }
 
-// indexRows writes the index files of the winning rows of one part through
-// write. place puts a doc's row in the part's light log and returns the row as
-// the part holds it; payload reads a row's payload_json for the ls rollups.
+// indexRows writes the index files of the winning rows of one part held in
+// memory, the delta image's, through write. place puts a doc's row in the
+// part's light log and returns the row as the part holds it; payload reads a
+// row's payload_json for the ls rollups.
 func indexRows(bySession map[string][]built, place func(built) (*Row, int64, int, error),
 	payload func(built) string, write func(name string, b []byte) error) (indexMeta, []lsRec, error) {
 	sessionIDs := make([]string, 0, len(bySession))
@@ -447,252 +586,49 @@ func indexRows(bySession map[string][]built, place func(built) (*Row, int64, int
 	}
 	sort.Strings(sessionIDs)
 
-	harnesses, sourceNames := dict{}, dict{}
+	var hot, hotOff, docs, blob bytes.Buffer
+	n := 0
+	for _, evs := range bySession {
+		n += len(evs)
+	}
+	acc := newPartAcc(n, &hot, &hotOff, &docs, &blob)
 	secs := newSections()
-	var docs []built
-	type sess struct {
-		start, end  uint32
-		first, last int64
-		completed   bool
-	}
-	type turn struct {
-		session, seq, count uint32
-		completed           bool
-		terminal            int64
-		terminalOrder       int
-	}
 	var lsRecs []lsRec
-	var sessions []sess
-	var turns []turn
-	turnSeqs := []uint32{}
-	ordinals := []uint32{}
-	for si, sid := range sessionIDs {
+	for _, sid := range sessionIDs {
 		evs := bySession[sid]
 		sort.Slice(evs, func(i, j int) bool { return orderLess(evs[i].row, evs[j].row) })
-		start := uint32(len(docs))
-		users := uint32(0)
-		perTurn := map[uint32]*turn{}
-		s := sess{start: start}
+		acc.beginSession(sid)
+		seqs := make([]uint32, len(evs))
 		for k, b := range evs {
-			r := b.row
-			if r.ActorKind == "user" && r.EventKind == "message" {
-				users++
+			r, lf, li, err := place(b)
+			if err != nil {
+				return indexMeta{}, nil, err
 			}
-			seq := uint32(r.TurnIndex)
-			if seq == 0 {
-				seq = max(1, users)
+			if seqs[k], err = acc.add(r, b.src, lf, li); err != nil {
+				return indexMeta{}, nil, err
 			}
-			t := perTurn[seq]
-			if t == nil {
-				t = &turn{session: uint32(si), seq: seq, terminal: -1}
-				perTurn[seq] = t
-			}
-			t.count++
-			if r.PayloadType == "task_complete" {
-				t.completed = true
-				s.completed = true
-			}
-			if r.PayloadType == "task_complete" || r.PayloadType == "turn_aborted" {
-				t.terminal = int64(len(docs))
-			}
-			turnSeqs = append(turnSeqs, seq)
-			ordinals = append(ordinals, t.count)
-			ms := timeMs(r)
-			if k == 0 || ms < s.first {
-				s.first = ms
-			}
-			if k == 0 || ms > s.last {
-				s.last = ms
-			}
-			docs = append(docs, b)
 		}
-		s.end = uint32(len(docs))
-		sessions = append(sessions, s)
-		view := &sessionView{evs: evs, seqs: turnSeqs[start:], payloadOf: payload}
+		acc.endSession()
+		view := &sessionView{evs: evs, seqs: seqs, payloadOf: payload}
 		lsRecs = append(lsRecs, lsAggregate(view.withSeqs(), view.payload))
 		secs.addSession(sid, view.rows(), view.payload)
-		seqs := make([]uint32, 0, len(perTurn))
-		for q := range perTurn {
-			seqs = append(seqs, q)
-		}
-		slices.Sort(seqs)
-		for _, q := range seqs {
-			turns = append(turns, *perTurn[q])
-		}
 		delete(bySession, sid)
 	}
-
-	n := len(docs)
-	docCol := make([]byte, n*docWidth)
-	var scoredDocs, totalLen uint64
-	postings := map[string][]uint64{}
-	uids := make([]uint64, 0, 2*n)
-	var faExact []faEntry
-	var faTio []uint32
-	var faBlob []byte
-	var faOffs []uint32
-	tfs := map[string]uint32{}
-	var hot, hotOff []byte
-	for d, b := range docs {
-		r, lf, li, err := place(b)
-		if err != nil {
-			return indexMeta{}, nil, err
-		}
-		hotOff = binary.LittleEndian.AppendUint64(hotOff, uint64(len(hot)))
-		hot = hotRow(*r).append(hot)
-		hotOff = binary.LittleEndian.AppendUint64(hotOff, textHash(r.Text))
-		clear(tfs)
-		dl := tokenize(r.Text, func(t string) { tfs[t]++ })
-		if dl > 0 {
-			scoredDocs++
-			totalLen += uint64(dl)
-			for t, tf := range tfs {
-				postings[t] = append(postings[t], uint64(d)<<16|uint64(min(tf, 65535)))
-			}
-		}
-		rec := docCol[d*docWidth : (d+1)*docWidth]
-		binary.LittleEndian.PutUint64(rec[0:], uint64(lf))
-		binary.LittleEndian.PutUint16(rec[8:], uint16(li))
-		binary.LittleEndian.PutUint16(rec[10:], b.src)
-		binary.LittleEndian.PutUint16(rec[12:], uint16(searchFlags(r)))
-		rec[14] = byte(harnesses.id(r.Harness))
-		rec[15] = byte(sourceNames.id(r.SourceName))
-		binary.LittleEndian.PutUint32(rec[16:], uint32(sort.Search(len(sessions), func(i int) bool { return sessions[i].end > uint32(d) })))
-		binary.LittleEndian.PutUint32(rec[20:], turnSeqs[d])
-		binary.LittleEndian.PutUint32(rec[24:], ordinals[d])
-		binary.LittleEndian.PutUint32(rec[28:], uint32(dl))
-		binary.LittleEndian.PutUint64(rec[32:], uint64(timeMs(r)))
-		uids = append(uids, uidHash(r.UID), uint64(d))
-		if r.ToolPhase == "request" {
-			if r.ProjectID != "" && r.RepoRelPath != "" {
-				faExact = append(faExact, faEntry{r.RepoRelPath, uint32(d)})
-			}
-			if r.Bits&bitTio != 0 {
-				faTio = append(faTio, uint32(d))
-				faOffs = append(faOffs, uint32(len(faBlob)))
-				faBlob = append(faBlob, r.TioInput...)
-			}
-		}
-	}
-	faOffs = append(faOffs, uint32(len(faBlob)))
-	docs = nil
-	hotOff = binary.LittleEndian.AppendUint64(hotOff, uint64(len(hot)))
-	for name, b := range map[string][]byte{"hot": hot, "hot.off": hotOff, "docs": docCol} {
+	for name, b := range map[string][]byte{"hot": hot.Bytes(), "hot.off": hotOff.Bytes(), "docs": docs.Bytes(), "fa.blob": blob.Bytes()} {
 		if err := write(name, b); err != nil {
 			return indexMeta{}, nil, err
 		}
 	}
-
-	var sb []byte
-	var sstr []byte
-	for i, s := range sessions {
-		sb = binary.LittleEndian.AppendUint32(sb, s.start)
-		sb = binary.LittleEndian.AppendUint32(sb, s.end)
-		sb = binary.LittleEndian.AppendUint64(sb, uint64(s.first))
-		sb = binary.LittleEndian.AppendUint64(sb, uint64(s.last))
-		c := byte(0)
-		if s.completed {
-			c = 1
-		}
-		sb = binary.LittleEndian.AppendUint32(sb, uint32(len(sstr)))
-		sb = binary.LittleEndian.AppendUint32(sb, uint32(c))
-		sstr = append(sstr, sessionIDs[i]...)
-	}
-	sb = binary.LittleEndian.AppendUint32(sb, uint32(len(sstr)))
-	var tb []byte
-	for _, t := range turns {
-		tb = binary.LittleEndian.AppendUint32(tb, t.session)
-		tb = binary.LittleEndian.AppendUint32(tb, t.seq)
-		tb = binary.LittleEndian.AppendUint32(tb, t.count)
-		c := uint32(0)
-		if t.completed {
-			c = 1
-		}
-		tb = binary.LittleEndian.AppendUint32(tb, c)
-		tb = binary.LittleEndian.AppendUint64(tb, uint64(t.terminal))
-	}
-	for name, b := range map[string][]byte{"sessions": sb, "sessions.str": sstr, "turns": tb} {
-		if err := write(name, b); err != nil {
-			return indexMeta{}, nil, err
-		}
-	}
-
-	pairs := make([][2]uint64, len(uids)/2)
-	for i := range pairs {
-		pairs[i] = [2]uint64{uids[2*i], uids[2*i+1]}
-	}
-	sort.Slice(pairs, func(i, j int) bool { return pairs[i][0] < pairs[j][0] })
-	var ub []byte
-	for _, p := range pairs {
-		ub = binary.LittleEndian.AppendUint64(ub, p[0])
-		ub = binary.LittleEndian.AppendUint32(ub, uint32(p[1]))
-	}
-	if err := write("uids", ub); err != nil {
+	meta, err := acc.finish(write)
+	if err != nil {
 		return indexMeta{}, nil, err
 	}
-
-	terms := make([]string, 0, len(postings))
-	for t := range postings {
-		terms = append(terms, t)
-	}
-	sort.Strings(terms)
-	var postB []byte
-	offs := make([]uint64, len(terms))
-	lens := make([]uint64, len(terms))
-	for i, t := range terms {
-		offs[i] = uint64(len(postB))
-		ps := postings[t]
-		postB = binary.AppendUvarint(postB, uint64(len(ps)))
-		prev := uint64(0)
-		for _, p := range ps {
-			d := p >> 16
-			postB = binary.AppendUvarint(postB, d-prev)
-			postB = binary.AppendUvarint(postB, p&0xffff)
-			prev = d
-		}
-		lens[i] = uint64(len(postB)) - offs[i]
-		delete(postings, t)
-	}
-	dictB, termIdx, termFilter := encodeTerms(terms, offs, lens)
-	for name, b := range map[string][]byte{"terms": dictB, "terms.idx": termIdx, "terms.filter": termFilter, "postings": postB} {
-		if err := write(name, b); err != nil {
-			return indexMeta{}, nil, err
-		}
-	}
-
-	sort.Slice(faExact, func(i, j int) bool {
-		if faExact[i].rel != faExact[j].rel {
-			return faExact[i].rel < faExact[j].rel
-		}
-		return faExact[i].doc < faExact[j].doc
-	})
-	var fe []byte
-	for _, e := range faExact {
-		fe = appendStr(fe, e.rel)
-		fe = binary.LittleEndian.AppendUint32(fe, e.doc)
-	}
-	var ft []byte
-	for i, d := range faTio {
-		ft = binary.LittleEndian.AppendUint32(ft, d)
-		ft = binary.LittleEndian.AppendUint32(ft, faOffs[i])
-	}
-	ft = binary.LittleEndian.AppendUint32(ft, 0)
-	ft = binary.LittleEndian.AppendUint32(ft, faOffs[len(faOffs)-1])
-	tri, trip := trigramIndex(faBlob, faOffs)
-	for name, b := range map[string][]byte{"fa.exact": fe, "fa.tio": ft, "fa.blob": faBlob, "fa.tri": tri, "fa.trip": trip} {
-		if err := write(name, b); err != nil {
-			return indexMeta{}, nil, err
-		}
-	}
-
 	for name, b := range secs.files() {
 		if err := write(name, b); err != nil {
 			return indexMeta{}, nil, err
 		}
 	}
-
-	return indexMeta{Docs: n, ScoredDocs: scoredDocs, TotalLen: totalLen, Harnesses: harnesses.list,
-		SourceNames: sourceNames.list, Sessions: len(sessions), Turns: len(turns), Terms: len(terms)}, lsRecs, nil
+	return meta, lsRecs, nil
 }
 
 type faEntry struct {
@@ -949,41 +885,6 @@ func hotRow(r Row) *Row {
 		r.TioInput, r.TioInPrev, r.TioOutPrev, r.TioProj, r.TioRel, r.TioWT = "", "", "", "", "", ""
 	}
 	return &r
-}
-
-// trigramIndex maps every 3-byte sequence of each fa.blob entry to the
-// ascending entries holding it: fa.tri is sorted (trigram u32, postings
-// offset u32) pairs, fa.trip the uvarint count and entry gaps.
-func trigramIndex(blob []byte, offs []uint32) ([]byte, []byte) {
-	post := map[uint32][]uint32{}
-	for i := 0; i+1 < len(offs); i++ {
-		e := blob[offs[i]:offs[i+1]]
-		for j := 0; j+3 <= len(e); j++ {
-			k := trigram(e[j:])
-			p := post[k]
-			if n := len(p); n == 0 || p[n-1] != uint32(i) {
-				post[k] = append(p, uint32(i))
-			}
-		}
-	}
-	keys := make([]uint32, 0, len(post))
-	for k := range post {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-	var tri, trip []byte
-	for _, k := range keys {
-		tri = binary.LittleEndian.AppendUint32(tri, k)
-		tri = binary.LittleEndian.AppendUint32(tri, uint32(len(trip)))
-		p := post[k]
-		trip = binary.AppendUvarint(trip, uint64(len(p)))
-		prev := uint32(0)
-		for _, e := range p {
-			trip = binary.AppendUvarint(trip, uint64(e-prev))
-			prev = e
-		}
-	}
-	return tri, trip
 }
 
 func trigram(b []byte) uint32 { return uint32(b[0])<<16 | uint32(b[1])<<8 | uint32(b[2]) }
