@@ -97,3 +97,30 @@ func TestArchiveParityRawAndArchiveUID(t *testing.T) {
 		t.Fatalf("higher archive version kept %q, want %q", r.Text, "archive one")
 	}
 }
+
+func TestArchiveParityRawCopiesGoByPathNotVersion(t *testing.T) {
+	const sid = "55555555-5555-4555-8555-555555555555"
+	line := func(uuid string, minute int, content string) []byte {
+		ts := time.Date(2026, 3, 1, 10, minute, 0, 0, time.UTC).Format("2006-01-02T15:04:05Z")
+		return []byte(fmt.Sprintf(`{"type":"user","sessionId":%q,"cwd":"/work/p","uuid":%q,"timestamp":%q,"message":{"role":"user","content":%q}}`+"\n",
+			sid, uuid, ts, content))
+	}
+	lesser := append(line("filler", 0, "filler line"), line("shared", 1, "shared line")...)
+	greater := line("shared", 1, "shared line")
+
+	root, store := t.TempDir(), t.TempDir()
+	writeRawSource(t, root, "a", "m", "claude-code", "s1", "/p/s1.jsonl", lesser, 1)
+	writeRawSource(t, root, "a", "m", "claude-code", "s2", "/p/s2.jsonl", greater, 1)
+	if _, err := Ingest(root, store, time.Minute, true); err != nil {
+		t.Fatal(err)
+	}
+	db, err := OpenDB(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(db.Close)
+	uid := rawUIDs(t, append(line("filler", 0, "filler line"), line("shared", 1, "shared line")...))[1]
+	if r := findRow(t, db, uid); r.SourceFile != "/p/s2.jsonl" {
+		t.Fatalf("shared uid kept the copy of %q, want %q", r.SourceFile, "/p/s2.jsonl")
+	}
+}
