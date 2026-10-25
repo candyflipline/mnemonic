@@ -102,7 +102,7 @@ func (queryTool) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, st
 	defer cancel()
 	data, text, err := runQuery(ctx, db, a.Query, from, to, limit)
 	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return nil, "", argErrorf("statement timeout: the query was stopped at its time limit of %d s", int(queryTimeout.Seconds()))
 		}
 		return nil, "", err
