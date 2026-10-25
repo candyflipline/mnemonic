@@ -110,6 +110,16 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 	if err != nil {
 		return err
 	}
+	// This process is the data dir's one writer for its whole life — the
+	// watcher and the store's Wake both ingest — so it takes the index dir's
+	// writer lock before the first ingest, and a second local on the same dir
+	// is refused here, before it ingests anything. Unlock is registered
+	// before the index handle so it runs after the handle is closed.
+	lock, err := index.HoldIndexLock(layout.IndexDir(opts.dataDir))
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
 	ix, err := index.Open(layout.IndexDir(opts.dataDir))
 	if err != nil {
 		return err
