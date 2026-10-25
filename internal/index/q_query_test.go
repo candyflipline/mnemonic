@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -208,6 +209,37 @@ func TestQueryRefusalsOnTheEngine(t *testing.T) {
 	d, _, err := queryCall(t, ctx, db, "FROM: EVENTS | MEASURES: COUNT(*)", "2026-01-16T00:00:00Z", "2026-02-16T00:00:00Z", nil)
 	if err != nil || queryRows(t, d) != "[[21]]" {
 		t.Fatalf("relation names are case-insensitive: %v %v", d, err)
+	}
+}
+
+// TestQueryBoundedScanAndPatternCap: a query whose context is already
+// cancelled returns before the scan walks any part of the store, and a like
+// pattern over the length cap is refused before any scan.
+func TestQueryBoundedScanAndPatternCap(t *testing.T) {
+	db, _ := newQueryDB(t)
+	if len(db.parts) < 2 {
+		t.Fatalf("the store holds %d part(s), want several", len(db.parts))
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	src, err := newQLSource(ctx, db, time.Unix(0, 0), time.Date(2999, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	calls := 0
+	err = src.Scan(ctx, ql.ScanRequest{Relation: "events", Columns: []ql.Column{{Name: "event_uid", Type: ql.TString}}},
+		func(ql.Row) error { calls++; return nil })
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("scan error %v, want context.Canceled", err)
+	}
+	if calls != 0 {
+		t.Fatalf("the scan delivered %d row(s) after the context was cancelled", calls)
+	}
+	const want = "1:37: like pattern must be at most 1000 bytes"
+	_, _, err = queryCall(t, context.Background(), db, "from: events | filter: text_content like '"+strings.Repeat("a", 1001)+"'",
+		"2026-01-16T00:00:00Z", "2026-02-16T00:00:00Z", nil)
+	if err == nil || err.Error() != want {
+		t.Fatalf("over-long like pattern: error %v, want %q", err, want)
 	}
 }
 
