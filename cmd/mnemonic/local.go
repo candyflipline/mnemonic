@@ -68,7 +68,9 @@ const settleSource = 15 * time.Minute
 // runLocal indexes this machine's harness files in place under
 // opts.dataDir (the engine's KindPlain sources, no raw copy, no HTTP and no
 // push loop), feeds push.Watch's file events to the index ingest, and serves
-// MCP with every tool result redacted at the output boundary.
+// MCP. Every line an ingest parses goes through the redactor push uploads
+// with, so the index holds no secret and results need no redaction of their
+// own; the files on disk are never touched.
 //
 // The data dir holds the index and raw/ for the write tools only: annotate,
 // set_visibility and delete_session append their records through the store
@@ -78,10 +80,12 @@ const settleSource = 15 * time.Minute
 // a harness change.
 //
 // The files are config.DefaultSources; there is no config file and no server.
-// MCP is loopback-only (requireLoopback) and answers the bearer token "local"
-// as this machine's user with every scope. Session controls load from
-// dataDir, empty until a control tool writes its first record through the
-// store under the same dataDir.
+// The redactor is therefore push's with no extra patterns (redact.New(nil)),
+// the build a config-less client pushes with. MCP is loopback-only
+// (requireLoopback) and answers the bearer token "local" as this machine's
+// user with every scope. Session controls load from dataDir, empty until a
+// control tool writes its first record through the store under the same
+// dataDir.
 func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) error {
 	if err := requireLoopback(opts.listen); err != nil {
 		return err
@@ -102,7 +106,7 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 		return err
 	}
 	author, machine := localIdentity()
-	red, err := redact.New(nil)
+	red, err := redact.New(nil) // as push builds it: no config file, no extra patterns
 	if err != nil {
 		return err
 	}
@@ -117,19 +121,19 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 	}
 	wake := make(chan struct{}, 1)
 	st := &store.Store{DataDir: opts.dataDir, Wake: wake}
-	if err := firstIngest(ix, srcs, logger, author, machine); err != nil {
+	if err := firstIngest(ix, srcs, logger, author, machine, red); err != nil {
 		return err
 	}
 	tokens := auth.NewTokens(map[string]auth.Token{
 		auth.Hash("local"): {Author: author, Scopes: slices.Clone(auth.Scopes[:])},
 	})
-	tools := mcp.Handler(ix, index.Lookup, red)
+	tools := mcp.Handler(ix, index.Lookup)
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", tokens.Require(auth.Read)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tools.ServeHTTP(w, r.WithContext(index.WithControls(store.WithStore(r.Context(), st), ctl)))
 	})))
 	hs := &http.Server{Addr: opts.listen, Handler: mux}
-	sink := &indexSink{ix: ix, srcs: srcs, author: author, machine: machine}
+	sink := &indexSink{ix: ix, srcs: srcs, author: author, machine: machine, red: red}
 	go func() {
 		if err := pushrun.WatchSink(ctx, config.Client{Sources: srcs}, sink, out); err != nil {
 			logger.Printf("watch: %v", err)
@@ -183,9 +187,9 @@ func expandSources(srcs []config.SourceGlob) ([]config.SourceGlob, error) {
 // firstIngest indexes the machine's files, and the tool records the data
 // dir's raw already holds, once before MCP serves, so the store answers as
 // soon as the socket is up; the watcher and the store's Wake keep it current.
-func firstIngest(ix *index.Index, srcs []config.SourceGlob, logger *log.Logger, author, machine string) error {
+func firstIngest(ix *index.Index, srcs []config.SourceGlob, logger *log.Logger, author, machine string, red *redact.Redactor) error {
 	start := time.Now()
-	st, err := ix.IngestPlain(srcs, author, machine, index.IngestOptions{Quiet: settleSource})
+	st, err := ix.IngestPlain(srcs, author, machine, index.IngestOptions{Quiet: settleSource, Red: red})
 	logger.Printf("index: unchanged=%d resumed=%d fresh=%d reparsed=%d in %s err=%v",
 		st[index.Unchanged], st[index.Resumed], st[index.Fresh], st[index.Reparsed],
 		time.Since(start).Round(time.Millisecond), err)
@@ -232,13 +236,14 @@ type indexSink struct {
 	srcs    []config.SourceGlob
 	author  string
 	machine string
+	red     *redact.Redactor
 	mu      sync.Mutex
 }
 
 func (s *indexSink) Sync(_ context.Context, _ []string) (pushrun.Stats, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err := s.ix.IngestPlain(s.srcs, s.author, s.machine, index.IngestOptions{Quiet: settleSource})
+	st, err := s.ix.IngestPlain(s.srcs, s.author, s.machine, index.IngestOptions{Quiet: settleSource, Red: s.red})
 	return pushrun.Stats{
 		Appended:  st[index.Resumed] + st[index.Fresh],
 		Replaced:  st[index.Reparsed],

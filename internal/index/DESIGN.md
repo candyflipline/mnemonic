@@ -101,6 +101,38 @@ one call; `Refresh` (after every `Index.Ingest`, and before every harness
 batch line) opens a newer CURRENT and closes the old DB once its last pin is
 released. A failed open keeps the old DB serving.
 
+## Local mode (redact at ingest)
+
+`mnemonic local` hands its ingest a redactor (`IngestOptions.Red`, built as
+push builds it: `redact.New(nil)` — local mode has no config file, so no
+extra patterns). In `ingestSource` the parser's reader is wrapped
+(`redactReader`, kind.go): every line the parse reads goes through
+`redact.Line`, the exact bytes push's `redactLines` uploads for the same
+lines. The redaction sits on the reader, not the kind: the write tools'
+records (KindStore under the data dir) need it as much as the harness files
+do, because the tools' store path does not redact — `q_annotate.go:158`
+appends the annotation value verbatim (found on this lane; the packet
+assumed it was redacted). Server mode hands no redactor: its raw was
+redacted by push before it arrived, so one behaviour in both modes — redact
+at ingest — and the parser never differs.
+
+**Offsets and uids equal the server path's by construction, no second
+offset kept.** `EventUID` hashes the parser's running byte offset
+(`shared/hash.go:15`, via `SourceOffset`, shared/jsonl.go), which counts the
+bytes the parser has actually read. Local's parser reads the redacted
+stream, byte-identical to what the server path's raw holds for the same
+file (push redacted each whole line with the same redactor before upload;
+`redact.Line` never introduces or removes a newline, so line n maps to line
+n). Line numbers match, fingerprints of the line match, so uids match. The
+checkpoint's `ZstSize` stays in the plain file's bytes and `WindowSHA` the
+plain file's window (kind.go `plainExtends`), so resume works on the
+unredacted file; the ckpt's `State.Offset` is parser-internal and counts
+redacted bytes, which stays consistent across resumes because both offsets
+advance one whole line at a time — `ingestSource` only ever resumes at a
+newline (`openPlain`'s end) or a frame boundary (store raw). A redactor
+change across runs would shift resumed state; local mode pins one build
+(`redact.New(nil)`), so the input cannot happen.
+
 ## Decisions (U0)
 
 1. **Tools in this package.** The tools read part internals (docs, hot
@@ -143,8 +175,8 @@ Every stub panics with `lane <unit>`. Oracle is main 59796bc unless named.
 | U6-query | `q_query.go` | `Tool.Call` on raw args | parse once into `ql.Query`, run over engine rows of events/sessions/spans | `internal/ql` contract; tools.json `query` entry |
 | U10 | `kind.go` | `openPlain(s source) (*os.File, int64, error)`; `plainExtends(f *os.File, end int64, prev ckpt) bool` | open the harness file in place, end = last newline; resume iff the 64 KB plain window before `prev.ZstSize` hashes to `prev.WindowSHA`, else parse from 0 into gen+1 | a plain ingest answers like the store ingest of the same file |
 | U10 | `kind.go` | `listPlainSources(globs []string, author, machine string) ([]source, error)` | KindPlain sources with push's src ids and manifest fields | push's manifest for the same file |
-| U10 | `internal/mcp/mcp.go` | `redactResult(out *redact.Redactor, result any) any` | every string in a tools/call result through `out.Line`; called in `Handler`'s tools/call branch when `out != nil` | redactor goldens |
-| U10 | `cmd/mnemonic/local.go` | `runLocal(ctx, opts, out, logOut) error` | in-place index, push.Watch events call ingest, MCP with `Handler(ix, index.Lookup, red)` | standing predicate 7 |
+| U10 | `internal/mcp/mcp.go` | — (deleted) | the output-boundary redaction (redactResult, redactEnvelope, redactValue, redactToolError) is gone; `Handler` takes no redactor — both modes redact at ingest | the local-mode redaction test in `ingest_local_test.go` |
+| U10 | `cmd/mnemonic/local.go` | `runLocal(ctx, opts, out, logOut) error` | in-place index redacting at ingest, push.Watch events call ingest, MCP with `Handler(ix, index.Lookup)` | standing predicate 7 |
 
 The five old tools are ported with main's Oct 22 scope (`scope.go`); there
 are no U4 stubs. U4 lanes own their tool's parity diffs (see the U0 report).
