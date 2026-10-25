@@ -1,6 +1,7 @@
 package index
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -62,5 +63,37 @@ func TestArchiveParityVersionWinner(t *testing.T) {
 	})
 	if r := findRow(t, db, "v"); r.Text != "newer copy" {
 		t.Fatalf("v kept %q, want %q", r.Text, "newer copy")
+	}
+}
+
+func TestArchiveParityRawAndArchiveUID(t *testing.T) {
+	const sid = "44444444-4444-4444-8444-444444444444"
+	line := func(uuid string, minute int, content string) []byte {
+		ts := time.Date(2026, 3, 1, 10, minute, 0, 0, time.UTC).Format("2006-01-02T15:04:05Z")
+		return []byte(fmt.Sprintf(`{"type":"user","sessionId":%q,"cwd":"/work/p","uuid":%q,"timestamp":%q,"message":{"role":"user","content":%q}}`+"\n",
+			sid, uuid, ts, content))
+	}
+	raw := append(line("r-0", 0, "raw zero"), line("r-1", 1, "raw one")...)
+	uids := rawUIDs(t, raw)
+
+	root, store := t.TempDir(), t.TempDir()
+	writeRawSource(t, root, "a", "m", "claude-code", "s1", "/p/s1.jsonl", raw, 1)
+	writeChParquet(t, filepath.Join(root, "events", "author=a", "machine=archive-ch", "harness=claude-code", "ch-export.parquet"), []chRow{
+		archParityRow(uids[0], sid, "archive zero", 0, 5),
+		archParityRow(uids[1], sid, "archive one", 5, 6),
+	})
+	if _, err := Ingest(root, store, time.Minute, true); err != nil {
+		t.Fatal(err)
+	}
+	db, err := OpenDB(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(db.Close)
+	if r := findRow(t, db, uids[0]); r.Text != "raw zero" {
+		t.Fatalf("equal versions kept %q, want the raw copy %q", r.Text, "raw zero")
+	}
+	if r := findRow(t, db, uids[1]); r.Text != "archive one" {
+		t.Fatalf("higher archive version kept %q, want %q", r.Text, "archive one")
 	}
 }
