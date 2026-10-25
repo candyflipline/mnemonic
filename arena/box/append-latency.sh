@@ -254,7 +254,7 @@ PYEOF
 		echo "append run $i: ingest=$IRC batch=$BRC, see $LOG" >&2
 		exit 1
 	fi
-	python3 -I - "$i" "$LOG" "$APP/reply-$i.jsonl" "$OUT/append-prereply.jsonl" "$SESSION" "$TARGET_SID" \
+	python3 -I - "$i" "$LOG" "$APP/reply-$i.jsonl" "$OUT/append-prereply.jsonl" "$session" "$target_sid" \
 		>> "$OUT/append-summary.tsv" <<'PYEOF'
 import base64, json, re, sys
 run, log, reply, pre, session, target = sys.argv[1:7]
