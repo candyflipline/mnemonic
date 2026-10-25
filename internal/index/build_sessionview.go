@@ -3,10 +3,11 @@ package index
 import "iter"
 
 // sessionView hands a session's materialized winners to the derivations as
-// the iterators they take, until the streaming build reads them from the
-// part's own logs. Rows yielded by rows are a scratch copy with TurnIndex set
-// from the session's turn seqs; withSeqs yields the winners themselves with
-// their seq beside them. payload answers for the row being yielded.
+// the iterators they take, for the delta image, which holds its rows in
+// memory; a full part's sections read the part's own logs (partView). Rows
+// yielded by rows are a scratch copy with TurnIndex set from the session's
+// turn seqs; withSeqs yields the winners themselves with their seq beside
+// them. payload answers for the row being yielded.
 type sessionView struct {
 	evs       []built
 	seqs      []uint32
