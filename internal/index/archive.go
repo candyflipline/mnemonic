@@ -97,23 +97,28 @@ func archiveMemberKey(fileKey, sessionID string) string {
 }
 
 // memberBeats reports whether a row of version v from member m beats the
-// incumbent row of version wv from member w: the cache's winner order, event
-// version first, then a non-archive copy over an archive one, then the lake
-// file (lesser for archive files, whose own order ingestArchive settles
-// before a row is logged; greater for raw, which keeps no ingested_at to
-// order its copies by).
+// incumbent row of version wv from member w. Two raw members go by the lake
+// path alone, the greater first, then the lesser key: the oracle's raw
+// versions are parse wall clocks and the engine's a line index, neither
+// comparable across files. Otherwise
+// the cache's winner order: event version first, then a non-archive copy over
+// an archive one, then the lesser archive lake file.
 func memberBeats(v uint64, m member, wv uint64, w member) bool {
+	ma, wa := m.Kind == KindArchive, w.Kind == KindArchive
+	if !ma && !wa {
+		if m.Path != w.Path {
+			return m.Path > w.Path
+		}
+		return m.Key < w.Key
+	}
 	if v != wv {
 		return v > wv
 	}
-	if a, wa := m.Kind == KindArchive, w.Kind == KindArchive; a != wa {
+	if ma != wa {
 		return wa
 	}
 	if m.Path != w.Path {
-		if m.Kind == KindArchive {
-			return m.Path < w.Path
-		}
-		return m.Path > w.Path
+		return m.Path < w.Path
 	}
 	return m.Key < w.Key
 }
