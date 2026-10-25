@@ -52,8 +52,19 @@ func (ix *Index) IngestPlain(globs []config.SourceGlob, author, machine string, 
 	return st, errors.Join(err, ix.Refresh())
 }
 
-// Refresh opens CURRENT when its bytes changed since the DB being served. A
-// failed open keeps the old DB serving; the next Refresh retries.
+// openTries bounds the CURRENT re-reads when a part CURRENT names does not
+// open. The writer's GC removes only parts the newest CURRENT does not name,
+// and it publishes that CURRENT before removing, so a re-read names live
+// parts; a store that still fails is broken and the error must reach the
+// caller rather than serve as an empty index.
+const openTries = 3
+
+// Refresh opens CURRENT when its bytes changed since the DB being served. No
+// CURRENT is nothing published yet and keeps the DB being served (Open's is
+// empty); a part CURRENT names that no longer opens is retried on a freshly
+// read CURRENT a bounded number of times and, still failing, returns the
+// error — never an empty DB with a nil error, which is what export would
+// write out.
 func (ix *Index) Refresh() error {
 	stamp, ok := CurrentStamp(ix.store)
 	ix.mu.Lock()
@@ -62,19 +73,27 @@ func (ix *Index) Refresh() error {
 	if same {
 		return nil
 	}
-	db, err := OpenDB(ix.store)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
+	for try := 1; ; try++ {
+		db, err := OpenDB(ix.store)
+		if err == nil {
+			ix.mu.Lock()
+			old := ix.cur
+			ix.cur = &snapshot{db: db, stamp: stamp}
+			ix.retire(old)
+			ix.mu.Unlock()
+			return nil
+		}
+		if errors.Is(err, fs.ErrNotExist) { // no CURRENT: nothing published yet
+			return nil
+		}
+		var missing *PartOpenError
+		if !errors.As(err, &missing) || try == openTries {
+			return err
+		}
+		if openRetryHook != nil {
+			openRetryHook()
+		}
 	}
-	if err != nil {
-		return err
-	}
-	ix.mu.Lock()
-	old := ix.cur
-	ix.cur = &snapshot{db: db, stamp: stamp}
-	ix.retire(old)
-	ix.mu.Unlock()
-	return nil
 }
 
 // Snapshot pins the DB being served; release unpins it.

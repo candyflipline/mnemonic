@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -39,6 +40,20 @@ func readManifest(store string) (manifestFile, error) {
 
 func partDir(store, id string) string { return filepath.Join(store, "parts", id) }
 
+// PartOpenError is a CURRENT naming a part that no longer opens: the writer's
+// GC removed the part after publishing a newer CURRENT, or the store is
+// damaged. It is deliberately not fs.ErrNotExist — a missing CURRENT is
+// "nothing published yet", this is a stale or broken CURRENT — and Open and
+// Refresh re-read CURRENT and retry before surfacing it.
+type PartOpenError struct {
+	Part string // the part id CURRENT names
+	Err  error  // the part's own open failure, message only
+}
+
+func (e *PartOpenError) Error() string {
+	return fmt.Sprintf("current names part %s, which does not open: %v", e.Part, e.Err)
+}
+
 func OpenDB(store string) (*DB, error) {
 	m, err := readManifest(store)
 	if err != nil {
@@ -51,7 +66,7 @@ func OpenDB(store string) (*DB, error) {
 			for _, p := range parts {
 				p.Close()
 			}
-			return nil, err
+			return nil, &PartOpenError{Part: id, Err: err}
 		}
 		parts = append(parts, st)
 	}
