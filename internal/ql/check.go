@@ -280,13 +280,16 @@ func (c *checker) bind(e Expr) bexpr {
 		if e.Fold {
 			pat = strings.ToLower(pat)
 		}
-		p := []rune(pat)
+		if len(e.Pattern) > likeMaxPattern {
+			panic(errorf(e.At, "like pattern must be at most %d bytes", likeMaxPattern))
+		}
+		lm := compileLike(pat)
 		return lift1(TBool, x, func(v Value) Value {
 			s := v.s
 			if e.Fold {
 				s = strings.ToLower(s)
 			}
-			return BoolValue(like([]rune(s), p) != e.Not)
+			return BoolValue(lm.match(s) != e.Not)
 		})
 	case *Match:
 		i, col := c.lookup(&e.Col)
@@ -555,23 +558,94 @@ func hasWords(s string, want []string) bool {
 	return true
 }
 
-func like(s, p []rune) bool {
-	si, pi, star, mark := 0, 0, -1, 0
-	for si < len(s) {
-		switch {
-		case pi < len(p) && (p[pi] == '_' || p[pi] == s[si]):
-			si, pi = si+1, pi+1
-		case pi < len(p) && p[pi] == '%':
-			star, mark, pi = pi, si, pi+1
-		case star >= 0:
-			mark++
-			si, pi = mark, star+1
-		default:
+// likeMaxPattern caps a like/ilike pattern; the matcher below is linear in
+// the string for a pattern this long.
+const likeMaxPattern = 1000
+
+// likeMatcher is a Shift-And automaton over a like pattern: state j is "j
+// pattern characters matched", loop marks the states a % keeps alive. One
+// pass over the string, no backtracking, at most 16 words of state.
+type likeMatcher struct {
+	n     int
+	words int
+	ascii [128][]uint64
+	other map[rune][]uint64
+	wild  []uint64
+	loop  []uint64
+}
+
+func compileLike(pat string) *likeMatcher {
+	var toks []rune
+	loops := map[int]bool{}
+	for _, r := range pat {
+		if r == '%' {
+			loops[len(toks)] = true
+			continue
+		}
+		toks = append(toks, r)
+	}
+	n := len(toks)
+	m := &likeMatcher{n: n, words: n/64 + 1, other: map[rune][]uint64{}}
+	m.wild = make([]uint64, m.words)
+	m.loop = make([]uint64, m.words)
+	for j := range loops {
+		m.loop[j/64] |= 1 << (j % 64)
+	}
+	for j, r := range toks {
+		bit := j + 1
+		if r == '_' {
+			m.wild[bit/64] |= 1 << (bit % 64)
+			continue
+		}
+		mask := m.mask(r)
+		if mask == nil {
+			mask = make([]uint64, m.words)
+			if r < 128 {
+				m.ascii[r] = mask
+			} else {
+				m.other[r] = mask
+			}
+		}
+		mask[bit/64] |= 1 << (bit % 64)
+	}
+	return m
+}
+
+func (m *likeMatcher) mask(r rune) []uint64 {
+	if r >= 0 && r < 128 {
+		return m.ascii[r]
+	}
+	return m.other[r]
+}
+
+func (m *likeMatcher) match(s string) bool {
+	var buf [17]uint64
+	d := buf[:m.words]
+	d[0] = 1
+	acc, accBit := m.n/64, uint64(1)<<(m.n%64)
+	accLoops := m.loop[acc]&accBit != 0
+	for _, r := range s {
+		mk := m.mask(r)
+		var carry uint64
+		alive := false
+		for w := 0; w < m.words; w++ {
+			shifted := d[w]<<1 | carry
+			carry = d[w] >> 63
+			t := m.wild[w]
+			if mk != nil {
+				t |= mk[w]
+			}
+			d[w] = shifted&t | d[w]&m.loop[w]
+			if d[w] != 0 {
+				alive = true
+			}
+		}
+		if !alive {
 			return false
 		}
+		if accLoops && d[acc]&accBit != 0 {
+			return true
+		}
 	}
-	for pi < len(p) && p[pi] == '%' {
-		pi++
-	}
-	return pi == len(p)
+	return d[acc]&accBit != 0
 }

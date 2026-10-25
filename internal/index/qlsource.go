@@ -39,18 +39,32 @@ func newQLSource(ctx context.Context, db *DB, from, to time.Time) (*qlSource, er
 	return s, nil
 }
 
+// scanCtxEvery is how many rows a scan walks between context checks; a scan
+// also checks before each part, so a cancelled query decodes nothing more.
+const scanCtxEvery = 4096
+
+func tickCtx(ctx context.Context, n *int) error {
+	if *n++; *n%scanCtxEvery == 0 {
+		return ctx.Err()
+	}
+	return nil
+}
+
 func (s *qlSource) Scan(ctx context.Context, req ql.ScanRequest, fn func(ql.Row) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	switch req.Relation {
 	case "events":
-		return s.scanEvents(req, fn)
+		return s.scanEvents(ctx, req, fn)
 	case "sessions":
-		return s.scanSessions(req, fn)
+		return s.scanSessions(ctx, req, fn)
 	case "turns":
-		return s.scanTurns(req, fn)
+		return s.scanTurns(ctx, req, fn)
 	case "spans":
-		return s.scanSpans(req, fn)
+		return s.scanSpans(ctx, req, fn)
 	case "annotations":
-		return s.scanAnnotations(req, fn)
+		return s.scanAnnotations(ctx, req, fn)
 	}
 	return fmt.Errorf("ql: the source does not serve relation %s", req.Relation)
 }
@@ -94,16 +108,23 @@ func usValue(us int64) (ql.Value, error) { return ql.TimeValue(time.UnixMicro(us
 // tokenizer could have (lowercase ASCII runs of 2..64); a shorter or
 // non-ASCII word is no term, so narrowing there could skip a row whose words
 // hold it, and the scan stays full (Run re-checks either way).
-func (s *qlSource) scanEvents(req ql.ScanRequest, fn func(ql.Row) error) error {
+func (s *qlSource) scanEvents(ctx context.Context, req ql.ScanRequest, fn func(ql.Row) error) error {
 	cells, err := eventCells(req.Columns)
 	if err != nil {
 		return err
 	}
 	lo, hi := s.from.UnixMilli(), s.to.UnixMilli()
+	var ticks int
 	for _, st := range s.db.parts {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		cand, narrowed := s.candidates(st, req.Match)
 		n := len(st.docs) / docWidth
 		for d := 0; d < n; d++ {
+			if err := tickCtx(ctx, &ticks); err != nil {
+				return err
+			}
 			if narrowed && !cand[d] {
 				continue
 			}
@@ -430,10 +451,17 @@ func (st *Part) member(d int) int { return int(binary.LittleEndian.Uint16(st.doc
 
 // eachSession calls fn for every session in the part sections the caller may
 // list. overlap narrows to the sessions the old sessions view held.
-func (s *qlSource) eachSession(overlap bool, fn func(st *Part, i int, info sessInfo) error) error {
+func (s *qlSource) eachSession(ctx context.Context, overlap bool, fn func(st *Part, i int, info sessInfo) error) error {
 	lo, hi := s.from.UnixMilli(), s.to.UnixMilli()
+	var ticks int
 	for _, st := range s.db.parts {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		for i := 0; i < st.nSessions; i++ {
+			if err := tickCtx(ctx, &ticks); err != nil {
+				return err
+			}
 			info := st.session(i)
 			if !s.f.Listed(info.id) {
 				continue
@@ -449,12 +477,12 @@ func (s *qlSource) eachSession(overlap bool, fn func(st *Part, i int, info sessI
 	return nil
 }
 
-func (s *qlSource) scanSessions(req ql.ScanRequest, fn func(ql.Row) error) error {
+func (s *qlSource) scanSessions(ctx context.Context, req ql.ScanRequest, fn func(ql.Row) error) error {
 	cells, err := sessionCells(req.Columns)
 	if err != nil {
 		return err
 	}
-	return s.eachSession(true, func(st *Part, i int, info sessInfo) error {
+	return s.eachSession(ctx, true, func(st *Part, i int, info sessInfo) error {
 		recs, err := st.lsRecs()
 		if err != nil {
 			return err
@@ -503,12 +531,12 @@ func sessionCells(cols []ql.Column) ([]func(sessInfo, lsRec) (ql.Value, error), 
 
 // scanTurns walks the part's turns section; a turn's session must be in
 // scope, which eachSession(overlap) answers by session index.
-func (s *qlSource) scanTurns(req ql.ScanRequest, fn func(ql.Row) error) error {
+func (s *qlSource) scanTurns(ctx context.Context, req ql.ScanRequest, fn func(ql.Row) error) error {
 	cells, err := turnCells(req.Columns)
 	if err != nil {
 		return err
 	}
-	return s.eachSession(true, func(st *Part, i int, info sessInfo) error {
+	return s.eachSession(ctx, true, func(st *Part, i int, info sessInfo) error {
 		for t := 0; t < st.nTurns; t++ {
 			b := st.turns[t*turnWidth:]
 			if int(binary.LittleEndian.Uint32(b)) != i {
@@ -569,12 +597,12 @@ func turnCells(cols []ql.Column) ([]func(*Part, []byte) (ql.Value, error), error
 
 // -------------------------------------------------- spans, annotations
 
-func (s *qlSource) scanSpans(req ql.ScanRequest, fn func(ql.Row) error) error {
+func (s *qlSource) scanSpans(ctx context.Context, req ql.ScanRequest, fn func(ql.Row) error) error {
 	cells, err := spanCells(req.Columns)
 	if err != nil {
 		return err
 	}
-	return s.eachSession(false, func(_ *Part, _ int, info sessInfo) error {
+	return s.eachSession(ctx, false, func(_ *Part, _ int, info sessInfo) error {
 		for _, sp := range s.spansOf(info.id) {
 			if sp.Start.Before(s.from) || !sp.Start.Before(s.to) {
 				continue
@@ -632,12 +660,12 @@ func spanCells(cols []ql.Column) ([]func(schema.Span) (ql.Value, error), error) 
 	return out, nil
 }
 
-func (s *qlSource) scanAnnotations(req ql.ScanRequest, fn func(ql.Row) error) error {
+func (s *qlSource) scanAnnotations(ctx context.Context, req ql.ScanRequest, fn func(ql.Row) error) error {
 	cells, err := annotationCells(req.Columns)
 	if err != nil {
 		return err
 	}
-	return s.eachSession(false, func(_ *Part, _ int, info sessInfo) error {
+	return s.eachSession(ctx, false, func(_ *Part, _ int, info sessInfo) error {
 		for _, a := range s.annotationsOf(info.id) {
 			if a.TS.Before(s.from) || !a.TS.Before(s.to) {
 				continue
