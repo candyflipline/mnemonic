@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 const (
@@ -141,5 +143,64 @@ func TestSettleRetiresOnceAndConverges(t *testing.T) {
 	}
 	if hashTree(t, once) != hashTree(t, twice) {
 		t.Fatal("a second cycle changed the store")
+	}
+}
+
+func TestAppendAfterSettleDoesNotRematerializeArchiveMembers(t *testing.T) {
+	root, store := t.TempDir(), t.TempDir()
+	uids := retireInputs(t, root)
+	if _, err := Ingest(root, store, time.Minute, true); err != nil {
+		t.Fatal(err)
+	}
+	if archive, _ := retireLogs(t, store); len(archive) != 0 {
+		t.Fatalf("archive members kept logs after settle: %v", archive)
+	}
+
+	first := append(retireLine("r-0", 0, "raw zero"), retireLine("r-1", 1, "raw one")...)
+	more := append(retireLine("r-2", 2, "raw two"), retireLine("r-3", 3, "raw three")...)
+	appendRawSource(t, root, "a", "m", "claude-code", "s1", "/p/s1.jsonl", [][]byte{first, more}, time.Now().Add(time.Hour).UnixMilli())
+	if _, err := Ingest(root, store, time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if archive, _ := retireLogs(t, store); len(archive) != 0 {
+		t.Fatalf("the append rematerialized archive members: %v", archive)
+	}
+
+	got := retireRows(t, store)
+	for _, want := range []string{
+		fmt.Sprintf("%s|%s|0|raw zero", uids[0], retireShared),
+		fmt.Sprintf("%s|%s|2|raw two", rawUIDs(t, more)[0], retireShared),
+		fmt.Sprintf("arch-only|%s|7|archive extra", retireShared),
+	} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("row %q missing after the append: %v", want, got)
+		}
+	}
+
+	cleanRoot, cleanStore := t.TempDir(), t.TempDir()
+	retireInputs(t, cleanRoot)
+	appendRawSource(t, cleanRoot, "a", "m", "claude-code", "s1", "/p/s1.jsonl", [][]byte{first, more}, 2)
+	if _, err := Ingest(cleanRoot, cleanStore, time.Minute, true); err != nil {
+		t.Fatal(err)
+	}
+	if want := retireRows(t, cleanStore); !slices.Equal(got, want) {
+		t.Fatalf("rows differ from a clean build:\n got %v\nwant %v", got, want)
+	}
+}
+
+// appendRawSource writes the raw source as one zstd frame per chunk, so a
+// later chunk is an append whose frame starts at the earlier size.
+func appendRawSource(t *testing.T, root, author, machine, harness, srcID, path string, chunks [][]byte, updatedMs int64) {
+	t.Helper()
+	enc, _ := zstd.NewWriter(nil)
+	var zst, plain []byte
+	for _, c := range chunks {
+		zst = enc.EncodeAll(c, zst)
+		plain = append(plain, c...)
+	}
+	writeRawManifest(t, root, author, machine, harness, srcID, path, int64(len(plain)), int64(len(zst)), updatedMs)
+	file := filepath.Join(root, "raw", "author="+author, "machine="+machine, "harness="+harness, srcID+".jsonl.zst")
+	if err := os.WriteFile(file, zst, 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
