@@ -131,9 +131,11 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 	}
 	wake := make(chan struct{}, 1)
 	st := &store.Store{DataDir: opts.dataDir, Wake: wake}
+	sink := &indexSink{ix: ix, srcs: srcs, author: author, machine: machine, red: red}
 	if err := firstIngest(ix, srcs, logger, author, machine, red); err != nil {
 		return err
 	}
+	sink.drainSettles(ctx, wake, logger) // the boot cycle's deferred settles, as serve sweeps after its own
 	tokens := auth.NewTokens(map[string]auth.Token{
 		auth.Hash("local"): {Author: author, Scopes: slices.Clone(auth.Scopes[:])},
 	})
@@ -143,7 +145,6 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 		tools.ServeHTTP(w, r.WithContext(index.WithControls(store.WithStore(r.Context(), st), ctl)))
 	})))
 	hs := &http.Server{Addr: opts.listen, Handler: mux}
-	sink := &indexSink{ix: ix, srcs: srcs, author: author, machine: machine, red: red}
 	go func() {
 		if err := pushrun.WatchSink(ctx, config.Client{Sources: srcs}, sink, out); err != nil {
 			logger.Printf("watch: %v", err)
@@ -234,11 +235,29 @@ func settleWake(ctx context.Context, wake <-chan struct{}) {
 }
 
 // wakeCycle is the wake goroutine's one lap: settle the burst of tool writes
-// into one ingest, then run it.
+// into one ingest, then run it and drain what it left.
 func (s *indexSink) wakeCycle(ctx context.Context, wake <-chan struct{}, logger *log.Logger) {
 	settleWake(ctx, wake)
 	if _, err := s.Sync(ctx, nil); err != nil {
 		logger.Printf("wake sync: %v", err)
+		return
+	}
+	s.drainSettles(ctx, wake, logger)
+}
+
+// drainSettles runs ingest cycles back to back while the last one left the
+// sweep work — a due component it could not settle into its cold shard, a
+// source for the parser-version sweep — and no wake is pending, the way serve
+// runs cycles until SweepStale hits 0; a cycle that parses no bytes settles
+// up to GOMAXPROCS shards, so a wake sync's cycle leaves the rest to these.
+// A pending wake or a done ctx hands the work to the next lap; an error
+// stops the drain, as a failed sync stops the wake lap.
+func (s *indexSink) drainSettles(ctx context.Context, wake <-chan struct{}, logger *log.Logger) {
+	for s.ix.SweepStale() > 0 && len(wake) == 0 && ctx.Err() == nil {
+		if _, err := s.Sync(ctx, nil); err != nil {
+			logger.Printf("settle sync: %v", err)
+			return
+		}
 	}
 }
 
