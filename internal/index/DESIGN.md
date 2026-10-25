@@ -110,9 +110,10 @@ extra patterns). In `ingestSource` the parser's reader is wrapped
 `redact.Line`, the exact bytes push's `redactLines` uploads for the same
 lines. The redaction sits on the reader, not the kind: the write tools'
 records (KindStore under the data dir) need it as much as the harness files
-do, because the tools' store path does not redact — `q_annotate.go:158`
-appends the annotation value verbatim (found on this lane; the packet
-assumed it was redacted). Server mode hands no redactor: its raw was
+do, so the write path redacts itself — q_annotate.go passes the
+annotation's name, source and string value through the same redactor
+(`annotateRed`, built once as `redact.New(nil)`) before the record is
+built and appended. Server mode hands no redactor: its raw was
 redacted by push before it arrived, so one behaviour in both modes — redact
 at ingest — and the parser never differs.
 
