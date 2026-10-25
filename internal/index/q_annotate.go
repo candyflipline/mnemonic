@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
 	"github.com/candyflipline/mnemonic/internal/auth"
+	"github.com/candyflipline/mnemonic/internal/redact"
 	"github.com/candyflipline/mnemonic/internal/schema"
 	"github.com/candyflipline/mnemonic/internal/store"
 )
@@ -91,9 +93,44 @@ func parseAnnotateArgs(raw json.RawMessage) (a annotateArgs, session string, val
 	return a, id.session, value, nil
 }
 
+// annotateRed is the redactor every annotate write passes the caller's user
+// text through, built once as a config-less client builds it (redact.New(nil):
+// the redactor push uploads with, no config file, no extra patterns). No
+// redactor reaches a tool's ctx — server raw arrived redacted from push and
+// local mode redacts its harness files at ingest — so the write path redacts
+// here, one behaviour in both modes. Redactor is safe for concurrent use.
+var annotateRed = sync.OnceValue(func() *redact.Redactor {
+	red, err := redact.New(nil)
+	if err != nil {
+		panic("index: " + err.Error()) // unreachable: no extra patterns to compile
+	}
+	return red
+})
+
+// redactUserText redacts one caller-controlled string with annotateRed; a
+// string with no secret comes back unchanged.
+func redactUserText(s string) string {
+	return string(annotateRed().Line([]byte(s)))
+}
+
+// redactValue redacts the string of a label or text value; a number holds no
+// caller text.
+func redactValue(v schema.Value) schema.Value {
+	if s, ok := v.Label(); ok {
+		return schema.Label(redactUserText(s))
+	}
+	if s, ok := v.Text(); ok {
+		return schema.Text(redactUserText(s))
+	}
+	return v
+}
+
 // annotationKey is the idempotency key of an annotate call: the hash of the
 // annotation without its timestamp, plus the client's request_id when it gave
-// one. An exact retry repeats the key; a different annotation under the same
+// one. Call hands it the redacted name, source and value — the key is of the
+// record the store actually holds, so a retried identical call repeats it (the
+// same secrets redact to the same bytes) and the annotation's id is
+// recomputable from the stored record. A different annotation under the same
 // request_id gets its own key, so the store never mistakes it for the first.
 func annotationKey(a annotateArgs, session string, value schema.Value) (string, error) {
 	b, err := json.Marshal(struct {
@@ -136,6 +173,13 @@ func (annotate) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, str
 	if err != nil {
 		return nil, "", err
 	}
+	// raw/ holds only redacted text: the write path is a raw boundary like
+	// push's upload and local ingest, so every field the caller controls goes
+	// through the redactor before the record is built. The key, the appended
+	// line and the result text all come from the redacted forms.
+	a.Name = redactUserText(a.Name)
+	a.Source = schema.AnnotationSource(redactUserText(string(a.Source)))
+	value = redactValue(value)
 	if err := requireTarget(ctx, db, session, a.SpanID); err != nil {
 		return nil, "", err
 	}
