@@ -502,12 +502,12 @@ func Ingest(root, store string, quiet time.Duration, settleAll bool) (IngestStat
 // IngestPlain brings store up to the machine's harness files the client globs
 // match, indexed in place as KindPlain sources, plus the sources under the
 // data dir around store — the records the write tools append through its
-// store (local mode: raw/ there holds only what they wrote, never a copy of
-// harness files, and the archive glob finds nothing). One list and one cycle,
-// so the manifest publish writes covers both and neither ingest drops the
-// other's sources. store is the index dir under the data dir
-// (layout.IndexDir), so root is its parent and the store sources' raw opens
-// under it.
+// store, and the raw copies old `mnemonic local` left there (the archive glob
+// finds nothing). A copy whose key a live harness file carries is dropped: the
+// plain file owns the key. One list and one cycle, so the manifest publish
+// writes covers both and neither ingest drops the other's sources. store is
+// the index dir under the data dir (layout.IndexDir), so root is its parent
+// and the store sources' raw opens under it.
 func IngestPlain(store string, globs []config.SourceGlob, author, machine string, opts IngestOptions) (IngestStats, error) {
 	plain, err := listPlainSources(globs, author, machine)
 	if err != nil {
@@ -518,7 +518,23 @@ func IngestPlain(store string, globs []config.SourceGlob, author, machine string
 	if err != nil {
 		return IngestStats{}, err
 	}
-	return ingest(root, store, append(plain, tool...), opts.Quiet, opts.SettleAll, opts.Red)
+	// The live harness file wins: old `mnemonic local` pushed every harness
+	// file into <root>/raw under the same key the plain source carries, so a
+	// store source whose key a plain source holds is that raw copy, not a
+	// second input — drop it, leaving the key one source and one checkpoint.
+	// The copy stays on disk. A copy whose plain file no longer exists keeps
+	// its key to itself and is ingested: it is the only copy left.
+	plainKeys := make(map[string]bool, len(plain))
+	for _, s := range plain {
+		plainKeys[sourceKey(s.key)] = true
+	}
+	for _, s := range tool {
+		if s.kind == KindStore && plainKeys[sourceKey(s.key)] {
+			continue
+		}
+		plain = append(plain, s)
+	}
+	return ingest(root, store, plain, opts.Quiet, opts.SettleAll, opts.Red)
 }
 
 // ingest is the cycle both entry points share: parse the sources, publish the
@@ -534,6 +550,19 @@ func IngestPlain(store string, globs []config.SourceGlob, author, machine string
 // process holding the dir for its whole life (serve, local) borrows its own
 // lock instead of refusing itself.
 func ingest(root, store string, sources []source, quiet time.Duration, settleAll bool, red *redact.Redactor) (stats IngestStats, err error) {
+	// One key, one source: two sources on one key would run two ingestSource
+	// workers over the same checkpoint and light/heavy logs, each truncating
+	// what the other appends. IngestPlain drops the raw copy behind a plain
+	// file; every other caller's list is one source per key by construction,
+	// so a duplicate here is refused loudly instead of corrupting the store.
+	seen := make(map[string]bool, len(sources))
+	for _, s := range sources {
+		k := sourceKey(s.key)
+		if seen[k] {
+			return IngestStats{}, fmt.Errorf("ingest: duplicate source key %s", k)
+		}
+		seen[k] = true
+	}
 	release, err := IngestLock(store)
 	if err != nil {
 		return IngestStats{}, err
