@@ -5,9 +5,11 @@
 ##   $1  BIN  the binary under test (`ingest`/`batch`, arena contract).
 ## Requires: ingest-timed.sh ran first for this BIN — BASE_STORE (default
 ##           $BOX/cold-1) is the pre-built store the append lands on.
-## Env: BOX (default /var/lib/mnemonic-e3). RUNS (default 5). SETUP=1 forces
-##      the deterministic target/donor/term choice to be redone; setup also
-##      redoes itself whenever BIN differs from the one recorded in the state.
+## Env: BOX (default /var/lib/mnemonic-e3). OUT (default $BOX/out; set it to
+##      a lane dir so concurrent lanes do not share output filenames). RUNS
+##      (default 5). SETUP=1 forces the deterministic target/donor/term
+##      choice to be redone; setup also redoes itself whenever BIN differs
+##      from the one recorded in the state.
 #
 # Scratch state lives on the box under $BOX/append/ and $BOX/out/append-* (the
 # copied lines, the chosen term and session — identifiers only, never printed):
@@ -62,7 +64,7 @@ BOX=${BOX:-/var/lib/mnemonic-e3}
 RUNS=${RUNS:-5}
 BIN=${1:?usage: append-latency.sh BIN}
 [ -x "$BIN" ] || { echo "not executable: $BIN" >&2; exit 2; }
-OUT=$BOX/out
+OUT=${OUT:-$BOX/out}
 APP=$BOX/append
 BASE_STORE=${BASE_STORE:-$BOX/cold-1}
 export GOMAXPROCS=16

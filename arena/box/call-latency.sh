@@ -6,8 +6,9 @@
 ## Requires: gen-masks.sh produced $BOX/arena/golden/calls.jsonl and
 ##           $BOX/arena/hidden/calls.jsonl, and ingest-timed.sh left a full
 ##           store (BASE_STORE, default $BOX/cold-1) the calls run against.
-## Env: BOX (default /var/lib/mnemonic-e3). BASE_STORE (default $BOX/cold-1).
-##      RUNS (default 5).
+## Env: BOX (default /var/lib/mnemonic-e3). OUT (default $BOX/out; set it to
+##      a lane dir so concurrent lanes do not share output filenames).
+##      BASE_STORE (default $BOX/cold-1). RUNS (default 5).
 #
 # RUNS fresh `BIN batch -root $BOX -store $BASE_STORE` processes (GOMAXPROCS=16),
 # each fed the golden calls then the hidden calls in one stdin stream (one
@@ -22,7 +23,7 @@ BOX=${BOX:-/var/lib/mnemonic-e3}
 RUNS=${RUNS:-5}
 BIN=${1:?usage: call-latency.sh BIN}
 [ -x "$BIN" ] || { echo "not executable: $BIN" >&2; exit 2; }
-OUT=$BOX/out
+OUT=${OUT:-$BOX/out}
 CALLS=$BOX/arena
 BASE_STORE=${BASE_STORE:-$BOX/cold-1}
 export GOMAXPROCS=16
