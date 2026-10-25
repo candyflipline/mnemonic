@@ -1,6 +1,7 @@
 package index
 
 import (
+	"iter"
 	"strconv"
 
 	"github.com/candyflipline/mnemonic/internal/schema"
@@ -61,8 +62,7 @@ type claudeApAgg struct {
 	hasTurn    bool
 }
 
-func claudeCodeSpans(_ string, session []*Row) []schema.Span {
-	sid := session[0].Session
+func claudeCodeSpans(_, sid string, rows iter.Seq[*Row]) []schema.Span {
 	rootID := spanIDHex("session", sid)
 	reqOf := func(r *Row) string {
 		if r.RequestID != "" {
@@ -82,7 +82,7 @@ func claudeCodeSpans(_ string, session []*Row) []schema.Span {
 	agents := map[string]*claudeAgentAgg{}
 	chats := map[string]*claudeChatAgg{}
 	tools := map[string]*claudeToolAgg{}
-	for _, r := range session {
+	for r := range rows {
 		uid, t := r.UID, eventTimeUs(r)
 		rb.add(uid, t)
 		sub := subOf(r)
@@ -144,7 +144,7 @@ func claudeCodeSpans(_ string, session []*Row) []schema.Span {
 	// its rows name, when that tool belongs to another thread or to none;
 	// first row in event order wins each field, the way arg_min does.
 	ap := map[string]*claudeApAgg{}
-	for _, r := range session {
+	for r := range rows {
 		sub := subOf(r)
 		if sub == "" {
 			continue

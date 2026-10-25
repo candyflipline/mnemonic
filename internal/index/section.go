@@ -2,6 +2,7 @@ package index
 
 import (
 	"encoding/json"
+	"iter"
 	"slices"
 	"sort"
 
@@ -27,49 +28,52 @@ func newSections() *sections {
 }
 
 // addSession folds one session's winner rows, in event order with turn_seq
-// current in seqs, into the three sections. Spans are derived per harness
-// from that harness's rows; annotation rows carry their payload from the
-// part's heavy log; the authors entry here sees winner rows only, so
+// current, into the three sections. rows may be ranged over more than once
+// and a yielded row is valid only during its yield. Spans are derived per
+// harness from that harness's rows; annotation rows carry their payload from
+// the part's heavy log; the authors entry here sees winner rows only, so
 // buildIndex overwrites it with buildSessionAuthors over every row.
-func (s *sections) addSession(sid string, evs []built, seqs []uint32, payload func(built) string) {
-	perHarness := map[string][]*Row{}
-	for i, b := range evs {
-		r := *b.row
-		r.Author = b.row.Author
-		if i < len(seqs) {
-			r.TurnIndex = uint64(seqs[i])
-		}
-		perHarness[r.Harness] = append(perHarness[r.Harness], &r)
-	}
-	hs := make([]string, 0, len(perHarness))
-	for h := range perHarness {
-		hs = append(hs, h)
-	}
-	slices.Sort(hs)
-	for _, h := range hs {
-		if f, ok := spanBuilders[h]; ok {
-			if sp := f(h, perHarness[h]); len(sp) > 0 {
-				s.spans[sid] = append(s.spans[sid], sp...)
-			}
-		}
-	}
-	var anns []annRow
-	for _, b := range evs {
-		if b.row.Harness == schema.AnnotationHarness {
-			anns = append(anns, annRow{row: b.row, payload: payload(b), author: b.row.Author})
-		}
-	}
-	if len(anns) > 0 {
-		s.ann[sid] = buildAnnotations(anns)
-	}
+func (s *sections) addSession(sid string, rows iter.Seq[*Row], payload func(*Row) string) {
 	set := s.auth[sid]
 	if set == nil {
 		set = map[string]bool{}
 		s.auth[sid] = set
 	}
-	for _, b := range evs {
-		if a := b.row.Author; a != "" {
+	seen := map[string]bool{}
+	var anns []annRow
+	for r := range rows {
+		seen[r.Harness] = true
+		if r.Harness == schema.AnnotationHarness {
+			anns = append(anns, annRow{payload: payload(r), author: r.Author})
+		}
+		if a := r.Author; a != "" {
 			set[a] = true
+		}
+	}
+	hs := make([]string, 0, len(seen))
+	for h := range seen {
+		hs = append(hs, h)
+	}
+	slices.Sort(hs)
+	for _, h := range hs {
+		if f, ok := spanBuilders[h]; ok {
+			if sp := f(h, sid, ofHarness(rows, h)); len(sp) > 0 {
+				s.spans[sid] = append(s.spans[sid], sp...)
+			}
+		}
+	}
+	if len(anns) > 0 {
+		s.ann[sid] = buildAnnotations(anns)
+	}
+}
+
+// ofHarness is the rows of one harness.
+func ofHarness(rows iter.Seq[*Row], harness string) iter.Seq[*Row] {
+	return func(yield func(*Row) bool) {
+		for r := range rows {
+			if r.Harness == harness && !yield(r) {
+				return
+			}
 		}
 	}
 }

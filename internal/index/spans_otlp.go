@@ -2,6 +2,7 @@ package index
 
 import (
 	"encoding/json"
+	"iter"
 
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
@@ -15,22 +16,26 @@ import (
 // the chats beneath it, else its own. The parent link is origin_event_id, the
 // event_uid of the parent span's row. Walks run at most 65 edges out, the
 // depth the derivation's recursive CTE walks.
-func otlpSpans(_ string, session []*Row) []schema.Span {
-	rows := map[string]*Row{}
-	for _, r := range session {
+func otlpSpans(_, sid string, session iter.Seq[*Row]) []schema.Span {
+	rows := map[string]*otlpNode{}
+	for r := range session {
 		if r.PayloadType == "span" && r.UID != "" {
-			rows[r.UID] = r
+			n := &otlpNode{origin: r.OriginEventID, opKind: r.OpKind, itemID: r.ItemID, traceID: r.TraceID,
+				author: r.Author, tok: tokens{r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheWriteTokens}}
+			if r.OpKind == string(schema.SpanChat) {
+				n.cost = otlpCostUsd(r)
+			}
+			rows[r.UID] = n
 		}
 	}
 	if len(rows) == 0 {
 		return nil
 	}
-	sid := session[0].Session
 
 	// nearest: each row's closest emitted strict ancestor.
-	nearest := map[string]*Row{}
-	otlpWalk(rows, func(from, uid string, anc *Row) bool {
-		if otlpEmitted(anc) {
+	nearest := map[string]*otlpNode{}
+	otlpWalk(rows, func(from, uid string, anc *otlpNode) bool {
+		if otlpEmitted(anc.opKind) {
 			nearest[from] = anc
 			return false
 		}
@@ -51,12 +56,12 @@ func otlpSpans(_ string, session []*Row) []schema.Span {
 			if p, seen := pos[c]; seen {
 				if members := path[p:]; len(members) <= 64 {
 					for _, m := range members {
-						if !otlpEmitted(rows[m]) {
+						if !otlpEmitted(rows[m].opKind) {
 							continue
 						}
 						isRoot := true
 						for _, n := range members {
-							if n != m && otlpEmitted(rows[n]) && rows[n].ItemID < rows[m].ItemID {
+							if n != m && otlpEmitted(rows[n].opKind) && rows[n].itemID < rows[m].itemID {
 								isRoot = false
 								break
 							}
@@ -74,7 +79,7 @@ func otlpSpans(_ string, session []*Row) []schema.Span {
 			color[c] = true
 			pos[c] = len(path)
 			path = append(path, c)
-			next := rows[c].OriginEventID
+			next := rows[c].origin
 			if next == "" || rows[next] == nil {
 				break
 			}
@@ -89,8 +94,8 @@ func otlpSpans(_ string, session []*Row) []schema.Span {
 		hasCost, hasChatBelow bool
 	}
 	under := map[string]*sums{}
-	otlpWalk(rows, func(from, uid string, anc *Row) bool {
-		if rows[from].OpKind != "chat" || anc.OpKind != string(schema.SpanInvokeAgent) {
+	otlpWalk(rows, func(from, uid string, anc *otlpNode) bool {
+		if rows[from].opKind != "chat" || anc.opKind != string(schema.SpanInvokeAgent) {
 			return true
 		}
 		s := under[uid]
@@ -98,9 +103,8 @@ func otlpSpans(_ string, session []*Row) []schema.Span {
 			s = &sums{}
 			under[uid] = s
 		}
-		s.tok.add(tokens{rows[from].InputTokens, rows[from].OutputTokens,
-			rows[from].CacheReadTokens, rows[from].CacheWriteTokens})
-		if c := otlpCostUsd(rows[from]); c != nil {
+		s.tok.add(rows[from].tok)
+		if c := rows[from].cost; c != nil {
 			s.cost += *c
 			s.hasCost = true
 		}
@@ -109,14 +113,14 @@ func otlpSpans(_ string, session []*Row) []schema.Span {
 	})
 
 	out := make([]schema.Span, 0, len(rows))
-	for _, r := range session {
-		if r.PayloadType != "span" || r.UID == "" || !otlpEmitted(r) {
+	for r := range session {
+		if r.PayloadType != "span" || r.UID == "" || !otlpEmitted(r.OpKind) {
 			continue
 		}
 		parent := ""
 		if !root[r.UID] {
 			if n := nearest[r.UID]; n != nil {
-				parent = spanIDHex("otlp", n.Author, n.TraceID, n.ItemID)
+				parent = spanIDHex("otlp", n.author, n.traceID, n.itemID)
 			}
 		}
 		name := r.OpKind
@@ -147,10 +151,19 @@ func otlpSpans(_ string, session []*Row) []schema.Span {
 	return out
 }
 
+// otlpNode is what the walks keep of a span row: the fields they read, not the
+// row, which is valid only during its yield. cost is the chat's own, the only
+// cost a walk sums.
+type otlpNode struct {
+	origin, opKind, itemID, traceID, author string
+	tok                                     tokens
+	cost                                    *float64
+}
+
 // otlpEmitted is op_kind IN ('chat', 'execute_tool', 'invoke_agent'): the
 // span rows the derivation emits; the rest only carry children.
-func otlpEmitted(r *Row) bool {
-	switch r.OpKind {
+func otlpEmitted(opKind string) bool {
+	switch opKind {
 	case string(schema.SpanChat), string(schema.SpanExecuteTool), string(schema.SpanInvokeAgent):
 		return true
 	}
@@ -160,12 +173,12 @@ func otlpEmitted(r *Row) bool {
 // otlpWalk follows each row's origin_event_id chain upward, calling yield on
 // every distinct strict ancestor, nearest first, at most 65 edges out (the CTE's depth 0..64), and
 // stopping where yield returns false.
-func otlpWalk(rows map[string]*Row, yield func(from, uid string, anc *Row) bool) {
+func otlpWalk(rows map[string]*otlpNode, yield func(from, uid string, anc *otlpNode) bool) {
 	for from := range rows {
 		seen := map[string]bool{from: true}
 		cur := from
 		for i := 0; i <= 64; i++ {
-			next := rows[cur].OriginEventID
+			next := rows[cur].origin
 			if next == "" || seen[next] {
 				break
 			}

@@ -2,11 +2,10 @@ package index
 
 import "github.com/candyflipline/mnemonic/internal/schema"
 
-// annRow is one annotation harness row with its heavy columns: the payload
-// the annotations relation reads its value, source and ts from, and the
-// author of the source the row was parsed from.
+// annRow is one annotation harness row's heavy column: the payload the
+// annotations relation reads its value, source and ts from, and the author of
+// the source the row was parsed from.
 type annRow struct {
-	row     *Row
 	payload string
 	author  string
 }

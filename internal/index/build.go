@@ -508,8 +508,9 @@ func indexRows(bySession map[string][]built, place func(built) (*Row, int64, int
 		}
 		s.end = uint32(len(docs))
 		sessions = append(sessions, s)
-		lsRecs = append(lsRecs, lsAggregate(evs, turnSeqs[start:], payload))
-		secs.addSession(sid, evs, turnSeqs[start:], payload)
+		view := &sessionView{evs: evs, seqs: turnSeqs[start:], payloadOf: payload}
+		lsRecs = append(lsRecs, lsAggregate(view.withSeqs(), view.payload))
+		secs.addSession(sid, view.rows(), view.payload)
 		seqs := make([]uint32, 0, len(perTurn))
 		for q := range perTurn {
 			seqs = append(seqs, q)

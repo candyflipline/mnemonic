@@ -3,23 +3,18 @@ package index
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"iter"
 	"time"
 
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-// buildSpans is a part's spans section for one session: the spans
-// 59796bc:internal/cache/index_spans_<harness>.go derives from the session's
-// winner rows of that harness, in event order with turn_seq current.
-func buildSpans(harness string, session []*Row) []schema.Span {
-	f, ok := spanBuilders[harness]
-	if !ok || len(session) == 0 {
-		return nil
-	}
-	return f(harness, session)
-}
-
-var spanBuilders = map[string]func(string, []*Row) []schema.Span{
+// spanBuilders derive a session's spans section from its winner rows of one
+// harness, in event order with turn_seq current:
+// 59796bc:internal/cache/index_spans_<harness>.go. rows may be ranged over
+// more than once; a yielded *Row is valid only during its yield, so a builder
+// copies the fields it keeps.
+var spanBuilders = map[string]func(harness, sid string, rows iter.Seq[*Row]) []schema.Span{
 	"claude-code":     claudeCodeSpans,
 	"codex":           codexSpans,
 	"cursor":          cursorSpans,

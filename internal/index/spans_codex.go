@@ -1,6 +1,7 @@
 package index
 
 import (
+	"iter"
 	"slices"
 	"strconv"
 
@@ -9,13 +10,13 @@ import (
 
 // codexSpans: flatSpans whose chat is each token_count row, the only row a
 // codex session records a model call boundary on.
-func codexSpans(harness string, session []*Row) []schema.Span {
+func codexSpans(harness, sid string, rows iter.Seq[*Row]) []schema.Span {
 	return flatSpans("codex", func(r *Row) string {
 		if r.PayloadType == "token_count" {
 			return r.UID
 		}
 		return ""
-	})(harness, session)
+	})(harness, sid, rows)
 }
 
 // flatSpans derives the tree for harnesses whose rows name no subagent: the
@@ -26,9 +27,8 @@ func codexSpans(harness string, session []*Row) []schema.Span {
 // boundary passes nil and gets no chats. A chat's tokens are the max over
 // its rows, because a provider reports one usage per call; root and turns
 // carry the sum over the chats below them.
-func flatSpans(root string, chatKey func(*Row) string) func(string, []*Row) []schema.Span {
-	return func(_ string, session []*Row) []schema.Span {
-		sid := session[0].Session
+func flatSpans(root string, chatKey func(*Row) string) func(string, string, iter.Seq[*Row]) []schema.Span {
+	return func(_, sid string, rows iter.Seq[*Row]) []schema.Span {
 		var rb spanBounds
 		type spanAgg struct {
 			b  spanBounds
@@ -50,7 +50,7 @@ func flatSpans(root string, chatKey func(*Row) string) func(string, []*Row) []sc
 			err        uint64
 		}
 		tools := map[string]*toolAgg{}
-		for _, r := range session {
+		for r := range rows {
 			uid, t := r.UID, eventTimeUs(r)
 			rb.add(uid, t)
 			seq := uint32(r.TurnIndex)

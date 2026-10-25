@@ -2,6 +2,7 @@ package index
 
 import (
 	"encoding/json"
+	"iter"
 	"os"
 	"path/filepath"
 	"sort"
@@ -61,17 +62,22 @@ func duckSubstr(s string, n int) string {
 	return s
 }
 
-func lsAggregate(evs []built, turnSeqs []uint32, payload func(b built) string) lsRec {
+// lsAggregate folds a session's winner rows, in event order with each row's
+// turn seq, into its rollup. payload is valid for the row being yielded and
+// no *Row outlives its yield.
+func lsAggregate(rows iter.Seq2[*Row, uint32], payload func(*Row) string) lsRec {
 	var rec lsRec
 	var web, mcp, tool bool
 	var term, harness, source argMax
 	var explicit, metaTitle, metaSummary, mdTitle, mdName, mdSummary, slug argMax
-	var preview *Row
+	var preview lsMinKey
 	var previewV string
-	for k, b := range evs {
-		r := b.row
+	var hasPreview bool
+	k := -1
+	for r, seq := range rows {
+		k++
 		rec.TotalEvents++
-		rec.TotalTurns = max(rec.TotalTurns, int(turnSeqs[k]))
+		rec.TotalTurns = max(rec.TotalTurns, int(seq))
 		if us := eventTimeUs(r); k == 0 || us > rec.LastUs {
 			rec.LastUs = us
 		}
@@ -96,14 +102,16 @@ func lsAggregate(evs []built, turnSeqs []uint32, payload func(b built) string) l
 			source.offer(r, r.SourceName)
 		}
 		if r.Harness == "codex" && r.ActorKind == "user" && r.EventKind == "event_msg" && r.PayloadType == "user_message" {
-			if v := duckTrim(duckSubstr(r.TextPreview, 320)); v != "" && (preview == nil || lsMinLess(r, preview)) {
-				preview, previewV = r, v
+			if v := duckTrim(duckSubstr(r.TextPreview, 320)); v != "" {
+				if key := lsMinKeyOf(r); !hasPreview || key.less(preview) {
+					preview, previewV, hasPreview = key, v, true
+				}
 			}
 		}
 		if r.Bits&bitMeta == 0 {
 			continue
 		}
-		p := payload(b)
+		p := payload(r)
 		title, name, summ := jsonTopString(p, "title"), jsonTopString(p, "name"), jsonTopString(p, "summary")
 		meta := r.EventKind == "session_meta"
 		if meta {
@@ -149,24 +157,36 @@ func lsAggregate(evs []built, turnSeqs []uint32, payload func(b built) string) l
 	return rec
 }
 
-// lsMinLess is the arg_min order (event_ts, source_name, source_file,
+// lsMinKey is the fields of a row the arg_min order reads, kept in place of
+// the row.
+type lsMinKey struct {
+	ts                  int64
+	name, file, uid     string
+	gen, offset, lineNo uint64
+}
+
+func lsMinKeyOf(r *Row) lsMinKey {
+	return lsMinKey{ts: r.TsMs, name: r.SourceName, file: r.SourceFile, uid: r.UID, gen: r.Gen, offset: r.Offset, lineNo: r.LineNo}
+}
+
+// less is the arg_min order (event_ts, source_name, source_file,
 // source_generation, source_offset, source_line_no, event_uid).
-func lsMinLess(a, b *Row) bool {
+func (a lsMinKey) less(b lsMinKey) bool {
 	switch {
-	case a.TsMs != b.TsMs:
-		return a.TsMs < b.TsMs
-	case a.SourceName != b.SourceName:
-		return a.SourceName < b.SourceName
-	case a.SourceFile != b.SourceFile:
-		return a.SourceFile < b.SourceFile
-	case a.Gen != b.Gen:
-		return a.Gen < b.Gen
-	case a.Offset != b.Offset:
-		return a.Offset < b.Offset
-	case a.LineNo != b.LineNo:
-		return a.LineNo < b.LineNo
+	case a.ts != b.ts:
+		return a.ts < b.ts
+	case a.name != b.name:
+		return a.name < b.name
+	case a.file != b.file:
+		return a.file < b.file
+	case a.gen != b.gen:
+		return a.gen < b.gen
+	case a.offset != b.offset:
+		return a.offset < b.offset
+	case a.lineNo != b.lineNo:
+		return a.lineNo < b.lineNo
 	}
-	return a.UID < b.UID
+	return a.uid < b.uid
 }
 
 func writeLs(dir string, recs []lsRec) error {

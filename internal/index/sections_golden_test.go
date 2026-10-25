@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -97,6 +98,15 @@ func spanRowsOf(spans []schema.Span) []spanRow {
 			FirstEvent: firstUID(s.FirstEventUID), LastEvent: firstUID(s.LastEventUID)})
 	}
 	return out
+}
+
+// buildSpans is the part build's spans for one session of one harness.
+func buildSpans(harness string, rows []*Row) []schema.Span {
+	f, ok := spanBuilders[harness]
+	if !ok || len(rows) == 0 {
+		return nil
+	}
+	return f(harness, rows[0].Session, slices.Values(rows))
 }
 
 func firstUID(uid string) string {
