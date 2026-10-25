@@ -24,10 +24,20 @@ SRC=$BOX/arch-diag/store/src
 	echo "=== (d) cold build $(date -u +%FT%TZ)"
 	FREE=$(df --output=avail -B1 "$BOX" | tail -1 | tr -d " ")
 	echo "free_before_d=$FREE"
-	if [ "$FREE" -lt 58000000000 ]; then
-		echo "skip (d): free < 58 GB"
+	# Foreman: skip the cold build under 70 GB free (ARCH2's oracle-clean is
+	# still growing) and report it as pending disk.
+	if [ "$FREE" -lt 70000000000 ]; then
+		echo "skip (d): free < 70 GB, cold build pending disk"
 		exit 0
 	fi
-	sh /root/size0-cold.sh /root/perf/index-size0.test
+	# Never run past the lane's report window: cap at 07:22Z, with an
+	# 8-minute floor (a shorter build's profiles are not worth the lock).
+	CAP=$(( $(date -u -d 2026-10-25T07:22:00Z +%s) - $(date -u +%s) ))
+	echo "cap_seconds=$CAP"
+	if [ "$CAP" -lt 480 ]; then
+		echo "skip (d): less than 8 min left in the lane window"
+		exit 0
+	fi
+	timeout "$CAP" sh /root/size0-cold.sh /root/perf/index-size0.test
 	echo "cold rc=$? (size0-cold.sh = arena/box/size0-cold.sh shipped to /root)"
 } > "$OUT/size0-chain.log" 2>&1

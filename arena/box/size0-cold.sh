@@ -20,7 +20,6 @@ OUT=${OUT:-$BOX/out}
 N=$(date +%s%N)
 LOG=$OUT/size0-cold-$N.log
 DU=$OUT/size0-cold-$N.du
-rm -rf "$STORE"
 mkdir -p "$STORE" "$OUT"
 : > "$LOG"
 ( while :; do
@@ -33,6 +32,10 @@ DUP=$!
 pidstat -u -h 1 > "$LOG.pidstat" 2>&1 &
 PSP=$!
 RC=0
+if [ -n "$(ls -A "$STORE" 2>/dev/null)" ]; then
+	echo "size0-cold.sh: $STORE is not empty — nothing on the box is ever deleted; pick a fresh store path" >&2
+	exit 1
+fi
 /usr/bin/time.gnu -v systemd-run --scope --unit=size0-cold-$N -p MemoryMax=8G \
   env GOMAXPROCS=4 PERF_ROOT="$ROOT" PERF_STORE="$STORE" PERF_MODE=cold PERF_PROF="$OUT" \
   "$TESTBIN" -test.run '^TestPerfCycle$' -test.v -test.count=1 >> "$LOG" 2>&1 || RC=$?
