@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -61,5 +63,102 @@ func TestOpenedPartListsSessionsAfterItsDirIsGone(t *testing.T) {
 	}
 	if !bytes.Contains(out, []byte(`"session_id"`)) {
 		t.Fatalf("no sessions listed: %s", out)
+	}
+}
+
+// TestConcurrentToolCallsOnOneSnapshot: the MCP handler pins one snapshot per
+// request and serializes nothing between two of them, so every lazily-filled
+// read cache of a DB must take concurrent fill. Before the fix -race reports
+// the shared frame cache's maps (row/heavyOf) and Part.ls. Each lane must
+// answer byte-identically to the sequential run, so the fix cannot change
+// behaviour.
+func TestConcurrentToolCallsOnOneSnapshot(t *testing.T) {
+	db, dir := newQueryDB(t)
+	ctx := context.Background()
+	claude := "7c666c01-d38e-4658-8650-854ffb5b626e" // a's claude-code session in newQueryDB
+
+	listArgs := `{"start_datetime":"2000-01-01T00:00:00Z","end_datetime":"2100-01-01T00:00:00Z"}`
+	searchArgs := `{"query":"project"}`
+	sdata, _, err := Call(ctx, db, "search_sessions", json.RawMessage(searchArgs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hits struct {
+		Results []struct {
+			ID string `json:"id"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(sdata, &hits); err != nil {
+		t.Fatal(err)
+	}
+	if len(hits.Results) == 0 {
+		t.Fatalf("search_sessions found nothing: %s", sdata)
+	}
+	openArgs := `{"id":"` + hits.Results[0].ID + `"}`
+	calls := []struct{ tool, args string }{
+		{"open", openArgs},
+		{"list_sessions", listArgs},
+		{"search_sessions", searchArgs},
+	}
+	want := make([]string, len(calls))
+	for i, c := range calls {
+		data, _, err := Call(ctx, db, c.tool, json.RawMessage(c.args))
+		if err != nil {
+			t.Fatalf("%s: %v", c.tool, err)
+		}
+		want[i] = string(data)
+	}
+	var listed struct {
+		Sessions []any `json:"sessions"`
+	}
+	if err := json.Unmarshal([]byte(want[1]), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Sessions) != 2 {
+		t.Fatalf("list_sessions returned %d sessions, want 2", len(listed.Sessions))
+	}
+
+	// The lanes race a cold DB over the same store: the race is two concurrent
+	// first requests filling the same lazily-filled caches of one snapshot.
+	racing, err := OpenDB(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer racing.Close()
+
+	const lanes = 8
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make([]error, lanes)
+	for g := 0; g < lanes; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			<-start
+			for round := 0; round < 25; round++ {
+				for i, c := range calls {
+					data, _, err := Call(ctx, racing, c.tool, json.RawMessage(c.args))
+					if err != nil {
+						errs[g] = fmt.Errorf("%s: %w", c.tool, err)
+						return
+					}
+					if string(data) != want[i] {
+						errs[g] = fmt.Errorf("%s: answer changed under concurrency", c.tool)
+						return
+					}
+				}
+				if a := racing.sessionAuthors(claude); len(a) != 1 || a[0] != "a" {
+					errs[g] = fmt.Errorf("session authors of %s: %v", claude, a)
+					return
+				}
+			}
+		}(g)
+	}
+	close(start)
+	wg.Wait()
+	for g, err := range errs {
+		if err != nil {
+			t.Fatalf("lane %d: %v", g, err)
+		}
 	}
 }
