@@ -109,17 +109,27 @@ func listSources(root string) ([]source, error) {
 		return nil, err
 	}
 	sort.Strings(paths)
-	var out []source
-	for _, p := range paths {
-		b, err := os.ReadFile(p)
+	mans := make([]manifest, len(paths))
+	errs := make([]error, len(paths))
+	bad := make([]error, len(paths))
+	eachIndex(len(paths), func(i int) {
+		b, err := os.ReadFile(paths[i])
 		if err != nil {
-			return nil, err
+			errs[i] = err
+			return
 		}
-		var m manifest
-		if err := json.Unmarshal(b, &m); err != nil {
-			fmt.Fprintf(os.Stderr, "ingest: %s: %v\n", p, err)
+		bad[i] = json.Unmarshal(b, &mans[i])
+	})
+	var out []source
+	for i, p := range paths {
+		if errs[i] != nil {
+			return nil, errs[i]
+		}
+		if bad[i] != nil {
+			fmt.Fprintf(os.Stderr, "ingest: %s: %v\n", p, bad[i])
 			continue
 		}
+		m := mans[i]
 		rel, _ := filepath.Rel(rawDir, p)
 		parts := strings.Split(rel, string(filepath.Separator))
 		if len(parts) != 4 {
@@ -146,6 +156,37 @@ func readCkpt(store, key string) (ckpt, bool) {
 		return ckpt{}, false
 	}
 	return c, true
+}
+
+// readCkpts reads the checkpoint of each source, nil where it has none; an
+// archive file's is left nil, its kind reads its own (archive.go).
+func readCkpts(store string, sources []source) []*ckpt {
+	out := make([]*ckpt, len(sources))
+	eachIndex(len(sources), func(i int) {
+		if sources[i].kind == KindArchive {
+			return
+		}
+		if c, ok := readCkpt(store, sourceKey(sources[i].key)); ok {
+			out[i] = &c
+		}
+	})
+	return out
+}
+
+// eachIndex calls fn with 0..n-1 on GOMAXPROCS workers.
+func eachIndex(n int, fn func(int)) {
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for range min(n, runtime.GOMAXPROCS(0)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := int(next.Add(1) - 1); i < n; i = int(next.Add(1) - 1) {
+				fn(i)
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func writeFileAtomic(path string, b []byte) error {
@@ -255,30 +296,37 @@ func storeExtends(raw *os.File, end int64, prev ckpt) bool {
 // bytes past its checkpoint when the input still extends it, and reports what
 // it did and how many log bytes it appended. red (local mode) sits between the
 // input and the parser: each line the parser reads has been through red.Line,
-// exactly the bytes push uploads for the same line.
-func ingestSource(root, store string, s source, red *redact.Redactor) (Outcome, int64, error) {
+// exactly the bytes push uploads for the same line. cur is the source's
+// checkpoint, nil for none, and the checkpoint the source has after is
+// returned with the outcome (nil for an archive file, whose kind keeps its own).
+func ingestSource(root, store string, s source, cur *ckpt, red *redact.Redactor) (Outcome, int64, *ckpt, error) {
 	if s.kind == KindArchive {
 		// Before normalize.For: archive harnesses do have parsers, but the
 		// parquet is read by the archive kind, not parsed as raw (DESIGN.md,
 		// Archive kind (d)).
-		return ingestArchive(store, s)
+		o, written, err := ingestArchive(store, s)
+		return o, written, nil, err
 	}
 	key := sourceKey(s.key)
 	parser, ok := normalize.For(s.src.Harness)
 	if !ok {
-		return Unchanged, 0, nil
+		return Unchanged, 0, cur, nil
 	}
 	raw, end, err := s.kind.open(root, s)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, cur, err
 	}
 	defer raw.Close()
 	meta := normalize.SourceMeta{SourceName: s.src.SourceName, Harness: s.src.Harness, SourceFile: s.src.Path}
 	want := wantCkpt(s, parser)
-	prev, has := readCkpt(store, key)
+	var prev ckpt
+	has := cur != nil
+	if has {
+		prev = *cur
+	}
 	resumed := has && extends(raw, end, want, prev)
 	if resumed && prev.ZstSize == end {
-		return Unchanged, 0, nil
+		return Unchanged, 0, cur, nil
 	}
 	next := want
 	var from ckpt
@@ -290,18 +338,18 @@ func ingestSource(root, store string, s source, red *redact.Redactor) (Outcome, 
 	}
 	lightF, err := openLog(logPath(store, key, next.Gen, "light"), from.LightLen)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, cur, err
 	}
 	defer lightF.Close()
 	heavyF, err := openLog(logPath(store, key, next.Gen, "heavy"), from.HeavyLen)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, cur, err
 	}
 	defer heavyF.Close()
 
 	zr, err := s.kind.reader(raw, from.ZstSize, end)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, cur, err
 	}
 	defer zr.Close()
 	if red != nil {
@@ -339,23 +387,23 @@ func ingestSource(root, store string, s source, red *redact.Redactor) (Outcome, 
 		return nil
 	})
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, cur, err
 	}
 	if err := hw.flush(); err != nil {
-		return 0, 0, err
+		return 0, 0, cur, err
 	}
 	if err := lw.flush(); err != nil {
-		return 0, 0, err
+		return 0, 0, cur, err
 	}
 	if err := lightF.Sync(); err != nil {
-		return 0, 0, err
+		return 0, 0, cur, err
 	}
 	if err := heavyF.Sync(); err != nil {
-		return 0, 0, err
+		return 0, 0, cur, err
 	}
 	sum, err := windowSHA(raw, end)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, cur, err
 	}
 	next.ZstSize, next.WindowSHA, next.State = end, sum, state
 	next.LightLen, next.HeavyLen, next.Rows = lw.off, hw.off, rows
@@ -365,16 +413,16 @@ func ingestSource(root, store string, s source, red *redact.Redactor) (Outcome, 
 	sort.Strings(next.Sessions)
 	b, _ := json.Marshal(next)
 	if err := writeFileAtomic(ckptPath(store, key), b); err != nil {
-		return 0, 0, err
+		return 0, 0, cur, err
 	}
 	written := next.LightLen - from.LightLen + next.HeavyLen - from.HeavyLen
 	switch {
 	case resumed:
-		return Resumed, written, nil
+		return Resumed, written, &next, nil
 	case has:
-		return Reparsed, written, nil
+		return Reparsed, written, &next, nil
 	}
-	return Fresh, written, nil
+	return Fresh, written, &next, nil
 }
 
 func appendStr(b []byte, s string) []byte {
@@ -575,13 +623,14 @@ func ingest(root, store string, sources []source, quiet time.Duration, settleAll
 		return
 	}
 	take := takeCycle(store)
-	outcomes, logBytes, stale, failSweep := parseSources(root, store, sources, take.failSweep, red)
+	cks := readCkpts(store, sources)
+	outcomes, logBytes, stale, failSweep := parseSources(root, store, sources, cks, take.failSweep, red)
 	for _, o := range outcomes {
 		stats[o]++
 	}
 	rec = cycleRecord{stats: CycleStats{LogBytes: logBytes}, stale: stale,
 		failed: len(sources) - len(outcomes), failSweep: failSweep}
-	cs, deferred, perr := publish(store, sources, quiet, settleAll, outcomes)
+	cs, deferred, perr := publish(store, sources, cks, quiet, settleAll, outcomes)
 	cs.LogBytes = logBytes
 	rec.stats, rec.settle = cs, deferred
 	return stats, perr
@@ -593,39 +642,42 @@ func ingest(root, store string, sources []source, quiet time.Duration, settleAll
 // the failSweep to carry into it: the version-stale sources whose re-parse
 // failed, so one poison source cannot keep the sweep cycling, plus skip for
 // the keys already known to fail at their version. A source that failed has no
-// outcome.
-func parseSources(root, store string, sources []source, skip map[string]int, red *redact.Redactor) (outcomes map[string]Outcome, logBytes int64, stale int, failSweep map[string]int) {
+// outcome. cks holds each source's checkpoint (readCkpts) and is updated to
+// the one each parse leaves.
+func parseSources(root, store string, sources []source, cks []*ckpt, skip map[string]int, red *redact.Redactor) (outcomes map[string]Outcome, logBytes int64, stale int, failSweep map[string]int) {
 	outcomes = make(map[string]Outcome, len(sources))
 	failSweep = map[string]int{}
 	for k, v := range skip {
 		failSweep[k] = v
 	}
-	var now []source // pushed, fresh or appended: parsed whatever the sweep is doing
-	var sweep []source
-	for _, s := range sources {
-		if versionStale(store, s) && failSweep[sourceKey(s.key)] != parserVersion(s) {
-			sweep = append(sweep, s)
+	var now []int // pushed, fresh or appended: parsed whatever the sweep is doing
+	var sweep []int
+	for i, s := range sources {
+		if versionStale(s, cks[i]) && failSweep[sourceKey(s.key)] != parserVersion(s) {
+			sweep = append(sweep, i)
 			continue
 		}
 		delete(failSweep, sourceKey(s.key))
-		now = append(now, s)
+		now = append(now, i)
 	}
 	var mu sync.Mutex
-	work := make(chan source)
-	done := make(chan []source)
+	work := make(chan int)
+	done := make(chan []int)
 	var wg sync.WaitGroup
 	for range runtime.GOMAXPROCS(0) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			var failed []source
-			for s := range work {
-				o, written, err := ingestSource(root, store, s, red)
+			var failed []int
+			for i := range work {
+				s := sources[i]
+				o, written, c, err := ingestSource(root, store, s, cks[i], red)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "ingest: %s: %v\n", s.mpath, err)
-					failed = append(failed, s)
+					failed = append(failed, i)
 					continue
 				}
+				cks[i] = c
 				mu.Lock()
 				outcomes[sourceKey(s.key)] = o
 				logBytes += written
@@ -634,16 +686,16 @@ func parseSources(root, store string, sources []source, skip map[string]int, red
 			done <- failed
 		}()
 	}
-	for _, s := range now {
-		work <- s
+	for _, i := range now {
+		work <- i
 	}
 	sweepEnd := time.Now().Add(sweepBudget)
-	for i, s := range sweep {
-		if i > 0 && time.Now().After(sweepEnd) {
-			stale = len(sweep) - i
+	for n, i := range sweep {
+		if n > 0 && time.Now().After(sweepEnd) {
+			stale = len(sweep) - n
 			break
 		}
-		work <- s
+		work <- i
 	}
 	close(work)
 	go func() {
@@ -651,9 +703,9 @@ func parseSources(root, store string, sources []source, skip map[string]int, red
 		close(done)
 	}()
 	for failed := range done {
-		for _, s := range failed {
-			if versionStale(store, s) {
-				failSweep[sourceKey(s.key)] = parserVersion(s)
+		for _, i := range failed {
+			if versionStale(sources[i], cks[i]) {
+				failSweep[sourceKey(sources[i].key)] = parserVersion(sources[i])
 			}
 		}
 	}
@@ -673,20 +725,21 @@ func parserVersion(s source) int {
 // versionStale reports whether s would re-parse from byte 0 only because its
 // parser has a newer Version than its checkpoint: no new bytes and none lost,
 // so it is sweep work, bounded per cycle, not push work. KindPlain sources are
-// never sweep work; their byte test is not the manifest's size.
-func versionStale(store string, s source) bool {
-	if s.kind != KindStore {
+// never sweep work; their byte test is not the manifest's size. c is s's
+// checkpoint, nil for none.
+func versionStale(s source, c *ckpt) bool {
+	if s.kind != KindStore || c == nil {
 		return false
 	}
-	prev, has := readCkpt(store, sourceKey(s.key))
-	return has && prev.Parser != parserVersion(s) && prev.ZstSize == s.src.ZstSize
+	return c.Parser != parserVersion(s) && c.ZstSize == s.src.ZstSize
 }
 
 // publish plans the parts of the sources' checkpoints, builds the missing ones
 // and points CURRENT at them, reporting what it wrote and how many components
 // whose quiet window has passed it left hot for a later cycle (settleSet).
-// outcomes is what this cycle's parse did, by source key.
-func publish(store string, sources []source, quiet time.Duration, settleAll bool, outcomes map[string]Outcome) (CycleStats, int, error) {
+// cur holds each source's checkpoint (parseSources), outcomes what this
+// cycle's parse did, by source key.
+func publish(store string, sources []source, cur []*ckpt, quiet time.Duration, settleAll bool, outcomes map[string]Outcome) (CycleStats, int, error) {
 	parsedAny := false
 	for _, o := range outcomes {
 		parsedAny = parsedAny || o != Unchanged
@@ -699,7 +752,7 @@ func publish(store string, sources []source, quiet time.Duration, settleAll bool
 	var due, touched []bool
 	var srcs []stSource
 	var keepExtra []string
-	for _, s := range sources {
+	for si, s := range sources {
 		if s.kind == KindArchive {
 			// The archive file's checkpoint expands into its per-session
 			// member checkpoints, which plan and build like any member; the
@@ -726,8 +779,8 @@ func publish(store string, sources []source, quiet time.Duration, settleAll bool
 			continue
 		}
 		row := stSource{Author: s.key.Author, Machine: s.key.Machine, Harness: s.key.Harness, UpdatedMs: s.src.UpdatedMs, Size: s.src.Size}
-		if c, ok := readCkpt(store, sourceKey(s.key)); ok {
-			cks = append(cks, c)
+		if c := cur[si]; c != nil {
+			cks = append(cks, *c)
 			due = append(due, settleAll || s.src.UpdatedMs <= newest-quiet.Milliseconds())
 			touched = append(touched, outcomes[sourceKey(s.key)] > Unchanged)
 			row.Events = c.Rows
