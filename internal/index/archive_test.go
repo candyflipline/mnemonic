@@ -73,7 +73,7 @@ func TestArchiveKind(t *testing.T) {
 	ts7, us7 := at(7)
 	ts8, us8 := at(8)
 	rows := []chRow{
-		archRow(overlapUID, archS1, ts5, us5, "shared beta ARCHIVE COPY", 100),
+		archRow(overlapUID, archS1, ts5, us5, "shared beta ARCHIVE COPY", 1),
 		archRow("arch-uid-s1", archS1, ts6, us6, "archshared gamma", 101),
 	}
 	r := archRow("arch-uid-s2a", archS2, ts7, us7, "archtwo otter", 102)
@@ -127,8 +127,8 @@ func TestArchiveKind(t *testing.T) {
 	if docs := docsTotal(db); docs != 6 {
 		t.Fatalf("docs %d, want 6 (3+2+1 winners)", docs)
 	}
-	// The raw copy wins the shared uid even though the archive copy carries a
-	// later record_ts and event_version.
+	// The raw copy wins the shared uid at equal event_version even though the
+	// archive copy carries a later record_ts.
 	w := findRow(t, db, overlapUID)
 	if w.Text != "shared beta question" || w.SourceFile != "/p/s1.jsonl" {
 		t.Fatalf("shared uid winner: text %q source %q", w.Text, w.SourceFile)

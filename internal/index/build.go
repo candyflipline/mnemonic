@@ -262,19 +262,17 @@ type winner struct {
 }
 
 // offerRow offers b, a row of member m, to win: within a member the higher
-// version wins, last on a tie; across members memberBeats, so a raw member's
-// copy beats an archive member's whatever their paths sort like. Two
-// same-kind members of equal path — no two members of a store carry one
-// today — hand the tie to the lesser key, the order buildIndex offers
-// members in, so both read paths pick one winner.
+// version wins, last on a tie; across members memberBeats, the one order
+// every read path (full build, delta image, holder rows) picks a uid's
+// winner by. Two same-kind members of equal path hand the tie to the lesser
+// key, the order buildIndex offers members in.
 func offerRow(win map[string]winner, b built, m member) {
 	if w, ok := win[b.row.UID]; ok {
 		if w.b.src == b.src {
 			if b.row.Version < w.b.row.Version {
 				return
 			}
-		} else if !memberBeats(ckpt{parsed: m.parsed}, w.member.Kind, w.member.Path) &&
-			(m.Path != w.member.Path || m.Key > w.member.Key) {
+		} else if !memberBeats(b.row.Version, m, w.b.row.Version, w.member) {
 			return
 		}
 	}

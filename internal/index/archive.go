@@ -1,12 +1,17 @@
 package index
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/candyflipline/mnemonic/internal/layout"
 	"github.com/candyflipline/mnemonic/internal/schema"
@@ -91,17 +96,166 @@ func archiveMemberKey(fileKey, sessionID string) string {
 	return fileKey + archiveMemberSep + sessionID
 }
 
-// memberBeats reports whether source c's copy of a uid beats the incumbent
-// w at the cross-source compare: a raw-derived member beats an archive
-// member unconditionally — the cache's winner order hands ties to the
-// non-archive copy (its index.go winner row_number) and an archive file is
-// never re-parsed, so its event_version only ages; within a kind the
-// greater lake path wins, the same order the cache uses across lake files.
-func memberBeats(c ckpt, wKind Kind, wPath string) bool {
-	if (c.Kind == KindArchive) != (wKind == KindArchive) {
-		return wKind == KindArchive
+// memberBeats reports whether a row of version v from member m beats the
+// incumbent row of version wv from member w: the cache's winner order, event
+// version first, then a non-archive copy over an archive one, then the lake
+// file (lesser for archive files, whose own order ingestArchive settles
+// before a row is logged; greater for raw, which keeps no ingested_at to
+// order its copies by).
+func memberBeats(v uint64, m member, wv uint64, w member) bool {
+	if v != wv {
+		return v > wv
 	}
-	return c.Path > wPath
+	if a, wa := m.Kind == KindArchive, w.Kind == KindArchive; a != wa {
+		return wa
+	}
+	if m.Path != w.Path {
+		if m.Kind == KindArchive {
+			return m.Path < w.Path
+		}
+		return m.Path > w.Path
+	}
+	return m.Key < w.Key
+}
+
+// archiveClaim is the best copy of a uid seen so far across the store's ch
+// files: the cache's order event_version DESC, ingested_at DESC, lake_file
+// ASC, lake_row ASC (index.go winnerOrder, archive files all alike).
+type archiveClaim struct {
+	version uint64
+	ingest  int64
+	file    int32
+	row     uint32
+}
+
+// chKey is the three columns the claim scan reads of a ch file.
+type chKey struct {
+	EventUID     string `parquet:"event_uid"`
+	EventVersion uint64 `parquet:"event_version"`
+	IngestedAt   int64  `parquet:"ingested_at,timestamp(microsecond)"`
+}
+
+// archiveSet is the store-wide verdict over every ch file under one events
+// dir: keep[i] marks the rows of paths[i] that are their uid's winner. A uid
+// is one row store-wide whatever session or file carries it, as the cache
+// holds it; digest names the files the verdict was drawn from.
+type archiveSet struct {
+	dir    string
+	digest string
+	paths  []string
+	keep   [][]uint64
+}
+
+func (a *archiveSet) kept(file int, row uint32) bool {
+	return a.keep[file][row>>6]&(1<<(row&63)) != 0
+}
+
+var archiveSetCache struct {
+	sync.Mutex
+	set  *archiveSet
+	wins map[string]archiveWindow
+}
+
+type archiveWindow struct {
+	size, mtime int64
+	sum         string
+}
+
+// archiveSetFor returns the verdict for the ch files under events, scanning
+// them once per change of the file list: the digest covers each file's path,
+// size and last window, the identity ingestArchive already trusts for one
+// file. Only the verdict is kept between calls, never the uid map.
+func archiveSetFor(events string) (*archiveSet, error) {
+	c := &archiveSetCache
+	c.Lock()
+	defer c.Unlock()
+	paths, err := filepath.Glob(filepath.Join(events, "author=*", "machine="+layout.ArchiveMachine, "harness=*", "ch-*.parquet"))
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(paths)
+	if c.wins == nil {
+		c.wins = map[string]archiveWindow{}
+	}
+	h := sha256.New()
+	for _, p := range paths {
+		fi, err := os.Stat(p)
+		if err != nil {
+			return nil, err
+		}
+		w, ok := c.wins[p]
+		if !ok || w.size != fi.Size() || w.mtime != fi.ModTime().UnixNano() {
+			f, err := os.Open(p)
+			if err != nil {
+				return nil, err
+			}
+			sum, err := windowSHA(f, fi.Size())
+			f.Close()
+			if err != nil {
+				return nil, err
+			}
+			w = archiveWindow{fi.Size(), fi.ModTime().UnixNano(), sum}
+			c.wins[p] = w
+		}
+		rel, _ := filepath.Rel(events, p)
+		fmt.Fprintf(h, "%s %d %s\n", filepath.ToSlash(rel), w.size, w.sum)
+	}
+	digest := hex.EncodeToString(h.Sum(nil))
+	if c.set != nil && c.set.dir == events && c.set.digest == digest {
+		return c.set, nil
+	}
+	set := &archiveSet{dir: events, digest: digest, paths: paths, keep: make([][]uint64, len(paths))}
+	claims := map[string]archiveClaim{}
+	rows := make([]uint32, len(paths))
+	buf := make([]chKey, archiveReadRows)
+	for i, p := range paths {
+		f, err := os.Open(p)
+		if err != nil {
+			return nil, err
+		}
+		fi, err := f.Stat()
+		if err != nil {
+			f.Close()
+			return nil, err
+		}
+		pf, err := parquet.OpenFile(f, fi.Size())
+		if err != nil {
+			f.Close()
+			return nil, err
+		}
+		n := uint32(0)
+		for _, rg := range pf.RowGroups() {
+			rd := parquet.NewGenericRowGroupReader[chKey](rg)
+			for {
+				k, err := rd.Read(buf)
+				for j := 0; j < k; j++ {
+					r := &buf[j]
+					if w, ok := claims[r.EventUID]; !ok || r.EventVersion > w.version ||
+						(r.EventVersion == w.version && r.IngestedAt > w.ingest) {
+						claims[r.EventUID] = archiveClaim{r.EventVersion, r.IngestedAt, int32(i), n}
+					}
+					n++
+				}
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					rd.Close()
+					f.Close()
+					return nil, err
+				}
+			}
+			rd.Close()
+		}
+		f.Close()
+		rows[i] = n
+		set.keep[i] = make([]uint64, (n+63)/64)
+	}
+	for _, w := range claims {
+		set.keep[w.file][w.row>>6] |= 1 << (w.row & 63)
+	}
+	c.set = set
+	return set, nil
 }
 
 // ingestArchive brings one ch-* file's per-session members up to the file.
@@ -124,10 +278,19 @@ func ingestArchive(store string, s source) (Outcome, int64, error) {
 		return 0, 0, err
 	}
 	end := fi.Size()
-	sum, err := windowSHA(f, end)
+	own, err := windowSHA(f, end)
 	if err != nil {
 		return 0, 0, err
 	}
+	set, err := archiveSetFor(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(s.mpath)))))
+	if err != nil {
+		return 0, 0, err
+	}
+	file := slices.Index(set.paths, s.mpath)
+	if file < 0 {
+		return 0, 0, fmt.Errorf("%s: not in the archive file list", s.mpath)
+	}
+	sum := own + "|" + set.digest
 	prev, has := readCkpt(store, key)
 	if has && prev.Kind == KindArchive && prev.ZstSize == end && prev.WindowSHA == sum {
 		return Unchanged, 0, nil
@@ -146,7 +309,7 @@ func ingestArchive(store string, s source) (Outcome, int64, error) {
 	}
 	ws := &archiveWriters{store: store, fileKey: key, prevGen: prevGen,
 		ws: map[string]*archiveWriter{}, limit: archiveOpenLogs}
-	if err := streamArchiveRows(pf, ws); err != nil {
+	if err := streamArchiveRows(pf, ws, set, file); err != nil {
 		return 0, 0, err
 	}
 	if err := ws.closeAll(); err != nil {
@@ -191,17 +354,21 @@ func ingestArchive(store string, s source) (Outcome, int64, error) {
 // streamArchiveRows reads every row group into a bounded slice and routes
 // each row to its session's member: the file is never held whole, one row
 // group's columns plus the slice is the peak.
-func streamArchiveRows(pf *parquet.File, ws *archiveWriters) error {
+func streamArchiveRows(pf *parquet.File, ws *archiveWriters, set *archiveSet, file int) error {
 	buf := make([]chRow, archiveReadRows)
+	row := uint32(0)
 	for _, rg := range pf.RowGroups() {
 		rd := parquet.NewGenericRowGroupReader[chRow](rg)
 		for {
 			n, err := rd.Read(buf)
 			for i := 0; i < n; i++ {
-				if err := ws.add(&buf[i]); err != nil {
-					rd.Close()
-					return err
+				if set.kept(file, row) {
+					if err := ws.add(&buf[i]); err != nil {
+						rd.Close()
+						return err
+					}
 				}
+				row++
 			}
 			if err == io.EOF {
 				break
