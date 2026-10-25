@@ -805,7 +805,8 @@ func publish(store string, sources []source, cur []*ckpt, quiet time.Duration, s
 	}
 	parts := planParts(cks)
 	prev, _ := readManifest(store)
-	back, err := rematerialize(store, cks, parts, prev)
+	byPrev := prevPartsMap(store, prev)
+	back, err := rematerialize(store, cks, parts, byPrev)
 	if err != nil {
 		return CycleStats{}, deferred, err
 	}
@@ -819,7 +820,7 @@ func publish(store string, sources []source, cur []*ckpt, quiet time.Duration, s
 	}
 	keep := map[string]bool{}
 	images := map[string]bool{}
-	planned, err := buildParts(store, parts, prev)
+	planned, err := buildParts(store, parts, prev, byPrev)
 	if err != nil {
 		return CycleStats{}, deferred, err
 	}
@@ -865,7 +866,7 @@ type builtPart struct {
 // GOMAXPROCS workers. The parts are independent: each writes its own dir, and
 // a delta only appends to the logs of the one image it extends. Results are in
 // plan order, and the error is the first one in plan order.
-func buildParts(store string, parts [][]ckpt, prev manifestFile) ([]builtPart, error) {
+func buildParts(store string, parts [][]ckpt, prev manifestFile, byPrev map[string]string) ([]builtPart, error) {
 	out := make([]builtPart, len(parts))
 	errs := make([]error, len(parts))
 	var failedAt atomic.Int64
@@ -880,7 +881,7 @@ func buildParts(store string, parts [][]ckpt, prev manifestFile) ([]builtPart, e
 				if int64(i) > failedAt.Load() {
 					continue
 				}
-				out[i], errs[i] = buildPart(store, parts[i], prev)
+				out[i], errs[i] = buildPart(store, parts[i], prev, byPrev)
 				if errs[i] != nil {
 					for cur := failedAt.Load(); int64(i) < cur && !failedAt.CompareAndSwap(cur, int64(i)); cur = failedAt.Load() {
 					}
@@ -901,13 +902,13 @@ func buildParts(store string, parts [][]ckpt, prev manifestFile) ([]builtPart, e
 	return out, nil
 }
 
-func buildPart(store string, members []ckpt, prev manifestFile) (builtPart, error) {
+func buildPart(store string, members []ckpt, prev manifestFile, byPrev map[string]string) (builtPart, error) {
 	id := fingerprint(members)
 	if slices.ContainsFunc(members, ckpt.hot) {
 		if retiredJoinsBase(store, members, prev) {
-			return buildHotImage(store, members, prev)
+			return buildHotImage(store, members, byPrev)
 		}
-		id, built, written, err := hotPart(store, members, prev)
+		id, built, written, err := hotPart(store, members, prev, byPrev)
 		if err != nil {
 			return builtPart{}, err
 		}
@@ -918,7 +919,7 @@ func buildPart(store string, members []ckpt, prev manifestFile) (builtPart, erro
 		return p, nil
 	}
 	if _, err := os.Stat(partDir(store, id)); err != nil {
-		if err := buildIndex(store, members, id, partDir(store, id), prev); err != nil {
+		if err := buildIndex(store, members, id, partDir(store, id), byPrev); err != nil {
 			return builtPart{}, err
 		}
 		return builtPart{id: id, built: true, written: dirSize(partDir(store, id))}, nil
@@ -944,14 +945,14 @@ func retiredJoinsBase(store string, members []ckpt, prev manifestFile) bool {
 
 // buildHotImage builds the hot component members as a full part, hotPart
 // without the delta path.
-func buildHotImage(store string, members []ckpt, prev manifestFile) (builtPart, error) {
+func buildHotImage(store string, members []ckpt, byPrev map[string]string) (builtPart, error) {
 	id := fingerprint(members)
 	for _, have := range []string{id, deltaID(members)} {
 		if _, err := os.Stat(partDir(store, have)); err == nil {
 			return builtPart{id: have, hot: true}, nil
 		}
 	}
-	if err := buildIndex(store, members, id, partDir(store, id), prev); err != nil {
+	if err := buildIndex(store, members, id, partDir(store, id), byPrev); err != nil {
 		return builtPart{}, err
 	}
 	return builtPart{id: id, hot: true, built: true, written: dirSize(partDir(store, id))}, nil

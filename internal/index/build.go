@@ -233,12 +233,11 @@ func memberRows(store string, si int, c ckpt, holder *Part, from int64) ([]built
 	return append(out, tail...), nil
 }
 
-// openHolders opens, per member of the part being built, the part of the
-// previous manifest that holds it: the one prev part naming the member's key,
-// a delta opened as its image plus delta. A member no prev part names — a
-// first build, or a member a regrouped plan moved — and one whose holder did
-// not survive on disk gets nil: its rows come from its logs whole.
-func openHolders(store string, cks []ckpt, prev manifestFile) (holders []*Part, close func(), err error) {
+// prevPartsMap is the previous manifest's key -> part id map, the one scan of
+// prev a cycle pays: hot parts first, then cold, first id wins per key. It is
+// built once per cycle, after readManifest, and handed to rematerialize and
+// down the build path, so the manifest is not re-scanned per part built.
+func prevPartsMap(store string, prev manifestFile) map[string]string {
 	byPrev := map[string]string{}
 	scan := func(ids []string) {
 		for _, id := range ids {
@@ -255,6 +254,16 @@ func openHolders(store string, cks []ckpt, prev manifestFile) (holders []*Part, 
 	}
 	scan(prev.Hot)
 	scan(prev.Parts)
+	return byPrev
+}
+
+// openHolders opens, per member of the part being built, the part of the
+// previous manifest that holds it: the one prev part naming the member's key,
+// a delta opened as its image plus delta. byPrev is the cycle's precomputed
+// prevPartsMap. A member no prev part names — a first build, or a member a
+// regrouped plan moved — and one whose holder did not survive on disk gets
+// nil: its rows come from its logs whole.
+func openHolders(store string, cks []ckpt, byPrev map[string]string) (holders []*Part, close func(), err error) {
 	var opened []*Part
 	holders = make([]*Part, len(cks))
 	for i, c := range cks {
@@ -319,12 +328,12 @@ func mergeAuthors(dst, src map[string][]string) {
 	}
 }
 
-func buildIndex(store string, cks []ckpt, fp, partDir string, prev manifestFile) error {
+func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]string) error {
 	sort.Slice(cks, func(i, j int) bool { return cks[i].Key < cks[j].Key })
 	win := map[string]winner{}
 	members := make([]member, len(cks))
 	cold := !slices.ContainsFunc(cks, ckpt.hot)
-	holders, closeHolders, err := openHolders(store, cks, prev)
+	holders, closeHolders, err := openHolders(store, cks, byPrev)
 	if err != nil {
 		return err
 	}

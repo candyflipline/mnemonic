@@ -100,18 +100,18 @@ func partHolding(t *testing.T, store, substr string) string {
 }
 
 // buildBoth builds cks into two fresh part dirs, one from the members' logs
-// alone (an empty previous manifest) and one with holders from prev, and
-// fails unless the dirs are byte-identical.
+// alone (no previous manifest) and one with holders from prev, and fails
+// unless the dirs are byte-identical.
 func buildBoth(t *testing.T, store string, cks []ckpt, prev manifestFile) {
 	t.Helper()
 	fp := fingerprint(cks)
 	tmp := t.TempDir()
 	logsDir := filepath.Join(tmp, "logs")
-	if err := buildIndex(store, cks, fp, logsDir, manifestFile{}); err != nil {
+	if err := buildIndex(store, cks, fp, logsDir, nil); err != nil {
 		t.Fatal(err)
 	}
 	holderDir := filepath.Join(tmp, "holders")
-	if err := buildIndex(store, cks, fp, holderDir, prev); err != nil {
+	if err := buildIndex(store, cks, fp, holderDir, prevPartsMap(store, prev)); err != nil {
 		t.Fatal(err)
 	}
 	cmpPartDirs(t, logsDir, holderDir)

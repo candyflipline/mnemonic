@@ -823,7 +823,7 @@ func (p memberPlan) holderAuthors(h *Part) map[string][]string {
 // generation through the winner verdict and row translation that wrote them the
 // first time. retireSettled drops them again once the part is published. cks is
 // updated to the checkpoints written; the count is how many members came back.
-func rematerialize(store string, cks []ckpt, parts [][]ckpt, prev manifestFile) (int, error) {
+func rematerialize(store string, cks []ckpt, parts [][]ckpt, byPrev map[string]string) (int, error) {
 	at := make(map[string]int, len(cks))
 	for i, c := range cks {
 		at[c.Key] = i
@@ -833,7 +833,7 @@ func rematerialize(store string, cks []ckpt, parts [][]ckpt, prev manifestFile) 
 		if !slices.ContainsFunc(members, ckpt.retired) || partExists(store, members) {
 			continue
 		}
-		holders, closeHolders, err := openHolders(store, members, prev)
+		holders, closeHolders, err := openHolders(store, members, byPrev)
 		if err != nil {
 			return 0, err
 		}

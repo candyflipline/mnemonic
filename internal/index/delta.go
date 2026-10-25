@@ -60,7 +60,7 @@ func deltasDir(store, image string) string { return filepath.Join(store, "deltas
 // hotPart returns the ID of the part that answers for the hot component
 // members, building it if it is missing: a delta append over the base it
 // extends, else a full build. It reports whether it wrote and how many bytes.
-func hotPart(store string, members []ckpt, prev manifestFile) (id string, built bool, written int64, err error) {
+func hotPart(store string, members []ckpt, prev manifestFile, byPrev map[string]string) (id string, built bool, written int64, err error) {
 	id = fingerprint(members)
 	if _, err := os.Stat(partDir(store, id)); err == nil {
 		return id, false, 0, nil
@@ -75,7 +75,7 @@ func hotPart(store string, members []ckpt, prev manifestFile) (id string, built 
 			return did, ok, written, err
 		}
 	}
-	if err := buildIndex(store, members, id, partDir(store, id), prev); err != nil {
+	if err := buildIndex(store, members, id, partDir(store, id), byPrev); err != nil {
 		return id, false, 0, err
 	}
 	return id, true, dirSize(partDir(store, id)), nil
