@@ -39,7 +39,7 @@ func New(dataDir string, tokens auth.Tokens) (*Server, error) {
 	}
 	wake := make(chan struct{}, 1)
 	st := &store.Store{DataDir: dataDir, Wake: wake}
-	tools := mcp.Handler(ix, index.Lookup, nil)
+	tools := mcp.Handler(ix, index.Lookup)
 	rcv := otlp.NewReceiver(st)
 	mux := http.NewServeMux()
 	mux.Handle("/v1/", tokens.Require(auth.Push)(st.Handler()))

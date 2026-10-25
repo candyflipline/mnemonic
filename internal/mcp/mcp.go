@@ -16,7 +16,6 @@ import (
 
 	"github.com/candyflipline/mnemonic/internal/auth"
 	"github.com/candyflipline/mnemonic/internal/index"
-	"github.com/candyflipline/mnemonic/internal/redact"
 )
 
 //go:embed tools.json
@@ -118,9 +117,10 @@ type rpcResponse struct {
 
 // Handler serves MCP to requests whose ctx carries an auth.Identity, the one
 // every tool's reads are scoped to; any other request is 401. Each tool call
-// reads the index snapshot ix serves when it starts. A non-nil out (local
-// mode) redacts every tool result before it leaves.
-func Handler(ix *index.Index, lookup func(name string) (index.Tool, bool), out *redact.Redactor) http.Handler {
+// reads the index snapshot ix serves when it starts. Results are not redacted
+// here: both modes redact at ingest, so the index holds no secret for a
+// result to carry.
+func Handler(ix *index.Index, lookup func(name string) (index.Tool, bool)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := auth.From(r.Context()); !ok {
 			statusError(w, http.StatusUnauthorized, "unauthorized")
@@ -209,9 +209,6 @@ func Handler(ix *index.Index, lookup func(name string) (index.Tool, bool), out *
 			}
 			h := handler{ix: ix, lookup: lookup}
 			result := h.toolsCall(r, paramsJSON)
-			if out != nil {
-				result = redactResult(out, result)
-			}
 			switch result := result.(type) {
 			case *rpcErrorObj:
 				writeJSON(w, rpcResponse{JSONRPC: "2.0", ID: id, Error: result})
@@ -234,115 +231,6 @@ func Handler(ix *index.Index, lookup func(name string) (index.Tool, bool), out *
 type handler struct {
 	ix     *index.Index
 	lookup func(name string) (index.Tool, bool)
-}
-
-// redactResult is a tools/call result with every string in its content and
-// structured content passed through out.Line, the local-mode output boundary.
-// Map keys and numbers are data, not prose, and go through untouched.
-func redactResult(out *redact.Redactor, result any) any {
-	switch t := result.(type) {
-	case toolResult:
-		for i, c := range t.Content {
-			t.Content[i].Text = lineRedacted(out, c.Text)
-		}
-		t.StructuredContent = redactEnvelope(out, t.StructuredContent)
-		return t
-	case *rpcErrorObj:
-		t.Message = lineRedacted(out, t.Message)
-		return t
-	default:
-		return redactValue(out, result)
-	}
-}
-
-// redactEnvelope walks the tool envelopes: the echoed request, the warnings,
-// the data and the error message all leave the machine.
-func redactEnvelope(out *redact.Redactor, v any) any {
-	switch t := v.(type) {
-	case successEnvelope:
-		t.Request = json.RawMessage(out.Line(t.Request))
-		t.Data = redactValue(out, t.Data)
-		t.Warnings = redactStrings(out, t.Warnings)
-		return t
-	case errorEnvelope:
-		t.Request = json.RawMessage(out.Line(t.Request))
-		t.Error = redactToolError(out, t.Error)
-		t.Warnings = redactStrings(out, t.Warnings)
-		return t
-	default:
-		return redactValue(out, v)
-	}
-}
-
-func redactToolError(out *redact.Redactor, e toolError) toolError {
-	e.Message = lineRedacted(out, e.Message)
-	e.Details = redactValue(out, e.Details)
-	return e
-}
-
-// redactValue walks what a tool returned: maps and slices redacted in place,
-// every string through out.Line. A shape no tool returns today falls back to
-// a JSON round-trip, so a later envelope change cannot drop strings from the
-// boundary; the round-trip re-sorts object keys.
-func redactValue(out *redact.Redactor, v any) any {
-	switch t := v.(type) {
-	case nil:
-		return nil
-	case string:
-		return lineRedacted(out, t)
-	case json.RawMessage:
-		return json.RawMessage(out.Line(t))
-	case json.Number:
-		return t
-	case bool:
-		return t
-	case map[string]any:
-		for k, vv := range t {
-			t[k] = redactValue(out, vv)
-		}
-		return t
-	case []any:
-		for i, vv := range t {
-			t[i] = redactValue(out, vv)
-		}
-		return t
-	case []string:
-		return redactStrings(out, t)
-	default:
-		b, err := json.Marshal(v)
-		if err != nil {
-			return v
-		}
-		dec := json.NewDecoder(bytes.NewReader(b))
-		dec.UseNumber()
-		var generic any
-		if dec.Decode(&generic) != nil {
-			return v
-		}
-		return json.RawMessage(marshalJSON(redactValue(out, generic)))
-	}
-}
-
-func redactStrings(out *redact.Redactor, ss []string) []string {
-	for i, s := range ss {
-		ss[i] = lineRedacted(out, s)
-	}
-	return ss
-}
-
-// lineRedacted passes one result string through out.Line.
-func lineRedacted(out *redact.Redactor, s string) string {
-	return string(out.Line([]byte(s)))
-}
-
-func marshalJSON(v any) []byte {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
-		return nil
-	}
-	return bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
 }
 
 // toolsCall runs one tool and wraps it in the tool envelope. Only a params

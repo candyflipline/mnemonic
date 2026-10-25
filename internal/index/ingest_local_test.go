@@ -1,12 +1,19 @@
 package index
 
 import (
+	"bytes"
+	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/candyflipline/mnemonic/internal/config"
+	"github.com/candyflipline/mnemonic/internal/redact"
 	"github.com/candyflipline/mnemonic/internal/schema"
 	"github.com/candyflipline/mnemonic/internal/store"
 )
@@ -75,5 +82,94 @@ func TestIngestPlainReportsToolRecords(t *testing.T) {
 	}
 	if label, ok := notes[0].Value.Label(); !ok || label != "pass" {
 		t.Fatalf("annotation value is %v, want label pass", notes[0].Value)
+	}
+}
+
+// TestIngestPlainRedactsAtIngest pins local mode's redaction contract: every
+// line a plain source's parse reads goes through the redactor push uploads
+// with, so the index holds the redacted text and neither the event text, a
+// search term, a like filter nor lower() can return the secret. The file on
+// disk keeps it, and the checkpoint stays in the plain file's bytes.
+func TestIngestPlainRedactsAtIngest(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "session.jsonl")
+	const session = "7c666c01-d38e-4658-8650-854ffb5b626e"
+	const awsKey = "AKIAIOSFODNN7EXAMPLE"
+	pem, err := json.Marshal("-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0Z3VS5JJcds3xfn0GByhQmluD9o1Pw\n-----END RSA PRIVATE KEY-----")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := []string{
+		fmt.Sprintf(`{"type":"user","sessionId":%q,"cwd":"/work/demo","uuid":"u1","timestamp":"2026-01-19T15:58:40.000Z","message":{"role":"user","content":"Deploy with %s please."}}`, session, awsKey),
+		fmt.Sprintf(`{"type":"assistant","sessionId":%q,"cwd":"/work/demo","uuid":"a1","parentUuid":"u1","requestId":"req-1","timestamp":"2026-01-19T15:58:41.421Z","message":{"model":"claude-opus-4-5-20251101","role":"assistant","usage":{"input_tokens":9,"output_tokens":5},"content":[{"type":"text","text":%s}]}}`, session, pem),
+	}
+	if err := os.WriteFile(file, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	red, err := redact.New(nil) // as push builds it: no config file, no extra patterns
+	if err != nil {
+		t.Fatal(err)
+	}
+	globs := []config.SourceGlob{{Harness: "claude-code", SourceName: "claude", Glob: file}}
+	ix, err := Open(filepath.Join(dir, "index"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ix.Close()
+	st, err := ix.IngestPlain(globs, "tester", "testbox", IngestOptions{SettleAll: true, Red: red})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st[Fresh] != 1 {
+		t.Fatalf("ingest: fresh=%d, want fresh=1", st[Fresh])
+	}
+
+	// The file on disk is never touched.
+	onDisk, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(onDisk, []byte(awsKey)) {
+		t.Fatalf("the plain file lost the secret; local mode must not touch it")
+	}
+
+	db, release := ix.Snapshot()
+	defer release()
+	ctx := context.Background()
+	openID := base64.RawURLEncoding.EncodeToString([]byte(session))
+	probes := []struct {
+		name string
+		args string
+		echo bool // the prose repeats the caller's own query; only data is index content
+	}{
+		{"open", `{"id":"session:` + openID + `","limit":10}`, false},
+		{"get_trace", `{"session_id":"session:` + openID + `"}`, false},
+		{"search_sessions", `{"query":"AKIAIOSFODNN7EXAMPLE"}`, true},
+		{"search_sessions", `{"query":"akiaiosfodnn7example"}`, true},
+		{"search_sessions", `{"query":"MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn"}`, true},
+		{"query", `{"query":"from: events | select: text_content, lower(text_content)","from":"2026-01-01T00:00:00Z","to":"2026-02-01T00:00:00Z"}`, false},
+		{"query", `{"query":"from: events | filter: text_content like '%AKIAIOSF%' | select: event_uid","from":"2026-01-01T00:00:00Z","to":"2026-02-01T00:00:00Z"}`, true},
+		{"query", `{"query":"from: events | filter: lower(text_content) like '%akiaiosf%' | select: event_uid","from":"2026-01-01T00:00:00Z","to":"2026-02-01T00:00:00Z"}`, true},
+		{"query", `{"query":"from: events | filter: payload_json like '%AKIAIOSF%' | select: event_uid","from":"2026-01-01T00:00:00Z","to":"2026-02-01T00:00:00Z"}`, true},
+		{"query", `{"query":"from: events | filter: payload_json like '%MIIEowIBAAKCAQEA%' | select: event_uid","from":"2026-01-01T00:00:00Z","to":"2026-02-01T00:00:00Z"}`, true},
+	}
+	for _, p := range probes {
+		data, text, err := Call(ctx, db, p.name, json.RawMessage(p.args))
+		if err != nil {
+			t.Fatalf("%s %s: %v", p.name, p.args, err)
+		}
+		if p.name == "search_sessions" && !bytes.Contains(data, []byte(`"result_count":0`)) {
+			t.Fatalf("%s %s: search found the secret: %s", p.name, p.args, data)
+		}
+		for _, secret := range []string{awsKey, "akiaiosfodnn7example", "BEGIN RSA PRIVATE KEY", "MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn"} {
+			if bytes.Contains(data, []byte(secret)) || (!p.echo && bytes.Contains([]byte(text), []byte(secret))) {
+				t.Fatalf("%s %s: response holds the secret %q:\n%s\n%s", p.name, p.args, secret, data, text)
+			}
+		}
+		// The redacted event must still be there: open answers the session and
+		// the query sees its text with the marker in place.
+		if p.name == "open" && !bytes.Contains(data, []byte("[REDACTED:aws-access-token]")) {
+			t.Fatalf("open: the redacted text is missing:\n%s", data)
+		}
 	}
 }

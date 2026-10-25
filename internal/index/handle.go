@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/candyflipline/mnemonic/internal/config"
+	"github.com/candyflipline/mnemonic/internal/redact"
 )
 
 // Index is the engine handle the server, MCP and the harness hold: a store
@@ -44,7 +45,7 @@ func (ix *Index) Ingest(root string, opts IngestOptions) (IngestStats, error) {
 // IngestPlain brings the store up to the machine's harness files read in
 // place as KindPlain sources (local mode) and serves the result.
 func (ix *Index) IngestPlain(globs []config.SourceGlob, author, machine string, opts IngestOptions) (IngestStats, error) {
-	st, err := IngestPlain(ix.store, globs, author, machine, opts.Quiet, opts.SettleAll)
+	st, err := IngestPlain(ix.store, globs, author, machine, opts)
 	return st, errors.Join(err, ix.Refresh())
 }
 
@@ -109,7 +110,11 @@ func (ix *Index) Close() error {
 
 // IngestOptions is when a hot source settles into a cold part: once its
 // manifest updated_ms is Quiet behind the newest one, or now with SettleAll.
+// Red is the redactor local mode hands its ingest (every parsed line goes
+// through it, as push's upload does); serve leaves it nil — its raw was
+// redacted before it arrived.
 type IngestOptions struct {
 	Quiet     time.Duration
 	SettleAll bool
+	Red       *redact.Redactor
 }

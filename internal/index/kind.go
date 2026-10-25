@@ -1,6 +1,7 @@
 package index
 
 import (
+	"bufio"
 	"bytes"
 	"io"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"github.com/candyflipline/mnemonic/internal/config"
 	"github.com/candyflipline/mnemonic/internal/layout"
 	"github.com/candyflipline/mnemonic/internal/push"
+	"github.com/candyflipline/mnemonic/internal/redact"
 	"github.com/candyflipline/mnemonic/internal/wire"
 	"github.com/klauspost/compress/zstd"
 )
@@ -99,6 +101,47 @@ func lastNewline(f *os.File, size int64) (int64, error) {
 func plainExtends(f *os.File, end int64, prev ckpt) bool {
 	sum, err := windowSHA(f, prev.ZstSize)
 	return err == nil && sum == prev.WindowSHA
+}
+
+// redactReader is push's per-line redaction over a stream: every line read
+// goes through red.Line, the exact bytes push's redactLines uploads for the
+// same lines, so a local parse sees what the server path's raw holds and the
+// parser's offsets and uids match it byte for byte.
+type redactReader struct {
+	r   *bufio.Reader
+	red *redact.Redactor
+	out []byte
+	err error
+}
+
+func newRedactReader(r io.Reader, red *redact.Redactor) *redactReader {
+	return &redactReader{r: bufio.NewReaderSize(r, lightFrame), red: red}
+}
+
+// Close closes nothing: the wrapped reader's Close runs in ingestSource.
+func (rr *redactReader) Close() error { return nil }
+
+func (rr *redactReader) Read(p []byte) (int, error) {
+	for len(rr.out) == 0 {
+		if rr.err != nil {
+			return 0, rr.err
+		}
+		line, err := rr.r.ReadBytes('\n')
+		rr.err = err
+		if len(line) == 0 {
+			continue
+		}
+		if line[len(line)-1] == '\n' {
+			line = line[:len(line)-1]
+			rr.out = rr.red.Line(line)
+			rr.out = append(rr.out, '\n')
+		} else {
+			rr.out = rr.red.Line(line)
+		}
+	}
+	n := copy(p, rr.out)
+	rr.out = rr.out[n:]
+	return n, nil
 }
 
 // listPlainSources is every harness file local mode indexes in place, as

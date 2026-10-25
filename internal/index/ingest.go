@@ -25,6 +25,7 @@ import (
 	"github.com/candyflipline/mnemonic/internal/layout"
 	"github.com/candyflipline/mnemonic/internal/normalize"
 	_ "github.com/candyflipline/mnemonic/internal/normalize/all"
+	"github.com/candyflipline/mnemonic/internal/redact"
 	"github.com/candyflipline/mnemonic/internal/schema"
 	"github.com/candyflipline/mnemonic/internal/wire"
 	"github.com/klauspost/compress/zstd"
@@ -252,8 +253,10 @@ func storeExtends(raw *os.File, end int64, prev ckpt) bool {
 
 // ingestSource brings one source's logs up to its input, parsing only the
 // bytes past its checkpoint when the input still extends it, and reports what
-// it did and how many log bytes it appended.
-func ingestSource(root, store string, s source) (Outcome, int64, error) {
+// it did and how many log bytes it appended. red (local mode) sits between the
+// input and the parser: each line the parser reads has been through red.Line,
+// exactly the bytes push uploads for the same line.
+func ingestSource(root, store string, s source, red *redact.Redactor) (Outcome, int64, error) {
 	if s.kind == KindArchive {
 		// Before normalize.For: archive harnesses do have parsers, but the
 		// parquet is read by the archive kind, not parsed as raw (DESIGN.md,
@@ -301,6 +304,14 @@ func ingestSource(root, store string, s source) (Outcome, int64, error) {
 		return 0, 0, err
 	}
 	defer zr.Close()
+	if red != nil {
+		// Local mode: redact at ingest (redact.Line per line before parse,
+		// exactly what push uploads), whichever kind carried the line in —
+		// the harness files and the write tools' records alike. The
+		// checkpoint stays in the input's own bytes, so resume still works
+		// on the unredacted file.
+		zr = newRedactReader(zr, red)
+	}
 
 	lw := &frameWriter{f: lightF, off: from.LightLen, target: lightFrame, enc: encoder}
 	hw := &frameWriter{f: heavyF, off: from.HeavyLen, target: heavyFrame, enc: heavyEncoder}
@@ -485,7 +496,7 @@ func Ingest(root, store string, quiet time.Duration, settleAll bool) (IngestStat
 	if err != nil {
 		return IngestStats{}, err
 	}
-	return ingest(root, store, sources, quiet, settleAll)
+	return ingest(root, store, sources, quiet, settleAll, nil)
 }
 
 // IngestPlain brings store up to the machine's harness files the client globs
@@ -497,7 +508,7 @@ func Ingest(root, store string, quiet time.Duration, settleAll bool) (IngestStat
 // other's sources. store is the index dir under the data dir
 // (layout.IndexDir), so root is its parent and the store sources' raw opens
 // under it.
-func IngestPlain(store string, globs []config.SourceGlob, author, machine string, quiet time.Duration, settleAll bool) (IngestStats, error) {
+func IngestPlain(store string, globs []config.SourceGlob, author, machine string, opts IngestOptions) (IngestStats, error) {
 	plain, err := listPlainSources(globs, author, machine)
 	if err != nil {
 		return IngestStats{}, err
@@ -507,13 +518,15 @@ func IngestPlain(store string, globs []config.SourceGlob, author, machine string
 	if err != nil {
 		return IngestStats{}, err
 	}
-	return ingest(root, store, append(plain, tool...), quiet, settleAll)
+	return ingest(root, store, append(plain, tool...), opts.Quiet, opts.SettleAll, opts.Red)
 }
 
 // ingest is the cycle both entry points share: parse the sources, publish the
 // plan, and record the lap. root is where KindStore sources' raw lives; a
-// KindPlain source opens its own path and ignores it.
-func ingest(root, store string, sources []source, quiet time.Duration, settleAll bool) (stats IngestStats, err error) {
+// KindPlain source opens its own path and ignores it. red is local mode's
+// redactor: every line a parse reads goes through it, the bytes push's upload
+// carries, so the index holds what the server path's raw holds.
+func ingest(root, store string, sources []source, quiet time.Duration, settleAll bool, red *redact.Redactor) (stats IngestStats, err error) {
 	debug.SetGCPercent(25)
 	var rec cycleRecord
 	defer func() { recordCycle(store, rec) }()
@@ -521,7 +534,7 @@ func ingest(root, store string, sources []source, quiet time.Duration, settleAll
 		return
 	}
 	take := takeCycle(store)
-	outcomes, logBytes, stale, failSweep := parseSources(root, store, sources, take.failSweep)
+	outcomes, logBytes, stale, failSweep := parseSources(root, store, sources, take.failSweep, red)
 	for _, o := range outcomes {
 		stats[o]++
 	}
@@ -540,7 +553,7 @@ func ingest(root, store string, sources []source, quiet time.Duration, settleAll
 // failed, so one poison source cannot keep the sweep cycling, plus skip for
 // the keys already known to fail at their version. A source that failed has no
 // outcome.
-func parseSources(root, store string, sources []source, skip map[string]int) (outcomes map[string]Outcome, logBytes int64, stale int, failSweep map[string]int) {
+func parseSources(root, store string, sources []source, skip map[string]int, red *redact.Redactor) (outcomes map[string]Outcome, logBytes int64, stale int, failSweep map[string]int) {
 	outcomes = make(map[string]Outcome, len(sources))
 	failSweep = map[string]int{}
 	for k, v := range skip {
@@ -566,7 +579,7 @@ func parseSources(root, store string, sources []source, skip map[string]int) (ou
 			defer wg.Done()
 			var failed []source
 			for s := range work {
-				o, written, err := ingestSource(root, store, s)
+				o, written, err := ingestSource(root, store, s, red)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "ingest: %s: %v\n", s.mpath, err)
 					failed = append(failed, s)

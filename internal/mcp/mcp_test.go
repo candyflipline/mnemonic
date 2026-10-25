@@ -5,16 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/candyflipline/mnemonic/internal/auth"
 	"github.com/candyflipline/mnemonic/internal/index"
-	"github.com/candyflipline/mnemonic/internal/redact"
 )
 
 type stubTool struct {
@@ -44,7 +41,7 @@ func mcpServer(t *testing.T, tools ...index.Tool) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(auth.Middleware(map[string]string{auth.Hash("tok"): "chris"})(Handler(ix, lookup, nil)))
+	srv := httptest.NewServer(auth.Middleware(map[string]string{auth.Hash("tok"): "chris"})(Handler(ix, lookup)))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -205,45 +202,6 @@ func TestToolsCallWrapsStubInEnvelope(t *testing.T) {
 	perf, _ := env["performance"].(map[string]any)
 	if ms, ok := perf["elapsed_ms"].(float64); !ok || ms < 0 {
 		t.Errorf("performance = %v, want integer elapsed_ms >= 0", env["performance"])
-	}
-}
-
-func TestToolsCallRedactsOutput(t *testing.T) {
-	red, err := redact.New(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secret := "ghp_" + strings.Repeat("a", 36)
-	lookup := func(name string) (index.Tool, bool) {
-		if name == "search_sessions" {
-			return stubTool{
-				name: "search_sessions",
-				data: map[string]any{"truncated": true, "token": secret},
-				text: "found " + secret,
-			}, true
-		}
-		return nil, false
-	}
-	ix, err := index.Open(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	out := httptest.NewServer(auth.Middleware(map[string]string{auth.Hash("tok"): "chris"})(Handler(ix, lookup, red)))
-	t.Cleanup(out.Close)
-
-	resp := postRPC(t, out, `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"search_sessions","arguments":{"query":"x"}}}`)
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(body, []byte(secret)) {
-		t.Errorf("response contains the secret: %s", body)
-	}
-	if !bytes.Contains(body, []byte("[REDACTED:github-token]")) {
-		t.Errorf("response does not mask the secret: %s", body)
-	}
-	if !bytes.Contains(body, []byte(`"truncated":true`)) {
-		t.Errorf("bool data did not survive the boundary: %s", body)
 	}
 }
 
