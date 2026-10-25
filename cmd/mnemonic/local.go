@@ -156,10 +156,7 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 				return
 			case <-wake:
 			}
-			settleWake(ctx, wake)
-			if _, err := sink.Sync(ctx, nil); err != nil {
-				logger.Printf("wake sync: %v", err)
-			}
+			sink.wakeCycle(ctx, wake, logger)
 		}
 	}()
 	go func() {
@@ -233,6 +230,15 @@ func settleWake(ctx context.Context, wake <-chan struct{}) {
 		case <-ctx.Done():
 			return
 		}
+	}
+}
+
+// wakeCycle is the wake goroutine's one lap: settle the burst of tool writes
+// into one ingest, then run it.
+func (s *indexSink) wakeCycle(ctx context.Context, wake <-chan struct{}, logger *log.Logger) {
+	settleWake(ctx, wake)
+	if _, err := s.Sync(ctx, nil); err != nil {
+		logger.Printf("wake sync: %v", err)
 	}
 }
 
