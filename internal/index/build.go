@@ -184,16 +184,25 @@ func memberRows(store string, si int, c ckpt, holder *Part, from int64) ([]built
 		if hs < 0 {
 			return nil, fmt.Errorf("%s: holder does not hold the member", c.Key)
 		}
+		// The light frame the previous doc read: a frame's docs are
+		// contiguous in the part's docs, so one member read decodes each
+		// of its frames once, not once per row.
+		var frameLF int64 = -1
+		var frameRows [][]byte
 		for d := 0; d < holder.meta.Docs; d++ {
 			rec := holder.docRec(d)
 			if binary.LittleEndian.Uint16(rec[10:]) != uint16(hs) {
 				continue
 			}
 			lf, li := int64(binary.LittleEndian.Uint64(rec[0:])), int(binary.LittleEndian.Uint16(rec[8:]))
-			rows, _, err := readFrame(segments{holder.lightB, holder.lightD}, lf, nil)
-			if err != nil {
-				return nil, fmt.Errorf("%s: holder %s: %w", c.Key, holder.meta.Fingerprint, err)
+			if lf != frameLF {
+				rows, _, err := readFrame(segments{holder.lightB, holder.lightD}, lf, nil)
+				if err != nil {
+					return nil, fmt.Errorf("%s: holder %s: %w", c.Key, holder.meta.Fingerprint, err)
+				}
+				frameLF, frameRows = lf, rows
 			}
+			rows := frameRows
 			if li >= len(rows) {
 				return nil, fmt.Errorf("%s: holder %s: light index past frame", c.Key, holder.meta.Fingerprint)
 			}
