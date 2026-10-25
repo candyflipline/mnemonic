@@ -901,7 +901,7 @@ func buildPart(store string, members []ckpt, prev manifestFile) (builtPart, erro
 		return p, nil
 	}
 	if _, err := os.Stat(partDir(store, id)); err != nil {
-		if err := buildIndex(store, members, id, partDir(store, id)); err != nil {
+		if err := buildIndex(store, members, id, partDir(store, id), prev); err != nil {
 			return builtPart{}, err
 		}
 		return builtPart{id: id, built: true, written: dirSize(partDir(store, id))}, nil

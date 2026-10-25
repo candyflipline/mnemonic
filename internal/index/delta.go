@@ -41,13 +41,6 @@ type listed struct {
 	TotalLen   int64    `json:"total_len"`
 }
 
-// deltaWinner is a uid's winning row in openDelta and the member it came
-// from, so a later row for the uid competes under the full build's rule.
-type deltaWinner struct {
-	b built
-	m member
-}
-
 func listedOf(st *Part) listed {
 	l := listed{ScoredDocs: int64(st.meta.ScoredDocs), TotalLen: int64(st.meta.TotalLen)}
 	for s := 0; s < st.nSessions; s++ {
@@ -82,7 +75,7 @@ func hotPart(store string, members []ckpt, prev manifestFile) (id string, built 
 			return did, ok, written, err
 		}
 	}
-	if err := buildIndex(store, members, id, partDir(store, id)); err != nil {
+	if err := buildIndex(store, members, id, partDir(store, id), prev); err != nil {
 		return id, false, 0, err
 	}
 	return id, true, dirSize(partDir(store, id)), nil
@@ -330,60 +323,64 @@ func openDelta(dir string, d delta) (*Part, error) {
 	}
 	lightD, heavyD, srcD = lightD[:d.LightLen], heavyD[:d.HeavyLen], srcD[:2*d.Rows]
 
-	// offer keeps, per uid, the row a full build would pick (buildIndex's
-	// loop): within a member the higher version wins, last on a tie; across
-	// members memberBeats, so a raw member's copy beats an archive member's
-	// whatever their paths sort like.
-	win := map[string]deltaWinner{}
-	var all []built
-	offer := func(b built) {
-		b.row.Author = d.Members[b.src].Author
-		all = append(all, b)
-		if w, ok := win[b.row.UID]; ok {
-			if w.b.src == b.src {
-				if b.row.Version < w.b.row.Version {
-					return
-				}
-			} else if !memberBeats(ckpt{parsed: d.Members[b.src].parsed}, w.m.Kind, w.m.Path) {
-				return
-			}
-		}
-		win[b.row.UID] = deltaWinner{b: b, m: d.Members[b.src]}
-	}
+	// win keeps, per uid, the row a full build would pick (offerRow). The
+	// image's rows come through memberRows — the image is each member's
+	// holder, its heavy records resolved from the image — and the delta's
+	// rows, the tails the append copied, through the delta logs.
+	win := map[string]winner{}
+	authors := map[string][]string{}
 	doc := 0
-	if err := eachFrame(img.lightB, 0, func(b built) {
-		b.src = binary.LittleEndian.Uint16(img.docRec(doc)[10:])
-		doc++
-		offer(b)
-	}); err != nil {
-		return fail(err)
+	for si := range d.Members {
+		m := d.Members[si]
+		var holder *Part
+		if holderIndexOf(img, m.Key) >= 0 {
+			holder = img
+		}
+		c := ckpt{parsed: m.parsed, Gen: m.Gen, LightLen: m.LightLen, HeavyLen: m.HeavyLen}
+		rows, err := memberRows("", si, c, holder, c.LightLen)
+		if err != nil {
+			return fail(err)
+		}
+		doc += len(rows)
+		for _, b := range rows {
+			offerRow(win, b, m)
+		}
 	}
 	if doc != img.meta.Docs {
 		return fail(fmt.Errorf("%s: image holds %d rows for %d docs", dir, doc, img.meta.Docs))
 	}
+	mergeAuthors(authors, img.authSection())
+	var tail []built
 	k := 0
 	if err := eachFrame(lightD, int64(len(img.lightB)), func(b built) {
 		b.src = binary.LittleEndian.Uint16(srcD[2*k:])
 		k++
-		offer(b)
+		b.row.Author = d.Members[b.src].Author
+		tail = append(tail, b)
+		offerRow(win, b, d.Members[b.src])
 	}); err != nil {
 		return fail(err)
 	}
 	if int64(k) != d.Rows {
 		return fail(fmt.Errorf("%s: delta holds %d rows, %s says %d", dd, k, deltaFile, d.Rows))
 	}
+	mergeAuthors(authors, authorsOf(tail, func(src uint16) string { return d.Members[src].Author }))
+	tail = nil
 	bySession := map[string][]built{}
 	for _, w := range win {
 		bySession[w.b.row.Session] = append(bySession[w.b.row.Session], w.b)
 	}
 	win = nil
-	authors := authorsOf(all, func(src uint16) string { return d.Members[src].Author })
-	all = nil
 
 	heavy := &heavyReader{logs: []io.ReaderAt{segments{img.heavyB, heavyD}}, recs: map[heavyKey][][]byte{}}
 	files := map[string][]byte{}
 	place := func(b built) (*Row, int64, int, error) { return b.row, b.lf, b.li, nil }
-	payload := func(b built) string { return heavy.payload(built{row: b.row}) }
+	payload := func(b built) string {
+		if b.hrec != nil {
+			return heavyPayload(b.hrec)
+		}
+		return heavy.payload(built{row: b.row})
+	}
 	write := func(name string, b []byte) error { files[name] = b; return nil }
 	meta, lsRecs, err := indexRows(bySession, place, payload, write)
 	if err != nil {

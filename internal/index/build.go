@@ -23,6 +23,10 @@ type built struct {
 	src uint16
 	lf  int64
 	li  int
+	// hrec is the row's heavy record, resolved from the holder part it was
+	// read from; nil reads the record from the member's own heavy log at
+	// place time (heavyReader.record).
+	hrec []byte
 }
 
 // partEncoder and partHeavyEncoder compress a part's frames. A part is
@@ -103,50 +107,236 @@ func loadSourceRows(store string, si int, c ckpt, from int64) ([]built, error) {
 	return out, nil
 }
 
-func buildIndex(store string, cks []ckpt, fp, partDir string) error {
-	sort.Slice(cks, func(i, j int) bool { return cks[i].Key < cks[j].Key })
-	type winner struct {
-		b    built
-		path string
-		kind Kind
+// holderIndexOf is the index of c's member entry in holder's members, -1 when
+// holder does not hold it.
+func holderIndexOf(holder *Part, key string) int {
+	for i := range holder.meta.Members {
+		if holder.meta.Members[i].Key == key {
+			return i
+		}
 	}
-	win := map[string]*winner{}
+	return -1
+}
+
+// memberFrom reports where c's tail starts when holder holds it: the light
+// length the holder recorded, or, for a cold holder (a full part zeroes its
+// members' lengths), no tail at all when the member provably has not parsed
+// since — any resume grows Rows and any re-parse changes a parsed field or
+// bumps the generation a hot holder records. ok is false when c must be read
+// from its logs whole: the holder does not name it, or is left behind by a
+// growth or re-parse it does not cover.
+func memberFrom(c ckpt, holder *Part) (from int64, ok bool) {
+	hs := holderIndexOf(holder, c.Key)
+	if hs < 0 {
+		return 0, false
+	}
+	hm := holder.meta.Members[hs]
+	if hm.LightLen > 0 {
+		if hm.Gen == c.Gen && hm.Rows <= c.Rows && hm.LightLen <= c.LightLen && hm.HeavyLen <= c.HeavyLen {
+			return hm.LightLen, true
+		}
+		return 0, false
+	}
+	if sameParsed(hm.parsed, c.parsed) && hm.Rows == c.Rows {
+		return c.LightLen, true
+	}
+	return 0, false
+}
+
+// sameParsed reports whether two checkpoints parsed the same bytes with the
+// same parser and stopped in the same place, everything but the session list
+// compared: a resume that adds rows changes ZstSize, State or Rows, and a
+// re-parse changes one of those or the parser version.
+func sameParsed(a, b parsed) bool {
+	return a.Key == b.Key && a.Kind == b.Kind && a.Parser == b.Parser && a.Layout == b.Layout &&
+		a.Harness == b.Harness && a.SourceName == b.SourceName && a.SourceFile == b.SourceFile &&
+		a.Path == b.Path && a.Author == b.Author && a.Machine == b.Machine &&
+		a.ZstSize == b.ZstSize && a.WindowSHA == b.WindowSHA && a.State == b.State && a.Rows == b.Rows
+}
+
+// memberRows returns one member's rows for a part build: the rows the holder
+// part holds for it — the winners of the rows it covered, their heavy records
+// resolved from the holder — plus the tail past the holder's copy, read from
+// the member's frame logs. holder is the part of the previous manifest that
+// holds the member, nil to read every row from the logs (a cold build's first
+// run, or a holder a re-parse left behind); from is the tail start, memberFrom
+// when holder is not nil. A member fully covered by its holder is read from
+// the holder alone and its logs are never opened.
+func memberRows(store string, si int, c ckpt, holder *Part, from int64) ([]built, error) {
+	var out []built
+	if holder != nil {
+		hs := holderIndexOf(holder, c.Key)
+		if hs < 0 {
+			return nil, fmt.Errorf("%s: holder does not hold the member", c.Key)
+		}
+		for d := 0; d < holder.meta.Docs; d++ {
+			rec := holder.docRec(d)
+			if binary.LittleEndian.Uint16(rec[10:]) != uint16(hs) {
+				continue
+			}
+			lf, li := int64(binary.LittleEndian.Uint64(rec[0:])), int(binary.LittleEndian.Uint16(rec[8:]))
+			rows, _, err := readFrame(segments{holder.lightB, holder.lightD}, lf, nil)
+			if err != nil {
+				return nil, fmt.Errorf("%s: holder %s: %w", c.Key, holder.meta.Fingerprint, err)
+			}
+			if li >= len(rows) {
+				return nil, fmt.Errorf("%s: holder %s: light index past frame", c.Key, holder.meta.Fingerprint)
+			}
+			r := new(Row)
+			if _, err := r.decode(rows[li]); err != nil {
+				return nil, fmt.Errorf("%s: holder %s: %w", c.Key, holder.meta.Fingerprint, err)
+			}
+			// The light record does not carry the author (strs skips it);
+			// rows off the logs get it from the checkpoint, so do these.
+			r.Author = c.Author
+			hrecs, err := holder.fc.heavyFrame(holder, r.HeavyFrame)
+			if err != nil {
+				return nil, fmt.Errorf("%s: holder %s: %w", c.Key, holder.meta.Fingerprint, err)
+			}
+			if int(r.HeavyIdx) >= len(hrecs) {
+				return nil, fmt.Errorf("%s: holder %s: heavy index past frame", c.Key, holder.meta.Fingerprint)
+			}
+			out = append(out, built{row: r, src: uint16(si), lf: lf, li: li, hrec: hrecs[r.HeavyIdx]})
+		}
+	}
+	if from >= c.LightLen {
+		return out, nil
+	}
+	tail, err := loadSourceRows(store, si, c, from)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", c.Key, err)
+	}
+	return append(out, tail...), nil
+}
+
+// openHolders opens, per member of the part being built, the part of the
+// previous manifest that holds it: the one prev part naming the member's key,
+// a delta opened as its image plus delta. A member no prev part names — a
+// first build, or a member a regrouped plan moved — and one whose holder did
+// not survive on disk gets nil: its rows come from its logs whole.
+func openHolders(store string, cks []ckpt, prev manifestFile) (holders []*Part, close func(), err error) {
+	byPrev := map[string]string{}
+	scan := func(ids []string) {
+		for _, id := range ids {
+			d, ok := readBase(store, id)
+			if !ok {
+				continue
+			}
+			for _, m := range d.Members {
+				if _, dup := byPrev[m.Key]; !dup {
+					byPrev[m.Key] = id
+				}
+			}
+		}
+	}
+	scan(prev.Hot)
+	scan(prev.Parts)
+	var opened []*Part
+	holders = make([]*Part, len(cks))
+	for i, c := range cks {
+		id, ok := byPrev[c.Key]
+		if !ok {
+			continue
+		}
+		h, err := OpenPartDir(partDir(store, id))
+		if err != nil {
+			continue
+		}
+		opened = append(opened, h)
+		if holderIndexOf(h, c.Key) >= 0 {
+			holders[i] = h
+		}
+	}
+	return holders, func() {
+		for _, h := range opened {
+			h.Close()
+		}
+	}, nil
+}
+
+// winner is a uid's winning row and the member it came from, kept per uid
+// while a part's rows are offered: the row a full build picks for the uid.
+type winner struct {
+	b      built
+	member member
+}
+
+// offerRow offers b, a row of member m, to win: within a member the higher
+// version wins, last on a tie; across members memberBeats, so a raw member's
+// copy beats an archive member's whatever their paths sort like. Two
+// same-kind members of equal path — no two members of a store carry one
+// today — hand the tie to the lesser key, the order buildIndex offers
+// members in, so both read paths pick one winner.
+func offerRow(win map[string]winner, b built, m member) {
+	if w, ok := win[b.row.UID]; ok {
+		if w.b.src == b.src {
+			if b.row.Version < w.b.row.Version {
+				return
+			}
+		} else if !memberBeats(ckpt{parsed: m.parsed}, w.member.Kind, w.member.Path) &&
+			(m.Path != w.member.Path || m.Key > w.member.Key) {
+			return
+		}
+	}
+	win[b.row.UID] = winner{b: b, member: m}
+}
+
+// mergeAuthors unions src's per-session authors into dst, each list sorted
+// and distinct. A part's section is the union of its holders' sections and
+// its tail rows': every row a holder covered, winner or not, is already in
+// the holder's section, and unions do not double-count.
+func mergeAuthors(dst, src map[string][]string) {
+	for sid, as := range src {
+		if len(as) == 0 {
+			continue
+		}
+		merged := append([]string{}, dst[sid]...)
+		merged = append(merged, as...)
+		slices.Sort(merged)
+		dst[sid] = slices.Compact(merged)
+	}
+}
+
+func buildIndex(store string, cks []ckpt, fp, partDir string, prev manifestFile) error {
+	sort.Slice(cks, func(i, j int) bool { return cks[i].Key < cks[j].Key })
+	win := map[string]winner{}
 	members := make([]member, len(cks))
 	cold := !slices.ContainsFunc(cks, ckpt.hot)
-	var all []built
+	holders, closeHolders, err := openHolders(store, cks, prev)
+	if err != nil {
+		return err
+	}
+	defer closeHolders()
+	authors := map[string][]string{}
 	for si, c := range cks {
 		members[si] = memberOf(c)
 		if cold {
 			members[si].Gen, members[si].LightLen, members[si].HeavyLen = 0, 0, 0
 		}
-		rows, err := loadSourceRows(store, si, c, 0)
+		holder, from := holders[si], int64(0)
+		if holder != nil {
+			var ok bool
+			if from, ok = memberFrom(c, holder); !ok {
+				holder = nil
+			}
+		}
+		if holder != nil {
+			mergeAuthors(authors, holder.authSection())
+		}
+		rows, err := memberRows(store, si, c, holder, from)
 		if err != nil {
-			return fmt.Errorf("%s: %w", c.Key, err)
+			return err
 		}
-		all = append(all, rows...)
-		local := map[string]int{}
-		for i := range rows {
-			r := rows[i].row
-			if j, ok := local[r.UID]; ok && r.Version < rows[j].row.Version {
-				continue
-			}
-			local[r.UID] = i
+		for _, b := range rows {
+			offerRow(win, b, members[si])
 		}
-		for _, i := range local {
-			b := rows[i]
-			w, ok := win[b.row.UID]
-			if !ok || memberBeats(c, w.kind, w.path) {
-				win[b.row.UID] = &winner{b: b, path: c.Path, kind: c.Kind}
-			}
-		}
+		mergeAuthors(authors, authorsOf(rows, func(src uint16) string { return c.Author }))
 	}
 	bySession := map[string][]built{}
 	for _, w := range win {
 		bySession[w.b.row.Session] = append(bySession[w.b.row.Session], w.b)
 	}
 	win = nil
-	authors := buildSessionAuthors(cks, all)
-	all = nil
 
 	heavy := newHeavyReader(store, cks)
 	defer heavy.close()
@@ -168,9 +358,12 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 	lw := &frameWriter{f: lightF, target: lightFrame, enc: partEncoder}
 	hw := &frameWriter{f: heavyF, target: heavyFrame, enc: partHeavyEncoder}
 	place := func(b built) (*Row, int64, int, error) {
-		hrec, err := heavy.record(b)
-		if err != nil {
-			return nil, 0, 0, err
+		hrec := b.hrec
+		if hrec == nil {
+			var err error
+			if hrec, err = heavy.record(b); err != nil {
+				return nil, 0, 0, err
+			}
 		}
 		hf, hi, err := hw.add(hrec)
 		if err != nil {
@@ -618,8 +811,11 @@ func tokenize(text string, emit func(string)) int {
 }
 
 // heavyReader reads the heavy records of rows at build, decoding a few frames
-// at a time; a row's src picks its log.
+// at a time; a row's src picks its log. Logs open on first use: a member whose
+// rows its holder carries never opens its own.
 type heavyReader struct {
+	store string
+	cks   []ckpt
 	logs  []io.ReaderAt
 	files []*os.File
 	recs  map[heavyKey][][]byte
@@ -633,16 +829,25 @@ type heavyKey struct {
 }
 
 func newHeavyReader(store string, cks []ckpt) *heavyReader {
-	h := &heavyReader{recs: map[heavyKey][][]byte{}}
-	for _, c := range cks {
-		f, err := os.Open(logPath(store, c.Key, c.Gen, "heavy"))
-		if err != nil && h.err == nil {
-			h.err = err
-		}
-		h.files = append(h.files, f)
-		h.logs = append(h.logs, f)
+	return &heavyReader{store: store, cks: cks, recs: map[heavyKey][][]byte{}}
+}
+
+// logAt is the heavy log of member src, opened on first use.
+func (h *heavyReader) logAt(src int) (io.ReaderAt, error) {
+	for len(h.logs) <= src {
+		h.logs = append(h.logs, nil)
 	}
-	return h
+	if h.logs[src] != nil {
+		return h.logs[src], nil
+	}
+	f, err := os.Open(logPath(h.store, h.cks[src].Key, h.cks[src].Gen, "heavy"))
+	if err != nil {
+		h.err = err
+		return nil, err
+	}
+	h.files = append(h.files, f)
+	h.logs[src] = f
+	return f, nil
 }
 
 // record is the heavy record of b: payload_json then token_usage_json, each a
@@ -654,8 +859,11 @@ func (h *heavyReader) record(b built) ([]byte, error) {
 	k := heavyKey{src: b.src, frame: b.row.HeavyFrame}
 	recs, ok := h.recs[k]
 	if !ok {
-		var err error
-		recs, _, err = readFrame(h.logs[k.src], int64(k.frame), nil)
+		log, err := h.logAt(int(k.src))
+		if err != nil {
+			return nil, err
+		}
+		recs, _, err = readFrame(log, int64(k.frame), nil)
 		if err != nil {
 			h.err = err
 			return nil, err
@@ -674,13 +882,18 @@ func (h *heavyReader) record(b built) ([]byte, error) {
 	return recs[b.row.HeavyIdx], nil
 }
 
+// heavyPayload is a heavy record's payload_json.
+func heavyPayload(rec []byte) string {
+	l, n := binary.Uvarint(rec)
+	return string(rec[n : n+int(l)])
+}
+
 func (h *heavyReader) payload(b built) string {
 	rec, err := h.record(b)
 	if err != nil {
 		return ""
 	}
-	l, n := binary.Uvarint(rec)
-	return string(rec[n : n+int(l)])
+	return heavyPayload(rec)
 }
 
 func (h *heavyReader) close() {
