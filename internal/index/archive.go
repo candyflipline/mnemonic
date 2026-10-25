@@ -309,7 +309,7 @@ func ingestArchive(store string, s source) (Outcome, int64, error) {
 	}
 	ws := &archiveWriters{store: store, fileKey: key, prevGen: prevGen,
 		ws: map[string]*archiveWriter{}, limit: archiveOpenLogs}
-	if err := streamArchiveRows(pf, ws, set, file); err != nil {
+	if err := streamArchiveRows(pf, set, file, ws.add); err != nil {
 		return 0, 0, err
 	}
 	if err := ws.closeAll(); err != nil {
@@ -351,10 +351,10 @@ func ingestArchive(store string, s source) (Outcome, int64, error) {
 	return Fresh, written, nil
 }
 
-// streamArchiveRows reads every row group into a bounded slice and routes
-// each row to its session's member: the file is never held whole, one row
+// streamArchiveRows reads every row group into a bounded slice and hands each
+// row that is its uid's winner to fn: the file is never held whole, one row
 // group's columns plus the slice is the peak.
-func streamArchiveRows(pf *parquet.File, ws *archiveWriters, set *archiveSet, file int) error {
+func streamArchiveRows(pf *parquet.File, set *archiveSet, file int, fn func(*chRow) error) error {
 	buf := make([]chRow, archiveReadRows)
 	row := uint32(0)
 	for _, rg := range pf.RowGroups() {
@@ -363,7 +363,7 @@ func streamArchiveRows(pf *parquet.File, ws *archiveWriters, set *archiveSet, fi
 			n, err := rd.Read(buf)
 			for i := 0; i < n; i++ {
 				if set.kept(file, row) {
-					if err := ws.add(&buf[i]); err != nil {
+					if err := fn(&buf[i]); err != nil {
 						rd.Close()
 						return err
 					}
@@ -697,4 +697,255 @@ func (r *chRow) event() schema.Event {
 		EventVersion:          r.EventVersion,
 		Cwd:                   r.Cwd,
 	}
+}
+
+// retired reports a settled archive member that keeps no frame logs: its
+// rows live in the cold part that holds it and, when that part cannot supply
+// them, in its ch file (deriveRetired). A member with rows always has log
+// bytes until retireSettled zeroes the lengths, and a re-stream writes them
+// again.
+func (c ckpt) retired() bool { return c.Kind == KindArchive && c.Rows > 0 && c.LightLen == 0 }
+
+// retireSettled drops the logs of every archive member held by a cold part of
+// the published plan: the part's id is the fingerprint of the member's
+// checkpoint, so CURRENT names a part that holds every winner of its rows. It
+// runs after CURRENT is written, on every cycle, so a crash between CURRENT and
+// the checkpoint rewrite is finished by the next cycle; the generation stays,
+// and gcLogs removes the files no retired checkpoint names. cks is updated to
+// the checkpoints written.
+func retireSettled(store string, cks []ckpt, parts [][]ckpt, planned []builtPart) error {
+	at := make(map[string]int, len(cks))
+	for i, c := range cks {
+		at[c.Key] = i
+	}
+	for pi, members := range parts {
+		if planned[pi].hot {
+			continue
+		}
+		for _, m := range members {
+			c := &cks[at[m.Key]]
+			if c.Kind != KindArchive || c.hot() || c.retired() {
+				continue
+			}
+			c.LightLen, c.HeavyLen = 0, 0
+			b, _ := json.Marshal(c)
+			if err := writeFileAtomic(ckptPath(store, c.Key), b); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// memberPlan says, per member of a part build, which holder part supplies its
+// rows and from where its log tail starts; a nil holder reads the member whole.
+// A holder keeps winners only, so a row that lost to another member's copy is
+// in no part. When a row can have left the part's input (a member re-parsed,
+// re-streamed or removed) the sessions it touched are stale, and every member
+// sharing one is read whole so the losing copies come back, as a clean build
+// finds them.
+type memberPlan struct {
+	holder []*Part
+	from   []int64
+	stale  map[string]bool
+}
+
+func planMembers(cks []ckpt, holders []*Part) memberPlan {
+	p := memberPlan{holder: make([]*Part, len(cks)), from: make([]int64, len(cks)), stale: map[string]bool{}}
+	have := make(map[string]bool, len(cks))
+	for _, c := range cks {
+		have[c.Key] = true
+	}
+	seen := map[*Part]bool{}
+	for i, c := range cks {
+		h := holders[i]
+		if h == nil {
+			continue
+		}
+		if !seen[h] {
+			seen[h] = true
+			for _, m := range h.meta.Members {
+				if !have[m.Key] {
+					for _, s := range m.Sessions {
+						p.stale[s] = true
+					}
+				}
+			}
+		}
+		if from, ok := memberFrom(c, h); ok {
+			p.holder[i], p.from[i] = h, from
+			continue
+		}
+		for _, s := range h.meta.Members[holderIndexOf(h, c.Key)].Sessions {
+			p.stale[s] = true
+		}
+		for _, s := range c.Sessions {
+			p.stale[s] = true
+		}
+	}
+	if len(p.stale) == 0 {
+		return p
+	}
+	for i, c := range cks {
+		if p.holder[i] != nil && slices.ContainsFunc(c.Sessions, func(s string) bool { return p.stale[s] }) {
+			p.holder[i], p.from[i] = nil, 0
+		}
+	}
+	return p
+}
+
+// holderAuthors is holder's per-session author section without the stale
+// sessions, whose authors the members read whole contribute afresh.
+func (p memberPlan) holderAuthors(h *Part) map[string][]string {
+	sec := h.authSection()
+	if len(p.stale) == 0 {
+		return sec
+	}
+	out := make(map[string][]string, len(sec))
+	for sid, as := range sec {
+		if !p.stale[sid] {
+			out[sid] = as
+		}
+	}
+	return out
+}
+
+// rematerialize writes frame logs again for the retired members the builds of
+// this cycle would read whole, before any part is built: for each part still to
+// build that holds a retired member, the same holder decision the build makes
+// (planMembers) names the members its holder cannot supply, and one pass over
+// each of their ch files streams those sessions back into logs at the next
+// generation through the winner verdict and row translation that wrote them the
+// first time. retireSettled drops them again once the part is published. cks is
+// updated to the checkpoints written; the count is how many members came back.
+func rematerialize(store string, cks []ckpt, parts [][]ckpt, prev manifestFile) (int, error) {
+	at := make(map[string]int, len(cks))
+	for i, c := range cks {
+		at[c.Key] = i
+	}
+	need := map[string]bool{}
+	for _, members := range parts {
+		if !slices.ContainsFunc(members, ckpt.retired) || partExists(store, members) {
+			continue
+		}
+		holders, closeHolders, err := openHolders(store, members, prev)
+		if err != nil {
+			return 0, err
+		}
+		plan := planMembers(members, holders)
+		for i, c := range members {
+			if c.retired() && plan.holder[i] == nil {
+				need[c.Key] = true
+			}
+		}
+		closeHolders()
+	}
+	byFile := map[string][]int{}
+	for key := range need {
+		i := at[key]
+		byFile[cks[i].SourceFile] = append(byFile[cks[i].SourceFile], i)
+	}
+	files := make([]string, 0, len(byFile))
+	for f := range byFile {
+		files = append(files, f)
+	}
+	sort.Strings(files)
+	for _, path := range files {
+		if err := restreamMembers(store, path, byFile[path], cks); err != nil {
+			return 0, err
+		}
+	}
+	return len(need), nil
+}
+
+// partExists reports whether the part the cycle publishes for members is
+// already on disk, so no build reads its members.
+func partExists(store string, members []ckpt) bool {
+	for _, id := range []string{fingerprint(members), deltaID(members)} {
+		if _, err := os.Stat(partDir(store, id)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// restreamMembers streams the sessions of the members cks[idx] out of their ch
+// file into frame logs one generation up and rewrites their checkpoints to
+// name them. The file must be the one the members were streamed from (size,
+// last window and the file list's digest); otherwise this cycle fails and the
+// next one's ingest re-streams the file whole.
+func restreamMembers(store, path string, idx []int, cks []ckpt) error {
+	set, err := archiveSetFor(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(path)))))
+	if err != nil {
+		return err
+	}
+	file := slices.Index(set.paths, path)
+	if file < 0 {
+		return fmt.Errorf("%s: not in the archive file list", path)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	own, err := windowSHA(f, fi.Size())
+	if err != nil {
+		return err
+	}
+	want := map[string]int{}
+	prevGen := map[string]int{}
+	var fileKey string
+	for _, i := range idx {
+		c := cks[i]
+		if c.ZstSize != fi.Size() || c.WindowSHA != own+"|"+set.digest {
+			return fmt.Errorf("%s: %s: the file changed since the member was streamed", path, c.Key)
+		}
+		sid := c.Sessions[0]
+		want[sid] = i
+		prevGen[sid] = c.Gen
+		fileKey = strings.TrimSuffix(c.Key, archiveMemberSep+sid)
+	}
+	pf, err := parquet.OpenFile(f, fi.Size())
+	if err != nil {
+		return err
+	}
+	ws := &archiveWriters{store: store, fileKey: fileKey, prevGen: prevGen,
+		ws: map[string]*archiveWriter{}, limit: archiveOpenLogs}
+	err = streamArchiveRows(pf, set, file, func(r *chRow) error {
+		if _, ok := want[r.SessionID]; !ok {
+			return nil
+		}
+		return ws.add(r)
+	})
+	if err != nil {
+		return err
+	}
+	if err := ws.closeAll(); err != nil {
+		return err
+	}
+	for sid, i := range want {
+		w := ws.ws[sid]
+		if w == nil || w.rows != cks[i].Rows {
+			return fmt.Errorf("%s: %s: %d rows streamed, %d recorded", path, cks[i].Key, rowsOf(w), cks[i].Rows)
+		}
+		c := cks[i]
+		c.Gen, c.LightLen, c.HeavyLen = w.gen, w.lightLen, w.heavyLen
+		b, _ := json.Marshal(c)
+		if err := writeFileAtomic(ckptPath(store, c.Key), b); err != nil {
+			return err
+		}
+		cks[i] = c
+	}
+	return nil
+}
+
+func rowsOf(w *archiveWriter) int64 {
+	if w == nil {
+		return 0
+	}
+	return w.rows
 }

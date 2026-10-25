@@ -799,12 +799,19 @@ func publish(store string, sources []source, cur []*ckpt, quiet time.Duration, s
 		}
 	}
 	parts := planParts(cks)
+	prev, _ := readManifest(store)
+	back, err := rematerialize(store, cks, parts, prev)
+	if err != nil {
+		return CycleStats{}, deferred, err
+	}
+	if back > 0 {
+		parts = planParts(cks)
+	}
 	ids := make([]string, 0, len(parts))
 	var hot []string
 	if err := os.MkdirAll(filepath.Join(store, "parts"), 0o755); err != nil {
 		return CycleStats{}, deferred, err
 	}
-	prev, _ := readManifest(store)
 	keep := map[string]bool{}
 	images := map[string]bool{}
 	planned, err := buildParts(store, parts, prev)
@@ -828,14 +835,16 @@ func publish(store string, sources []source, cur []*ckpt, quiet time.Duration, s
 	}
 	cs.HotParts, cs.ColdParts = len(hot), len(ids)-len(hot)
 	mb, _ := json.Marshal(manifestFile{Parts: ids, Hot: hot, Sources: srcs})
-	if cur, err := os.ReadFile(filepath.Join(store, "CURRENT")); err == nil && bytes.Equal(cur, mb) {
-		return cs, deferred, nil
+	if cur, err := os.ReadFile(filepath.Join(store, "CURRENT")); err != nil || !bytes.Equal(cur, mb) {
+		if err := writeFileAtomic(filepath.Join(store, "CURRENT"), mb); err != nil {
+			return cs, deferred, err
+		}
+		gcParts(store, keep)
+		gcDeltas(store, images)
 	}
-	if err := writeFileAtomic(filepath.Join(store, "CURRENT"), mb); err != nil {
+	if err := retireSettled(store, cks, parts, planned); err != nil {
 		return cs, deferred, err
 	}
-	gcParts(store, keep)
-	gcDeltas(store, images)
 	return cs, deferred, gcLogs(store, cks, keepExtra)
 }
 
@@ -890,6 +899,9 @@ func buildParts(store string, parts [][]ckpt, prev manifestFile) ([]builtPart, e
 func buildPart(store string, members []ckpt, prev manifestFile) (builtPart, error) {
 	id := fingerprint(members)
 	if slices.ContainsFunc(members, ckpt.hot) {
+		if retiredJoinsBase(store, members, prev) {
+			return buildHotImage(store, members, prev)
+		}
 		id, built, written, err := hotPart(store, members, prev)
 		if err != nil {
 			return builtPart{}, err
@@ -907,6 +919,37 @@ func buildPart(store string, members []ckpt, prev manifestFile) (builtPart, erro
 		return builtPart{id: id, built: true, written: dirSize(partDir(store, id))}, nil
 	}
 	return builtPart{id: id}, nil
+}
+
+// retiredJoinsBase reports whether a delta append over the hot part members
+// extend would take in a retired archive member that part does not hold: its
+// rows are in no log to append, so the component is built whole instead.
+func retiredJoinsBase(store string, members []ckpt, prev manifestFile) bool {
+	if !slices.ContainsFunc(members, ckpt.retired) {
+		return false
+	}
+	base, ok := deltaBase(store, members, prev)
+	if !ok {
+		return false
+	}
+	return slices.ContainsFunc(members, func(c ckpt) bool {
+		return c.retired() && !slices.ContainsFunc(base.Members, func(m member) bool { return m.Key == c.Key })
+	})
+}
+
+// buildHotImage builds the hot component members as a full part, hotPart
+// without the delta path.
+func buildHotImage(store string, members []ckpt, prev manifestFile) (builtPart, error) {
+	id := fingerprint(members)
+	for _, have := range []string{id, deltaID(members)} {
+		if _, err := os.Stat(partDir(store, have)); err == nil {
+			return builtPart{id: have, hot: true}, nil
+		}
+	}
+	if err := buildIndex(store, members, id, partDir(store, id), prev); err != nil {
+		return builtPart{}, err
+	}
+	return builtPart{id: id, hot: true, built: true, written: dirSize(partDir(store, id))}, nil
 }
 
 // dirSize is the bytes of the files directly in dir, what a part build or a
@@ -1114,8 +1157,10 @@ func gcParts(store string, want map[string]bool) {
 func gcLogs(store string, cks []ckpt, keepExtra []string) error {
 	keep := map[string]bool{}
 	for _, c := range cks {
-		keep[filepath.Base(logPath(store, c.Key, c.Gen, "light"))] = true
-		keep[filepath.Base(logPath(store, c.Key, c.Gen, "heavy"))] = true
+		if !c.retired() {
+			keep[filepath.Base(logPath(store, c.Key, c.Gen, "light"))] = true
+			keep[filepath.Base(logPath(store, c.Key, c.Gen, "heavy"))] = true
+		}
 		keep[filepath.Base(ckptPath(store, c.Key))] = true
 	}
 	for _, p := range keepExtra {

@@ -82,6 +82,9 @@ func memberOf(c ckpt) member {
 }
 
 func loadSourceRows(store string, si int, c ckpt, from int64) ([]built, error) {
+	if from >= c.LightLen {
+		return nil, nil
+	}
 	f, err := os.Open(logPath(store, c.Key, c.Gen, "light"))
 	if err != nil {
 		return nil, err
@@ -163,6 +166,9 @@ func sameParsed(a, b parsed) bool {
 // when holder is not nil. A member fully covered by its holder is read from
 // the holder alone and its logs are never opened.
 func memberRows(store string, si int, c ckpt, holder *Part, from int64) ([]built, error) {
+	if holder == nil && c.retired() {
+		return nil, fmt.Errorf("%s: retired member read without a holder", c.Key)
+	}
 	var out []built
 	if holder != nil {
 		hs := holderIndexOf(holder, c.Key)
@@ -306,22 +312,19 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, prev manifestFile)
 	}
 	defer closeHolders()
 	authors := map[string][]string{}
+	plan := planMembers(cks, holders)
+	merged := map[*Part]bool{}
 	for si, c := range cks {
 		members[si] = memberOf(c)
 		if cold {
 			members[si].Gen, members[si].LightLen, members[si].HeavyLen = 0, 0, 0
 		}
-		holder, from := holders[si], int64(0)
-		if holder != nil {
-			var ok bool
-			if from, ok = memberFrom(c, holder); !ok {
-				holder = nil
-			}
+		holder := plan.holder[si]
+		if holder != nil && !merged[holder] {
+			merged[holder] = true
+			mergeAuthors(authors, plan.holderAuthors(holder))
 		}
-		if holder != nil {
-			mergeAuthors(authors, holder.authSection())
-		}
-		rows, err := memberRows(store, si, c, holder, from)
+		rows, err := memberRows(store, si, c, holder, plan.from[si])
 		if err != nil {
 			return err
 		}
@@ -851,6 +854,9 @@ func (h *heavyReader) logAt(src int) (io.ReaderAt, error) {
 // record is the heavy record of b: payload_json then token_usage_json, each a
 // uvarint length and its bytes.
 func (h *heavyReader) record(b built) ([]byte, error) {
+	if b.hrec != nil {
+		return b.hrec, nil
+	}
 	if h.err != nil {
 		return nil, h.err
 	}
