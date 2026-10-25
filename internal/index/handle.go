@@ -36,6 +36,9 @@ func Open(store string) (*Index, error) {
 
 func emptyDB() *DB { return &DB{sessPart: map[string]int{}} }
 
+// openRetryHook, non-nil in tests, runs between open retries.
+var openRetryHook func()
+
 // Ingest brings the store up to root's raw and serves the result.
 func (ix *Index) Ingest(root string, opts IngestOptions) (IngestStats, error) {
 	st, err := Ingest(root, ix.store, opts.Quiet, opts.SettleAll)
