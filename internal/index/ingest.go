@@ -513,7 +513,19 @@ func IngestPlain(store string, globs []config.SourceGlob, author, machine string
 // ingest is the cycle both entry points share: parse the sources, publish the
 // plan, and record the lap. root is where KindStore sources' raw lives; a
 // KindPlain source opens its own path and ignores it.
+//
+// It is also the one place every writer passes through, so it holds the dir's
+// writer lock for the lap: both package entries, Index.Ingest and
+// Index.IngestPlain, and so serve's cycle, local's sink, export's pre-export
+// ingest and the harness subcommand all exclude each other here, and a
+// process holding the dir for its whole life (serve, local) borrows its own
+// lock instead of refusing itself.
 func ingest(root, store string, sources []source, quiet time.Duration, settleAll bool) (stats IngestStats, err error) {
+	release, err := IngestLock(store)
+	if err != nil {
+		return IngestStats{}, err
+	}
+	defer release()
 	debug.SetGCPercent(25)
 	var rec cycleRecord
 	defer func() { recordCycle(store, rec) }()

@@ -79,14 +79,26 @@ func exportCmd(args []string) error {
 	hidden := controls.ExportHidden(kind != "dataset" || *includePrivate)
 
 	// One-shot: bring the raw under the data dir into the index, everything
-	// settled, as the converge before an export did.
+	// settled, as the converge before an export did. The index dir's writer
+	// lock says whether that is ours to do: under a running writer (the
+	// server) it is not, and export exports the published CURRENT without
+	// ingesting, saying so on stderr.
 	ix, err := index.Open(layout.IndexDir(*dataDir))
 	if err != nil {
 		return err
 	}
 	defer ix.Close()
-	if _, err := ix.Ingest(*dataDir, index.IngestOptions{SettleAll: true}); err != nil {
-		return err
+	lock, lockErr := index.HoldIndexLock(layout.IndexDir(*dataDir))
+	switch {
+	case errors.Is(lockErr, index.ErrLocked):
+		fmt.Fprintf(os.Stderr, "export: %v; exporting the published index without ingesting\n", lockErr)
+	case lockErr != nil:
+		return lockErr
+	default:
+		defer lock.Unlock()
+		if _, err := ix.Ingest(*dataDir, index.IngestOptions{SettleAll: true}); err != nil {
+			return err
+		}
 	}
 	db, release := ix.Snapshot()
 	defer release()

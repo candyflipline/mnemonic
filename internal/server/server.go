@@ -19,6 +19,7 @@ import (
 type Server struct {
 	dataDir string
 	ix      *index.Index
+	lock    *index.IndexLock
 	wake    chan struct{}
 	handler http.Handler
 	otlp    *otlp.Receiver
@@ -27,7 +28,9 @@ type Server struct {
 // New opens the index under dataDir, loads the session controls from raw,
 // and mounts the store (push scope) and MCP (read scope) behind tokens. MCP
 // tools find the store with store.From and the controls with
-// index.WithControls on their ctx.
+// index.WithControls on their ctx. The server takes the index dir's writer
+// lock for its whole life — it is the dir's one writer — and refuses to start
+// under another one, naming the holder.
 func New(dataDir string, tokens auth.Tokens) (*Server, error) {
 	ctl, err := index.LoadControls(dataDir)
 	if err != nil {
@@ -35,6 +38,11 @@ func New(dataDir string, tokens auth.Tokens) (*Server, error) {
 	}
 	ix, err := index.Open(layout.IndexDir(dataDir))
 	if err != nil {
+		return nil, err
+	}
+	lock, err := index.HoldIndexLock(layout.IndexDir(dataDir))
+	if err != nil {
+		ix.Close()
 		return nil, err
 	}
 	wake := make(chan struct{}, 1)
@@ -48,7 +56,7 @@ func New(dataDir string, tokens auth.Tokens) (*Server, error) {
 	mux.Handle("/mcp", tokens.Require(auth.Read)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tools.ServeHTTP(w, r.WithContext(index.WithControls(store.WithStore(r.Context(), st), ctl)))
 	})))
-	return &Server{dataDir: dataDir, ix: ix, wake: wake, handler: mux, otlp: rcv}, nil
+	return &Server{dataDir: dataDir, ix: ix, lock: lock, wake: wake, handler: mux, otlp: rcv}, nil
 }
 
 func (s *Server) Handler() http.Handler { return s.handler }
@@ -57,7 +65,13 @@ func (s *Server) Handler() http.Handler { return s.handler }
 // is off until set.
 func (s *Server) StoreOTLPContent(on bool) { s.otlp.SetStoreContent(on) }
 
-func (s *Server) Close() error { return s.ix.Close() }
+func (s *Server) Close() error {
+	err := s.ix.Close()
+	if lerr := s.lock.Unlock(); err == nil {
+		err = lerr
+	}
+	return err
+}
 
 // Cycle ingests everything pending now.
 func (s *Server) Cycle(context.Context) error { return s.cycle("reconcile") }
