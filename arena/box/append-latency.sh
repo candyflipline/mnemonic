@@ -19,16 +19,16 @@
 #   the donor with the zstd CLI and their sessionId REWRITTEN to the target's:
 #   appended as-is they would only land on the donor session (already
 #   searchable — EventUID hashes the source file, so the copies are new rows
-#   of whatever session their sessionId names). The search term is the longest
-#   [a-z][a-z0-9_]{5,} token of the lines' MESSAGE TEXT (message.content text
-#   only — the lake indexes message text, not tool-use structure, so a token
-#   from anywhere else matches other sessions' rows and never proves the
-#   append landed) that a search_sessions call on the pristine store returns
-#   in its top hit WITHOUT the target session already among the hits, keeping
-#   the candidate with the fewest pre-append hits (the search fetches only
-#   the top n+1 candidate docs and a broad term's docs crowd the appended
-#   copy out of it); that top hit's session id is what must stay in the
-#   reply.
+#   of whatever session their sessionId names). A fixed nonce marker
+#   (qz9u9cappendprobe) is appended to the first message-text item of the
+#   copied lines: mined terms cannot guarantee rarity, and a broad term's
+#   posted docs crowd the appended copy out of the search's top n+1
+#   candidate docs no matter how correctly it is indexed (two real rounds
+#   proved both halves). The marker matches nothing pre-append — proven by
+#   one batch against the base store — so post-append ONLY the appended rows
+#   can match, which is exactly the packet's correctness predicate: the
+#   post-append reply contains the target session, which the pre-append
+#   reply lacked.
 # - the pre-append reply of the timed call is saved against the base store.
 #
 # Each of RUNS rounds then does, timed only where marked:
@@ -124,7 +124,9 @@ PYEOF
 	cat > "$APP/donor10.py" <<'PYEOF'
 import json, sys
 sid = sys.argv[1]
+marker = sys.argv[2]
 n = 0
+marked = False
 for line in sys.stdin:
     if n >= 10:
         break
@@ -138,95 +140,60 @@ for line in sys.stdin:
     if o.get("type") not in ("user", "assistant") or not o.get("sessionId"):
         continue
     o["sessionId"] = sid
+    if not marked:
+        m = o.get("message")
+        if isinstance(m, dict):
+            c = m.get("content")
+            if isinstance(c, str):
+                o["message"]["content"] = c + " " + marker
+                marked = True
+            elif isinstance(c, list):
+                for it in c:
+                    if isinstance(it, dict) and it.get("type") == "text" \
+                            and isinstance(it.get("text"), str):
+                        it["text"] = it["text"] + " " + marker
+                        marked = True
+                        break
     sys.stdout.write(json.dumps(o, separators=(",", ":"), ensure_ascii=False) + "\n")
     n += 1
 if n < 10:
     sys.exit("donor gave fewer than 10 user/assistant lines")
+if not marked:
+    sys.exit("no message-text item to carry the marker")
 PYEOF
 	TARGET_SID=$(zstd -q -dc "$TGT_ZST" | python3 -I "$APP/first_sid.py")
 	[ -n "$TARGET_SID" ] || { echo "no target session id in the target source" >&2; exit 1; }
-	zstd -q -dc "$DON_ZST" | python3 -I "$APP/donor10.py" "$TARGET_SID" > "$APP/lines.jsonl"
+	MARKER=qz9u9cappendprobe
+	zstd -q -dc "$DON_ZST" | python3 -I "$APP/donor10.py" "$TARGET_SID" "$MARKER" > "$APP/lines.jsonl"
 	[ "$(wc -l < "$APP/lines.jsonl")" -eq 10 ] || { echo "donor gave fewer than 10 lines" >&2; exit 1; }
-	python3 -I - "$APP/lines.jsonl" > "$APP/terms.txt" <<'PYEOF'
-import json, re, sys
-toks = set()
-for line in open(sys.argv[1], encoding="utf-8"):
-    try:
-        o = json.loads(line)
-    except Exception:
-        continue
-    m = o.get("message")
-    texts = []
-    if isinstance(m, dict):
-        c = m.get("content")
-        if isinstance(c, str):
-            texts.append(c)
-        elif isinstance(c, list):
-            texts.extend(i.get("text", "") for i in c
-                         if isinstance(i, dict) and i.get("type") == "text")
-    for t in texts:
-        toks.update(re.findall(r"[a-z][a-z0-9_]{5,}", t))
-for s in sorted(toks, key=lambda s: (-len(s), s))[:20]:
-    print(s)
-PYEOF
-	# validate terms against the pristine store until one returns a top hit
-	# and the target session is NOT among the hits (else no new hit is
-	# possible post-append), then keep the candidate with the FEWEST
-	# pre-append hits: the search fetches only the top n+1 candidate docs,
-	# and a broad term's docs crowd the appended copy (whose BM25 score ties
-	# its origin doc's) out of the candidate set
-	TERM=""; SESSION=""; BESTN=999999; BESTFILE=""
-	n=0
-	while IFS= read -r cand; do
-		n=$((n+1))
-		RF="$APP/term-reply-$n.jsonl"
-		printf '{"id":1,"tool":"search_sessions","args":{"query":"%s","n_hits":10}}\n' "$cand" \
-			| "$BIN" batch -root "$BOX" -store "$BASE_STORE" > "$RF" 2>/dev/null \
-			|| continue
-		PICKED=$(python3 -I - "$RF" "$TARGET_SID" <<'PYEOF'
-import base64, json, sys
-target = sys.argv[2]
-forms = {target, "session:" + base64.b64encode(target.encode()).decode()}
-top = ""
-count = 0
+	# the marker must match nothing pre-append: prove it once against the
+	# base store, and that reply is the pre-append reply of the timed call
+	printf '{"id":1,"tool":"search_sessions","args":{"query":"%s","n_hits":10}}\n' "$MARKER" \
+		| "$BIN" batch -root "$BOX" -store "$BASE_STORE" > "$OUT/append-prereply.jsonl" 2>/dev/null
+	NRES=$(python3 -I - "$OUT/append-prereply.jsonl" <<'PYEOF'
+import json, sys
+n = 0
 for line in open(sys.argv[1]):
     r = json.loads(line)
     if r.get("error"):
-        continue
+        sys.exit("marker pre-check errored: %s" % r["error"][:120])
     for res in ((r.get("data") or {}).get("results") or []):
-        o = res.get("open") or {}
-        sid = o.get("session_id")
-        if not sid:
-            continue
-        if sid in forms:
-            raise SystemExit  # target already searchable for this term
-        if not top:
-            top = sid
-        count += 1
-print("%s\t%d" % (top, count))
+        if (res.get("open") or {}).get("session_id"):
+            n += 1
+print(n)
 PYEOF
 )
-		[ -n "$PICKED" ] || continue
-		GOT=$(printf '%s' "$PICKED" | cut -f1)
-		NRES=$(printf '%s' "$PICKED" | cut -f2)
-		if [ -n "$GOT" ] && [ "$NRES" -lt "$BESTN" ]; then
-			TERM=$cand; SESSION=$GOT; BESTN=$NRES; BESTFILE=$RF
-		fi
-		[ "$BESTN" -le 2 ] && break
-		[ "$n" -ge 8 ] && break
-	done < "$APP/terms.txt"
-	[ -n "$TERM" ] || { echo "no candidate term matched the pristine store" >&2; exit 1; }
+	[ "$NRES" -eq 0 ] || { echo "marker already matches $NRES sessions pre-append" >&2; exit 1; }
 	REL_MAN=${TGT_MAN#"$BOX/raw/"}
 	{
 		echo "bin=$BIN"
 		echo "base=$BASE_STORE"
 		echo "target_rel=$REL_MAN"
-		echo "term=$TERM"
-		echo "session=$SESSION"
+		echo "term=$MARKER"
+		echo "session="
 		echo "target_sid=$TARGET_SID"
 	} > "$OUT/append-state.env"
-	cp -f "$BESTFILE" "$OUT/append-prereply.jsonl"
-	printf '{"id":1,"tool":"search_sessions","args":{"query":"%s","n_hits":10}}\n' "$TERM" \
+	printf '{"id":1,"tool":"search_sessions","args":{"query":"%s","n_hits":10}}\n' "$MARKER" \
 		> "$OUT/append-call.jsonl"
 	echo "append setup: state rewritten for this bin"
 fi
@@ -319,7 +286,7 @@ p = [json.loads(l) for l in open(pre)]
 post = ids(r[0]) if r else []
 pre_ids = set(ids(p[0])) if p else set()
 hits = len(post)
-found = 1 if session in post else 0
+found = 1 if (not session or session in post) else 0
 new = [s for s in post if s not in pre_ids]
 same = (json.dumps(r[0].get("data"), sort_keys=True) ==
         json.dumps(p[0].get("data"), sort_keys=True)) if r and p else True
