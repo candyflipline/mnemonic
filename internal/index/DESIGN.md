@@ -134,6 +134,19 @@ newline (`openPlain`'s end) or a frame boundary (store raw). A redactor
 change across runs would shift resumed state; local mode pins one build
 (`redact.New(nil)`), so the input cannot happen.
 
+**One key, one source.** The data dir's raw/ can hold copies of harness files:
+old `mnemonic local` pushed every file it indexed into raw/ under the same key
+(author, machine, src id of the file path) the plain source carries. A list
+holding one key twice would run two `ingestSource` workers over one checkpoint
+and one pair of logs — each truncating what the other appends, and the kind
+mismatch re-parsing every lap — so `IngestPlain` drops the KindStore source
+behind a live plain file: the file on disk owns the key, one checkpoint, and
+the raw copy stays on disk untouched. A copy whose plain file no longer exists
+(retention deletes transcripts) keeps the key to itself and is ingested from
+raw: it is the only copy left. `ingest` refuses any list still holding a
+duplicate key, with the key in the error, so the race cannot return by another
+path.
+
 ## Decisions (U0)
 
 1. **Tools in this package.** The tools read part internals (docs, hot
