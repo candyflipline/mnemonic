@@ -11,9 +11,11 @@
 ##      the box; set GOFLAGS= to build full width.
 #
 # Builds cmd/mnemonic with CGO_ENABLED=0 and NO build tags: the engine's
-# `index` subcommand is in the default build, and at the engine heads so far
-# the `server` tag still pulls internal/lake -> go-duckdb, which cgo-rejects
-# under CGO_ENABLED=0. Writes $BOX/bin-$TREE/mnemonic, a wrapper-engine that
+# `index` subcommand is in the default build, and a plain untagged build is
+# all the timed scripts and check need. (Since the DuckDB removal the
+# `server` tag also builds under CGO_ENABLED=0 — verified on the box at
+# 5b0c6f7 2026-10-25 — but build-engine.sh still builds untagged.) Writes
+# $BOX/bin-$TREE/mnemonic, a wrapper-engine that
 # execs `mnemonic index "$@"` with GOMAXPROCS=16 (check and the timed scripts
 # call `ingest`/`batch` on it, the arena contract), and sha256.txt.
 set -eu
