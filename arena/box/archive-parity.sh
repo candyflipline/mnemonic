@@ -32,7 +32,10 @@ set -eu
 
 BOX=${BOX:-/var/lib/mnemonic-e3}
 OUT=${OUT:-$BOX/out/u9e}
-BIN=${BIN:-$(ls -d "$BOX"/bin-333fbd6* 2>/dev/null | head -1)}
+BIN=${BIN:-$(ls -d "$BOX"/bin-59796bc-mem* 2>/dev/null | head -1)}
+if [ -z "$BIN" ]; then
+	BIN=$(ls -d "$BOX"/bin-333fbd6* 2>/dev/null | head -1)
+fi
 ENG=${ENG:-$(ls -d "$BOX"/bin-dcfe552* 2>/dev/null | head -1)}
 MIN_ARCH=${MIN_ARCH:-10}
 SEEDS=${SEEDS:-"3 4"}
@@ -369,12 +372,58 @@ PYEOF
 	rm -rf "$STORE"
 }
 
-case "${1:?usage: archive-parity.sh setup|oracle|gen|check|build|deploy}" in
+phase_patchoracle() {
+	# Rebuild the arena oracle (ingest/batch/answer/), gen, check, seed from a
+	# 59796bc tarball with ONE local patch: arena/duck/duck.go's harness
+	# MemoryLimit 800MB -> ORACLE_MB (default 16000). The limit caps DuckDB's
+	# working set, not its answers; at 800MB the converge of raw+archive
+	# (9.5M-row events relation) OOMs (oracle-arch-ingest.log, 02:18Z), so the
+	# stock harness oracle cannot build the archive store at all. Recorded
+	# here and in the report; answers are still 59796bc's.
+	TARBALL=${1:?usage: archive-parity.sh patchoracle TARBALL}
+	MB=${ORACLE_MB:-16000}
+	SRC=/root/src/oracle-build-u9e
+	BINOUT=$BOX/bin-59796bc-mem${MB}mb
+	export PATH=/usr/local/go/bin:$PATH
+	GOFLAGS=${GOFLAGS:--p=2}
+	export GOFLAGS
+	rm -rf "$SRC"
+	mkdir -p "$SRC"
+	tar -xf "$TARBALL" -C "$SRC"
+	cd "$SRC"
+	grep -n 'MemoryLimit' arena/duck/duck.go
+	sed -i "s/MemoryLimit: \"800MB\"/MemoryLimit: \"${MB}MB\"/" arena/duck/duck.go
+	tar -xOf "$TARBALL" arena/duck/duck.go > "$OUT/oracle-duck-orig.go" || true
+	diff "$OUT/oracle-duck-orig.go" arena/duck/duck.go > "$OUT/oracle-patch.diff" || true
+	rm -rf "$BINOUT"
+	mkdir -p "$BINOUT"
+	CGO_ENABLED=1 go build -o "$BINOUT/oracle" ./arena/oracle
+	CGO_ENABLED=1 go build -o "$BINOUT/gen" ./arena/gen
+	CGO_ENABLED=0 go build -o "$BINOUT/check" ./arena/check
+	CGO_ENABLED=0 go build -o "$BINOUT/seed" ./arena/seed
+	{
+		echo "source: 59796bc + arena/duck MemoryLimit 800MB->${MB}MB (patch in $OUT/oracle-patch.diff)"
+		echo "built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+		go version
+		sha256sum "$BINOUT"/oracle "$BINOUT"/gen "$BINOUT"/check
+	} > "$BINOUT/sha256.txt"
+	{
+		echo '#!'/bin/sh
+		echo 'export GOMAXPROCS=16'
+		echo "exec \"$BINOUT/oracle\" \"\$@\""
+	} > "$BINOUT/wrapper-oracle"
+	chmod +x "$BINOUT/wrapper-oracle"
+	cat "$BINOUT/sha256.txt"
+	log "patchoracle: $BINOUT ready"
+}
+
+case "${1:?usage: archive-parity.sh setup|oracle|gen|check|build|deploy|patchoracle}" in
 setup) phase_setup ;;
 oracle) phase_oracle ;;
 gen) phase_gen ;;
 check) phase_check ;;
 build) shift; phase_build "$@" ;;
 deploy) phase_deploy ;;
+patchoracle) shift; phase_patchoracle "$@" ;;
 *) fail "unknown phase $1" ;;
 esac
