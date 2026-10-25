@@ -22,7 +22,9 @@ BOX=${BOX:-/var/lib/mnemonic-e3}
 RUNS=${RUNS:-5}
 BIN=${1:?usage: call-latency.sh BIN}
 [ -x "$BIN" ] || { echo "not executable: $BIN" >&2; exit 2; }
-OUT=$BOX/out
+# OUT overridable so two lanes' runs (oracle and engine) never share the
+# summary and reply files; each lane passes its own dir.
+OUT=${OUT:-$BOX/out}
 CALLS=$BOX/arena
 BASE_STORE=${BASE_STORE:-$BOX/cold-1}
 export GOMAXPROCS=16
