@@ -17,13 +17,15 @@ type CycleStats struct {
 
 // cycleRecord is everything one Ingest reports to the cycle that ran it, kept
 // by store dir: the stats above, the sources the parser-version sweep left for
-// the next cycle, and the sources whose re-parse failed. The map is in memory
+// the next cycle, the due components it left hot (settleSet), and the sources
+// whose re-parse failed. The map is in memory
 // on purpose, unlike the lake's on-disk parser marker: a failed sweep is
 // retried once per process, and a push or the next version bump parses the
 // source again regardless.
 type cycleRecord struct {
 	stats     CycleStats
 	stale     int
+	settle    int
 	failed    int
 	failSweep map[string]int
 }
@@ -48,10 +50,13 @@ func takeCycle(store string) cycleRecord {
 // LastCycle is the CycleStats of the last Ingest through ix.
 func (ix *Index) LastCycle() CycleStats { return takeCycle(ix.store).stats }
 
-// SweepStale is the sources the last Ingest left for the next cycle's
-// parser-version sweep, zero once the lap is over: the server runs cycles
-// back to back while it is not.
-func (ix *Index) SweepStale() int { return takeCycle(ix.store).stale }
+// SweepStale is the work the last Ingest left for the next cycle: sources for
+// the parser-version sweep and due components it did not settle. It is zero
+// once both are done; the server runs cycles back to back while it is not.
+func (ix *Index) SweepStale() int {
+	r := takeCycle(ix.store)
+	return r.stale + r.settle
+}
 
 // CycleFailed is the sources whose parse failed in the last Ingest; the cycle
 // went on without them, and each stays on its older output.

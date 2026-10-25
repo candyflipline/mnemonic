@@ -581,9 +581,9 @@ func ingest(root, store string, sources []source, quiet time.Duration, settleAll
 	}
 	rec = cycleRecord{stats: CycleStats{LogBytes: logBytes}, stale: stale,
 		failed: len(sources) - len(outcomes), failSweep: failSweep}
-	cs, perr := publish(store, sources, quiet, settleAll)
+	cs, deferred, perr := publish(store, sources, quiet, settleAll, outcomes)
 	cs.LogBytes = logBytes
-	rec.stats = cs
+	rec.stats, rec.settle = cs, deferred
 	return stats, perr
 }
 
@@ -683,13 +683,20 @@ func versionStale(store string, s source) bool {
 }
 
 // publish plans the parts of the sources' checkpoints, builds the missing ones
-// and points CURRENT at them, reporting what it wrote.
-func publish(store string, sources []source, quiet time.Duration, settleAll bool) (CycleStats, error) {
+// and points CURRENT at them, reporting what it wrote and how many components
+// whose quiet window has passed it left hot for a later cycle (settleSet).
+// outcomes is what this cycle's parse did, by source key.
+func publish(store string, sources []source, quiet time.Duration, settleAll bool, outcomes map[string]Outcome) (CycleStats, int, error) {
+	parsedAny := false
+	for _, o := range outcomes {
+		parsedAny = parsedAny || o != Unchanged
+	}
 	newest := int64(0)
 	for _, s := range sources {
 		newest = max(newest, s.src.UpdatedMs)
 	}
 	var cks []ckpt
+	var due, touched []bool
 	var srcs []stSource
 	var keepExtra []string
 	for _, s := range sources {
@@ -712,43 +719,44 @@ func publish(store string, sources []source, quiet time.Duration, settleAll bool
 				if !ok {
 					continue
 				}
-				if c.hot() && (settleAll || s.src.UpdatedMs <= newest-quiet.Milliseconds()) {
-					c.ColdZst = c.ZstSize
-					b, _ := json.Marshal(c)
-					if err := writeFileAtomic(ckptPath(store, c.Key), b); err != nil {
-						return CycleStats{}, err
-					}
-				}
 				cks = append(cks, c)
+				due = append(due, settleAll || s.src.UpdatedMs <= newest-quiet.Milliseconds())
+				touched = append(touched, outcomes[fk] > Unchanged)
 			}
 			continue
 		}
 		row := stSource{Author: s.key.Author, Machine: s.key.Machine, Harness: s.key.Harness, UpdatedMs: s.src.UpdatedMs, Size: s.src.Size}
 		if c, ok := readCkpt(store, sourceKey(s.key)); ok {
-			if c.hot() && (settleAll || s.src.UpdatedMs <= newest-quiet.Milliseconds()) {
-				c.ColdZst = c.ZstSize
-				b, _ := json.Marshal(c)
-				if err := writeFileAtomic(ckptPath(store, c.Key), b); err != nil {
-					return CycleStats{}, err
-				}
-			}
 			cks = append(cks, c)
+			due = append(due, settleAll || s.src.UpdatedMs <= newest-quiet.Milliseconds())
+			touched = append(touched, outcomes[sourceKey(s.key)] > Unchanged)
 			row.Events = c.Rows
 		}
 		srcs = append(srcs, row)
+	}
+	settle, deferred := settleSet(cks, due, touched, settleShards(settleAll, parsedAny))
+	for i := range cks {
+		if !settle[i] {
+			continue
+		}
+		cks[i].ColdZst = cks[i].ZstSize
+		b, _ := json.Marshal(cks[i])
+		if err := writeFileAtomic(ckptPath(store, cks[i].Key), b); err != nil {
+			return CycleStats{}, deferred, err
+		}
 	}
 	parts := planParts(cks)
 	ids := make([]string, 0, len(parts))
 	var hot []string
 	if err := os.MkdirAll(filepath.Join(store, "parts"), 0o755); err != nil {
-		return CycleStats{}, err
+		return CycleStats{}, deferred, err
 	}
 	prev, _ := readManifest(store)
 	keep := map[string]bool{}
 	images := map[string]bool{}
 	planned, err := buildParts(store, parts, prev)
 	if err != nil {
-		return CycleStats{}, err
+		return CycleStats{}, deferred, err
 	}
 	var cs CycleStats
 	for _, p := range planned {
@@ -768,14 +776,14 @@ func publish(store string, sources []source, quiet time.Duration, settleAll bool
 	cs.HotParts, cs.ColdParts = len(hot), len(ids)-len(hot)
 	mb, _ := json.Marshal(manifestFile{Parts: ids, Hot: hot, Sources: srcs})
 	if cur, err := os.ReadFile(filepath.Join(store, "CURRENT")); err == nil && bytes.Equal(cur, mb) {
-		return cs, nil
+		return cs, deferred, nil
 	}
 	if err := writeFileAtomic(filepath.Join(store, "CURRENT"), mb); err != nil {
-		return cs, err
+		return cs, deferred, err
 	}
 	gcParts(store, keep)
 	gcDeltas(store, images)
-	return cs, gcLogs(store, cks, keepExtra)
+	return cs, deferred, gcLogs(store, cks, keepExtra)
 }
 
 type builtPart struct {
@@ -902,36 +910,16 @@ func components(tokens [][]string) []int {
 // its appends; the settled ones go to partShards cold parts by a hash of their
 // least session id, rewritten only when a component settles into or leaves one.
 func planParts(cks []ckpt) [][]ckpt {
-	tokens := make([][]string, len(cks))
-	for i, c := range cks {
-		tokens[i] = c.Sessions
-	}
-	root := components(tokens)
-	find := func(i int) int { return root[i] }
-	least := map[int]string{}
-	hot := map[int]bool{}
-	for i, c := range cks {
-		r := find(i)
-		k := c.Key
-		if len(c.Sessions) > 0 {
-			k = c.Sessions[0]
-		}
-		if cur, ok := least[r]; !ok || k < cur {
-			least[r] = k
-		}
-		hot[r] = hot[r] || c.hot()
-	}
+	root, least, hot := componentsOf(cks)
 	cold := map[uint32][]ckpt{}
 	hotParts := map[string][]ckpt{}
 	for i, c := range cks {
-		r := find(i)
+		r := root[i]
 		if hot[r] {
 			hotParts[least[r]] = append(hotParts[least[r]], c)
 			continue
 		}
-		h := fnv.New32a()
-		h.Write([]byte(least[r]))
-		s := h.Sum32() % partShards
+		s := shardOf(least[r])
 		cold[s] = append(cold[s], c)
 	}
 	keys := make([]uint32, 0, len(cold))
@@ -955,6 +943,106 @@ func planParts(cks []ckpt) [][]ckpt {
 }
 
 const partShards = 256
+
+// componentsOf returns each checkpoint's component representative, and per
+// representative the component's least session id (its key when it has no
+// session) and whether any of its sources is hot.
+func componentsOf(cks []ckpt) (root []int, least map[int]string, hot map[int]bool) {
+	tokens := make([][]string, len(cks))
+	for i, c := range cks {
+		tokens[i] = c.Sessions
+	}
+	root = components(tokens)
+	least, hot = map[int]string{}, map[int]bool{}
+	for i, c := range cks {
+		r := root[i]
+		k := c.Key
+		if len(c.Sessions) > 0 {
+			k = c.Sessions[0]
+		}
+		if cur, ok := least[r]; !ok || k < cur {
+			least[r] = k
+		}
+		hot[r] = hot[r] || c.hot()
+	}
+	return root, least, hot
+}
+
+func shardOf(least string) uint32 {
+	h := fnv.New32a()
+	h.Write([]byte(least))
+	return h.Sum32() % partShards
+}
+
+// settleShards is how many shards that already hold a settled component a
+// cycle may rewrite to settle more components into them. Joining such a shard
+// rewrites all of it, about 1/partShards of the corpus, so a cycle that
+// parsed bytes (an append waiting to be searchable) rewrites none; a cycle
+// that parsed nothing rewrites up to GOMAXPROCS, the width buildParts builds
+// them at, and SettleAll every one.
+func settleShards(settleAll, parsedAny bool) int {
+	switch {
+	case settleAll:
+		return partShards
+	case parsedAny:
+		return 0
+	}
+	return runtime.GOMAXPROCS(0)
+}
+
+// settleSet picks the hot checkpoints that settle this cycle: every hot
+// source of a component whose hot sources are all due, when the component's
+// shard is one of the first budget shards by number that hold a settled
+// component, or holds none yet and the cycle settles (budget > 0) or parsed
+// the component (touched) or no shard is held at all: such a shard's part is
+// the settling components alone, so a cold build, and one resumed after a
+// crash mid-parse, settles in the cycle that publishes it. deferred counts the
+// due components left hot for a later cycle.
+func settleSet(cks []ckpt, due, touched []bool, budget int) (settle []bool, deferred int) {
+	root, least, hot := componentsOf(cks)
+	ready := map[int]bool{}
+	for r, h := range hot {
+		ready[r] = h
+	}
+	parsedComp := map[int]bool{}
+	for i, c := range cks {
+		if c.hot() && !due[i] {
+			ready[root[i]] = false
+		}
+		parsedComp[root[i]] = parsedComp[root[i]] || touched[i]
+	}
+	held := map[uint32]bool{}
+	for r, h := range hot {
+		if !h {
+			held[shardOf(least[r])] = true
+		}
+	}
+	var busy []uint32
+	for r, ok := range ready {
+		if s := shardOf(least[r]); ok && held[s] && !slices.Contains(busy, s) {
+			busy = append(busy, s)
+		}
+	}
+	slices.Sort(busy)
+	busy = busy[:min(budget, len(busy))]
+	joins := func(r int) bool {
+		s := shardOf(least[r])
+		if held[s] {
+			return ready[r] && slices.Contains(busy, s)
+		}
+		return ready[r] && (budget > 0 || parsedComp[r] || len(held) == 0)
+	}
+	for r, ok := range ready {
+		if ok && !joins(r) {
+			deferred++
+		}
+	}
+	settle = make([]bool, len(cks))
+	for i, c := range cks {
+		settle[i] = c.hot() && joins(root[i])
+	}
+	return settle, deferred
+}
 
 // gcParts removes part dirs neither the manifest nor its deltas name, and any
 // half-built part a killed build left behind.
