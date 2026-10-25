@@ -213,8 +213,8 @@ func appendDelta(store string, members []ckpt, base delta, did string) (bool, in
 		return false, 0, err
 	}
 	defer srcF.Close()
-	lw := &frameWriter{f: lightF, off: base.LightLen, target: lightFrame, enc: encoder}
-	hw := &frameWriter{f: heavyF, off: base.HeavyLen, target: heavyFrame, enc: heavyEncoder}
+	lw := &frameWriter{f: lightF, off: base.LightLen, target: lightFrame, enc: partEncoder}
+	hw := &frameWriter{f: heavyF, off: base.HeavyLen, target: heavyFrame, enc: partHeavyEncoder}
 	next := delta{Image: base.Image, Rows: base.Rows, Members: slices.Clone(base.Members)}
 	var srcs []byte
 	for _, c := range cks {

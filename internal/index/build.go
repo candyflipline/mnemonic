@@ -10,9 +10,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 type built struct {
@@ -21,6 +24,14 @@ type built struct {
 	lf  int64
 	li  int
 }
+
+// partEncoder and partHeavyEncoder compress a part's frames. A part is
+// rewritten whole each time its member set changes (a settle, an append to a
+// settled component), so its frames are on the cycle's path where a source
+// log's are written once: they take the default level, not the source logs'
+// better one.
+var partEncoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(runtime.GOMAXPROCS(0)), zstd.WithLowerEncoderMem(true))
+var partHeavyEncoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(runtime.GOMAXPROCS(0)), zstd.WithLowerEncoderMem(true))
 
 // partFormat is hashed into every part ID, so a store built by an older layout
 // rebuilds its parts instead of opening them.
@@ -154,8 +165,8 @@ func buildIndex(store string, cks []ckpt, fp, partDir string) error {
 		return err
 	}
 	defer heavyF.Close()
-	lw := &frameWriter{f: lightF, target: lightFrame, enc: encoder}
-	hw := &frameWriter{f: heavyF, target: heavyFrame, enc: heavyEncoder}
+	lw := &frameWriter{f: lightF, target: lightFrame, enc: partEncoder}
+	hw := &frameWriter{f: heavyF, target: heavyFrame, enc: partHeavyEncoder}
 	place := func(b built) (*Row, int64, int, error) {
 		hrec, err := heavy.record(b)
 		if err != nil {
