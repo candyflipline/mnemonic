@@ -59,16 +59,20 @@ func OpenDB(store string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	parts := make([]*Part, 0, len(m.Parts))
-	for _, id := range m.Parts {
-		st, err := OpenPartDir(partDir(store, id))
+	parts := make([]*Part, len(m.Parts))
+	errs := make([]error, len(m.Parts))
+	eachIndex(len(m.Parts), func(i int) {
+		parts[i], errs[i] = OpenPartDir(partDir(store, m.Parts[i]))
+	})
+	for i, err := range errs {
 		if err != nil {
 			for _, p := range parts {
-				p.Close()
+				if p != nil {
+					p.Close()
+				}
 			}
-			return nil, &PartOpenError{Part: id, Err: err}
+			return nil, &PartOpenError{Part: m.Parts[i], Err: err}
 		}
-		parts = append(parts, st)
 	}
 	db, err := OpenParts(parts)
 	if err != nil {
