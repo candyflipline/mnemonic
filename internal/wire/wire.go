@@ -47,28 +47,3 @@ type Source struct {
 	HeadHash   string `json:"head_hash"`
 	UpdatedMs  int64  `json:"updated_ms"`
 }
-
-const ManifestPath = "/v1/manifest"
-
-// Manifest answers GET /v1/manifest?machine=M for the caller's author.
-type Manifest struct {
-	Author  string   `json:"author"`
-	Machine string   `json:"machine"`
-	Sources []Source `json:"sources"`
-}
-
-// PUT /v1/raw/{machine}/{harness}/{src_id}?offset=N&head_hash=H&source_name=S&path=P&raw_end=R
-// Body: whole redacted lines, each ending in '\n'. An empty body only records
-// raw_end: the server accepts it only at offset == Size > 0 with a matching
-// head_hash (else 409, or 400 at offset 0). offset=0 replaces the raw file;
-// offset>0 appends and must equal the server's Size, else 409 with a Conflict
-// body. raw_end=R is the offset in the client's raw file the sent body ends
-// at; R=0 (or absent) means unknown. Success is 200 with the updated Source.
-const RawPathPrefix = "/v1/raw/"
-
-// Conflict is the 409 body: the client re-reads Size and retries from there.
-type Conflict struct {
-	Size     int64  `json:"size"`
-	HeadHash string `json:"head_hash"`
-	RawEnd   int64  `json:"raw_end"`
-}
