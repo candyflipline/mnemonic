@@ -262,14 +262,19 @@ run)
 		T_LISTEN=$(date +%s.%N)
 		HITS=$(curl -s --max-time 120 -X POST "http://$LISTEN/mcp" \
 			-H 'Authorization: Bearer local' -H 'Mcp-Protocol-Version: 2025-06-18' \
-			-H 'Content-Type: application/json' \
+			-H 'Content-Type: application/json' -H 'Accept: application/json' \
 			-d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_sessions","arguments":{"query":"error","n_hits":10}}}' \
 			| python3 -I -c 'import json,sys
 try:
     r = json.load(sys.stdin)
-    sc = (r.get("result") or {}).get("structuredContent") or {}
-    print(sc.get("result_count", "no-result_count"))
-except Exception as e:
+    res = r.get("result") or {}
+    sc = res.get("structuredContent") or {}
+    data = sc.get("data") if isinstance(sc, dict) else None
+    if res.get("isError") or not isinstance(data, dict) or "result_count" not in data:
+        print("no-result_count")
+    else:
+        print(data["result_count"])
+except Exception:
     print("reply-error")') || HITS=reply-error
 		LPID=$(pgrep -P "$TPID" | head -1)
 		[ -n "${LPID:-}" ] && kill -TERM "$LPID" 2>/dev/null || true
