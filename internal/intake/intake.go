@@ -40,6 +40,8 @@ const (
 
 var (
 	errBadSegment = errors.New("bad path segment")
+
+	helloLimit = 60 * time.Second
 )
 
 // Mount constructs the native Push server; every stream passes the push-scope
@@ -226,9 +228,9 @@ func (s *service) Sync(stream grpc.BidiStreamingServer[pushpb.ClientMsg, pushpb.
 		return err
 	}
 	defer s.release()
-	first, err := stream.Recv()
+	first, err := recvHello(stream)
 	if err != nil {
-		return recvStatus(err, "expected Hello")
+		return err
 	}
 	hello := first.GetHello()
 	if hello == nil || !wire.ValidSegment(hello.GetMachine()) {
@@ -282,6 +284,35 @@ func (s *service) Sync(stream grpc.BidiStreamingServer[pushpb.ClientMsg, pushpb.
 		case <-ctx.Done():
 			return toStatus(context.Cause(ctx))
 		}
+	}
+}
+
+// recvHello reads the first message, which must arrive within helloLimit. The
+// stream counts against maxStreams from admit, so a silent one would hold its
+// slot for good. Returning from Sync cancels the stream, which unblocks the
+// Recv still running here.
+func recvHello(stream grpc.BidiStreamingServer[pushpb.ClientMsg, pushpb.ServerMsg]) (*pushpb.ClientMsg, error) {
+	type received struct {
+		m   *pushpb.ClientMsg
+		err error
+	}
+	got := make(chan received, 1)
+	go func() {
+		m, err := stream.Recv()
+		got <- received{m, err}
+	}()
+	limit := time.NewTimer(helloLimit)
+	defer limit.Stop()
+	select {
+	case r := <-got:
+		if r.err != nil {
+			return nil, recvStatus(r.err, "expected Hello")
+		}
+		return r.m, nil
+	case <-limit.C:
+		return nil, status.Errorf(codes.DeadlineExceeded, "no Hello within %s", helloLimit)
+	case <-stream.Context().Done():
+		return nil, toStatus(context.Cause(stream.Context()))
 	}
 }
 

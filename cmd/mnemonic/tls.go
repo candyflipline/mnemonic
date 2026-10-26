@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"net/url"
 	"path/filepath"
 
 	"golang.org/x/crypto/acme"
@@ -16,7 +17,9 @@ import (
 
 // listen binds the HTTP and push listeners. With [tls] hosts set, both
 // serve certificates from one autocert.Manager; tls-alpn-01 answers on the
-// HTTP listener, port 443.
+// HTTP listener, port 443. Certificates are cached per ACME directory
+// (autocert for Let's Encrypt prod, autocert-<directory host> otherwise), so
+// a staging certificate is never found by a prod directory.
 func listen(cfg config.Server) (httpL, pushL net.Listener, err error) {
 	httpL, err = net.Listen("tcp", cfg.Listen)
 	if err != nil {
@@ -30,14 +33,17 @@ func listen(cfg config.Server) (httpL, pushL net.Listener, err error) {
 	if len(cfg.TLS.Hosts) == 0 {
 		return httpL, pushL, nil
 	}
+	cache := "autocert"
 	m := &autocert.Manager{
 		Prompt:     autocert.AcceptTOS,
-		Cache:      autocert.DirCache(filepath.Join(cfg.DataDir, "autocert")),
 		HostPolicy: autocert.HostWhitelist(cfg.TLS.Hosts...),
 	}
 	if cfg.TLS.ACMEDirectory != "" {
 		m.Client = &acme.Client{DirectoryURL: cfg.TLS.ACMEDirectory}
+		u, _ := url.Parse(cfg.TLS.ACMEDirectory)
+		cache += "-" + u.Host
 	}
+	m.Cache = autocert.DirCache(filepath.Join(cfg.DataDir, cache))
 	tc := m.TLSConfig()
 	tc.MinVersion = tls.VersionTLS12
 	return tls.NewListener(httpL, tc), tls.NewListener(pushL, tc), nil

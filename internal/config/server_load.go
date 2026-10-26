@@ -39,7 +39,7 @@ func LoadServer(path string) (Server, error) {
 	if cfg.PushListen == cfg.Listen {
 		return Server{}, fmt.Errorf("%s: push_listen must differ from listen", path)
 	}
-	if err := cfg.TLS.check(cfg.Listen); err != nil {
+	if err := cfg.TLS.check(cfg.Listen, cfg.PushListen); err != nil {
 		return Server{}, fmt.Errorf("%s: %w", path, err)
 	}
 	if len(cfg.Tokens) == 0 {
@@ -80,7 +80,7 @@ func LoadServer(path string) (Server, error) {
 	return cfg, nil
 }
 
-func (t TLS) check(listen string) error {
+func (t TLS) check(listen, pushListen string) error {
 	if len(t.Hosts) == 0 {
 		if t.ACMEDirectory != "" {
 			return fmt.Errorf("tls.acme_directory is set but tls.hosts is empty")
@@ -89,6 +89,9 @@ func (t TLS) check(listen string) error {
 	}
 	if _, port, _ := net.SplitHostPort(listen); port != "443" {
 		return fmt.Errorf("tls.hosts needs listen on port 443 (tls-alpn-01 validates there), not %q", listen)
+	}
+	if _, port, _ := net.SplitHostPort(pushListen); port != "8741" {
+		return fmt.Errorf("tls: push_listen must use port 8741, the port clients dial, not %q", pushListen)
 	}
 	for i, h := range t.Hosts {
 		if h == "" || strings.ContainsAny(h, ":/ ") {

@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -135,11 +136,15 @@ const (
 // and every 5 min without one so hot sources settle cold, until ctx is done. A
 // parser version bump leaves sources for the sweep: cycles then run back to
 // back, each parsing stale sources under the sweep budget, until none are
-// left.
-func (s *Server) Run(ctx context.Context) {
+// left. A boot that yields no lap ends Run with its error: push is served
+// only after boot, so the process cannot do its job and its supervisor
+// restarts it.
+func (s *Server) Run(ctx context.Context) error {
 	changed := s.st.Changed()
 	pushPending := func() bool { return len(changed) > 0 }
-	s.cycle("boot")
+	if err := s.cycle("boot"); s.lap == nil {
+		return fmt.Errorf("index boot: %w", err)
+	}
 	settled := time.Now()
 	for {
 		reason := "sweep"
@@ -149,7 +154,7 @@ func (s *Server) Run(ctx context.Context) {
 			reason = "settle"
 			select {
 			case <-ctx.Done():
-				return
+				return nil
 			case <-changed:
 				reason = "put"
 				settle(ctx, changed)
@@ -157,7 +162,7 @@ func (s *Server) Run(ctx context.Context) {
 			}
 		}
 		if ctx.Err() != nil {
-			return
+			return nil
 		}
 		if reason == "settle" {
 			settled = time.Now()
