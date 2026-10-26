@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/candyflipline/mnemonic/internal/auth"
+	"github.com/candyflipline/mnemonic/internal/export"
 	"github.com/candyflipline/mnemonic/internal/index"
 	"github.com/candyflipline/mnemonic/internal/intake"
 	"github.com/candyflipline/mnemonic/internal/layout"
@@ -64,6 +65,7 @@ func New(dataDir string, tokens auth.Tokens) (*Server, error) {
 	push, drain := intake.Mount(st, tokens)
 	mux.Handle("POST /v1/traces", tokens.Require(auth.Push)(rcv.Traces()))
 	mux.Handle("POST /v1/logs", tokens.Require(auth.Push)(rcv.Logs()))
+	mux.Handle("GET /v1/export/{kind}", tokens.Require(auth.Read)(export.Handler(ix, ctl)))
 	mux.Handle("/mcp", tokens.Require(auth.Read)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tools.ServeHTTP(w, r.WithContext(index.WithControls(store.WithStore(r.Context(), st), ctl)))
 	})))

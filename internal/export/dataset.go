@@ -2,6 +2,7 @@ package export
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -56,23 +57,28 @@ type sessionKey struct {
 	annotations       []schema.Annotation
 }
 
-// Dataset returns the sessions matching the annotation, at most perTask per
-// task, newest first. A task is the cwd of the session's first published
-// event. Sessions in hidden are left out. A session that fails validation does
-// not count toward its task's cap and comes back in skipped; Dataset errs only
-// when every matching session failed.
-func Dataset(db *index.DB, f AnnotationFilter, perTask int, hidden map[string]bool) (rows []DatasetRow, skipped []SessionError, err error) {
+// ErrEveryFailed is Dataset's error when every matching session failed
+// validation.
+var ErrEveryFailed = errors.New("every matching session failed")
+
+// Dataset emits the sessions matching the annotation, at most perTask per
+// task, newest first, one row at a time. A task is the cwd of the session's
+// first published event. Sessions in hidden, and those listed refuses, are
+// left out. A session that fails validation does not count toward its task's
+// cap and comes back in skipped; Dataset errs with ErrEveryFailed only when
+// every matching session failed, and with emit's error when emit fails.
+func Dataset(db *index.DB, f AnnotationFilter, perTask int, hidden map[string]bool, listed func(sessionID string) bool, emit func(DatasetRow) error) (skipped []SessionError, err error) {
 	if f.Name == "" {
-		return nil, nil, fmt.Errorf("export: --annotation needs a name")
+		return nil, fmt.Errorf("export: --annotation needs a name")
 	}
 	if perTask < 1 {
-		return nil, nil, fmt.Errorf("export: --per-task must be at least 1")
+		return nil, fmt.Errorf("export: --per-task must be at least 1")
 	}
 	var sessions []sessionKey
 	err = db.EachSession(hidden, func(es index.ExportSession) error {
 		// A session the annotations relation targets but events never held
 		// is not among the export's sessions.
-		if len(es.Rows) == 0 {
+		if len(es.Rows) == 0 || !listed(es.ID) {
 			return nil
 		}
 		for _, a := range es.Annotations {
@@ -87,11 +93,12 @@ func Dataset(db *index.DB, f AnnotationFilter, perTask int, hidden map[string]bo
 		return nil
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	// Newest first; the session id breaks ties so the order is total.
 	sort.Slice(sessions, func(i, j int) bool { return sessionNewer(sessions[i], sessions[j]) })
 	tasks := map[string]int{}
+	emitted := 0
 	for _, s := range sessions {
 		if tasks[s.task] >= perTask {
 			continue
@@ -102,18 +109,21 @@ func Dataset(db *index.DB, f AnnotationFilter, perTask int, hidden map[string]bo
 			continue
 		}
 		tasks[s.task]++
-		rows = append(rows, DatasetRow{
+		emitted++
+		if err := emit(DatasetRow{
 			SessionID:   s.id,
 			Harness:     s.harness,
 			Task:        s.task,
 			Annotations: annotationOuts(s.annotations),
 			ATIF:        atif,
-		})
+		}); err != nil {
+			return skipped, err
+		}
 	}
-	if len(rows) == 0 && len(skipped) > 0 {
-		return nil, skipped, fmt.Errorf("export: every matching session failed (%d)", len(skipped))
+	if emitted == 0 && len(skipped) > 0 {
+		return skipped, fmt.Errorf("export: %w (%d)", ErrEveryFailed, len(skipped))
 	}
-	return rows, skipped, nil
+	return skipped, nil
 }
 
 func sessionNewer(a, b sessionKey) bool {
