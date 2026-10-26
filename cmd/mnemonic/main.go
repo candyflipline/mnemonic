@@ -11,12 +11,10 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
 	"syscall"
-	"time"
 
 	"github.com/candyflipline/mnemonic/internal/config"
 	pushrun "github.com/candyflipline/mnemonic/internal/push"
@@ -55,14 +53,13 @@ func push(args []string) error {
 	if err != nil {
 		return err
 	}
-	hc := &http.Client{Timeout: 60 * time.Second}
 	if *watch {
 		runtime.GOMAXPROCS(1)
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		return pushrun.Watch(ctx, cfg, red, hc, os.Stdout)
+		return pushrun.Watch(ctx, cfg, red, os.Stdout)
 	}
-	stats, err := pushrun.Run(context.Background(), cfg, red, hc)
+	stats, err := pushrun.Run(context.Background(), cfg, red)
 	if err != nil {
 		return err
 	}
