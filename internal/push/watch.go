@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -18,12 +17,10 @@ import (
 )
 
 const (
-	quietFor       = 1 * time.Second
-	flushWithin    = 5 * time.Second
-	conflictRetry  = time.Second
-	errorRetryMin  = 5 * time.Second
-	errorRetryMax  = time.Minute
-	reconcileEvery = 6 * time.Hour
+	quietFor      = 1 * time.Second
+	flushWithin   = 5 * time.Second
+	errorRetryMin = 5 * time.Second
+	errorRetryMax = time.Minute
 )
 
 const lostEvents = ""
@@ -43,7 +40,7 @@ type watchGlob struct {
 type watcher struct {
 	cfg      config.Client
 	red      Redactor
-	hc       *http.Client
+	up       *uplink
 	sink     Sink
 	globs    []watchGlob
 	quiet    time.Duration
@@ -51,15 +48,15 @@ type watcher struct {
 	failed   bool
 	retries  int
 	note     *notifier
-	held     map[string]*wire.Source
 	files    map[string]*watched
+	deferred map[string]bool
 	dirs     map[string]bool
 	stale    bool
 	watchErr error
 }
 
 // Sink is where a watcher hands the paths whose (size, mtime) changed since
-// their last sync, instead of the HTTP push: local mode feeds them to the
+// their last sync, instead of the push stream: local mode feeds them to the
 // index ingest. Sync brings the sink's index up to the named files and
 // reports what it did; an error fails the pass, and the watcher retries on
 // the same backoff a failed push gets.
@@ -70,23 +67,23 @@ type Sink interface {
 // Watch runs until ctx ends. Paths named by file events are sent at the first
 // quietFor tick after the first unsent event that finds no newer event, or
 // flushWithin after it, whichever comes first; a stats line is printed when
-// something was sent or failed.
-func Watch(ctx context.Context, cfg config.Client, red Redactor, hc *http.Client, out io.Writer) error {
-	return newWatcher(cfg, red, hc).run(ctx, out)
+// something was sent or failed. It holds one push stream open and, whenever
+// the stream ends, backs off, redials and runs one full pass.
+func Watch(ctx context.Context, cfg config.Client, red Redactor, out io.Writer) error {
+	return newWatcher(cfg, red).run(ctx, out)
 }
 
-// WatchSink is Watch with every changed path handed to sink instead of pushed
-// over HTTP: no server is contacted, nothing is redacted, and the sink owns
+// WatchSink is Watch with every changed path handed to sink instead of pushed: no server is contacted, nothing is redacted, and the sink owns
 // its own sync state — it is told, it is not kept current. Syncing still
 // follows the watcher's quiet window and stamp tests.
 func WatchSink(ctx context.Context, cfg config.Client, sink Sink, out io.Writer) error {
-	w := newWatcher(cfg, nil, nil)
+	w := newWatcher(cfg, nil)
 	w.sink = sink
 	return w.run(ctx, out)
 }
 
-func newWatcher(cfg config.Client, red Redactor, hc *http.Client) *watcher {
-	w := &watcher{cfg: cfg, red: red, hc: hc, quiet: quietFor, within: flushWithin, stale: true}
+func newWatcher(cfg config.Client, red Redactor) *watcher {
+	w := &watcher{cfg: cfg, red: red, quiet: quietFor, within: flushWithin, stale: true, deferred: make(map[string]bool)}
 	for _, src := range cfg.Sources {
 		glob, err := filepath.Abs(src.Glob)
 		if err != nil {
@@ -104,9 +101,8 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 		return err
 	}
 	defer n.close()
+	defer w.hangup()
 	w.note = n
-	periodic := time.NewTimer(0)
-	defer periodic.Stop()
 	dirty := make(map[string]bool)
 	flushAt := time.NewTimer(time.Hour)
 	flushAt.Stop()
@@ -119,9 +115,15 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 		}
 	}
 	var firstEvent time.Time
-	var window, retry <-chan time.Time
+	var window <-chan time.Time
+	retry := time.After(0)
 	var fresh, delivered bool
 	for {
+		var acks <-chan ack
+		var ended <-chan struct{}
+		if w.up != nil {
+			acks, ended = w.up.acked, w.up.ended()
+		}
 		select {
 		case <-ctx.Done():
 			return nil
@@ -152,21 +154,53 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 			}
 		case <-retry:
 			retry = nil
-		case <-periodic.C:
-			w.stale = true
+		case a := <-acks:
+			if err := w.up.consume(a); err != nil {
+				fmt.Fprintln(out, "push:", err)
+			}
+			w.takeRedo(dirty)
+			if window == nil && w.ready(dirty) {
+				firstEvent = time.Now()
+				window = flushAt.C
+				flushAt.Reset(w.quiet)
+			}
+			continue
+		case <-ended:
+			if err := w.up.cause(); err != io.EOF {
+				fmt.Fprintln(out, "push:", err)
+			} else {
+				fmt.Fprintln(out, "push: stream closed by the server")
+			}
+			w.up, w.stale = nil, true
+			if retry == nil {
+				retry = time.After(w.retryDelay())
+			}
+			continue
 		}
 		flushAt.Stop()
 		window, fresh = nil, false
 		w.failed = false
 		var st Stats
 		var err error
-		if w.stale {
-			st, err = w.reconcile(ctx)
-			periodic.Reset(reconcileEvery)
-		} else {
+		if w.sink == nil && w.up == nil {
+			if w.up, err = dial(ctx, w.cfg); err == nil {
+				w.stale = true
+			}
+		}
+		switch {
+		case err != nil:
+			w.stale = true
+		case w.stale:
+			st = w.reconcile(ctx)
+		default:
 			st = w.flush(ctx, dirty)
 		}
 		clear(dirty)
+		for p := range w.deferred {
+			dirty[p] = true
+		}
+		clear(w.deferred)
+		w.takeRedo(dirty)
 		if delivered {
 			n.rearm()
 			delivered = false
@@ -187,36 +221,60 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 		if !w.stale {
 			w.retries = 0
 		} else if retry == nil {
-			retry = time.After(w.retryDelay(err))
+			retry = time.After(w.retryDelay())
+		}
+		if window == nil && w.ready(dirty) {
+			firstEvent = time.Now()
+			window = flushAt.C
+			flushAt.Reset(w.quiet)
 		}
 	}
 }
 
-// retryDelay is how long a stale watcher waits before it reconciles again;
-// file events in the meantime wait for it too. A 409 alone means the server's
-// size moved, not that it is struggling, so it starts from conflictRetry; a
-// failed request may mean an overloaded or absent server, so it starts from
-// errorRetryMin. Each consecutive stale pass doubles the wait up to
-// errorRetryMax, and a clean pass resets it.
-func (w *watcher) retryDelay(reconcileErr error) time.Duration {
-	base := conflictRetry
-	if reconcileErr != nil || w.failed {
-		base = errorRetryMin
+// hangup ends the stream without waiting for acks: what was sent and not
+// acked is forgotten, and the next Welcome says what landed.
+func (w *watcher) hangup() {
+	if w.up != nil {
+		w.up.cancel()
 	}
-	d := base << min(w.retries, 8)
+}
+
+// takeRedo marks the paths a conflict ack named dirty and forgets their
+// stamps, so the next flush re-decides them from the server's state.
+func (w *watcher) takeRedo(dirty map[string]bool) {
+	if w.up == nil {
+		return
+	}
+	for _, p := range w.up.takeRedo() {
+		if f := w.files[p]; f != nil {
+			f.synced = stamp{}
+		}
+		dirty[p] = true
+	}
+}
+
+// ready reports whether a flush can make progress on dirty: some path has no
+// append still in flight. Paths that do are retried when their acks arrive.
+func (w *watcher) ready(dirty map[string]bool) bool {
+	for p := range dirty {
+		if w.up == nil || !w.up.busy(wire.SrcID(p)) {
+			return true
+		}
+	}
+	return false
+}
+
+// retryDelay is how long a stale watcher waits before it reconciles or
+// redials again; file events in the meantime wait for it too. It starts at
+// errorRetryMin, doubles for each consecutive stale pass up to errorRetryMax,
+// and a clean pass resets it.
+func (w *watcher) retryDelay() time.Duration {
+	d := errorRetryMin << min(w.retries, 8)
 	w.retries++
 	return min(d, errorRetryMax)
 }
 
-func (w *watcher) reconcile(ctx context.Context) (Stats, error) {
-	if w.sink == nil {
-		held, err := fetchManifest(ctx, w.cfg, w.hc)
-		if err != nil {
-			w.stale = true
-			return Stats{}, err
-		}
-		w.held = held
-	}
+func (w *watcher) reconcile(ctx context.Context) Stats {
 	oldFiles, oldDirs := w.files, w.dirs
 	w.files = make(map[string]*watched)
 	w.dirs = make(map[string]bool)
@@ -241,7 +299,7 @@ func (w *watcher) reconcile(ctx context.Context) (Stats, error) {
 	for p := range w.files {
 		paths = append(paths, p)
 	}
-	return w.sync(ctx, paths), nil
+	return w.sync(ctx, paths)
 }
 
 // flush lists the dirty directories and any glob base not seen yet, then
@@ -327,8 +385,9 @@ func (w *watcher) classify(path string) (watchGlob, bool) {
 }
 
 // sync watches each known path, then sends it when its (size, mtime) differs
-// from its stamp at its last completed sync. A 409 or an error makes the next
-// wake reconcile, after conflictRetry or a backoff.
+// from its stamp at its last completed sync. A path whose appends are still
+// in flight waits in deferred until their acks are in. A file error makes the
+// next wake reconcile after a backoff, and so does a stream that ended.
 func (w *watcher) sync(ctx context.Context, paths []string) Stats {
 	if w.sink != nil {
 		return w.syncSink(ctx, paths)
@@ -353,19 +412,19 @@ func (w *watcher) sync(ctx context.Context, paths []string) Stats {
 		if now == f.synced {
 			continue
 		}
+		if w.up.busy(wire.SrcID(path)) {
+			w.deferred[path] = true
+			continue
+		}
 		st.Scanned++
 		f.size, f.mtimeMs = now.size, info.ModTime().UnixMilli()
-		srcID := wire.SrcID(path)
-		held, conflicted, err := syncSource(ctx, w.cfg, w.red, w.hc, w.held[srcID], f.fileRef, &st)
-		if held != nil {
-			w.held[srcID] = held
-		}
-		if conflicted || err != nil {
-			w.stale = true
-		}
-		if err != nil {
-			w.failed = true
+		if err := streamSource(ctx, w.red, w.up, f.fileRef, &st); err != nil {
+			w.stale, w.failed = true, true
 			st.Failed++
+			var se streamErr
+			if errors.As(err, &se) {
+				return st
+			}
 			continue
 		}
 		f.synced = now

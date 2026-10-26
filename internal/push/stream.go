@@ -1,19 +1,213 @@
 package push
 
-// SKETCH (docs/design/uploader.md, "Usage"): the client end of the push
-// stream. Lane C deletes fetchManifest, putSource, the 409 retry loop in
-// syncSource and syncTail, reconcileEvery and conflictRetry, and Watch and
-// Run take no *http.Client. decide, firstChunk, rawEndOf, redactTail and
-// redactComplete stay as they are: they cut the chunks, so the stream sends
-// the bytes today's PUTs send.
-
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
+	"errors"
+	"fmt"
+	"io"
+	"net/url"
+	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	"github.com/candyflipline/mnemonic/internal/config"
 	"github.com/candyflipline/mnemonic/internal/wire"
 	"github.com/candyflipline/mnemonic/internal/wire/pushpb"
 )
+
+const (
+	pingEvery    = 30 * time.Second
+	pingTimeout  = 20 * time.Second
+	welcomeLimit = time.Minute
+)
+
+type window struct {
+	appends int
+	bytes   int64
+}
+
+type inflight struct {
+	seq   uint64
+	path  string
+	srcID string
+	bytes int64
+}
+
+// ack is a parsed pushpb.Ack. conflict and state are all applyAck needs.
+type ack struct {
+	seq      uint64
+	conflict bool
+	state    wire.Source
+}
+
+// uplink is one open Sync stream. sources starts as what Welcome said, by
+// src_id, and is then the server's state plus what is in flight: send
+// advances a source's entry optimistically, and an APPLIED ack writes the
+// server's state back only when no later append of that source is in flight
+// (unacked[src] reaches 0). A CONFLICT ack always writes the server's state
+// back and records the path in redo. Only the goroutine that owns the uplink
+// touches sources, unacked, queue and redo; the reader goroutine only parses
+// acks and delivers them on acked.
+type uplink struct {
+	stream  pushpb.Push_SyncClient
+	cancel  context.CancelFunc
+	sources map[string]*wire.Source
+	unacked map[string]int
+	queue   []inflight
+	queued  int64
+	redo    []string
+	window  window
+	seq     uint64
+	acked   chan ack
+	fin     chan struct{}
+	err     error // why the stream ended; valid once fin is closed
+}
+
+// target maps the config's server URL to a gRPC target and credentials:
+// https dials host:443 (or the URL's port) with the system roots, http dials
+// plaintext HTTP/2 (the box and tests).
+func target(server string) (string, credentials.TransportCredentials, error) {
+	u, err := url.Parse(server)
+	if err != nil || u.Hostname() == "" {
+		return "", nil, fmt.Errorf("server %q is not an http(s) URL", server)
+	}
+	port := u.Port()
+	switch u.Scheme {
+	case "https":
+		if port == "" {
+			port = "443"
+		}
+		return "passthrough:///" + u.Hostname() + ":" + port, credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12}), nil
+	case "http":
+		if port == "" {
+			port = "80"
+		}
+		return "passthrough:///" + u.Hostname() + ":" + port, insecure.NewCredentials(), nil
+	}
+	return "", nil, fmt.Errorf("server %q is not an http(s) URL", server)
+}
+
+// dial opens Sync on cfg.Server, sends Hello with cfg.Machine and the bearer
+// token as metadata, reads Welcome pages until more is false, and starts the
+// ack reader. The client pings every pingEvery while the stream is open.
+func dial(ctx context.Context, cfg config.Client) (*uplink, error) {
+	tgt, creds, err := target(cfg.Server)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := grpc.NewClient(tgt,
+		grpc.WithTransportCredentials(creds),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: pingEvery, Timeout: pingTimeout}),
+	)
+	if err != nil {
+		return nil, err
+	}
+	sctx, cancel := context.WithCancel(metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+cfg.Token))
+	u := &uplink{cancel: cancel, sources: make(map[string]*wire.Source), unacked: make(map[string]int), fin: make(chan struct{})}
+	stop := time.AfterFunc(welcomeLimit, cancel)
+	err = u.handshake(sctx, conn, cfg.Machine)
+	if !stop.Stop() && err == nil {
+		err = context.DeadlineExceeded
+	}
+	if err != nil {
+		cancel()
+		conn.Close()
+		return nil, err
+	}
+	u.acked = make(chan ack, u.window.appends+1)
+	go u.read(sctx, conn)
+	return u, nil
+}
+
+func (u *uplink) handshake(ctx context.Context, conn *grpc.ClientConn, machine string) error {
+	stream, err := pushpb.NewPushClient(conn).Sync(ctx)
+	if err != nil {
+		return err
+	}
+	u.stream = stream
+	if err := stream.Send(&pushpb.ClientMsg{Msg: &pushpb.ClientMsg_Hello{Hello: &pushpb.Hello{Machine: machine}}}); err != nil {
+		return u.recvErr(err)
+	}
+	for {
+		msg, err := stream.Recv()
+		if err != nil {
+			return err
+		}
+		w := msg.GetWelcome()
+		if w == nil {
+			return errors.New("sync: server sent an ack before Welcome ended")
+		}
+		for _, s := range w.Sources {
+			u.sources[s.SrcId] = &wire.Source{
+				SrcID: s.SrcId, Harness: s.Harness, Size: s.Size, HeadHash: s.HeadHash,
+				RawEnd: s.RawEnd, UpdatedMs: s.UpdatedMs,
+			}
+		}
+		if w.More {
+			continue
+		}
+		if w.Window == nil || w.Window.Appends == 0 || w.Window.Bytes == 0 {
+			return errors.New("sync: last Welcome page carries no window")
+		}
+		u.window = window{appends: int(w.Window.Appends), bytes: int64(w.Window.Bytes)}
+		return nil
+	}
+}
+
+// recvErr turns a Send failure into the stream's real status: a Send that
+// fails with io.EOF means the stream ended, and Recv says why.
+func (u *uplink) recvErr(err error) error {
+	if errors.Is(err, io.EOF) {
+		if _, rerr := u.stream.Recv(); rerr != nil {
+			return rerr
+		}
+	}
+	return err
+}
+
+func (u *uplink) read(ctx context.Context, conn *grpc.ClientConn) {
+	defer func() {
+		u.cancel()
+		conn.Close()
+		close(u.fin)
+	}()
+	for {
+		msg, err := u.stream.Recv()
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				u.err = err
+			}
+			return
+		}
+		a := msg.GetAck()
+		if a == nil || a.State == nil {
+			u.err = errors.New("sync: server sent a message that is not an ack")
+			return
+		}
+		s := a.State
+		parsed := ack{seq: a.Seq, conflict: a.Result == pushpb.Ack_CONFLICT, state: wire.Source{
+			SrcID: s.SrcId, Harness: s.Harness, Size: s.Size, HeadHash: s.HeadHash,
+			RawEnd: s.RawEnd, UpdatedMs: s.UpdatedMs,
+		}}
+		if a.Result != pushpb.Ack_APPLIED && a.Result != pushpb.Ack_CONFLICT {
+			u.err = fmt.Errorf("sync: ack %d has result %v", a.Seq, a.Result)
+			return
+		}
+		select {
+		case u.acked <- parsed:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
 
 // put is one chunk the decision logic cut: a PUT's fields, now an Append.
 type put struct {
@@ -24,88 +218,264 @@ type put struct {
 	body                             []byte
 }
 
-// ack is a parsed pushpb.Ack: the path it answers (from the in-flight
-// record of its seq) and the source's state after it.
-type ack struct {
-	path     string
-	srcID    string
-	conflict bool
-	state    wire.Source
-}
-
-// uplink is one open Sync stream. sources starts as what Welcome said, by
-// src_id, and is then the server's state plus what is in flight: send
-// advances a source's Size optimistically, and an APPLIED ack writes the
-// server's state back only when no later append of that source is in flight
-// (unacked[src] reaches 0), so a flush during the ack latency never re-sends
-// from a stale offset. A CONFLICT ack always writes the server's state back.
-// Only the watcher goroutine touches sources and unacked: the ack reader
-// goroutine only parses and delivers on acked, and the watcher applies each
-// ack in its select loop (applyAck).
-type uplink struct {
-	stream  pushpb.Push_SyncClient
-	cancel  context.CancelFunc
-	sources map[string]*wire.Source
-	unacked map[string]int
-	window  window
-	seq     uint64
-	sent    chan inflight // cap window.appends: send blocks when full
-	acked   chan ack
-	done    chan error // the stream's end: nil after close, else why
-}
-
-type window struct {
-	appends int
-	bytes   int64
-}
-
-type inflight struct {
-	seq   uint64
-	path  string
-	bytes int64
-}
-
-// dial opens Sync on cfg.Server (https: TLS with system roots on :443 unless
-// the URL names a port; http: plaintext h2c, tests only), sends Hello with
-// cfg.Machine and the bearer token as metadata, reads Welcome pages until
-// more is false, and starts the ack reader.
-func dial(ctx context.Context, cfg config.Client) (*uplink, error) { panic("not implemented") }
-
 // send writes one Append. It blocks while window.appends appends or
-// window.bytes body bytes are unacked, and returns the stream's error once
-// the stream ended.
-func (u *uplink) send(ctx context.Context, p put) error { panic("not implemented") }
+// window.bytes body bytes are unacked, applying the acks that arrive, and
+// returns the stream's error once the stream ended.
+func (u *uplink) send(ctx context.Context, p put) error {
+	if err := u.sendOne(ctx, p); err != nil {
+		return streamErr{err}
+	}
+	return nil
+}
 
-// acks delivers each Ack in send order; a seq that is not the oldest
-// in-flight one ends the stream (protocol error).
-func (u *uplink) acks() <-chan ack { return u.acked }
+// streamErr marks an error that ended the stream, as opposed to one that
+// failed a single file.
+type streamErr struct{ error }
+
+func (e streamErr) Unwrap() error { return e.error }
+
+func (u *uplink) sendOne(ctx context.Context, p put) error {
+	size := int64(len(p.body))
+	for len(u.queue) >= u.window.appends || (len(u.queue) > 0 && u.queued+size > u.window.bytes) {
+		select {
+		case a := <-u.acked:
+			if err := u.consume(a); err != nil {
+				return err
+			}
+		case <-u.fin:
+			return u.cause()
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	select {
+	case <-u.fin:
+		return u.cause()
+	default:
+	}
+	u.seq++
+	err := u.stream.Send(&pushpb.ClientMsg{Msg: &pushpb.ClientMsg_Append{Append: &pushpb.Append{
+		Seq: u.seq, Harness: p.harness, SrcId: p.srcID, Offset: p.offset, HeadHash: p.headHash,
+		SourceName: p.sourceName, Path: p.path, RawEnd: p.rawEnd, Body: p.body,
+	}}})
+	if err != nil {
+		select {
+		case <-u.fin:
+			return u.cause()
+		case <-time.After(time.Second):
+		}
+		return err
+	}
+	u.queue = append(u.queue, inflight{seq: u.seq, path: p.path, srcID: p.srcID, bytes: size})
+	u.queued += size
+	u.unacked[p.srcID]++
+	prev := u.sources[p.srcID]
+	next := &wire.Source{SrcID: p.srcID, Harness: p.harness, Size: p.offset + size, HeadHash: p.headHash, RawEnd: p.rawEnd}
+	if prev != nil {
+		next.UpdatedMs = prev.UpdatedMs
+	}
+	u.sources[p.srcID] = next
+	return nil
+}
+
+// cause is why a finished stream ended.
+func (u *uplink) cause() error {
+	if u.err != nil {
+		return u.err
+	}
+	return io.EOF
+}
+
+// consume applies one delivered ack; an ack out of order ends the stream.
+func (u *uplink) consume(a ack) error {
+	if len(u.queue) == 0 || u.queue[0].seq != a.seq {
+		u.cancel()
+		return fmt.Errorf("sync: ack %d does not answer the oldest append in flight", a.seq)
+	}
+	if u.applyAck(a) {
+		u.redo = append(u.redo, u.queue[0].path)
+	}
+	head := u.queue[0]
+	u.queue = u.queue[1:]
+	u.queued -= head.bytes
+	return nil
+}
 
 // applyAck folds a into sources and unacked, as the uplink comment says, and
-// reports whether a's path must be re-decided (a conflict).
-func (u *uplink) applyAck(a ack) (redo bool) { panic("not implemented") }
+// reports whether the path of the append it answers must be re-decided (a
+// conflict). The append stays on the queue until consume pops it.
+func (u *uplink) applyAck(a ack) (redo bool) {
+	src := u.queue[0].srcID
+	u.unacked[src]--
+	if u.unacked[src] == 0 {
+		delete(u.unacked, src)
+	}
+	if !a.conflict && u.unacked[src] > 0 {
+		return false
+	}
+	if a.conflict && a.state.Size == 0 && a.state.HeadHash == "" {
+		delete(u.sources, src)
+	} else {
+		s := a.state
+		s.SrcID = src
+		u.sources[src] = &s
+	}
+	return a.conflict
+}
 
-// ended fires once with the stream's error.
-func (u *uplink) ended() <-chan error { return u.done }
+// busy reports whether appends of the source are still unacked.
+func (u *uplink) busy(srcID string) bool { return u.unacked[srcID] > 0 }
+
+// takeRedo returns the paths whose append was answered CONFLICT since the
+// last call.
+func (u *uplink) takeRedo() []string {
+	r := u.redo
+	u.redo = nil
+	return r
+}
+
+// drain applies acks until nothing is in flight or the stream ended.
+func (u *uplink) drain(ctx context.Context) error {
+	for len(u.queue) > 0 {
+		select {
+		case a := <-u.acked:
+			if err := u.consume(a); err != nil {
+				return err
+			}
+		case <-u.fin:
+			select {
+			case a := <-u.acked:
+				if err := u.consume(a); err != nil {
+					return err
+				}
+				continue
+			default:
+			}
+			return fmt.Errorf("sync: stream ended with %d appends unacked: %w", len(u.queue), u.cause())
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
 
 // close half-closes, waits for every in-flight ack, and returns the stream's
 // error.
-func (u *uplink) close() error { panic("not implemented") }
+func (u *uplink) close(ctx context.Context) error {
+	defer func() {
+		u.cancel()
+		<-u.fin
+	}()
+	if err := u.stream.CloseSend(); err != nil {
+		return err
+	}
+	return u.drain(ctx)
+}
+
+// ended returns a channel closed when the stream ended; cause says why.
+func (u *uplink) ended() <-chan struct{} { return u.fin }
+
+// retriable reports whether err is a stream end the client treats as normal:
+// back off, redial, run a full pass.
+func retriable(err error) bool {
+	switch status.Code(err) {
+	case codes.Aborted, codes.Unavailable:
+		return true
+	}
+	return false
+}
 
 // streamSource replaces syncSource: the same skip rules against
 // u.sources[srcID], the same decide/firstChunk/rawEndOf cut, every chunk sent
 // without waiting for its ack (the next chunk's offset is the previous one's
-// end, as syncSource already assumes at push.go:176). A conflict ack is the
-// watcher's: it sets u.sources[srcID] to the ack's state and marks the path
-// dirty, and the next flush re-decides it once from that state.
+// end). A conflict ack is the caller's: u.takeRedo names the path, and the
+// next pass re-decides it once from the server's state.
 func streamSource(ctx context.Context, red Redactor, u *uplink, f fileRef, st *Stats) error {
-	// TODO:
-	// entry := u.sources[wire.SrcID(f.path)]
-	// skip exactly as push.go:94-106
-	// tail path (entry.RawEnd > 0 && entry.Size > 0): redactTail, then for
-	//   each firstChunk: u.send(put{offset: entry.Size, ...}); entry.Size += len
-	//   (fallback to the full path when redactTail returns nil, as today)
-	// full path: redactComplete; loop decide(entry, head, body):
-	//   noop -> legacy backfill send (empty body, raw_end) when entry.RawEnd==0
-	//   else send firstChunk at offset; entry = {Size: offset+len, HeadHash: head}
-	panic("not implemented")
+	srcID := wire.SrcID(f.path)
+	entry := u.sources[srcID]
+	if entry != nil && entry.RawEnd > 0 && f.size == entry.RawEnd {
+		st.Unchanged++
+		return nil
+	}
+	// The server stamps UpdatedMs after it received the bytes, so a file whose
+	// last write is older than that stamp (with a 5-minute margin for
+	// client/server clock skew) has nothing new; skip it unread. Entries with
+	// RawEnd 0 — the legacy shape — are saved the read by this skip alone.
+	if entry != nil && f.mtimeMs < entry.UpdatedMs-skewMs {
+		st.Unchanged++
+		return nil
+	}
+	legacy := entry != nil && entry.RawEnd == 0
+	chunk := func(offset int64, head string, body []byte, rawEnd int64) error {
+		return u.send(ctx, put{
+			path: f.path, harness: f.harness, srcID: srcID, sourceName: f.sourceName,
+			offset: offset, headHash: head, rawEnd: rawEnd, body: body,
+		})
+	}
+	sent, replaced := false, false
+	if entry != nil && entry.RawEnd > 0 && entry.Size > 0 {
+		tail, err := redactTail(f.path, red, entry, f.head)
+		if err != nil {
+			return err
+		}
+		if tail != nil {
+			size, body, rawEnds := entry.Size, tail.body, tail.rawEnds
+			for len(body) > 0 {
+				piece := firstChunk(body, maxChunk)
+				lines := bytes.Count(piece, []byte{'\n'})
+				if err := chunk(size, tail.head, piece, rawEnds[lines-1]); err != nil {
+					return err
+				}
+				st.Bytes += int64(len(piece))
+				sent = true
+				size += int64(len(piece))
+				body, rawEnds = body[len(piece):], rawEnds[lines:]
+			}
+			if sent {
+				st.Appended++
+			} else {
+				st.Unchanged++
+			}
+			return nil
+		}
+	}
+	file, err := redactComplete(f.path, red)
+	if err != nil {
+		return err
+	}
+	if file == nil {
+		st.Unchanged++
+		return nil
+	}
+	cur := entry
+	for {
+		body, offset, noop := decide(cur, file.head, file.body)
+		if noop {
+			// A legacy entry (RawEnd 0) whose redacted bytes the server already
+			// holds in full would read whole every pass forever: one empty
+			// append at Size records raw_end so the next pass takes the exact
+			// skip.
+			if legacy && !sent {
+				if err := chunk(cur.Size, file.head, nil, file.rawEnds[len(file.rawEnds)-1]); err != nil {
+					return err
+				}
+			}
+			switch {
+			case !sent:
+				st.Unchanged++
+			case replaced:
+				st.Replaced++
+			default:
+				st.Appended++
+			}
+			return nil
+		}
+		body = firstChunk(body, maxChunk)
+		if err := chunk(offset, file.head, body, rawEndOf(file.rawEnds, file.body, offset, body)); err != nil {
+			return err
+		}
+		st.Bytes += int64(len(body))
+		sent, replaced = true, replaced || offset == 0
+		cur = &wire.Source{SrcID: srcID, Size: offset + int64(len(body)), HeadHash: file.head}
+	}
 }
