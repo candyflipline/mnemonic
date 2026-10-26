@@ -9,8 +9,10 @@
 # "cycle put" that indexes it.
 #
 # Prep, once per DIR (idempotent, outside the timed part):
-#   - DIR missing: cp -a SRC (default $BOX/http-1, read-only, raw-only store) DIR
-#   - DIR/events: a symlink tree to the 16 ch files under $BOX/events (read-only)
+#   - DIR: an overlayfs view of SRC (default $BOX/http-1, a raw-only store, never
+#     written: writes land in DIR.up); the prep stops if / drops under 60 GB free
+#   - DIR/events: a symlink tree to the ch files under $BOX/events (read-only)
+#     smaller than CH_MAX bytes (default all 16)
 #   - one `BIN index ingest -settle` brings the archive in and settles every
 #     source, so archive member logs are retired as on prod
 #   - the target: the first raw (kind 0) checkpoint, harness claude-code, whose
@@ -26,7 +28,7 @@
 # Counts, sizes and timings only. Run under the box lock:
 #   flock /var/lib/mnu/box.lock sh perf-p2.sh BIN DIR
 # Env: BOX (/var/lib/mnu), SRC ($BOX/http-1), OUT ($BOX/out), N (6),
-#      SPACING (20), PORT (7795), PERF (0).
+#      SPACING (20), PORT (7795), PERF (0), CH_MAX (all).
 set -eu
 
 BIN=${1:?usage: perf-p2.sh BIN DIR}
@@ -38,6 +40,7 @@ N=${N:-6}
 SPACING=${SPACING:-20}
 PORT=${PORT:-7795}
 PERF=${PERF:-0}
+CH_MAX=${CH_MAX:-1000000000000}
 SHA8=$(sha256sum "$BIN" | cut -c1-8)
 P=$OUT/p2-$SHA8-$(date -u +%Y%m%dT%H%M%SZ)
 mkdir -p "$OUT"
@@ -45,25 +48,38 @@ mkdir -p "$OUT"
 avail=$(awk '/MemAvailable/ {print int($2/1048576)}' /proc/meminfo)
 [ "$avail" -ge 8 ] || { echo "MemAvailable ${avail} GB < 8 GB, refusing" >&2; exit 2; }
 
-if [ ! -d "$DIR" ]; then
-	need=$(du -s -B1G "$SRC" | cut -f1)
-	free=$(df --output=avail -B1G / | tail -1 | tr -d ' ')
-	[ $((free - need - 12)) -ge 60 ] || { echo "df: ${free} GB free, copy ${need} GB + 12 GB archive: under 60 GB left" >&2; exit 2; }
-	cp -a "$SRC" "$DIR"
+freegb() { df --output=avail -B1G / | tail -1 | tr -d ' '; }
+if ! mountpoint -q "$DIR"; then
+	mkdir -p "$DIR" "$DIR.up" "$DIR.work"
+	mount -t overlay overlay -o "lowerdir=$SRC,upperdir=$DIR.up,workdir=$DIR.work" "$DIR"
 fi
 if [ ! -d "$DIR/events" ]; then
 	mkdir "$DIR/events"
 	cp "$BOX/events/.parser-version" "$DIR/events/" 2>/dev/null || true
-	find "$BOX/events" -name 'ch-*.parquet' | while IFS= read -r f; do
+	find "$BOX/events" -name 'ch-*.parquet' -size -"$CH_MAX"c | while IFS= read -r f; do
 		rel=${f#"$BOX/events/"}
 		mkdir -p "$DIR/events/$(dirname "$rel")"
 		ln -s "$f" "$DIR/events/$rel"
 	done
 fi
-echo "ch files: $(find "$DIR/events" -name 'ch-*.parquet' | wc -l)"
+CHB=$(find -L "$DIR/events" -name 'ch-*.parquet' -printf '%s\n' | awk '{s+=$1} END {print s+0}')
+echo "ch files: $(find "$DIR/events" -name 'ch-*.parquet' | wc -l) of $(find "$BOX/events" -name 'ch-*.parquet' | wc -l), bytes $CHB of $(find "$BOX/events" -name 'ch-*.parquet' -printf '%s\n' | awk '{s+=$1} END {print s+0}')"
 if [ ! -e "$DIR/.p2-settled" ]; then
-	/usr/bin/time -v systemd-run --scope --quiet -p MemoryMax=12G env GOMAXPROCS=4 \
-		"$BIN" index ingest -root "$DIR" -store "$DIR/index" -settle > "$P-prep.log" 2>&1
+	need=$((60 + 2 * CHB / 1000000000 + 4))
+	[ "$(freegb)" -ge "$need" ] || { echo "df: $(freegb) GB free < $need (60 + twice the ch bytes + 4)" >&2; exit 2; }
+	/usr/bin/time -v systemd-run --scope --quiet -p MemoryMax=8G env GOMAXPROCS=4 \
+		"$BIN" index ingest -root "$DIR" -store "$DIR/index" -settle > "$P-prep.log" 2>&1 &
+	PREP=$!
+	while kill -0 "$PREP" 2>/dev/null; do
+		echo "$(date -u +%T) free_gb $(freegb) upper_gb $(du -s -B1G "$DIR.up" | cut -f1)" >> "$P-prep-df.log"
+		if [ "$(freegb)" -lt 60 ]; then
+			pkill -INT -P "$PREP" 2>/dev/null || true
+			echo "DISK GUARD: $(freegb) GB free < 60, prep stopped" >&2
+			exit 2
+		fi
+		sleep 10
+	done
+	wait "$PREP"
 	grep -E '^ingest:|Elapsed .wall|Maximum resident|Percent of CPU' "$P-prep.log"
 	touch "$DIR/.p2-settled"
 fi
