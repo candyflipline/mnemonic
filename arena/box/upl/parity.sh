@@ -41,6 +41,46 @@ SHIM
 	chmod +x /usr/bin/time
 fi
 
+# file_attention reads the host filesystem (internal/index/q_list_helpers.go:206
+# qFindProjectRoot stats <dir>/.git up from each touched path; q_attention_tail.go
+# :89 qWorktreeRootsForRepoRoot reads the git dir), so its expected answers hold
+# the repo roots of the machine that made them. Without those directories the box
+# answers 113 of 126 (the 13 file_attention calls: roots 1 where 2 are expected).
+# Create each absolute root the fixture's expected file_attention answers name,
+# as an empty <root>/.git directory; idempotent, never touches an existing one.
+python3 -I - "$FIX" <<'PYEOF'
+import json, os, sys
+fix = sys.argv[1]
+roots = set()
+def walk(o):
+    if isinstance(o, dict):
+        for k, v in o.items():
+            if k in ("root", "worktree_root") and isinstance(v, str):
+                roots.add(v)
+            elif k == "worktree_roots" and isinstance(v, list):
+                roots.update(r for r in v if isinstance(r, str))
+            else:
+                walk(v)
+    elif isinstance(o, list):
+        for v in o:
+            walk(v)
+for s in ("golden", "hidden"):
+    tool = {}
+    for l in open(os.path.join(fix, s, "calls.jsonl")):
+        c = json.loads(l)
+        tool[c["id"]] = c["tool"]
+    for l in open(os.path.join(fix, s, "expected.jsonl")):
+        e = json.loads(l)
+        if tool.get(e["id"]) == "file_attention":
+            walk(e.get("data"))
+made = 0
+for r in sorted(roots):
+    if r.startswith("/") and not os.path.exists(r + "/.git"):
+        os.makedirs(r + "/.git")
+        made += 1
+print("stub_repo_roots\t%d created of %d named" % (made, len([r for r in roots if r.startswith("/")])))
+PYEOF
+
 WRAP=$ARENA_DIR/wrapper-$SHA8
 {
 	echo '#!/bin/sh'
