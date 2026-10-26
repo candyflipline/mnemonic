@@ -20,10 +20,14 @@ type manifestFile struct {
 
 // DB is every part of one committed manifest. Parts partition sessions, so a
 // session's events, turns and rollups live in exactly one part; only BM25's
-// corpus statistics are summed across parts.
+// corpus statistics are summed across parts, and only the annotations
+// section: a part may hold annotation entries for a session whose rows live
+// in another part, so annPart indexes, per target session, every part whose
+// annotations section holds it.
 type DB struct {
 	parts      []*Part
 	sessPart   map[string]int
+	annPart    map[string][]int
 	scoredDocs uint64
 	totalLen   uint64
 	sources    []stSource
@@ -85,7 +89,7 @@ func OpenDB(store string) (*DB, error) {
 // OpenParts is a DB over parts the caller opened. It answers every tool but
 // get_ingest_status, which has no source rows here.
 func OpenParts(parts []*Part) (*DB, error) {
-	db := &DB{parts: parts, sessPart: map[string]int{}}
+	db := &DB{parts: parts, sessPart: map[string]int{}, annPart: map[string][]int{}}
 	fc := newFrameCache()
 	for i, st := range parts {
 		st.fc = fc
@@ -93,6 +97,9 @@ func OpenParts(parts []*Part) (*DB, error) {
 		db.totalLen += st.meta.TotalLen
 		for s := 0; s < st.nSessions; s++ {
 			db.sessPart[st.session(s).id] = i
+		}
+		for sid := range st.annAt.of(st.annB) {
+			db.annPart[sid] = append(db.annPart[sid], i)
 		}
 	}
 	return db, nil

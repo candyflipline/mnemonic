@@ -938,6 +938,18 @@ func buildParts(store string, parts [][]ckpt, prev manifestFile, byPrev map[stri
 
 func buildPart(store string, members []ckpt, prev manifestFile, byPrev map[string]string) (builtPart, error) {
 	id := fingerprint(members)
+	if annotationOnly(members) {
+		// An annotation component's part is the annotations section alone: no
+		// docs to delta, and tiny next to any session part, so it is rebuilt
+		// whole each cycle it grows and takes no image or delta.
+		if _, err := os.Stat(partDir(store, id)); err == nil {
+			return builtPart{id: id, hot: slices.ContainsFunc(members, ckpt.hot)}, nil
+		}
+		if err := buildIndex(store, members, id, partDir(store, id), byPrev); err != nil {
+			return builtPart{}, err
+		}
+		return builtPart{id: id, hot: slices.ContainsFunc(members, ckpt.hot), built: true, written: dirSize(partDir(store, id))}, nil
+	}
 	if slices.ContainsFunc(members, ckpt.hot) {
 		if retiredJoinsBase(store, members, prev) {
 			return buildHotImage(store, members, byPrev)
@@ -1082,18 +1094,23 @@ const partShards = 256
 
 // componentsOf returns each checkpoint's component representative, and per
 // representative the component's least session id (its key when it has no
-// session) and whether any of its sources is hot.
+// session) and whether any of its sources is hot. An annotation checkpoint
+// contributes no session tokens to the join: it is a component of its own,
+// keyed by its source key, whose part holds the annotations alone and joins
+// its targets at read time.
 func componentsOf(cks []ckpt) (root []int, least map[int]string, hot map[int]bool) {
 	tokens := make([][]string, len(cks))
 	for i, c := range cks {
-		tokens[i] = c.Sessions
+		if c.Harness != schema.AnnotationHarness {
+			tokens[i] = c.Sessions
+		}
 	}
 	root = components(tokens)
 	least, hot = map[int]string{}, map[int]bool{}
 	for i, c := range cks {
 		r := root[i]
 		k := c.Key
-		if len(c.Sessions) > 0 {
+		if c.Harness != schema.AnnotationHarness && len(c.Sessions) > 0 {
 			k = c.Sessions[0]
 		}
 		if cur, ok := least[r]; !ok || k < cur {
@@ -1108,6 +1125,13 @@ func shardOf(least string) uint32 {
 	h := fnv.New32a()
 	h.Write([]byte(least))
 	return h.Sum32() % partShards
+}
+
+// annotationOnly reports whether every member parses the annotation harness,
+// so the part build holds annotation rows alone: they feed only the
+// annotations section and the part holds no docs.
+func annotationOnly(members []ckpt) bool {
+	return len(members) > 0 && !slices.ContainsFunc(members, func(c ckpt) bool { return c.Harness != schema.AnnotationHarness })
 }
 
 // settleShards is how many shards that already hold a settled component a
