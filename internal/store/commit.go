@@ -526,6 +526,9 @@ func (c *Committer) run() {
 			c.stop(err, held)
 			return
 		}
+		// The budget no longer counts this prefix. Drop its references before
+		// re-slicing: the backing array remains live even while we are idle.
+		clear(held[:n])
 		held = held[n:]
 	}
 }
