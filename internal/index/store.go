@@ -35,7 +35,9 @@ type Part struct {
 	lsErr                     error
 	lsB                       []byte
 	spansB, annB, authB       []byte
-	spansAt, annAt, authAt    secOffsets
+	spansAt, annAt            secOffsets
+	authOnce                  sync.Once
+	authBy                    map[string][]string
 }
 
 // frameCache holds the last decoded light and heavy frames of every part of
@@ -208,29 +210,34 @@ func (st *Part) annOf(id string) []schema.Annotation {
 	return decodeAnn(raw)
 }
 
-func (st *Part) authOf(id string) []string {
-	raw := st.authAt.raw(st.authB, id)
-	if raw == nil {
-		return nil
-	}
-	return decodeAuthors(raw)
+// authors is the authors section decoded once, on first use. The section is
+// one short list per session, so it scales with sessions and not with docs or
+// with the spans file beside it. The lists are shared: a caller that writes
+// into one copies it first.
+func (st *Part) authors() map[string][]string {
+	st.authOnce.Do(func() {
+		at := scanSection(st.authB)
+		st.authBy = make(map[string][]string, len(at))
+		for id, r := range at {
+			st.authBy[id] = decodeAuthors(st.authB[r[0]:r[1]])
+		}
+	})
+	return st.authBy
 }
 
-// authEach decodes the authors of every session keep accepts, one at a time.
+func (st *Part) authOf(id string) []string { return st.authors()[id] }
+
+// authEach hands fn the authors of every session keep accepts.
 func (st *Part) authEach(keep func(id string) bool, fn func(id string, authors []string)) {
-	for id, r := range st.authAt.of(st.authB) {
+	for id, as := range st.authors() {
 		if keep == nil || keep(id) {
-			fn(id, decodeAuthors(st.authB[r[0]:r[1]]))
+			fn(id, as)
 		}
 	}
 }
 
-// authSection is every session's authors.
-func (st *Part) authSection() map[string][]string {
-	out := make(map[string][]string, len(st.authAt.of(st.authB)))
-	st.authEach(nil, func(id string, as []string) { out[id] = as })
-	return out
-}
+// authSection is every session's authors, the part's own map.
+func (st *Part) authSection() map[string][]string { return st.authors() }
 
 // segments reads a log held as an image and the delta appended after it.
 type segments struct{ image, delta []byte }
