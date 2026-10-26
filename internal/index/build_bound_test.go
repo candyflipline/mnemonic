@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 // TestBuildHeapGrowsBoundedPerWinnerRow builds one part from a store holding
@@ -80,6 +82,7 @@ func buildGrowth(t *testing.T, n int) int64 {
 	}
 	dir := filepath.Join(t.TempDir(), "part")
 
+	warmEncoders()
 	runtime.GC()
 	debug.FreeOSMemory()
 	var peak uint64
@@ -124,6 +127,20 @@ func buildGrowth(t *testing.T, n int) int64 {
 	}
 	t.Logf("%d rows: heap %d B before the build, peak %d B", n, base, peak)
 	return int64(peak) - int64(base)
+}
+
+// warmEncoders makes every zstd encoder the build and the ingest draw from
+// allocate its window buffer. Each pool holds GOMAXPROCS encoders and an
+// encoder allocates its history on first use, about 8 MB, so a build that has
+// not reached every encoder yet appears to grow with its row count while it is
+// only filling a pool that is the same size at any row count.
+func warmEncoders() {
+	payload := make([]byte, 512<<10)
+	for _, enc := range []*zstd.Encoder{encoder, heavyEncoder, partEncoder, partHeavyEncoder} {
+		for range 2 * runtime.GOMAXPROCS(0) {
+			enc.EncodeAll(payload, nil)
+		}
+	}
 }
 
 func heapBytes() uint64 {
