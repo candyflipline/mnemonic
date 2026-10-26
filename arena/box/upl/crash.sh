@@ -35,7 +35,8 @@
 #   flock /var/lib/mnu/box.lock sh crash.sh BIN
 # Env: BOX (/var/lib/mnu), DRV (crashdrv next to BIN), SMALL ($BOX/smallhome,
 #      read only, copied), RUN ($BOX/gcrash/run-<time>, must not exist),
-#      PORT (7871), PPORT (7872), TINY_N (5000), DELAY_US (100000),
+#      PORT (7891, listen), PUSH_PORT (7892, push_listen), PPORT (7893),
+#      TINY_N (5000), DELAY_US (100000),
 #      FREEFLOOR_GB (15): refuse to copy when / has less free.
 # Writes RUN/rows.tsv and per point RUN/<point>.* (logs, strace, counts).
 set -eu
@@ -45,8 +46,9 @@ BOX=${BOX:-/var/lib/mnu}
 DRV=${DRV:-$(dirname "$BIN")/crashdrv}
 SMALL=${SMALL:-$BOX/smallhome}
 RUN=${RUN:-$BOX/gcrash/run-$(date +%Y%m%d-%H%M%S)}
-PORT=${PORT:-7871}
-PPORT=${PPORT:-7872}
+PORT=${PORT:-7891}
+PUSH_PORT=${PUSH_PORT:-7892}
+PPORT=${PPORT:-7893}
 TINY_N=${TINY_N:-5000}
 DELAY_US=${DELAY_US:-100000}
 FREEFLOOR_GB=${FREEFLOOR_GB:-15}
@@ -57,6 +59,16 @@ mkdir -p "$RUN/cfg"
 chmod 700 "$RUN/cfg"
 ROWS=$RUN/rows.tsv
 FAILS=0
+LAUNCH= SPID= KPID= PXPID= CPID=
+ppid_of() { awk '{print $4}' "/proc/$1/stat" 2>/dev/null; }
+cleanup() {
+	for p in $SPID; do [ "$(ppid_of "$p")" = "$LAUNCH" ] && kill -9 "$p" 2>/dev/null; done
+	for p in $CPID $PXPID $KPID $LAUNCH; do [ "$(ppid_of "$p")" = $$ ] && kill -9 "$p" 2>/dev/null; done
+	return 0
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 "$BIN" token new --author gcrash > "$RUN/cfg/token.out"
 head -1 "$RUN/cfg/token.out" > "$RUN/cfg/token"
@@ -65,9 +77,9 @@ chmod 600 "$RUN/cfg/token"
 client_cfg() { # name port machine
 	printf 'server = "http://127.0.0.1:%s"\ntoken_file = "%s"\nmachine = "%s"\n' "$2" "$RUN/cfg/token" "$3" > "$RUN/cfg/$1.toml"
 }
-client_cfg small "$PORT" gcrash
+client_cfg small "$PUSH_PORT" gcrash
 client_cfg small-proxy "$PPORT" gcrash
-client_cfg tiny "$PORT" gcrash-tiny
+client_cfg tiny "$PUSH_PORT" gcrash-tiny
 client_cfg tiny-proxy "$PPORT" gcrash-tiny
 
 now() { date +%s.%N; }
@@ -80,6 +92,7 @@ serve_start() {
 	{
 		echo "data_dir = \"$d\""
 		echo "listen = \"127.0.0.1:$PORT\""
+		echo "push_listen = \"127.0.0.1:$PUSH_PORT\""
 		cat "$RUN/cfg/tokens.toml"
 	} > "$d.$tag.toml"
 	if [ $# -gt 0 ]; then
@@ -89,7 +102,7 @@ serve_start() {
 	fi
 	LAUNCH=$!
 	i=0
-	until grep -q 'listening on' "$d.$tag.serve.log" 2>/dev/null; do
+	until grep -q 'mnemonic serve: HTTP' "$d.$tag.serve.log" 2>/dev/null; do
 		kill -0 "$LAUNCH" 2>/dev/null || { echo "serve died at start ($d $tag)" >&2; return 1; }
 		i=$((i + 1))
 		[ $i -lt 600 ] || { echo "serve not listening after 120 s" >&2; return 1; }
@@ -108,7 +121,7 @@ serve_stop() {
 proxy_start() { # log args...
 	plog=$1
 	shift
-	"$DRV" proxy -listen "127.0.0.1:$PPORT" -upstream "127.0.0.1:$PORT" -log "$plog" "$@" 2> "$plog.err" &
+	"$DRV" proxy -listen "127.0.0.1:$PPORT" -upstream "127.0.0.1:$PUSH_PORT" -log "$plog" "$@" 2> "$plog.err" &
 	PXPID=$!
 	i=0
 	until ss -ltn "sport = :$PPORT" | grep -q LISTEN; do
@@ -181,7 +194,7 @@ converge() {
 	p=$1 row=$2 d=$3 home=$4 cfg=$5 mach=$6 ref=$7 proof=$8
 	t0=$(now)
 	serve_start "$d" restart
-	"$DRV" welcome -addr "127.0.0.1:$PORT" -token-file "$RUN/cfg/token" -machine "$mach" > "$d.welcome" 2> "$d.welcome.err" || true
+	"$DRV" welcome -addr "127.0.0.1:$PUSH_PORT" -token-file "$RUN/cfg/token" -machine "$mach" > "$d.welcome" 2> "$d.welcome.err" || true
 	ack=$(acked_check "$d.proxy" "$d.welcome") && ackrc=0 || ackrc=$?
 	prc=0
 	HOME=$home "$BIN" push --config "$RUN/cfg/$cfg.toml" > "$d.converge.push.out" 2>&1 || prc=$?

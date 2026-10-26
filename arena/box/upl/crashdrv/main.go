@@ -90,8 +90,8 @@ type proxy struct {
 
 func proxyCmd(args []string) error {
 	fs := flag.NewFlagSet("proxy", flag.ExitOnError)
-	listen := fs.String("listen", "127.0.0.1:7872", "address the push client dials")
-	upstream := fs.String("upstream", "127.0.0.1:7871", "serve's address")
+	listen := fs.String("listen", "127.0.0.1:7893", "address the push client dials")
+	upstream := fs.String("upstream", "127.0.0.1:7892", "serve's push_listen address")
 	logPath := fs.String("log", "", "event log (required)")
 	serial := fs.Bool("serial", false, "forward an Append only after the previous one's Ack arrived")
 	hold := fs.String("hold", "", "kill point: welcome2, acks (stop forwarding Acks after -k), append (hold Append k+1 after Ack k reached the client)")
@@ -234,7 +234,7 @@ func (p *proxy) Sync(down grpc.BidiStreamingServer[pushpb.ClientMsg, pushpb.Serv
 
 func welcomeCmd(args []string) error {
 	fs := flag.NewFlagSet("welcome", flag.ExitOnError)
-	addr := fs.String("addr", "127.0.0.1:7871", "serve's address")
+	addr := fs.String("addr", "127.0.0.1:7892", "serve's push_listen address")
 	tokenFile := fs.String("token-file", "", "bearer token file")
 	machine := fs.String("machine", "", "Hello.machine")
 	fs.Parse(args)

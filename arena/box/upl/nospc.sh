@@ -1,30 +1,27 @@
 #!/bin/sh
-# GCRASH: a W1 pwrite64 ENOSPC fails one push; the SAME server accepts retry.
+# FGCRASH: a W1 pwrite64 ENOSPC fails one push; the SAME server accepts retry.
 # Synthetic input only. Run on Linux, never the Mac or prod. Example:
 #   setsid nohup flock /var/lib/mnu/box.lock sh arena/box/upl/nospc.sh \
 #     /var/lib/mnu/bin/mnemonic /var/lib/mnu/nospc-$(date +%s) \
 #     </dev/null >/var/lib/mnu/out/nospc.log 2>&1 &
 # BIN must include the NOSPC fix. DIR must be new; nothing is deleted.
-# HTTP_PORT defaults to 7795. For the native-gRPC integration, set PUSH_PORT
-# to its port and PUSH_LISTEN_KEY to the server TOML key (e.g. push_listen).
-# Without those overrides, this also runs against the lane/upl ServeHTTP base.
-# The trace suppresses buffers; all generated inputs are synthetic regardless.
-# strace counts injections per thread: stop tracing after the one-source push
-# fails, before retry, so no later thread can inject another first-call fault.
+# HTTP_PORT (listen) defaults to 7895, PUSH_PORT (push_listen) to 7896.
+# All generated inputs are synthetic. The store's only pwrite64 is W1's raw
+# tail write (commit.go appendFrames), so strace attaches for the injected
+# push alone and fails every pwrite64 in that window; it also traces the
+# barrier, link and rollback calls, and the log must show exactly one failed
+# call, the injected pwrite64 on the seeded raw. A second, injection-free
+# trace of the retry must show syncfs and renames and no failed call.
 set -eu
 BIN=${1:?usage: nospc.sh BIN NEW_DIR}
 DIR=${2:?usage: nospc.sh BIN NEW_DIR}
-HTTP_PORT=${HTTP_PORT:-7795}
-PUSH_PORT=${PUSH_PORT:-$HTTP_PORT}
-PUSH_LISTEN_KEY=${PUSH_LISTEN_KEY:-}
+HTTP_PORT=${HTTP_PORT:-7895}
+PUSH_PORT=${PUSH_PORT:-7896}
 [ "$(uname -s)" = Linux ] || { echo 'Linux box only' >&2; exit 2; }
 [ -x "$BIN" ] || { echo 'BIN is not executable' >&2; exit 2; }
 case "$DIR" in /var/lib/mnu/*) ;; *) echo 'DIR must be under /var/lib/mnu' >&2; exit 2;; esac
 [ ! -e "$DIR" ] || { echo 'DIR must be new' >&2; exit 2; }
 case "$DIR$BIN" in *\"*|*\\*) echo 'quotes/backslashes in paths are unsupported' >&2; exit 2;; esac
-if [ -n "$PUSH_LISTEN_KEY" ]; then
- case "$PUSH_LISTEN_KEY" in *[!a-z_]*) echo 'invalid TOML listen key' >&2; exit 2;; esac
-fi
 umask 077
 mkdir -p "$DIR/input" "$DIR/baseline" "$DIR/fault"
 SERVE_PID=
@@ -75,8 +72,7 @@ JSON
 start_server() {
  run=$1
  {
-  printf 'data_dir = "%s/%s"\nlisten = "127.0.0.1:%s"\n' "$DIR" "$run" "$HTTP_PORT"
-  if [ -n "$PUSH_LISTEN_KEY" ]; then printf '%s = "127.0.0.1:%s"\n' "$PUSH_LISTEN_KEY" "$PUSH_PORT"; fi
+  printf 'data_dir = "%s/%s"\nlisten = "127.0.0.1:%s"\npush_listen = "127.0.0.1:%s"\n' "$DIR" "$run" "$HTTP_PORT" "$PUSH_PORT"
   tail -n +2 "$DIR/token.out"
  } > "$DIR/$run.toml"
  GOMAXPROCS=2 "$BIN" serve --config "$DIR/$run.toml" > "$DIR/$run-serve.log" 2>&1 &
@@ -85,7 +81,7 @@ start_server() {
  ready=0
  for _ in $(seq 1 120); do
   kill -0 "$SERVE_PID" 2>/dev/null || { echo 'server died at start' >&2; exit 1; }
-  if grep -q "listening on" "$DIR/$run-serve.log" && curl -sS --max-time 1 "http://127.0.0.1:$HTTP_PORT/mcp" >/dev/null 2>&1; then ready=1; break; fi
+  if grep -q 'mnemonic serve: HTTP' "$DIR/$run-serve.log"; then ready=1; break; fi
   sleep 0.25
  done
  [ "$ready" = 1 ] || { echo 'server readiness timeout' >&2; exit 1; }
@@ -110,32 +106,69 @@ push_ok fault-seed
 RAW=$(find "$DIR/fault/raw" -type f -name '*.jsonl.zst')
 [ "$(printf '%s\n' "$RAW" | wc -l)" -eq 1 ] && [ -f "$RAW" ] || { echo 'expected one seeded raw' >&2; exit 1; }
 sha256sum "$RAW" | cut -d' ' -f1 > "$DIR/before-raw.sha"
-# -P confines injection to this seeded raw, excluding index IO and sockets.
-# -e raw prevents strace from decoding the write buffer into the evidence log.
-strace -f -p "$SERVE_PID" -P "$RAW" -e trace=pwrite64 -e raw=pwrite64 \
- -e inject=pwrite64:error=ENOSPC:when=1 -o "$DIR/fault-strace.log" \
- 2> "$DIR/strace-attach.log" &
-TRACE_PID=$!
-printf '%s\n' "$TRACE_PID" > "$DIR/strace.pid"
-attached=0
-for _ in $(seq 1 100); do
- kill -0 "$TRACE_PID" 2>/dev/null || { echo 'strace attach failed' >&2; exit 1; }
- if grep -q 'attached' "$DIR/strace-attach.log"; then attached=1; break; fi
- sleep 0.1
-done
-[ "$attached" = 1 ] || { echo 'strace attach timeout' >&2; exit 1; }
+start_trace() {
+ name=$1
+ shift
+ strace -f -p "$SERVE_PID" -ttt -y -s 8 -e signal=none \
+  -e trace=pwrite64,syncfs,fsync,fdatasync,rename,renameat,renameat2,linkat,truncate,ftruncate,unlinkat \
+  "$@" -o "$DIR/$name-strace.log" 2> "$DIR/$name-strace-attach.log" &
+ TRACE_PID=$!
+ printf '%s\n' "$TRACE_PID" > "$DIR/$name-strace.pid"
+ for _ in $(seq 1 100); do
+  kill -0 "$TRACE_PID" 2>/dev/null || { echo 'strace attach failed' >&2; exit 1; }
+  if grep -q 'attached' "$DIR/$name-strace-attach.log"; then return 0; fi
+  sleep 0.1
+ done
+ echo 'strace attach timeout' >&2
+ exit 1
+}
+check_trace() {
+ if python3 -I - "$DIR/$1-strace.log" "$RAW" "$1" > "$DIR/$1-strace.check" <<'PY'
+import re, sys
+log, raw, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+pend, calls = {}, []
+for line in open(log):
+    tid, _, rest = line.rstrip('\n').split(' ', 2)
+    if rest.endswith(' <unfinished ...>'):
+        pend[tid] = rest[:-len(' <unfinished ...>')]
+        continue
+    m = re.match(r'<\.\.\. \w+ resumed>(.*)$', rest)
+    if m:
+        rest = pend.pop(tid, '') + m.group(1)
+    if re.match(r'[a-z0-9_]+\(', rest):
+        calls.append(rest)
+failed = [c for c in calls if re.search(r'\) += -1 ', c)]
+injected = [c for c in failed if c.startswith('pwrite64(') and '<%s>' % raw in c and 'ENOSPC' in c and '(INJECTED)' in c]
+names = {}
+for c in calls:
+    n = c.split('(', 1)[0]
+    names[n] = names.get(n, 0) + 1
+print('calls\t%d\t%s' % (len(calls), ' '.join('%s=%d' % kv for kv in sorted(names.items()))))
+print('failed\t%d\tinjected_w1_pwrite64_on_raw\t%d' % (len(failed), len(injected)))
+if mode == 'fault':
+    sys.exit(0 if len(failed) == 1 and len(injected) == 1 else 1)
+renames = sum(v for k, v in names.items() if k.startswith('rename'))
+sys.exit(0 if not failed and names.get('syncfs', 0) and renames else 1)
+PY
+ then printf '%s\t' "$1"; cat "$DIR/$1-strace.check"; else cat "$DIR/$1-strace.check"; exit 1; fi
+}
+start_trace fault -e inject=pwrite64:error=ENOSPC:when=1+
 append_input
 rc=0
 timeout 60 "$BIN" push --config "$DIR/client.toml" > "$DIR/injected-client.log" 2>&1 || rc=$?
 stop_trace
 [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ] || { echo 'injected push did not fail as expected' >&2; exit 1; }
 grep -q ResourceExhausted "$DIR/injected-client.log"
-grep -q 'ENOSPC.*INJECTED' "$DIR/fault-strace.log"
+check_trace fault
 kill -0 "$SERVE_PID"
 sha256sum "$RAW" | cut -d' ' -f1 > "$DIR/rolled-back-raw.sha"
 cmp "$DIR/before-raw.sha" "$DIR/rolled-back-raw.sha"
+start_trace retry
 push_ok after-fault
+stop_trace
+check_trace retry
 kill -0 "$SERVE_PID"
+printf 'serve_pid\t%s\tsame_pid_after_fault_and_retry\tyes\n' "$SERVE_PID"
 stop_server
 # Save per-file sha manifests, then compare them. Manifest timestamps are
 # checked for type and normalized; raw frames are hashed without modification.
@@ -164,4 +197,8 @@ for run in ('baseline', 'fault'):
 assert lists[0] == lists[1], 'store sha manifests differ'
 print('PASS: injected push ResourceExhausted; same server committed retry; store SHA manifests match (updated_ms masked); no temps')
 PY
+erc=0
+sh "$(dirname "$0")/equiv.sh" "$DIR/baseline" "$DIR/fault" > "$DIR/equiv.out" 2>&1 || erc=$?
+printf 'equiv_rc\t%s\t%s\n' "$erc" "$(head -2 "$DIR/equiv.out" | tr '\n' ' ')"
+[ "$erc" = 0 ]
 printf 'date_pt\t%s\nevidence_dir\t%s\ninjected_client_exit\t%s\n' "$(TZ=America/Los_Angeles date '+%Y-%m-%d %H:%M:%S %Z')" "$DIR" "$rc"
