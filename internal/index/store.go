@@ -35,10 +35,7 @@ type Part struct {
 	lsErr                     error
 	lsB                       []byte
 	spansB, annB, authB       []byte
-	secOnce                   sync.Once
-	spansSec                  map[string][]schema.Span
-	annSec                    map[string][]schema.Annotation
-	authSec                   map[string][]string
+	spansAt, annAt, authAt    secOffsets
 }
 
 // frameCache holds the last decoded light and heavy frames of every part of
@@ -191,27 +188,48 @@ func (st *Part) Close() {
 	}
 }
 
-// sections decodes the part's three section files on first use.
-func (st *Part) sections() (map[string][]schema.Span, map[string][]schema.Annotation, map[string][]string) {
-	st.secOnce.Do(func() {
-		st.spansSec, st.annSec, st.authSec = decodeSections(st.spansB, st.annB, st.authB)
-	})
-	return st.spansSec, st.annSec, st.authSec
+// sessionSpansRaw is session id's value in the spans section as stored, a
+// slice of the section bytes, or nil for a session the part does not hold.
+func (st *Part) sessionSpansRaw(id string) []byte { return st.spansAt.raw(st.spansB, id) }
+
+func (st *Part) spansOf(id string) []schema.Span {
+	raw := st.sessionSpansRaw(id)
+	if raw == nil {
+		return nil
+	}
+	return decodeSpans(raw)
 }
 
-func (st *Part) spansSection() map[string][]schema.Span {
-	spans, _, _ := st.sections()
-	return spans
+func (st *Part) annOf(id string) []schema.Annotation {
+	raw := st.annAt.raw(st.annB, id)
+	if raw == nil {
+		return nil
+	}
+	return decodeAnn(raw)
 }
 
-func (st *Part) annSection() map[string][]schema.Annotation {
-	_, ann, _ := st.sections()
-	return ann
+func (st *Part) authOf(id string) []string {
+	raw := st.authAt.raw(st.authB, id)
+	if raw == nil {
+		return nil
+	}
+	return decodeAuthors(raw)
 }
 
+// authEach decodes the authors of every session keep accepts, one at a time.
+func (st *Part) authEach(keep func(id string) bool, fn func(id string, authors []string)) {
+	for id, r := range st.authAt.of(st.authB) {
+		if keep == nil || keep(id) {
+			fn(id, decodeAuthors(st.authB[r[0]:r[1]]))
+		}
+	}
+}
+
+// authSection is every session's authors.
 func (st *Part) authSection() map[string][]string {
-	_, _, auth := st.sections()
-	return auth
+	out := make(map[string][]string, len(st.authAt.of(st.authB)))
+	st.authEach(nil, func(id string, as []string) { out[id] = as })
+	return out
 }
 
 // segments reads a log held as an image and the delta appended after it.

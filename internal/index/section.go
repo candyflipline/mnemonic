@@ -1,10 +1,13 @@
 package index
 
 import (
+	"bytes"
 	"encoding/json"
 	"iter"
 	"slices"
 	"sort"
+	"strings"
+	"sync"
 
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
@@ -97,23 +100,6 @@ func marshalAnn(ann map[string][]schema.Annotation) []byte {
 	return mustJSON(out)
 }
 
-func unmarshalAnn(b []byte) map[string][]schema.Annotation {
-	var files map[string][]annFile
-	if json.Unmarshal(b, &files) != nil {
-		return nil
-	}
-	out := make(map[string][]schema.Annotation, len(files))
-	for sid, fs := range files {
-		as := make([]schema.Annotation, len(fs))
-		for i, f := range fs {
-			as[i] = f.Annotation
-			as[i].Author = f.Author
-		}
-		out[sid] = as
-	}
-	return out
-}
-
 // files encodes the three section files a part carries: spans and
 // annotations grouped per session id, session authors as its map. Every part
 // write must produce all three, so the reader never sees a missing file.
@@ -172,13 +158,152 @@ func sortAnnotations(ann []schema.Annotation) {
 	})
 }
 
-// decodeSections fills a part's lazily read sections from the bytes the part
-// was opened with.
-func decodeSections(spansB, annB, authB []byte) (map[string][]schema.Span, map[string][]schema.Annotation, map[string][]string) {
-	var spans map[string][]schema.Span
-	var auth map[string][]string
-	_ = json.Unmarshal(spansB, &spans)
-	ann := unmarshalAnn(annB)
-	_ = json.Unmarshal(authB, &auth)
-	return spans, ann, auth
+// secOffsets is where each session's value lies in a section file, found by
+// one scan on first use. The index holds offsets only; the value itself is
+// decoded from the section bytes when a session is asked for.
+type secOffsets struct {
+	once sync.Once
+	at   map[string][2]int
+}
+
+func (o *secOffsets) of(b []byte) map[string][2]int {
+	o.once.Do(func() { o.at = scanSection(b) })
+	return o.at
+}
+
+// raw is session id's value as stored, a slice of b, or nil.
+func (o *secOffsets) raw(b []byte, id string) []byte {
+	r, ok := o.of(b)[id]
+	if !ok {
+		return nil
+	}
+	return b[r[0]:r[1]:r[1]]
+}
+
+// scanSection maps each key of the JSON object b to the byte range of its
+// value, without decoding any value. A section that does not scan to its end
+// yields the sessions before the break.
+func scanSection(b []byte) map[string][2]int {
+	at := map[string][2]int{}
+	i := skipSpace(b, 0)
+	if i >= len(b) || b[i] != '{' {
+		return at
+	}
+	i = skipSpace(b, i+1)
+	for i < len(b) && b[i] != '}' {
+		if b[i] != '"' {
+			return at
+		}
+		ke := skipString(b, i)
+		if ke < 0 {
+			return at
+		}
+		key := string(b[i+1 : ke-1])
+		if bytes.IndexByte(b[i+1:ke-1], '\\') >= 0 {
+			if json.Unmarshal(b[i:ke], &key) != nil {
+				return at
+			}
+		}
+		i = skipSpace(b, ke)
+		if i >= len(b) || b[i] != ':' {
+			return at
+		}
+		i = skipSpace(b, i+1)
+		ve := skipValue(b, i)
+		if ve < 0 {
+			return at
+		}
+		at[key] = [2]int{i, ve}
+		i = skipSpace(b, ve)
+		if i < len(b) && b[i] == ',' {
+			i = skipSpace(b, i+1)
+		}
+	}
+	return at
+}
+
+func skipSpace(b []byte, i int) int {
+	for i < len(b) && (b[i] == ' ' || b[i] == '\n' || b[i] == '\t' || b[i] == '\r') {
+		i++
+	}
+	return i
+}
+
+// skipString is the index after the string that opens at b[i], or -1.
+func skipString(b []byte, i int) int {
+	for j := i + 1; j < len(b); {
+		q := bytes.IndexByte(b[j:], '"')
+		if q < 0 {
+			return -1
+		}
+		q += j
+		n := 0
+		for k := q - 1; k > i && b[k] == '\\'; k-- {
+			n++
+		}
+		if n%2 == 0 {
+			return q + 1
+		}
+		j = q + 1
+	}
+	return -1
+}
+
+// skipValue is the index after the JSON value that starts at b[i], or -1.
+func skipValue(b []byte, i int) int {
+	if i >= len(b) {
+		return -1
+	}
+	switch b[i] {
+	case '"':
+		return skipString(b, i)
+	case '{', '[':
+		depth := 0
+		for j := i; j < len(b); j++ {
+			switch b[j] {
+			case '"':
+				if j = skipString(b, j); j < 0 {
+					return -1
+				}
+				j--
+			case '{', '[':
+				depth++
+			case '}', ']':
+				if depth--; depth == 0 {
+					return j + 1
+				}
+			}
+		}
+		return -1
+	}
+	j := i
+	for j < len(b) && !strings.ContainsRune(",}] \n\t\r", rune(b[j])) {
+		j++
+	}
+	return j
+}
+
+func decodeSpans(raw []byte) []schema.Span {
+	var spans []schema.Span
+	_ = json.Unmarshal(raw, &spans)
+	return spans
+}
+
+func decodeAnn(raw []byte) []schema.Annotation {
+	var fs []annFile
+	if json.Unmarshal(raw, &fs) != nil {
+		return nil
+	}
+	as := make([]schema.Annotation, len(fs))
+	for i, f := range fs {
+		as[i] = f.Annotation
+		as[i].Author = f.Author
+	}
+	return as
+}
+
+func decodeAuthors(raw []byte) []string {
+	var as []string
+	_ = json.Unmarshal(raw, &as)
+	return as
 }

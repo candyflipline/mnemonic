@@ -42,5 +42,5 @@ func (db *DB) sessionAuthors(sessionID string) []string {
 	if !ok {
 		return nil
 	}
-	return st.authSection()[sessionID]
+	return st.authOf(sessionID)
 }

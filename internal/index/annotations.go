@@ -40,5 +40,5 @@ func (db *DB) sessionAnnotations(sessionID string) []schema.Annotation {
 	if !ok {
 		return nil
 	}
-	return st.annSection()[sessionID]
+	return st.annOf(sessionID)
 }

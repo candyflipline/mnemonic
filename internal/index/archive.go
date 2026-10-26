@@ -802,16 +802,8 @@ func planMembers(cks []ckpt, holders []*Part) memberPlan {
 // holderAuthors is holder's per-session author section without the stale
 // sessions, whose authors the members read whole contribute afresh.
 func (p memberPlan) holderAuthors(h *Part) map[string][]string {
-	sec := h.authSection()
-	if len(p.stale) == 0 {
-		return sec
-	}
-	out := make(map[string][]string, len(sec))
-	for sid, as := range sec {
-		if !p.stale[sid] {
-			out[sid] = as
-		}
-	}
+	out := map[string][]string{}
+	h.authEach(func(sid string) bool { return !p.stale[sid] }, func(sid string, as []string) { out[sid] = as })
 	return out
 }
 

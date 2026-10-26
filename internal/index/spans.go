@@ -29,7 +29,17 @@ func (db *DB) sessionSpans(sessionID string) []schema.Span {
 	if !ok {
 		return nil
 	}
-	return st.spansSection()[sessionID]
+	return st.spansOf(sessionID)
+}
+
+// sessionSpansSize is the stored size of sessionID's spans value, 0 for a
+// session db does not hold.
+func (db *DB) sessionSpansSize(sessionID string) int {
+	st, ok := db.part(sessionID)
+	if !ok {
+		return 0
+	}
+	return len(st.sessionSpansRaw(sessionID))
 }
 
 // spanIDHex is the cache's spanID: the first 16 hex chars of sha256 over the

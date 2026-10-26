@@ -108,7 +108,7 @@ func (st *Part) exportSession(i int) (ExportSession, error) {
 	if len(es.Rows) > 0 {
 		es.Harness, es.FirstCwd = es.Rows[0].Harness, es.Rows[0].Cwd
 	}
-	es.Annotations = st.annSection()[s.id]
+	es.Annotations = st.annOf(s.id)
 	return es, nil
 }
 
