@@ -3,9 +3,12 @@ package export
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"io"
 	"strconv"
 
 	"github.com/candyflipline/mnemonic/internal/index"
+	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
 // OTLP/JSON export: one ExportTraceServiceRequest per session, built from the
@@ -102,54 +105,66 @@ func intAttr(key string, value uint64) otlpAttr {
 	return otlpAttr{Key: key, Value: otlpAnyVal{IntValue: strconv.FormatUint(value, 10)}}
 }
 
-// OTLP builds the ExportTraceServiceRequest of one session from its spans,
-// ordered by start time. The trace id is derived from the session id, a
-// span's id is its spans.span_id (16 hex chars, 8 bytes), and the root keeps
-// no parentSpanId. Only chat spans carry gen_ai.usage.*: the spans relation
-// rolls usage up onto invoke_agent and turn spans, so a sum over the trace
-// would count it twice. A session in hidden is not found.
-func OTLP(db *index.DB, sessionID string, hidden map[string]bool) (*otlpRequest, error) {
-	if hidden[sessionID] {
-		return nil, notFound(sessionID)
+// WriteOTLP writes the ExportTraceServiceRequest of one session to w, indented
+// by two spaces in field order, one span at a time, the spans ordered by start
+// time. The trace id is derived from the session id, a span's id is its
+// spans.span_id (16 hex chars, 8 bytes), and the root keeps no parentSpanId.
+// Only chat spans carry gen_ai.usage.*: the spans relation rolls usage up onto
+// invoke_agent and turn spans, so a sum over the trace would count it twice. A
+// session in hidden is not found.
+func WriteOTLP(w io.Writer, db *index.DB, sessionID string, hidden map[string]bool) error {
+	if hidden[sessionID] || !db.ExportHasSession(sessionID) {
+		return notFound(sessionID)
 	}
-	if !db.ExportHasSession(sessionID) {
-		return nil, notFound(sessionID)
-	}
-
 	sum := sha256.Sum256([]byte(tracePrefix + sessionID))
 	traceID := hex.EncodeToString(sum[:16])
-
-	spans := []otlpSpan{}
-	for _, row := range db.ExportSpans(sessionID) {
-		var s otlpSpan
-		kind := string(row.Kind)
-		s.SpanID = row.SpanID
-		s.ParentSpanID = row.ParentSpanID
-		s.Name = row.Name
-		s.TraceID = traceID
-		s.Kind = spanKindInt(kind)
-		s.StartTimeUnixNano = strconv.FormatInt(row.Start.UnixNano(), 10)
-		s.EndTimeUnixNano = strconv.FormatInt(row.End.UnixNano(), 10)
-		s.Status = otlpStatus{Code: statusCode(string(row.Status))}
-		s.Attributes = []otlpAttr{
-			strAttr("gen_ai.operation.name", kind),
-			strAttr("gen_ai.conversation.id", sessionID),
-		}
-		if row.Model != "" {
-			s.Attributes = append(s.Attributes, strAttr("gen_ai.request.model", row.Model))
-		}
-		if kind == "chat" {
-			s.Attributes = append(s.Attributes,
-				intAttr("gen_ai.usage.input_tokens", row.InputTokens),
-				intAttr("gen_ai.usage.output_tokens", row.OutputTokens))
-		}
-		spans = append(spans, s)
-	}
-	return &otlpRequest{ResourceSpans: []otlpResourceSpans{{
+	env, err := json.MarshalIndent(otlpRequest{ResourceSpans: []otlpResourceSpans{{
 		Resource: otlpResource{Attributes: []otlpAttr{strAttr("service.name", "mnemonic")}},
 		ScopeSpans: []otlpScopeOne{{
 			Scope: otlpScope{Name: otlpScopeName},
-			Spans: spans,
+			Spans: []otlpSpan{},
 		}},
-	}}}, nil
+	}}}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeArray(w, env, `"spans": []`, "  ", func(prefix string, put func([]byte) error) error {
+		for _, row := range db.ExportSpans(sessionID) {
+			b, err := json.MarshalIndent(otlpSpanOf(traceID, sessionID, row), prefix, "  ")
+			if err != nil {
+				return err
+			}
+			if err := put(b); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func otlpSpanOf(traceID, sessionID string, row schema.Span) otlpSpan {
+	kind := string(row.Kind)
+	s := otlpSpan{
+		TraceID:           traceID,
+		SpanID:            row.SpanID,
+		ParentSpanID:      row.ParentSpanID,
+		Name:              row.Name,
+		Kind:              spanKindInt(kind),
+		StartTimeUnixNano: strconv.FormatInt(row.Start.UnixNano(), 10),
+		EndTimeUnixNano:   strconv.FormatInt(row.End.UnixNano(), 10),
+		Status:            otlpStatus{Code: statusCode(string(row.Status))},
+		Attributes: []otlpAttr{
+			strAttr("gen_ai.operation.name", kind),
+			strAttr("gen_ai.conversation.id", sessionID),
+		},
+	}
+	if row.Model != "" {
+		s.Attributes = append(s.Attributes, strAttr("gen_ai.request.model", row.Model))
+	}
+	if kind == "chat" {
+		s.Attributes = append(s.Attributes,
+			intAttr("gen_ai.usage.input_tokens", row.InputTokens),
+			intAttr("gen_ai.usage.output_tokens", row.OutputTokens))
+	}
+	return s
 }

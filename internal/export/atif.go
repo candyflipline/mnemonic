@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"iter"
 	"strconv"
 	"strings"
 	"time"
@@ -103,6 +105,10 @@ type eventRow struct {
 	CacheWrite      uint64
 }
 
+// ErrInvalidATIF is an ATIF export's error when the validator refuses the
+// trajectory.
+var ErrInvalidATIF = errors.New("ATIF validation failed")
+
 // ErrSessionNotFound is what an export answers for a session the index does
 // not know and for one in hidden, so the two cannot be told apart.
 var ErrSessionNotFound = errors.New("session not found")
@@ -111,59 +117,185 @@ func notFound(sessionID string) error {
 	return fmt.Errorf("export: %w: %q", ErrSessionNotFound, sessionID)
 }
 
-// ATIF builds one session's trajectory from the index. Only published rows
-// take part (the events table's rows, in event order, which EachSession's
-// rows are). The harness of the first event names the agent. A session in
-// hidden (deleted, per the server's session controls) is not found.
-func ATIF(db *index.DB, sessionID string, hidden map[string]bool) (*Trajectory, error) {
+// session is one session's published rows in event order, as the exports
+// read them; rows may be ranged more than once.
+type session struct {
+	id, harness string
+	rows        iter.Seq[eventRow]
+}
+
+// openSession reads one session from the index. Only published rows take
+// part (the events table's rows, in event order, which ExportSession's rows
+// are). A session in hidden (deleted, per the server's session controls) is
+// not found.
+func openSession(db *index.DB, sessionID string, hidden map[string]bool) (session, error) {
 	if hidden[sessionID] {
-		return nil, notFound(sessionID)
+		return session{}, notFound(sessionID)
 	}
 	es, ok, err := db.ExportSession(sessionID)
 	if err != nil {
-		return nil, err
+		return session{}, err
 	}
 	if !ok || len(es.Rows) == 0 {
-		return nil, notFound(sessionID)
+		return session{}, notFound(sessionID)
 	}
-	evs := make([]eventRow, len(es.Rows))
-	for i, r := range es.Rows {
-		evs[i] = eventRow{
-			EventTime:       r.EventTime(),
-			RequestID:       r.RequestID,
-			TraceID:         r.TraceID,
-			ItemID:          r.ItemID,
-			EventKind:       r.EventKind,
-			ActorKind:       r.ActorKind,
-			ToolCallID:      r.ToolCallID,
-			ToolName:        r.ToolName,
-			TextContent:     r.Text,
-			ToolIOInputJSON: r.TioInput,
-			Model:           r.Model,
-			InputTokens:     r.InputTokens,
-			OutputTokens:    r.OutputTokens,
-			CacheReadTokens: r.CacheReadTokens,
-			CacheWrite:      r.CacheWriteTokens,
+	return session{id: sessionID, harness: es.Harness, rows: func(yield func(eventRow) bool) {
+		for i := range es.Rows {
+			if !yield(eventRowOf(&es.Rows[i])) {
+				return
+			}
 		}
-	}
-	return buildTrajectory(sessionID, es.Harness, evs), nil
+	}}, nil
 }
 
-// MarshalATIF builds the trajectory and returns its JSON, but only once the
-// ported validator accepts it; a failed rule comes back as the error.
-func MarshalATIF(db *index.DB, sessionID string, hidden map[string]bool) ([]byte, error) {
-	t, err := ATIF(db, sessionID, hidden)
+func eventRowOf(r *index.Row) eventRow {
+	return eventRow{
+		EventTime:       r.EventTime(),
+		RequestID:       r.RequestID,
+		TraceID:         r.TraceID,
+		ItemID:          r.ItemID,
+		EventKind:       r.EventKind,
+		ActorKind:       r.ActorKind,
+		ToolCallID:      r.ToolCallID,
+		ToolName:        r.ToolName,
+		TextContent:     r.Text,
+		ToolIOInputJSON: r.TioInput,
+		Model:           r.Model,
+		InputTokens:     r.InputTokens,
+		OutputTokens:    r.OutputTokens,
+		CacheReadTokens: r.CacheReadTokens,
+		CacheWrite:      r.CacheWriteTokens,
+	}
+}
+
+// trajectory is one session's ATIF document, built and written a step at a
+// time: plan says which step each row lands in and last the row that
+// completes each step, so a step leaves memory once it is written.
+type trajectory struct {
+	session
+	agent Agent
+	plan  []rowPlan
+	last  []int32
+}
+
+// rowPlan is where one row lands: the index of its step, or -1 for a row no
+// step takes; linked marks a tool result that keeps its source_call_id.
+type rowPlan struct {
+	step   int32
+	linked bool
+}
+
+// newTrajectory opens the session and plans its steps. The harness of the
+// first event names the agent.
+func newTrajectory(db *index.DB, sessionID string, hidden map[string]bool) (*trajectory, error) {
+	s, err := openSession(db, sessionID, hidden)
 	if err != nil {
 		return nil, err
 	}
-	b, err := json.Marshal(t)
+	version := 0
+	if p, ok := normalize.For(s.harness); ok {
+		version = p.Version()
+	}
+	t := &trajectory{session: s, agent: Agent{Name: s.harness, Version: strconv.Itoa(version)}}
+	t.plan, t.last = planSteps(s.harness, s.rows)
+	return t, nil
+}
+
+// envelope is the root object with the given steps value.
+func (t *trajectory) envelope(steps []Step) Trajectory {
+	return Trajectory{SchemaVersion: SchemaVersion, SessionID: t.id, Agent: t.agent, Steps: steps}
+}
+
+// WriteATIF writes the session's trajectory to w once the ported validator
+// accepts it, laid out as the CLI prints it: keys sorted at every level and
+// indented by two spaces. A refused trajectory writes nothing.
+func WriteATIF(w io.Writer, db *index.DB, sessionID string, hidden map[string]bool) error {
+	t, err := newTrajectory(db, sessionID, hidden)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if msgs := ValidateJSON(b); len(msgs) > 0 {
-		return nil, errors.New("export: ATIF validation failed: " + strings.Join(msgs, "; "))
+	if err := t.validate(); err != nil {
+		return err
 	}
-	return b, nil
+	env, err := json.Marshal(t.envelope([]Step{}))
+	if err != nil {
+		return err
+	}
+	if env, err = sortedIndent(env, ""); err != nil {
+		return err
+	}
+	return writeArray(w, env, `"steps": []`, "  ", func(prefix string, put func([]byte) error) error {
+		return t.eachStep(func(s *Step) error {
+			b, err := json.Marshal(s)
+			if err != nil {
+				return err
+			}
+			if b, err = sortedIndent(b, prefix); err != nil {
+				return err
+			}
+			return put(b)
+		})
+	})
+}
+
+// writeCompact writes the trajectory as json.Marshal lays it out, unchecked:
+// the caller validated it.
+func (t *trajectory) writeCompact(w io.Writer) error {
+	env, err := json.Marshal(t.envelope([]Step{}))
+	if err != nil {
+		return err
+	}
+	return writeArray(w, env, `"steps":[]`, "", func(_ string, put func([]byte) error) error {
+		return t.eachStep(func(s *Step) error {
+			b, err := json.Marshal(s)
+			if err != nil {
+				return err
+			}
+			return put(b)
+		})
+	})
+}
+
+// validate runs the ported validator over the envelope and then each step,
+// reporting what ValidateJSON reports for the whole document.
+func (t *trajectory) validate() error {
+	env, err := json.Marshal(t.envelope(nil))
+	if err != nil {
+		return err
+	}
+	root, err := decodeNumbers(env)
+	if err != nil {
+		return err
+	}
+	obj := root.(map[string]any)
+	v := &validator{}
+	v.trajectoryHead(obj)
+	var steps stepsCheck
+	err = t.eachStep(func(s *Step) error {
+		b, err := json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		doc, err := decodeNumbers(b)
+		if err != nil {
+			return err
+		}
+		steps.add(doc)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if steps.n == 0 {
+		v.missing("steps")
+	} else {
+		v.errs = append(v.errs, steps.errs()...)
+	}
+	v.trajectoryTail(obj)
+	if len(v.errs) > 0 {
+		return fmt.Errorf("export: %w: %s", ErrInvalidATIF, strings.Join(v.errs, "; "))
+	}
+	return nil
 }
 
 // requestKey names the model request an assistant row belongs to, the way the
@@ -184,96 +316,127 @@ func requestKey(harness string, ev eventRow) string {
 	return ""
 }
 
-// buildTrajectory maps events to steps: one step per user message, per model
-// request within a run of assistant rows (message, reasoning, tool_call), and
-// per system/meta row; a tool result joins the step whose tool_calls carry its
-// tool_call_id.
-func buildTrajectory(sessionID, harness string, evs []eventRow) *Trajectory {
-	version := 0
-	if p, ok := normalize.For(harness); ok {
-		version = p.Version()
+// planSteps maps rows to steps: one step per user message, per model request
+// within a run of assistant rows (message, reasoning, tool_call), and per
+// system/meta row. A tool result joins the step whose tool_calls carry its
+// tool_call_id (the open agent run first, then the newest closed step), else
+// the open agent run, else the newest step, and keeps its source_call_id only
+// on an exact match; a result with neither id match nor content is dropped.
+// Steps are numbered in the order they open, which is the order they close.
+func planSteps(harness string, rows iter.Seq[eventRow]) (plan []rowPlan, last []int32) {
+	latest := map[string]int32{}
+	curCalls := map[string]bool{}
+	cur, curReq := int32(-1), ""
+	open := func() int32 {
+		last = append(last, 0)
+		return int32(len(last) - 1)
 	}
-	t := &Trajectory{
-		SchemaVersion: SchemaVersion,
-		SessionID:     sessionID,
-		Agent:         Agent{Name: harness, Version: strconv.Itoa(version)},
-	}
-	var cur *Step
-	curReq := ""
-	flush := func() {
-		if cur == nil {
-			return
+	closeCur := func() {
+		for id := range curCalls {
+			latest[id] = cur
 		}
-		if metricsEmpty(cur.Metrics) {
-			cur.Metrics = nil
-		}
-		t.Steps = append(t.Steps, *cur)
-		cur, curReq = nil, ""
+		clear(curCalls)
+		cur, curReq = -1, ""
 	}
-	for _, ev := range evs {
+	r := int32(0)
+	for ev := range rows {
+		step, linked := int32(-1), false
 		switch {
 		case ev.ActorKind == "assistant" && isAssistantKind(ev.EventKind):
 			req := requestKey(harness, ev)
-			if cur != nil && req != "" && curReq != "" && req != curReq {
-				flush()
+			if cur >= 0 && req != "" && curReq != "" && req != curReq {
+				closeCur()
 			}
-			if cur == nil {
-				cur = &Step{Source: "agent", Timestamp: isoMillis(ev.EventTime)}
+			if cur < 0 {
+				cur = open()
 			}
 			if curReq == "" {
 				curReq = req
 			}
-			absorbAssistant(cur, ev)
+			if ev.EventKind == "tool_call" && ev.ToolCallID != "" {
+				curCalls[ev.ToolCallID] = true
+			}
+			step = cur
 		case ev.ActorKind == "tool":
-			// The result joins the step whose tool_calls carry its
-			// tool_call_id, the open agent run, or the newest step, in that
-			// order; only an exact match keeps the source_call_id.
-			home := cur
-			if home == nil || !stepHasCall(home, ev.ToolCallID) {
-				home = nil
-				for i := len(t.Steps) - 1; i >= 0 && home == nil; i-- {
-					if stepHasCall(&t.Steps[i], ev.ToolCallID) {
-						home = &t.Steps[i]
-					}
-				}
-				if home == nil {
-					home = cur
-				}
-				if home == nil && len(t.Steps) > 0 {
-					home = &t.Steps[len(t.Steps)-1]
+			home, found := int32(-1), false
+			if ev.ToolCallID != "" {
+				if cur >= 0 && curCalls[ev.ToolCallID] {
+					home, found = cur, true
+				} else if k, ok := latest[ev.ToolCallID]; ok {
+					home, found = k, true
 				}
 			}
-			res := ObservationResult{Content: ev.TextContent}
-			if home != nil && ev.ToolCallID != "" && stepHasCall(home, ev.ToolCallID) {
-				res.SourceCallID = ev.ToolCallID
+			if !found {
+				home = cur
+				if home < 0 {
+					home = int32(len(last)) - 1
+				}
 			}
-			if res.SourceCallID == "" && res.Content == "" {
-				continue
+			if home >= 0 && (found || ev.TextContent != "") {
+				step, linked = home, found
 			}
-			if home == nil && len(t.Steps) > 0 {
-				home = &t.Steps[len(t.Steps)-1]
-			}
-			if home == nil {
-				continue
-			}
-			if home.Observation == nil {
-				home.Observation = &Observation{}
-			}
-			home.Observation.Results = append(home.Observation.Results, res)
 		default:
-			flush()
-			t.Steps = append(t.Steps, Step{
-				Timestamp: isoMillis(ev.EventTime),
-				Source:    sourceOf(ev),
-				Message:   ev.TextContent,
-			})
+			if cur >= 0 {
+				closeCur()
+			}
+			step = open()
 		}
+		plan = append(plan, rowPlan{step, linked})
+		if step >= 0 {
+			last[step] = r
+		}
+		r++
 	}
-	flush()
-	for i := range t.Steps {
-		t.Steps[i].StepID = i + 1
+	return plan, last
+}
+
+// eachStep builds the planned steps from the rows and hands each to fn, in
+// order, as soon as its last row is read.
+func (t *trajectory) eachStep(fn func(*Step) error) error {
+	building := map[int32]*Step{}
+	next, r := int32(0), int32(0)
+	for ev := range t.rows {
+		p := t.plan[r]
+		if p.step >= 0 {
+			s := building[p.step]
+			switch {
+			case ev.ActorKind == "assistant" && isAssistantKind(ev.EventKind):
+				if s == nil {
+					s = &Step{Source: "agent", Timestamp: isoMillis(ev.EventTime)}
+					building[p.step] = s
+				}
+				absorbAssistant(s, ev)
+			case ev.ActorKind == "tool":
+				res := ObservationResult{Content: ev.TextContent}
+				if p.linked {
+					res.SourceCallID = ev.ToolCallID
+				}
+				if s.Observation == nil {
+					s.Observation = &Observation{}
+				}
+				s.Observation.Results = append(s.Observation.Results, res)
+			default:
+				building[p.step] = &Step{
+					Timestamp: isoMillis(ev.EventTime),
+					Source:    sourceOf(ev),
+					Message:   ev.TextContent,
+				}
+			}
+		}
+		for ; next < int32(len(t.last)) && t.last[next] <= r; next++ {
+			s := building[next]
+			delete(building, next)
+			if metricsEmpty(s.Metrics) {
+				s.Metrics = nil
+			}
+			s.StepID = int(next) + 1
+			if err := fn(s); err != nil {
+				return err
+			}
+		}
+		r++
 	}
-	return t
+	return nil
 }
 
 func isAssistantKind(kind string) bool {
@@ -347,18 +510,6 @@ func toolArguments(ev eventRow) map[string]any {
 		}
 	}
 	return map[string]any{}
-}
-
-func stepHasCall(s *Step, callID string) bool {
-	if callID == "" {
-		return false
-	}
-	for _, tc := range s.ToolCalls {
-		if tc.ToolCallID == callID {
-			return true
-		}
-	}
-	return false
 }
 
 // sourceOf maps the event's actor to the ATIF source enum (m-step.py:26-29).

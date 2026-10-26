@@ -1,8 +1,11 @@
 package export
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"time"
@@ -56,23 +59,29 @@ type sessionKey struct {
 	annotations       []schema.Annotation
 }
 
-// Dataset returns the sessions matching the annotation, at most perTask per
-// task, newest first. A task is the cwd of the session's first published
-// event. Sessions in hidden are left out. A session that fails validation does
-// not count toward its task's cap and comes back in skipped; Dataset errs only
-// when every matching session failed.
-func Dataset(db *index.DB, f AnnotationFilter, perTask int, hidden map[string]bool) (rows []DatasetRow, skipped []SessionError, err error) {
+// ErrEveryFailed is Dataset's error when every matching session failed
+// validation.
+var ErrEveryFailed = errors.New("every matching session failed")
+
+// Dataset writes the sessions matching the annotation to w as JSONL, at most
+// perTask per task, newest first, one session and one step at a time. A task
+// is the cwd of the session's first published event. Sessions in hidden, and
+// those listed refuses, are left out. A session that fails validation does not
+// count toward its task's cap and comes back in skipped; Dataset errs with
+// ErrEveryFailed only when every matching session failed, and with w's error
+// when a write fails.
+func Dataset(w io.Writer, db *index.DB, f AnnotationFilter, perTask int, hidden map[string]bool, listed func(sessionID string) bool) (skipped []SessionError, err error) {
 	if f.Name == "" {
-		return nil, nil, fmt.Errorf("export: --annotation needs a name")
+		return nil, fmt.Errorf("export: --annotation needs a name")
 	}
 	if perTask < 1 {
-		return nil, nil, fmt.Errorf("export: --per-task must be at least 1")
+		return nil, fmt.Errorf("export: --per-task must be at least 1")
 	}
 	var sessions []sessionKey
 	err = db.EachSession(hidden, func(es index.ExportSession) error {
 		// A session the annotations relation targets but events never held
 		// is not among the export's sessions.
-		if len(es.Rows) == 0 {
+		if len(es.Rows) == 0 || !listed(es.ID) {
 			return nil
 		}
 		for _, a := range es.Annotations {
@@ -87,33 +96,60 @@ func Dataset(db *index.DB, f AnnotationFilter, perTask int, hidden map[string]bo
 		return nil
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	// Newest first; the session id breaks ties so the order is total.
 	sort.Slice(sessions, func(i, j int) bool { return sessionNewer(sessions[i], sessions[j]) })
 	tasks := map[string]int{}
+	emitted := 0
 	for _, s := range sessions {
 		if tasks[s.task] >= perTask {
 			continue
 		}
-		atif, err := MarshalATIF(db, s.id, hidden)
+		t, err := newTrajectory(db, s.id, hidden)
+		if err == nil {
+			err = t.validate()
+		}
 		if err != nil {
 			skipped = append(skipped, SessionError{s.id, err})
 			continue
 		}
 		tasks[s.task]++
-		rows = append(rows, DatasetRow{
+		emitted++
+		if err := writeRow(w, DatasetRow{
 			SessionID:   s.id,
 			Harness:     s.harness,
 			Task:        s.task,
 			Annotations: annotationOuts(s.annotations),
-			ATIF:        atif,
-		})
+		}, t); err != nil {
+			return skipped, err
+		}
 	}
-	if len(rows) == 0 && len(skipped) > 0 {
-		return nil, skipped, fmt.Errorf("export: every matching session failed (%d)", len(skipped))
+	if emitted == 0 && len(skipped) > 0 {
+		return skipped, fmt.Errorf("export: %w (%d)", ErrEveryFailed, len(skipped))
 	}
-	return rows, skipped, nil
+	return skipped, nil
+}
+
+// writeRow writes one JSONL line: row as json.Marshal lays it out, its atif
+// the trajectory written in place of the null row carries.
+func writeRow(w io.Writer, row DatasetRow, t *trajectory) error {
+	line, err := json.Marshal(row)
+	if err != nil {
+		return err
+	}
+	const tail = "null}"
+	if !bytes.HasSuffix(line, []byte(tail)) {
+		return fmt.Errorf("export: dataset row does not end in atif")
+	}
+	if _, err := w.Write(line[:len(line)-len(tail)]); err != nil {
+		return err
+	}
+	if err := t.writeCompact(w); err != nil {
+		return err
+	}
+	_, err = io.WriteString(w, "}\n")
+	return err
 }
 
 func sessionNewer(a, b sessionKey) bool {

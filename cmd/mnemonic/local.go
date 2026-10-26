@@ -26,6 +26,7 @@ import (
 
 	"github.com/candyflipline/mnemonic/internal/auth"
 	"github.com/candyflipline/mnemonic/internal/config"
+	"github.com/candyflipline/mnemonic/internal/export"
 	"github.com/candyflipline/mnemonic/internal/index"
 	"github.com/candyflipline/mnemonic/internal/layout"
 	"github.com/candyflipline/mnemonic/internal/mcp"
@@ -145,6 +146,7 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 	})
 	tools := mcp.Handler(ix, index.Lookup)
 	mux := http.NewServeMux()
+	mux.Handle("GET /v1/export/{kind}", tokens.Require(auth.Read)(export.Handler(ix, ctl)))
 	mux.Handle("/mcp", tokens.Require(auth.Read)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tools.ServeHTTP(w, r.WithContext(index.WithControls(store.WithStore(r.Context(), st), ctl)))
 	})))
