@@ -8,7 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -18,6 +17,11 @@ import (
 
 	"github.com/candyflipline/mnemonic/internal/config"
 	"github.com/candyflipline/mnemonic/internal/server"
+)
+
+const (
+	pushDrainDeadline    = 10 * time.Second
+	httpShutdownDeadline = 10 * time.Second
 )
 
 func init() {
@@ -42,15 +46,11 @@ func serve(args []string) error {
 	defer srv.Close()
 	srv.StoreOTLPContent(cfg.OTLP.StoreContent)
 
-	httpListener, err := net.Listen("tcp", cfg.Listen)
+	httpListener, pushListener, err := listen(cfg)
 	if err != nil {
-		return fmt.Errorf("listen on %s: %w", cfg.Listen, err)
+		return err
 	}
 	defer httpListener.Close()
-	pushListener, err := net.Listen("tcp", cfg.PushListen)
-	if err != nil {
-		return fmt.Errorf("listen on %s: %w", cfg.PushListen, err)
-	}
 	defer pushListener.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -61,28 +61,34 @@ func serve(args []string) error {
 		srv.Run(ctx)
 	}()
 
-	hs := &http.Server{Handler: srv.Handler()}
+	hs := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	ended := make(chan error, 2)
 	go func() { ended <- hs.Serve(httpListener) }()
-	go func() { ended <- srv.ServePush(pushListener) }()
+	go func() {
+		select {
+		case <-srv.Booted():
+			log.Printf("mnemonic serve: push serving (index booted)")
+			ended <- srv.ServePush(pushListener)
+		case <-ctx.Done():
+		}
+	}()
 	log.Printf("mnemonic serve: HTTP %s, push %s (data_dir %s)", cfg.Listen, cfg.PushListen, cfg.DataDir)
 	var serveErr error
 	select {
 	case <-ctx.Done():
 	case serveErr = <-ended:
 	}
-	// Stop accepting push first, drain sessions and transports, then HTTP.
-	// The deferred Close runs only after the cycle loop stops, and commits
-	// queued writes before releasing the store and index.
+	stop()
 	pushListener.Close()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	srv.Drain(shutdownCtx)
-	if err := hs.Shutdown(shutdownCtx); err != nil {
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), pushDrainDeadline)
+	srv.Drain(drainCtx)
+	cancelDrain()
+	httpCtx, cancelHTTP := context.WithTimeout(context.Background(), httpShutdownDeadline)
+	if err := hs.Shutdown(httpCtx); err != nil {
 		log.Printf("shutdown: %v", err)
 		hs.Close()
 	}
-	stop()
+	cancelHTTP()
 	<-looped
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		return fmt.Errorf("serve: %w", serveErr)

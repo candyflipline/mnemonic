@@ -30,6 +30,12 @@ const (
 	windowBytes   = 96 << 20
 	maxMsg        = 33 << 20
 	welcomePage   = 4096
+
+	streamWindow = 1 << 20
+	connWindow   = 4 << 20
+	maxSessions  = 10
+	spareStreams = 4
+	maxStreams   = maxSessions + spareStreams
 )
 
 var (
@@ -46,8 +52,8 @@ func Mount(st *store.Committer, tokens auth.Tokens) (*grpc.Server, func()) {
 	svc := &service{st: st, live: map[streamKey]*session{}}
 	gs := grpc.NewServer(
 		grpc.MaxRecvMsgSize(maxMsg),
-		grpc.InitialWindowSize(64<<10),
-		grpc.InitialConnWindowSize(256<<10),
+		grpc.InitialWindowSize(streamWindow),
+		grpc.InitialConnWindowSize(connWindow),
 		grpc.MaxConcurrentStreams(4),
 		grpc.MaxHeaderListSize(16<<10),
 		grpc.ConnectionTimeout(10*time.Second),
@@ -94,6 +100,7 @@ type service struct {
 
 	mu      sync.Mutex
 	live    map[streamKey]*session
+	streams int
 	closing bool
 }
 
@@ -138,7 +145,29 @@ func (s *session) end(ctx context.Context, cause error) error {
 var (
 	errReplaced = status.Error(codes.Aborted, "replaced by a newer stream for this machine")
 	errDraining = status.Error(codes.Unavailable, "server is shutting down")
+
+	errSessionCap = status.Errorf(codes.ResourceExhausted, "server is at its cap of %d live sessions (author, machine); retry later", maxSessions)
+	errStreamCap  = status.Errorf(codes.ResourceExhausted, "server is at its cap of %d open push streams; retry later", maxStreams)
 )
+
+// admit counts a stream from before its Hello is read: an unregistered
+// stream already buffers up to a message. The spare streams over maxSessions
+// cover streams before Hello and displaced sessions still unwinding.
+func (s *service) admit() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.streams >= maxStreams {
+		return errStreamCap
+	}
+	s.streams++
+	return nil
+}
+
+func (s *service) release() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.streams--
+}
 
 func (s *service) enter(k streamKey, sess *session) (*session, error) {
 	s.mu.Lock()
@@ -147,6 +176,9 @@ func (s *service) enter(k streamKey, sess *session) (*session, error) {
 		return nil, errDraining
 	}
 	old := s.live[k]
+	if old == nil && len(s.live) >= maxSessions {
+		return nil, errSessionCap
+	}
 	s.live[k] = sess
 	return old, nil
 }
@@ -190,6 +222,10 @@ func (s *service) Sync(stream grpc.BidiStreamingServer[pushpb.ClientMsg, pushpb.
 	if author == "" {
 		return status.Error(codes.Unauthenticated, "unauthorized")
 	}
+	if err := s.admit(); err != nil {
+		return err
+	}
+	defer s.release()
 	first, err := stream.Recv()
 	if err != nil {
 		return recvStatus(err, "expected Hello")

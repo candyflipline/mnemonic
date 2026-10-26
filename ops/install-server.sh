@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 1 ]]; then
-	echo "usage: install-server.sh <mnemonic-binary>" >&2
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+	echo "usage: install-server.sh <mnemonic-binary> [public-hostname]" >&2
 	exit 2
 fi
 BINARY=$1
+PUBLIC_HOST=${2:-}
 if [[ ! -x "$BINARY" ]]; then
 	echo "install-server.sh: not an executable: $BINARY" >&2
+	exit 2
+fi
+if [[ ! -f /etc/mnemonic/server.toml && -z "$PUBLIC_HOST" ]]; then
+	echo "install-server.sh: no /etc/mnemonic/server.toml yet; pass the public hostname (its A record points here) as the second argument" >&2
 	exit 2
 fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,10 +30,13 @@ install -o root -g root -m 644 "$SCRIPT_DIR/systemd/mnemonic.service" /etc/syste
 
 if [[ ! -f /etc/mnemonic/server.toml ]]; then
 	install -o root -g mnemonic -m 640 /dev/null /etc/mnemonic/server.toml
-	cat > /etc/mnemonic/server.toml <<'EOF'
+	cat > /etc/mnemonic/server.toml <<EOF
 data_dir = "/var/lib/mnemonic"
-listen   = "127.0.0.1:8740"
-push_listen = "127.0.0.1:8741"
+listen   = ":443"
+push_listen = ":8741"
+
+[tls]
+hosts = ["$PUBLIC_HOST"]
 
 # One block per teammate, from: mnemonic token new --author <name>
 # [[tokens]]

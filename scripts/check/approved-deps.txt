@@ -3,6 +3,7 @@ github.com/bmatcuk/doublestar/v4
 github.com/klauspost/compress
 github.com/parquet-go/parquet-go
 go.opentelemetry.io/proto/otlp
+golang.org/x/crypto
 google.golang.org/genproto/googleapis/rpc
 google.golang.org/grpc
 google.golang.org/protobuf

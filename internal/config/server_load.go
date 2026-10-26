@@ -3,9 +3,11 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 
@@ -36,6 +38,9 @@ func LoadServer(path string) (Server, error) {
 	}
 	if cfg.PushListen == cfg.Listen {
 		return Server{}, fmt.Errorf("%s: push_listen must differ from listen", path)
+	}
+	if err := cfg.TLS.check(cfg.Listen); err != nil {
+		return Server{}, fmt.Errorf("%s: %w", path, err)
 	}
 	if len(cfg.Tokens) == 0 {
 		return Server{}, fmt.Errorf("%s: at least one [[tokens]] entry is required", path)
@@ -73,6 +78,29 @@ func LoadServer(path string) (Server, error) {
 		}
 	}
 	return cfg, nil
+}
+
+func (t TLS) check(listen string) error {
+	if len(t.Hosts) == 0 {
+		if t.ACMEDirectory != "" {
+			return fmt.Errorf("tls.acme_directory is set but tls.hosts is empty")
+		}
+		return nil
+	}
+	if _, port, _ := net.SplitHostPort(listen); port != "443" {
+		return fmt.Errorf("tls.hosts needs listen on port 443 (tls-alpn-01 validates there), not %q", listen)
+	}
+	for i, h := range t.Hosts {
+		if h == "" || strings.ContainsAny(h, ":/ ") {
+			return fmt.Errorf("tls.hosts[%d] = %q must be a bare DNS name", i, h)
+		}
+	}
+	if t.ACMEDirectory != "" {
+		if u, err := url.Parse(t.ACMEDirectory); err != nil || u.Scheme != "https" || u.Host == "" {
+			return fmt.Errorf("tls.acme_directory %q must be an https URL", t.ACMEDirectory)
+		}
+	}
+	return nil
 }
 
 // Identities is the token table LoadServer validated.

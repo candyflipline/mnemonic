@@ -10,6 +10,10 @@ Group=mnemonic
 ExecStart=/usr/local/bin/mnemonic serve --config /etc/mnemonic/server.toml
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=80
+
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 # The server writes only under /var/lib/mnemonic; the config and binary are read-only.
 NoNewPrivileges=true

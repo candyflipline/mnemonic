@@ -6,11 +6,7 @@ at it.
 
 ## Build
 
-Client (any Mac, pure Go, no cgo):
-
-```
-CGO_ENABLED=0 go build -o mnemonic ./cmd/mnemonic
-```
+The client build is in the [README](../README.md).
 
 The server is pure Go too; it needs the server build tag:
 
@@ -23,36 +19,40 @@ build on any Linux box and copy the binary over.
 
 ## Server install
 
-Copy the repo to the server (or at least `ops/` and the binary), then:
+Point an A record for the public hostname at the server (not proxied), copy
+the repo to the server (or at least `ops/` and the binary), then:
 
 ```
-sudo ./ops/install-server.sh ./mnemonic
+sudo ./ops/install-server.sh ./mnemonic mnemonic.example
 ```
 
 The script creates the `mnemonic` user, `/var/lib/mnemonic`,
-`/usr/local/bin/mnemonic`, and the systemd unit, then enables the service.
+`/usr/local/bin/mnemonic`, the systemd unit and, on a first install,
+`/etc/mnemonic/server.toml`, then enables the service.
 
-Caddy fronts it from a Docker container (image `caddy:2.10.2-alpine`) that
-reaches HTTP at `host.docker.internal:8740` and native gRPC at
-`host.docker.internal:8741`. Mount `ops/Caddyfile` as the
-container's Caddyfile, set `MORAINE_HOST` to the public hostname, and reload
-Caddy. The push stream (`/mnemonic.push.v1.Push/*`) goes to port 8741 over h2c;
-everything else goes over HTTP/1.1.
-
-Set both required listener fields in `/etc/mnemonic/server.toml`:
+mnemonic terminates TLS itself; there is no proxy. The config the script
+writes:
 
 ```toml
-listen = "0.0.0.0:8740"
-push_listen = "0.0.0.0:8741"
+listen = ":443"
+push_listen = ":8741"
+
+[tls]
+hosts = ["mnemonic.example"]
 ```
 
-There is no default for `push_listen`; a missing field, malformed host:port,
-or the same address as `listen` fails startup. Bind 8741 like 8740 and keep
-both blocked publicly by the hcloud firewall `loyal-agent-memory`, while
-allowing the Docker Caddy host connection. Before promotion, main checks
-from outside the server that `nc -vz -w 5 PUBLIC_IP 8741` times out (not a
-successful connection), as for 8740, and verifies HTTPS push through Caddy.
-The client still dials HTTPS port 443; it needs no config change.
+MCP and HTTP OTLP answer on 443, the push stream on 8741, both with one
+Let's Encrypt certificate. It is issued on the first TLS handshake by
+tls-alpn-01 on 443 (no port 80) and cached in `/var/lib/mnemonic/autocert`
+(0700). The unit grants `CAP_NET_BIND_SERVICE` so the `mnemonic` user can
+bind 443. `acme_directory =
+"https://acme-staging-v02.api.letsencrypt.org/directory"` under `[tls]` uses
+Let's Encrypt staging for a trial host. Without `[tls]` both listeners are
+plaintext (boxes and tests). With `[tls]`, `listen` must be on port 443.
+
+Open 443 and 8741 to the internet and 22 to your allowlist. A client whose
+`server` is `https://mnemonic.example` pushes to `mnemonic.example:8741`;
+`push_address = "host:port"` in its config overrides that.
 
 ## Tokens
 
@@ -72,77 +72,6 @@ sudo systemctl restart mnemonic
 
 ## Teammate onboarding
 
-Get your token file from the owner. The server keeps one per teammate at
-`/root/mnemonic-tokens/<author>.token`. Never paste it in chat or commit it.
-
-Install the client (or grab a release binary):
-
-```
-CGO_ENABLED=0 go install github.com/candyflipline/mnemonic/cmd/mnemonic@latest
-```
-
-`mnemonic init` writes `~/.mnemonic/config.toml` and `~/.mnemonic/token`
-(0600) and, on macOS, `~/Library/LaunchAgents/com.mnemonic.push.plist`,
-then prints the one `launchctl bootstrap gui/$UID ...` command to run (on
-Linux it prints a systemd --user service):
-
-```
-mnemonic init --server https://loyal-agent-memory.5-78-147-233.sslip.io \
-  --token-file ./<author>.token
-```
-
-`--machine NAME` overrides the machine name (it defaults to the short
-hostname); `--force` overwrites an existing config.
-
-## Point your agents at it
-
-The MCP server name is `mnemonic`; its tools are `mcp__mnemonic__*`. The
-token never goes into a config file.
-
-Claude Code — add an `mcpServers` entry in `~/.claude.json`:
-
-```
-"mnemonic": {"type":"http","url":"https://loyal-agent-memory.5-78-147-233.sslip.io/mcp","headersHelper":"printf '{\"Authorization\":\"Bearer %s\"}' \"$(cat ~/.mnemonic/token)\""}
-```
-
-Codex — in `~/.codex/config.toml`:
-
-```
-[mcp_servers.mnemonic]
-url = "https://loyal-agent-memory.5-78-147-233.sslip.io/mcp"
-bearer_token_env_var = "MNEMONIC_TOKEN"
-```
-
-and in `~/.zshenv`:
-
-```
-export MNEMONIC_TOKEN="$(cat ~/.mnemonic/token)"
-```
-
-## Client config
-
-`~/.mnemonic/config.toml`:
-
-```
-server  = "https://mnemonic.example.com"
-machine = "chris-mbp"
-
-[[sources]]
-harness     = "claude-code"
-source_name = "claude"
-glob        = "~/.claude/projects/**/*.jsonl"
-```
-
-Omit `[[sources]]` to use the built-in defaults. The token lives in
-`~/.mnemonic/token`; `token_file` can point somewhere else if you would
-rather not use the default path.
-
-## Push on every Mac
-
-`mnemonic push --watch` stays resident under launchd, wakes on kernel file
-events and uploads what changed within 5 s; launchd restarts it if it exits. `mnemonic init` installs the plist; to
-bootstrap it by hand:
-
-```
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mnemonic.push.plist
-```
+Installing the client, pointing Claude Code, Codex and Cursor at the server, and
+upgrading are in the [README](../README.md). A teammate needs the server URL
+and their token file from the operator.

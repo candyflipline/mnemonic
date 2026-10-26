@@ -20,12 +20,11 @@ func TestW1NoSpaceFailsOnlyBatch(t *testing.T) {
 	for _, tc := range []struct {
 		name, target string
 		errno        syscall.Errno
-		dropped      bool
 	}{
-		{"rewrite-enospc", ".b.jsonl.zst.", syscall.ENOSPC, true},
-		{"rewrite-edquot", ".b.jsonl.zst.", syscall.EDQUOT, true},
-		{"extend-enospc", "a.jsonl.zst", syscall.ENOSPC, false},
-		{"backfill-edquot", ".c.json.", syscall.EDQUOT, true},
+		{"rewrite-enospc", ".b.jsonl.zst.", syscall.ENOSPC},
+		{"rewrite-edquot", ".b.jsonl.zst.", syscall.EDQUOT},
+		{"extend-enospc", "a.jsonl.zst", syscall.ENOSPC},
+		{"backfill-edquot", ".c.json.", syscall.EDQUOT},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -149,9 +148,6 @@ func TestW1NoSpaceFailsOnlyBatch(t *testing.T) {
 			}
 			welcome := c.Sources("test", "mac")
 			wantIDs := []string{"a", "b", "c"}
-			if tc.dropped {
-				wantIDs = []string{"a", "c"}
-			}
 			if len(welcome) != len(wantIDs) {
 				t.Fatalf("Welcome length=%d; want %d", len(welcome), len(wantIDs))
 			}
@@ -160,9 +156,9 @@ func TestW1NoSpaceFailsOnlyBatch(t *testing.T) {
 					t.Fatalf("Welcome[%d]=%+v; want %s size=8 raw_end=8", i, src, wantIDs[i])
 				}
 			}
-			if tc.dropped {
-				if _, err := os.Stat(sources[1].key.Manifest(dir)); !errors.Is(err, os.ErrNotExist) {
-					t.Fatalf("rewrite manifest: %v; want absent", err)
+			for _, src := range sources {
+				if _, err := os.Stat(src.key.Manifest(dir)); err != nil {
+					t.Fatalf("manifest %s after the failed batch: %v; want the acked one", src.key.SrcID, err)
 				}
 			}
 			oldRaw, err := os.ReadFile(sources[0].key.Raw(dir))
