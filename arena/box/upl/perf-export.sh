@@ -8,8 +8,8 @@
 # would beside a live server. Picks 32 sessions from list_sessions by event
 # count (the largest, every third of the top 40, 18 spread over the rest), then
 # per session and kind (atif, otlp) runs OLD and NEW alternately, OLD first on
-# odd sessions, and compares sha256. With ANNOTATION it also compares one
-# dataset run. Prints counts, sha agreement, wall and peak RSS (median, range,
+# odd sessions, and compares sha256. With ANNOTATION it annotates the 32
+# sessions with it through the annotate tool and compares one dataset run. Prints counts, sha agreement, wall and peak RSS (median, range,
 # n) per side, serve VmHWM over an idle settle cycle and over the export
 # window, and the serve cgroup's oom_kill. Never prints output content.
 # Run under the box lock: flock /var/lib/mnu/box.lock sh perf-export.sh ...
@@ -22,11 +22,16 @@ annotation=${4:-}
 port=${PORT:-18840}
 url=http://127.0.0.1:$port
 TMP=$(mktemp -d /var/lib/mnu/out/export-perf.XXXXXX)
-SERVE= SAMPLER=
+SERVE= SAMPLER= PIDSTAT=
 cleanup() {
-	[ -n "$SAMPLER" ] && kill "$SAMPLER" 2>/dev/null || true
-	[ -n "$SERVE" ] && kill "$SERVE" 2>/dev/null || true
-	rm -f "$TMP"/*.json "$TMP"/*.jsonl "$TMP"/*.err 2>/dev/null || true
+	set +e
+	for p in $PIDSTAT $SAMPLER; do kill "$p" 2>/dev/null; done
+	if [ -n "$SERVE" ]; then
+		kill "$SERVE" 2>/dev/null
+		for _ in $(seq 1 30); do kill -0 "$SERVE" 2>/dev/null || break; sleep 1; done
+		kill -9 "$SERVE" 2>/dev/null
+	fi
+	rm -f "$TMP"/*.json "$TMP"/*.jsonl "$TMP"/*.err 2>/dev/null
 }
 trap cleanup EXIT INT TERM
 
@@ -42,9 +47,9 @@ author = "export-probe"
 sha256 = "$(hash "$TMP/reader.tok")"
 scopes = ["read"]
 [[tokens]]
-author = "export-admin"
+author = "export-annotator"
 sha256 = "$(hash "$TMP/admin.tok")"
-scopes = ["read", "admin"]
+scopes = ["read", "annotate"]
 EOF
 
 systemd-run --scope -q -p MemoryMax=8G -p MemorySwapMax=0 env GOMAXPROCS=4 "$new" serve --config "$TMP/serve.toml" > "$TMP/serve.log" 2>&1 &
@@ -98,7 +103,6 @@ done) > "$TMP/serve-rss.kb" &
 SAMPLER=$!
 pidstat -u -p "$SERVE" 5 > "$TMP/serve-pidstat.log" 2>&1 &
 PIDSTAT=$!
-trap 'kill $PIDSTAT 2>/dev/null; cleanup' EXIT INT TERM
 
 timed() { # side out cmd...: run cmd timed, append wall, RSS MiB, rc
 	side=$1 outf=$2
@@ -145,6 +149,21 @@ done < "$TMP/ids"
 echo "atif+otlp: compared=$((same + differ + both_fail + one_fail)) same=$same differ=$differ both_failed=$both_fail one_side_failed=$one_fail bytes_same=$bytes"
 
 if [ -n "$annotation" ]; then
+	before=$(grep -c 'cycle put' "$TMP/serve.log" || true)
+	ok=0
+	while read -r sid; do
+		r=$(curl -sf -H 'MCP-Protocol-Version: 2025-06-18' -H "Authorization: Bearer $(cat "$TMP/admin.tok")" \
+			-H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+			-d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"annotate\",\"arguments\":{\"session_id\":\"$sid\",\"name\":\"$annotation\",\"number\":1}}}" "$url/mcp" |
+			jq -r '.result.isError // false')
+		[ "$r" = false ] && ok=$((ok + 1))
+	done < "$TMP/ids"
+	waited=0
+	while [ "$(grep -c 'cycle put' "$TMP/serve.log" || true)" = "$before" ] && [ "$waited" -lt 60 ]; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	echo "annotated=$ok put_cycle_after=${waited}s"
 	: > "$TMP/fail"
 	rm -f "$TMP/old.json" "$TMP/new.json"
 	runold dataset --annotation "$annotation" --per-task 3
