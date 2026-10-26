@@ -271,11 +271,13 @@ func wantCkpt(s source, parser normalize.Parser) ckpt {
 }
 
 // extends reports whether the input up to end still holds the bytes prev was
-// parsed from, under the same kind, parser and identity, from a State that is
-// not Provisional, so only the bytes past it parse. The byte test is the kind's.
+// parsed from, under the same kind, parser and identity, so only the bytes
+// past it parse. Past a Provisional State they cannot: its rows take a
+// timestamp from lines not read yet. The byte test is the kind's.
 func extends(raw *os.File, end int64, want, prev ckpt) bool {
-	if prev.State.Provisional() || prev.Kind != want.Kind || prev.Parser != want.Parser || prev.Harness != want.Harness || prev.SourceName != want.SourceName ||
-		prev.SourceFile != want.SourceFile || prev.Layout != want.Layout || prev.ZstSize > end {
+	if prev.Kind != want.Kind || prev.Parser != want.Parser || prev.Harness != want.Harness || prev.SourceName != want.SourceName ||
+		prev.SourceFile != want.SourceFile || prev.Layout != want.Layout || prev.ZstSize > end ||
+		prev.State.Provisional() && prev.ZstSize < end {
 		return false
 	}
 	return want.Kind.extends(raw, end, prev)
