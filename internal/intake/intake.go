@@ -40,6 +40,8 @@ const (
 
 var (
 	errBadSegment = errors.New("bad path segment")
+
+	helloLimit = 60 * time.Second
 )
 
 // Mount constructs the native Push server; every stream passes the push-scope
