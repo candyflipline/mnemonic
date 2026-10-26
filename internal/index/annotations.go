@@ -35,13 +35,8 @@ func buildAnnotations(rows []annRow) []schema.Annotation {
 }
 
 // sessionAnnotations is the annotations targeting sessionID, the annotations
-// relation's rows for it. A session no part holds answers nil, the way the
-// section did: the annotation of a session the index holds no rows of is not
-// served (a deleted session's target reads as gone even though the
-// annotation source still holds its line).
+// relation's rows for it: a session made only of annotation rows answers its
+// annotations as the section did, though no part holds it.
 func (db *DB) sessionAnnotations(sessionID string) []schema.Annotation {
-	if _, ok := db.part(sessionID); !ok {
-		return nil
-	}
 	return db.anns[sessionID]
 }
