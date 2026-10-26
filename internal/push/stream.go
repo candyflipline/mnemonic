@@ -28,16 +28,25 @@ type put struct {
 // record of its seq) and the source's state after it.
 type ack struct {
 	path     string
+	srcID    string
 	conflict bool
 	state    wire.Source
 }
 
-// uplink is one open Sync stream. sources is what Welcome said, by src_id;
-// the window is the server's.
+// uplink is one open Sync stream. sources starts as what Welcome said, by
+// src_id, and is then the server's state plus what is in flight: send
+// advances a source's Size optimistically, and an APPLIED ack writes the
+// server's state back only when no later append of that source is in flight
+// (unacked[src] reaches 0), so a flush during the ack latency never re-sends
+// from a stale offset. A CONFLICT ack always writes the server's state back.
+// Only the watcher goroutine touches sources and unacked: the ack reader
+// goroutine only parses and delivers on acked, and the watcher applies each
+// ack in its select loop (applyAck).
 type uplink struct {
 	stream  pushpb.Push_SyncClient
 	cancel  context.CancelFunc
 	sources map[string]*wire.Source
+	unacked map[string]int
 	window  window
 	seq     uint64
 	sent    chan inflight // cap window.appends: send blocks when full
@@ -71,6 +80,10 @@ func (u *uplink) send(ctx context.Context, p put) error { panic("not implemented
 // in-flight one ends the stream (protocol error).
 func (u *uplink) acks() <-chan ack { return u.acked }
 
+// applyAck folds a into sources and unacked, as the uplink comment says, and
+// reports whether a's path must be re-decided (a conflict).
+func (u *uplink) applyAck(a ack) (redo bool) { panic("not implemented") }
+
 // ended fires once with the stream's error.
 func (u *uplink) ended() <-chan error { return u.done }
 
@@ -81,7 +94,7 @@ func (u *uplink) close() error { panic("not implemented") }
 // streamSource replaces syncSource: the same skip rules against
 // u.sources[srcID], the same decide/firstChunk/rawEndOf cut, every chunk sent
 // without waiting for its ack (the next chunk's offset is the previous one's
-// end, as syncSource already assumes at push.go:181). A conflict ack is the
+// end, as syncSource already assumes at push.go:176). A conflict ack is the
 // watcher's: it sets u.sources[srcID] to the ack's state and marks the path
 // dirty, and the next flush re-decides it once from that state.
 func streamSource(ctx context.Context, red Redactor, u *uplink, f fileRef, st *Stats) error {
