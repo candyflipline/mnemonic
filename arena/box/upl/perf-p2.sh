@@ -5,30 +5,35 @@
 # members, 10 lines appended, one cycle) started a fresh process per round, so
 # each round paid archiveSetFor's first-call scan of every ch file. serve is one
 # long-lived process. This measures that shape: one `BIN serve` on DIR, its boot
-# cycle, then N rounds of one 10-line PUT append to the mixed target and the
-# "cycle put" that indexes it.
+# cycle, then N rounds of one 10-line PUT append to each of TARGETS mixed
+# sources and the "cycle put" that indexes them. With TARGETS=9 a round is the
+# cycle PROF saw stall in rematerialize and OOM on 83b0042.
 #
 # Prep, once per DIR (idempotent, outside the timed part):
 #   - DIR: an overlayfs view of SRC (default $BOX/http-1, a raw-only store, never
-#     written: writes land in DIR.up); the prep stops if / drops under 60 GB free
+#     written: writes land in DIR.up); the prep stops if / drops under FLOOR GB free
 #   - DIR/events: a symlink tree to the ch files under $BOX/events (read-only)
 #     smaller than CH_MAX bytes (default all 16)
 #   - one `BIN index ingest -settle` brings the archive in and settles every
 #     source, so archive member logs are retired as on prod
-#   - the target: the first raw (kind 0) checkpoint, harness claude-code, whose
-#     sessions meet an archive member's; a token for its author
-# Run: serve at GOMAXPROCS=4 under MemoryMax=8G (prod's shape), pidstat 1 s
-# alongside. Per round: SPACING s idle (its CPU is printed), read the target's
-# manifest, PUT 10 synthetic claude-code lines at offset=size, wait for the next
-# cycle line; cycle CPU = serve utime+stime from just before the PUT to that
-# line. Work check per round: PUT 200, the cycle counts resumed+fresh+reparsed
-# >= 1, err=<nil>. Prints one TSV row per round, then n, median and range.
+#   - the targets: the first TARGETS raw (kind 0) claude-code checkpoints of one
+#     author whose sessions meet an archive member's; a token for that author
+# Run: serve at GOMAXPROCS=4 under MemoryMax=MEM (8G, prod's shape) in its own
+# scope, pidstat 1 s alongside. Per round: SPACING s idle (its CPU is printed),
+# per target read the manifest and PUT 10 synthetic claude-code lines at
+# offset=size, wait for the next cycle line; cycle CPU = serve utime+stime from
+# just before the first PUT to that line. Work check per round: every PUT 200,
+# the cycle counts resumed+fresh+reparsed >= 1, err=<nil>. A serve that dies
+# (OOM) ends the run and is reported with the scope's memory.peak and the
+# kernel's oom_kill count. Prints one TSV row per round, n, median and range,
+# and the scope's memory.peak.
 # PERF=1 wraps the rounds in `perf record -g` (an unreported profile run) and
 # prints the share of samples under archiveSetFor and buildPart.
 # Counts, sizes and timings only. Run under the box lock:
 #   flock /var/lib/mnu/box.lock sh perf-p2.sh BIN DIR
 # Env: BOX (/var/lib/mnu), SRC ($BOX/http-1), OUT ($BOX/out), N (6),
-#      SPACING (20), PORT (7795), PERF (0), CH_MAX (all).
+#      SPACING (20), PORT (7795), PERF (0), CH_MAX (all), TARGETS (9),
+#      MEM (8G), FLOOR (15).
 set -eu
 
 BIN=${1:?usage: perf-p2.sh BIN DIR}
@@ -41,8 +46,12 @@ SPACING=${SPACING:-20}
 PORT=${PORT:-7795}
 PERF=${PERF:-0}
 CH_MAX=${CH_MAX:-1000000000000}
+TARGETS=${TARGETS:-9}
+MEM=${MEM:-8G}
+FLOOR=${FLOOR:-15}
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 SHA8=$(sha256sum "$BIN" | cut -c1-8)
-P=$OUT/p2-$SHA8-$(date -u +%Y%m%dT%H%M%SZ)
+P=$OUT/p2-$SHA8-$STAMP
 mkdir -p "$OUT"
 
 avail=$(awk '/MemAvailable/ {print int($2/1048576)}' /proc/meminfo)
@@ -53,34 +62,35 @@ if ! mountpoint -q "$DIR"; then
 	mkdir -p "$DIR" "$DIR.up" "$DIR.work"
 	mount -t overlay overlay -o "lowerdir=$SRC,upperdir=$DIR.up,workdir=$DIR.work" "$DIR"
 fi
-if [ ! -d "$DIR/events" ]; then
-	mkdir "$DIR/events"
+if [ ! -e "$DIR/.p2-settled" ]; then
+	mkdir -p "$DIR/events"
 	cp "$BOX/events/.parser-version" "$DIR/events/" 2>/dev/null || true
 	find "$BOX/events" -name 'ch-*.parquet' -size -"$CH_MAX"c | while IFS= read -r f; do
 		rel=${f#"$BOX/events/"}
 		mkdir -p "$DIR/events/$(dirname "$rel")"
-		ln -s "$f" "$DIR/events/$rel"
+		[ -e "$DIR/events/$rel" ] || ln -s "$f" "$DIR/events/$rel"
 	done
 fi
 CHB=$(find -L "$DIR/events" -name 'ch-*.parquet' -printf '%s\n' | awk '{s+=$1} END {print s+0}')
 echo "ch files: $(find "$DIR/events" -name 'ch-*.parquet' | wc -l) of $(find "$BOX/events" -name 'ch-*.parquet' | wc -l), bytes $CHB of $(find "$BOX/events" -name 'ch-*.parquet' -printf '%s\n' | awk '{s+=$1} END {print s+0}')"
 if [ ! -e "$DIR/.p2-settled" ]; then
-	need=$((60 + 2 * CHB / 1000000000 + 4))
-	[ "$(freegb)" -ge "$need" ] || { echo "df: $(freegb) GB free < $need (60 + twice the ch bytes + 4)" >&2; exit 2; }
-	/usr/bin/time -v systemd-run --scope --quiet -p MemoryMax=8G env GOMAXPROCS=4 \
-		"$BIN" index ingest -root "$DIR" -store "$DIR/index" -settle > "$P-prep.log" 2>&1 &
-	PREP=$!
-	while kill -0 "$PREP" 2>/dev/null; do
+	need=$((FLOOR + 2 * CHB / 1000000000 + 4))
+	[ "$(freegb)" -ge "$need" ] || { echo "df: $(freegb) GB free < $need (FLOOR + twice the ch bytes + 4)" >&2; exit 2; }
+	PU=p2-prep-$STAMP
+	systemd-run --unit="$PU" --quiet -p MemoryMax=12G -p WorkingDirectory=/ --setenv=GOMAXPROCS=4 \
+		/usr/bin/time.gnu -v -o "$P-prep.time" "$BIN" index ingest -root "$DIR" -store "$DIR/index" -settle
+	while systemctl is-active -q "$PU"; do
 		echo "$(date -u +%T) free_gb $(freegb) upper_gb $(du -s -B1G "$DIR.up" | cut -f1)" >> "$P-prep-df.log"
-		if [ "$(freegb)" -lt 60 ]; then
-			pkill -INT -P "$PREP" 2>/dev/null || true
-			echo "DISK GUARD: $(freegb) GB free < 60, prep stopped" >&2
+		if [ "$(freegb)" -lt "$FLOOR" ]; then
+			systemctl stop "$PU"
+			echo "DISK GUARD: $(freegb) GB free < $FLOOR, prep stopped" >&2
 			exit 2
 		fi
 		sleep 10
 	done
-	wait "$PREP"
-	grep -E '^ingest:|Elapsed .wall|Maximum resident|Percent of CPU' "$P-prep.log"
+	journalctl -u "$PU" -o cat --no-pager | grep -E '^ingest:' || true
+	grep -E 'Exit status|Elapsed .wall|Maximum resident|Percent of CPU' "$P-prep.time"
+	grep -q 'Exit status: 0' "$P-prep.time" || { echo "prep failed" >&2; exit 1; }
 	touch "$DIR/.p2-settled"
 fi
 
@@ -88,9 +98,9 @@ CFG=$DIR/.p2-cfg
 if [ ! -e "$CFG/server.toml" ]; then
 	mkdir -p "$CFG"
 	chmod 700 "$CFG"
-	python3 -I - "$DIR/index/src" "$CFG" <<'PY'
+	python3 -I - "$DIR/index/src" "$CFG" "$TARGETS" <<'PY'
 import json, os, sys
-src, cfg = sys.argv[1], sys.argv[2]
+src, cfg, k = sys.argv[1], sys.argv[2], int(sys.argv[3])
 arch, raw = set(), []
 for f in sorted(os.listdir(src)):
     if not f.endswith(".ckpt"):
@@ -102,11 +112,14 @@ for f in sorted(os.listdir(src)):
         raw.append(c)
 cands = [c for c in raw if arch.intersection(c.get("sessions") or [])]
 assert cands, "no raw claude-code source shares a session with an archive member"
-c = cands[0]
-sid = sorted(arch.intersection(c["sessions"]))[0]
-a, m, h, s = c["key"].split("__", 3)
-open(cfg + "/target", "w").write("%s %s %s %s %s\n" % (a, m, h, s, sid))
-print("mixed raw candidates=%d archive sessions=%d picked rows=%d" % (len(cands), len(arch), c.get("rows", 0)))
+author = cands[0]["key"].split("__", 1)[0]
+picked = [c for c in cands if c["key"].split("__", 1)[0] == author][:k]
+with open(cfg + "/target", "w") as out:
+    for c in picked:
+        sid = sorted(arch.intersection(c["sessions"]))[0]
+        out.write("%s %s %s %s %s\n" % (tuple(c["key"].split("__", 3)) + (sid,)))
+print("mixed raw candidates=%d archive sessions=%d picked=%d rows=%d" % (
+    len(cands), len(arch), len(picked), sum(c.get("rows", 0) for c in picked)))
 PY
 	read -r AUTH _ < "$CFG/target"
 	"$BIN" token new --author "$AUTH" > "$CFG/token.out"
@@ -117,13 +130,30 @@ PY
 	} > "$CFG/server.toml"
 fi
 
-python3 -u -I - "$BIN" "$DIR" "$CFG" "$P" "$N" "$SPACING" "$PORT" "$PERF" <<'PY'
+python3 -u -I - "$BIN" "$DIR" "$CFG" "$P" "$N" "$SPACING" "$PORT" "$PERF" "$MEM" "p2-serve-$STAMP" <<'PY'
 import json, os, queue, re, statistics, subprocess, sys, threading, time, urllib.request, uuid
-BIN, DIR, CFG, P, N, SPACING, PORT, PERF = sys.argv[1:9]
+BIN, DIR, CFG, P, N, SPACING, PORT, PERF, MEM, UNIT = sys.argv[1:11]
 N, SPACING, PERF = int(N), int(SPACING), PERF == "1"
-author, machine, harness, src, sid = open(CFG + "/target").read().split()
+targets = [l.split() for l in open(CFG + "/target") if l.strip()]
 token = open(CFG + "/token.out").readline().strip()
-man_path = "%s/raw/author=%s/machine=%s/harness=%s/%s.json" % (DIR, author, machine, harness, src)
+CG = "/sys/fs/cgroup/system.slice/%s.scope/" % UNIT
+
+seen = {"peak": float("nan"), "oom": -1}
+
+def sample():
+    while True:
+        try:
+            seen["peak"] = int(open(CG + "memory.peak").read()) / 2**30
+            seen["oom"] = int(dict(l.split() for l in open(CG + "memory.events"))["oom_kill"])
+        except (OSError, KeyError, ValueError):
+            pass
+        time.sleep(0.5)
+
+def peak_gb():
+    return seen["peak"]
+
+def ooms():
+    return seen["oom"]
 TCK = os.sysconf("SC_CLK_TCK")
 CYC = re.compile(r"cycle (\w+): sources unchanged=(\d+) resumed=(\d+) fresh=(\d+) reparsed=(\d+) failed=(\d+) stale=(\d+); "
                  r"wrote logs=(\d+) parts=(\d+) built=(\d+) hot=(\d+) cold=(\d+) in (\S+) err=(.*)$")
@@ -138,7 +168,7 @@ def cpu(pid):
     f = open("/proc/%d/stat" % pid).read().rsplit(")", 1)[1].split()
     return (int(f[11]) + int(f[12])) / TCK
 
-serve = subprocess.Popen(["systemd-run", "--scope", "--quiet", "-p", "MemoryMax=8G", "env", "GOMAXPROCS=4",
+serve = subprocess.Popen(["systemd-run", "--scope", "--quiet", "--unit=" + UNIT, "-p", "MemoryMax=" + MEM, "env", "GOMAXPROCS=4",
                           BIN, "serve", "--config", CFG + "/server.toml"],
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 lines = queue.Queue()
@@ -150,13 +180,23 @@ def reader():
         if m:
             lines.put(m.groups())
 threading.Thread(target=reader, daemon=True).start()
+threading.Thread(target=sample, daemon=True).start()
 time.sleep(1)
 pid = serve.pid
 assert open("/proc/%d/comm" % pid).read().strip() == "mnemonic", "serve pid is not the mnemonic process"
 ps = subprocess.Popen(["pidstat", "-u", "-r", "-h", "-p", str(pid), "1"], stdout=open(P + "-pidstat.txt", "w"))
 
-def next_cycle(limit=1800):
-    return lines.get(timeout=limit)
+def next_cycle(limit=3600):
+    end = time.time() + limit
+    while time.time() < end:
+        try:
+            return lines.get(timeout=5)
+        except queue.Empty:
+            if serve.poll() is not None:
+                break
+    print("serve died or no cycle: rc=%s memory.peak_gb=%.2f oom_kill=%d after %.0f s" % (serve.poll(), peak_gb(), ooms(), time.time() - t0))
+    print("evidence %s-{serve.log,pidstat.txt}" % P)
+    sys.exit(3)
 
 t0 = time.time()
 b = next_cycle(7200)
@@ -177,24 +217,27 @@ if PERF:
 rows, errs = [], 0
 for i in range(1, N + 1):
     c0 = cpu(pid); time.sleep(SPACING); idle = cpu(pid) - c0
-    m = json.load(open(man_path))
-    body = "".join(json.dumps({"type": "user", "sessionId": sid, "uuid": str(uuid.uuid4()),
-                               "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
-                               "cwd": "/tmp/p2probe", "message": {"role": "user", "content": "qz9p2probe %d %d" % (i, k)}},
-                              separators=(",", ":")) + "\n" for k in range(10)).encode()
-    q = urllib.parse.urlencode({"offset": m["size"], "head_hash": m["head_hash"], "source_name": m.get("source_name") or "claude",
-                                "path": m.get("path") or "/tmp/p2probe", "raw_end": 0})
-    req = urllib.request.Request("http://127.0.0.1:%s/v1/raw/%s/%s/%s?%s" % (PORT, machine, harness, src, q),
-                                 data=body, method="PUT", headers={"Authorization": "Bearer " + token,
-                                                                    "Content-Type": "application/octet-stream"})
     c1 = cpu(pid); w1 = time.time()
-    try:
-        code = urllib.request.urlopen(req, timeout=60).status
-    except urllib.error.HTTPError as e:
-        code = e.code
-    if code != 200:
+    bad = 0
+    for author, machine, harness, src, sid in targets:
+        m = json.load(open("%s/raw/author=%s/machine=%s/harness=%s/%s.json" % (DIR, author, machine, harness, src)))
+        body = "".join(json.dumps({"type": "user", "sessionId": sid, "uuid": str(uuid.uuid4()),
+                                   "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+                                   "cwd": "/tmp/p2probe", "message": {"role": "user", "content": "qz9p2probe %d %d" % (i, k)}},
+                                  separators=(",", ":")) + "\n" for k in range(10)).encode()
+        q = urllib.parse.urlencode({"offset": m["size"], "head_hash": m["head_hash"], "source_name": m.get("source_name") or "claude",
+                                    "path": m.get("path") or "/tmp/p2probe", "raw_end": 0})
+        req = urllib.request.Request("http://127.0.0.1:%s/v1/raw/%s/%s/%s?%s" % (PORT, machine, harness, src, q),
+                                     data=body, method="PUT", headers={"Authorization": "Bearer " + token,
+                                                                        "Content-Type": "application/octet-stream"})
+        try:
+            code = urllib.request.urlopen(req, timeout=60).status
+        except urllib.error.HTTPError as e:
+            code = e.code
+        bad += code != 200
+    if bad:
         errs += 1
-        print("round %d: PUT %d" % (i, code)); continue
+        print("round %d: %d PUTs not 200" % (i, bad)); continue
     g = next_cycle()
     c2 = cpu(pid); w2 = time.time()
     changed = int(g[2]) + int(g[3]) + int(g[4])
@@ -204,6 +247,7 @@ for i in range(1, N + 1):
 if prof:
     prof.send_signal(2); prof.wait()
 ps.terminate()
+final_peak, final_oom = peak_gb(), ooms()
 serve.terminate(); serve.wait(timeout=120)
 
 print("round\tcycle_cpu_s\tcycle_wall_s\tput_to_cycle_end_s\tidle_cpu_s_per_%ds\treason\tchanged\tbuilt\tpart_bytes\tok" % SPACING)
@@ -215,6 +259,7 @@ if cc:
           % (statistics.median(cc), min(cc), max(cc), len(cc), statistics.median(cw), min(cw), max(cw), errs, N))
 else:
     print("no rounds measured, errors %d of %d" % (errs, N))
+print("serve memory.peak_gb %.2f oom_kill %d targets %d" % (final_peak, final_oom, len(targets)))
 print("evidence %s-{serve.log,pidstat.txt}" % P)
 if prof:
     rep = subprocess.run(["perf", "report", "-i", P + "-perf.data", "--children", "--stdio", "--no-demangle", "-g", "none",
