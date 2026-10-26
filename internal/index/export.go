@@ -1,6 +1,8 @@
 package index
 
 import (
+	"bytes"
+	"encoding/json"
 	"sort"
 	"time"
 
@@ -81,6 +83,34 @@ func (db *DB) ExportHasSession(id string) bool {
 // ExportSpans is the session's spans relation rows, in export order (start
 // time, span id).
 func (db *DB) ExportSpans(id string) []schema.Span { return db.sessionSpans(id) }
+
+// ExportEachSpan calls fn with the session's spans in export order, decoding
+// one span at a time from the stored array; the first error from fn or from a
+// malformed array ends the walk.
+func (db *DB) ExportEachSpan(id string, fn func(schema.Span) error) error {
+	st, ok := db.part(id)
+	if !ok {
+		return nil
+	}
+	raw := st.sessionSpansRaw(id)
+	if raw == nil {
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if _, err := dec.Token(); err != nil {
+		return err
+	}
+	for dec.More() {
+		var sp schema.Span
+		if err := dec.Decode(&sp); err != nil {
+			return err
+		}
+		if err := fn(sp); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // exportSession folds the part's session i into an ExportSession.
 func (st *Part) exportSession(i int) (ExportSession, error) {

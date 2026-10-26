@@ -1,8 +1,10 @@
 package export
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -168,8 +170,12 @@ func TestFixtureExports(t *testing.T) {
 
 	t.Run("otlp-claude", func(t *testing.T) {
 		db := engineDB(t, [2]string{"claude-code", "session.jsonl"})
-		doc, err := OTLP(db, "7c666c01-d38e-4658-8650-854ffb5b626e", nil)
-		if err != nil {
+		var buf bytes.Buffer
+		if err := WriteOTLP(&buf, db, "7c666c01-d38e-4658-8650-854ffb5b626e", nil); err != nil {
+			t.Fatal(err)
+		}
+		var doc otlpRequest
+		if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
 			t.Fatal(err)
 		}
 		spans := doc.ResourceSpans[0].ScopeSpans[0].Spans
@@ -245,7 +251,7 @@ func TestDeletedSessionRefused(t *testing.T) {
 	if _, err := ATIF(db, session, hidden); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("ATIF of a deleted session: %v, want %v", err, ErrSessionNotFound)
 	}
-	if _, err := OTLP(db, session, hidden); !errors.Is(err, ErrSessionNotFound) {
+	if err := WriteOTLP(io.Discard, db, session, hidden); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("OTLP of a deleted session: %v, want %v", err, ErrSessionNotFound)
 	}
 }

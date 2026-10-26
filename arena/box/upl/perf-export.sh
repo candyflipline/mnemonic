@@ -4,7 +4,7 @@
 # perf-export.sh equal DATADIR IDS_FILE BIN_A BIN_B  sha256 of both binaries' output per session
 #
 # DATADIR is a COPY of a serve store (raw/ + index/); it is never written: this
-# script holds index/writer.lock itself, so export skips its settle-all ingest and
+# script holds index/writer.lock on its own fd 9 (no child process holds it), so export skips its settle-all ingest and
 # exports the published index, as it does under a running server.
 # run prints, per side: n, median and range of wall seconds and of peak RSS (MiB),
 # the failed-run count, the bytes written and the number of distinct output shas
@@ -16,18 +16,15 @@ set -eu
 mode=${1:?usage: perf-export.sh run|equal ...}
 shift
 TMP=$(mktemp -d /var/lib/mnu/out/p3-perf.XXXXXX)
-HOLDER=
 cleanup() {
-	[ -n "$HOLDER" ] && kill "$HOLDER" 2>/dev/null || true
 	rm -f "$TMP"/*.json "$TMP"/*.tm "$TMP"/*.err "$TMP"/*.tsv 2>/dev/null || true
 	rmdir "$TMP" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
 hold() {
-	flock -n "$1/index/writer.lock" sleep 86400 &
-	HOLDER=$!
-	sleep 1
+	exec 9> "$1/index/writer.lock"
+	flock -n 9 || { echo "writer.lock of $1 is held elsewhere" >&2; exit 2; }
 }
 
 stats() { # file of numbers -> n median min max

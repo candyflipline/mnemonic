@@ -1,11 +1,16 @@
 package export
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
 	"strconv"
 
 	"github.com/candyflipline/mnemonic/internal/index"
+	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
 // OTLP/JSON export: one ExportTraceServiceRequest per session, built from the
@@ -102,25 +107,55 @@ func intAttr(key string, value uint64) otlpAttr {
 	return otlpAttr{Key: key, Value: otlpAnyVal{IntValue: strconv.FormatUint(value, 10)}}
 }
 
-// OTLP builds the ExportTraceServiceRequest of one session from its spans,
-// ordered by start time. The trace id is derived from the session id, a
-// span's id is its spans.span_id (16 hex chars, 8 bytes), and the root keeps
-// no parentSpanId. Only chat spans carry gen_ai.usage.*: the spans relation
-// rolls usage up onto invoke_agent and turn spans, so a sum over the trace
-// would count it twice. A session in hidden is not found.
-func OTLP(db *index.DB, sessionID string, hidden map[string]bool) (*otlpRequest, error) {
+const (
+	otlpSkeletonSpans = "\"spans\": []"
+	otlpSpanIndent    = "            "
+	otlpSpansCloser   = "          ]"
+)
+
+// WriteOTLP writes the ExportTraceServiceRequest of one session, indented two
+// spaces and without a trailing newline, as json.MarshalIndent would write it
+// whole, but one span at a time: the document is the empty-spans skeleton
+// split at its spans array, with each span indented to the array's depth in
+// between. The trace id is derived from the session id, a span's id is its
+// spans.span_id (16 hex chars, 8 bytes), and the root keeps no parentSpanId.
+// Only chat spans carry gen_ai.usage.*: the spans relation rolls usage up
+// onto invoke_agent and turn spans, so a sum over the trace would count it
+// twice. A session in hidden is not found, and nothing is written for it.
+func WriteOTLP(w io.Writer, db *index.DB, sessionID string, hidden map[string]bool) error {
 	if hidden[sessionID] {
-		return nil, notFound(sessionID)
+		return notFound(sessionID)
 	}
 	if !db.ExportHasSession(sessionID) {
-		return nil, notFound(sessionID)
+		return notFound(sessionID)
 	}
 
 	sum := sha256.Sum256([]byte(tracePrefix + sessionID))
 	traceID := hex.EncodeToString(sum[:16])
 
-	spans := []otlpSpan{}
-	for _, row := range db.ExportSpans(sessionID) {
+	skeleton, err := json.MarshalIndent(&otlpRequest{ResourceSpans: []otlpResourceSpans{{
+		Resource: otlpResource{Attributes: []otlpAttr{strAttr("service.name", "mnemonic")}},
+		ScopeSpans: []otlpScopeOne{{
+			Scope: otlpScope{Name: otlpScopeName},
+			Spans: []otlpSpan{},
+		}},
+	}}}, "", "  ")
+	if err != nil {
+		return err
+	}
+	before, after, ok := bytes.Cut(skeleton, []byte(otlpSkeletonSpans))
+	if !ok {
+		return errors.New("export: otlp skeleton has no spans array")
+	}
+	if _, err := w.Write(before); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, "\"spans\": "); err != nil {
+		return err
+	}
+
+	n := 0
+	err = db.ExportEachSpan(sessionID, func(row schema.Span) error {
 		var s otlpSpan
 		kind := string(row.Kind)
 		s.SpanID = row.SpanID
@@ -143,13 +178,31 @@ func OTLP(db *index.DB, sessionID string, hidden map[string]bool) (*otlpRequest,
 				intAttr("gen_ai.usage.input_tokens", row.InputTokens),
 				intAttr("gen_ai.usage.output_tokens", row.OutputTokens))
 		}
-		spans = append(spans, s)
+		body, err := json.MarshalIndent(&s, otlpSpanIndent, "  ")
+		if err != nil {
+			return err
+		}
+		open := ",\n"
+		if n == 0 {
+			open = "[\n"
+		}
+		n++
+		if _, err := io.WriteString(w, open+otlpSpanIndent); err != nil {
+			return err
+		}
+		_, err = w.Write(body)
+		return err
+	})
+	if err != nil {
+		return err
 	}
-	return &otlpRequest{ResourceSpans: []otlpResourceSpans{{
-		Resource: otlpResource{Attributes: []otlpAttr{strAttr("service.name", "mnemonic")}},
-		ScopeSpans: []otlpScopeOne{{
-			Scope: otlpScope{Name: otlpScopeName},
-			Spans: spans,
-		}},
-	}}}, nil
+	closer := "[]"
+	if n > 0 {
+		closer = "\n" + otlpSpansCloser
+	}
+	if _, err := io.WriteString(w, closer); err != nil {
+		return err
+	}
+	_, err = w.Write(after)
+	return err
 }

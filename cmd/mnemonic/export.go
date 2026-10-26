@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -110,10 +111,7 @@ func exportCmd(args []string) error {
 			body = indent(body)
 		}
 	case "otlp":
-		var doc any
-		if doc, err = export.OTLP(db, sessionID, hidden); err == nil {
-			body, err = json.MarshalIndent(doc, "", "  ")
-		}
+		return writeOTLP(*out, db, sessionID, hidden)
 	case "dataset":
 		f, parseErr := parseAnnotation(*annotation)
 		if parseErr != nil {
@@ -134,6 +132,53 @@ func exportCmd(args []string) error {
 		return err
 	}
 	return writeOut(*out, body)
+}
+
+// writeOTLP streams the session's trace to path, or to stdout for "" and "-"
+// with the newline writeOut adds; the file is created at the first byte, so a
+// refused session leaves none.
+func writeOTLP(path string, db *index.DB, sessionID string, hidden map[string]bool) error {
+	lw := &lazyOut{path: path}
+	bw := bufio.NewWriterSize(lw, 1<<20)
+	if err := export.WriteOTLP(bw, db, sessionID, hidden); err != nil {
+		lw.close()
+		return err
+	}
+	if path == "" || path == "-" {
+		bw.WriteByte('\n')
+	}
+	if err := bw.Flush(); err != nil {
+		lw.close()
+		return err
+	}
+	return lw.close()
+}
+
+type lazyOut struct {
+	path string
+	f    *os.File
+}
+
+func (l *lazyOut) Write(p []byte) (int, error) {
+	if l.f == nil {
+		if l.path == "" || l.path == "-" {
+			l.f = os.Stdout
+		} else {
+			f, err := os.Create(l.path)
+			if err != nil {
+				return 0, err
+			}
+			l.f = f
+		}
+	}
+	return l.f.Write(p)
+}
+
+func (l *lazyOut) close() error {
+	if l.f == nil || l.f == os.Stdout {
+		return nil
+	}
+	return l.f.Close()
 }
 
 // indent makes a single-session document readable on a terminal.
