@@ -115,7 +115,7 @@ func ack(c *client) string {
 func main() {
 	server := flag.String("server", "", "host:port of the plaintext push listener")
 	token := flag.String("token", "", "push-scope bearer token")
-	capN := flag.Int("cap", 20, "the server's live-session cap")
+	capN := flag.Int("cap", 10, "the server's live-session cap")
 	prefix := flag.String("prefix", "cap", "machine name prefix")
 	flag.Parse()
 	n := *capN + 1

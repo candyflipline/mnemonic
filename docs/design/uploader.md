@@ -115,7 +115,7 @@ Native transport limits (`internal/intake/intake.go`):
 
 - `InitialWindowSize(1 MiB)` and `InitialConnWindowSize(4 MiB)` (`streamWindow`, `connWindow`) fix the receive credit; both are above grpc-go's 65535 threshold, so dynamic BDP sizing stays off. `MaxConcurrentStreams(4)` bounds streams per connection, and four stream windows equal the connection window, so the connection window adds no credit beyond the streams'. The first values (64 KiB / 256 KiB) cost the 4-client push about 70% of its batching: appends per batch 1.44 with the 1 MiB / 4 MiB windows against 1.11 with the small ones, wall 8.0 s against 10.0 s (box, 1/32 corpus subset, n=5 alternating, 30/30 equivalent). A 32 MiB Append still fits.
 - Headers are limited to 16 KiB and connection handshakes to 10 s. Keepalive enforcement is `MinTime: 20s, PermitWithoutStream: true`; server parameters are `Time: 45s, Timeout: 20s, MaxConnectionIdle: 5min` (idle means no active RPC). The client's 30 s pings are allowed.
-- Admission: `maxSessions = 20` live (author, machine) sessions. `enter` refuses a 21st new key with `ResourceExhausted` ("server is at its cap of 20 live sessions"); a stream for a key already live replaces it (newest wins) and never counts twice, so a takeover works at the cap. Memory is held before a stream says Hello (a message is read into a buffer first), so `admit` also counts open streams from the start of `Sync`: `maxStreams = maxSessions + spareStreams = 24`, `ResourceExhausted` past it. The 4 spare streams cover streams before Hello and displaced sessions still unwinding. The client treats every stream end alike (backoff, redial, Welcome), so a refusal costs one backoff.
+- Admission: `maxSessions = 10` live (author, machine) sessions. `enter` refuses an 11th new key with `ResourceExhausted` ("server is at its cap of 10 live sessions"); a stream for a key already live replaces it (newest wins) and never counts twice, so a takeover works at the cap. Memory is held before a stream says Hello (a message is read into a buffer first), so `admit` also counts open streams from the start of `Sync`: `maxStreams = maxSessions + spareStreams = 14`, `ResourceExhausted` past it. The 4 spare streams cover streams before Hello and displaced sessions still unwinding. The client treats every stream end alike (backoff, redial, Welcome), so a refusal costs one backoff.
 - Push is served only after the index has booted: `cmd/mnemonic/server.go` calls `ServePush` when `Server.Booted()` closes, which `cycle` does after `Index.Boot` returns. Boot is the process's peak, so no push memory is added to it; the listener is bound earlier (a bad address still fails at start) and connections wait in its backlog until serving starts.
 
 **Memory arithmetic** (MiB, redo with the constants named; every term is a bound, not an average):
@@ -127,18 +127,18 @@ Native transport limits (`internal/intake/intake.go`):
 | stream credit | 1 | `streamWindow`; 4 x 1 = `connWindow`, so nothing more per connection |
 | frame held before admission (default zstd of 33 MiB input: 33 MiB + 3 x 265 + 14 bytes, rounded up) | 34 | `commit.go` Submit, klauspost/compress v1.19.1 |
 | **per stream** | **101** | sum |
-| streams | 24 | `maxStreams` |
-| streams total | 2424 | 24 x 101 |
+| streams | 14 | `maxStreams` |
+| streams total | 1414 | 14 x 101 |
 | admitted-frame budget | 256 | `queueBytes`, `commit.go:27` |
 | completed batch whose budget is released but whose frames are not yet dropped | 128 | `maxBatchBytes`, `commit.go:26` |
-| **push live bytes** | **2808** | 2424 + 256 + 128 |
-| Go GC headroom on push buffers | 702 | GC percent 25 is process-wide from the first cycle (`internal/index/ingest.go:650`), which finishes before push is served: 2808 x 0.25 |
+| **push live bytes** | **1798** | 1414 + 256 + 128 |
+| Go GC headroom on push buffers | 450 | GC percent 25 is process-wide from the first cycle (`internal/index/ingest.go:650`), which finishes before push is served: 1798 x 0.25, rounded up |
 | index, steady | 3243 | 3.4 GB, the top of the 2.2-3.4 GB steady anon measured on prod's binary (Oct 26); it already includes the index's own GC headroom |
 | everything else: page cache for written frames, goroutine stacks, runtime, Welcome pages (20 x 8.9k entries), the HTTP surface | 1024 | reserved, not measured |
-| **total at the cap** | **7777** | 2808 + 702 + 3243 + 1024 |
+| **total at the cap** | **6515** | 1798 + 450 + 3243 + 1024 |
 | MemoryMax | 8192 | `ops/systemd/mnemonic.service` |
 
-7777 < 8192, a margin of 415 MiB. Solving 3243 + 1.25 x (384 + 101 x (C + 4)) + 1024 <= 8192 gives C <= 23, so 20 leaves three sessions of slack. Boot, with push not served: VmHWM 7.04 GiB = 7209 MiB on the lag-1 store (final tree, MemoryMax 8G, one run, margin 983 MiB). Before this change `ServePush` started beside `Run`, so push could overlap that boot peak with no bound on sessions.
+6515 < 8192, a margin of 1677 MiB beyond the 1024 MiB reservation, so at least 1 GiB stays under MemoryMax at the cap. Solving 3243 + 1.25 x (384 + 101 x (C + 4)) + 1024 + 1024 <= 8192 gives C <= 15; the cap is 10 (it was 20 with no margin past the reservation). The index term is prod's steady figure, the largest measured: on the box's full store (BASE, 8,874 sources) VmHWM over a warm boot plus 22 put cycles was 1,246,220 kB = 1217 MiB (one run, hot=1, so below prod's hot=34 steady state). Boot, with push not served: VmHWM 6,548,240 kB = 6395 MiB on a cold boot of that store (one run) and 7.04 GiB = 7209 MiB on the lag-1 store (one run), both under MemoryMax 8G with oom_kill 0. Go reuses the heap boot freed before it asks the kernel for more, so after boot the process is bounded by the larger of the boot peak and the total at the cap: 7209 MiB, a margin of 983 MiB. Before push waited for boot, `ServePush` started beside `Run`, so push could overlap that boot peak with no bound on sessions.
 
 What the bound does not cover: the HTTP surface (the OTLP receiver reads up to 64 MiB per request, `internal/otlp/receiver.go:38`, and MCP results) shares the 1024 MiB reservation, which is not measured; a larger corpus raises the index term and lowers the largest cap by 1 per 126 MiB (101 x 1.25 per stream). The index's steady and boot figures come from the box measurement above; if they change, recompute the table.
 

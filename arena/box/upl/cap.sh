@@ -8,7 +8,7 @@
 # Aborted. Then SIGTERM, and the wall from the signal to exit is printed.
 # Synthetic input only; counts and codes. Run under the box lock:
 #   flock /var/lib/mnu/box.lock sh cap.sh BIN CAPDRV DIR
-BIN=$1 CAPDRV=$2 DIR=$3 CAP=${4:-20}
+BIN=$1 CAPDRV=$2 DIR=$3 CAP=${4:-10}
 HTTP_PORT=${HTTP_PORT:-7791}
 PUSH_PORT=${PUSH_PORT:-7792}
 SERVE_PID=

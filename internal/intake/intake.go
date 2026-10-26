@@ -33,7 +33,7 @@ const (
 
 	streamWindow = 1 << 20
 	connWindow   = 4 << 20
-	maxSessions  = 20
+	maxSessions  = 10
 	spareStreams = 4
 	maxStreams   = maxSessions + spareStreams
 )
