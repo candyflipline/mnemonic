@@ -84,9 +84,9 @@ func TestBootFailureKeepsServeUpAndRetries(t *testing.T) {
 	web := httptest.NewServer(srv.Handler())
 	defer web.Close()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	ran := make(chan struct{})
 	go func() { srv.Run(ctx); close(ran) }()
+	defer func() { cancel(); <-ran }()
 
 	var failing string
 	for deadline := time.Now().Add(5 * time.Second); failing == "" || strings.HasPrefix(failing, bootPrefix+"1:"); {
