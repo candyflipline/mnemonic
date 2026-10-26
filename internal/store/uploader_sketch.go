@@ -178,8 +178,11 @@ type CommittedSource struct {
 func (*Committer) OpenCommitted(layout.Key) (*CommittedSource, error) { panic("not implemented") }
 func (*CommittedSource) State() SourceState                           { panic("not implemented") }
 func (*CommittedSource) CompressedEnd() int64                         { panic("not implemented") }
-func (*CommittedSource) ReadAt([]byte, int64) (int, error)            { panic("not implemented") }
-func (*CommittedSource) Close() error                                 { panic("not implemented") }
+func (*CommittedSource) ReadAt([]byte, int64) (int, error) {
+	// TODO: clamp reads to compressedEnd; no uncommitted tail is observable.
+	panic("not implemented")
+}
+func (*CommittedSource) Close() error { panic("not implemented") }
 
 // Distinct private phase types expose only the next legal durability step.
 // No phase before syncedBatch has a receipt-producing method.
