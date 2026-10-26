@@ -90,8 +90,8 @@ func (t TLS) check(listen, pushListen string) error {
 	if _, port, _ := net.SplitHostPort(listen); port != "443" {
 		return fmt.Errorf("tls.hosts needs listen on port 443 (tls-alpn-01 validates there), not %q", listen)
 	}
-	if _, port, _ := net.SplitHostPort(pushListen); port != "8741" {
-		return fmt.Errorf("tls: push_listen must use port 8741, the port clients dial, not %q", pushListen)
+	if _, port, _ := net.SplitHostPort(pushListen); port != wire.PushPort {
+		return fmt.Errorf("tls: push_listen must use port %s, the port clients dial, not %q", wire.PushPort, pushListen)
 	}
 	for i, h := range t.Hosts {
 		if h == "" || strings.ContainsAny(h, ":/ ") {

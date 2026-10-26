@@ -71,11 +71,8 @@ type uplink struct {
 	err     error // why the stream ended; valid once fin is closed
 }
 
-// pushPort is where the server's push listener answers an https server URL.
-const pushPort = "8741"
-
 // target maps the config's server URL to a gRPC target and credentials:
-// https dials the URL's host on pushPort with the system roots, http dials
+// https dials the URL's host on wire.PushPort with the system roots, http dials
 // the URL's host:port in plaintext HTTP/2 (the box and tests). A non-empty
 // pushAddress replaces the host:port and keeps the scheme's credentials.
 func target(server, pushAddress string) (string, credentials.TransportCredentials, error) {
@@ -87,7 +84,7 @@ func target(server, pushAddress string) (string, credentials.TransportCredential
 	var creds credentials.TransportCredentials
 	switch u.Scheme {
 	case "https":
-		addr = net.JoinHostPort(u.Hostname(), pushPort)
+		addr = net.JoinHostPort(u.Hostname(), wire.PushPort)
 		creds = credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12})
 	case "http":
 		port := u.Port()
