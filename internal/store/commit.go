@@ -1,59 +1,75 @@
 package store
 
-// SKETCH (docs/design/uploader.md, "Group-commit state machine"): types and
-// signatures only, bodies panic. Lane S makes Committer the Store: Store's
-// DataDir, Wake, mu and locks fields, lockKey, replace, append, replaceRaw
-// and the HTTP handlers (moved to internal/intake) are deleted, and
-// Committer is renamed Store.
-
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
+	"time"
+
+	"github.com/klauspost/compress/zstd"
 
 	"github.com/candyflipline/mnemonic/internal/layout"
 	"github.com/candyflipline/mnemonic/internal/wire"
 )
 
-// Batch bounds. A batch is whatever is queued when the committer finishes the
-// previous one, up to these caps; there is no timer, so a lone append commits
-// at once and a burst shares its barriers.
 const (
 	maxBatchAppends = 512
 	maxBatchBytes   = 128 << 20
-	// queueBytes bounds compressed frames submitted and not yet committed,
-	// across every stream and the HTTP adapter. Submit blocks while it is
-	// spent, which stops the stream's Recv, which closes the HTTP/2 window.
-	queueBytes = 256 << 20
+	queueBytes      = 256 << 20
+	queueRequests   = 2 * maxBatchAppends
 )
 
-// Lines is a non-empty run of whole lines, each ending in '\n'. ParseLines is
-// its only constructor, so nothing past the edge re-checks it.
+// Lines is a non-empty run of whole lines, each ending in '\n'.
 type Lines struct{ b []byte }
 
-func ParseLines(b []byte) (Lines, error) { panic("not implemented") }
+var errLines = errors.New("body must be non-empty whole lines")
 
-// ClientSource is the key of a client-owned source: the author from auth,
-// machine, harness and src_id valid segments, and none of them a
-// server-owned name (ServerMachine, ServerHarnesses).
+func ParseLines(b []byte) (Lines, error) {
+	if len(b) == 0 || b[len(b)-1] != '\n' {
+		return Lines{}, errLines
+	}
+	return Lines{b}, nil
+}
+
+// ErrReserved is NewClientSource's answer to a machine or harness only the
+// server writes (HTTP 403, gRPC PermissionDenied).
+var ErrReserved = errors.New("machine or harness is reserved for server-owned sources")
+
+var errSegment = errors.New("bad path segment")
+
+// ClientSource is the key of a client-owned source.
 type ClientSource struct{ key layout.Key }
 
 func NewClientSource(author, machine, harness, srcID string) (ClientSource, error) {
-	panic("not implemented")
+	for _, seg := range [...]string{author, machine, harness, srcID} {
+		if !wire.ValidSegment(seg) {
+			return ClientSource{}, errSegment
+		}
+	}
+	if machine == ServerMachine || isServerHarness(harness) {
+		return ClientSource{}, ErrReserved
+	}
+	return ClientSource{layout.Key{Author: author, Machine: machine, Harness: harness, SrcID: srcID}}, nil
 }
 
-// Op is one client change to a source: exactly one of Replace, Extend,
-// Backfill. ParseOp maps the PUT and stream fields onto it with today's
-// servePut rules (store.go:112-148).
+// Op is one change to a source: Replace, Extend, Backfill, or the server's
+// own append.
 type Op interface{ isOp() }
 
-// Replace makes the source exactly Lines (offset 0).
 type Replace struct {
 	HeadHash, SourceName, Path string
 	RawEnd                     int64
 	Lines                      Lines
 }
 
-// Extend appends Lines when the source is Offset long with HeadHash.
 type Extend struct {
 	Offset   int64
 	HeadHash string
@@ -61,50 +77,64 @@ type Extend struct {
 	Lines    Lines
 }
 
-// Backfill records RawEnd when the source is Offset long with HeadHash; no
-// raw byte is written and Size and UpdatedMs stay.
+// Backfill records RawEnd when the source is Offset long with HeadHash; Size,
+// ZstSize and UpdatedMs stay, so the index re-parses nothing.
 type Backfill struct {
 	Offset   int64
 	HeadHash string
 	RawEnd   int64
 }
 
-func (Replace) isOp()  {}
-func (Extend) isOp()   {}
-func (Backfill) isOp() {}
-
-// serverAppend is Append's request: create or extend a server-owned source,
-// deduplicated by requestKey against the source and the day before it.
 type serverAppend struct {
 	src        ServerSource
 	requestKey string
 	lines      Lines
 }
 
+func (Replace) isOp()      {}
+func (Extend) isOp()       {}
+func (Backfill) isOp()     {}
 func (serverAppend) isOp() {}
 
+// ParseOp maps a PUT's or an Append's fields onto an Op. Its errors read as
+// the HTTP 400 bodies the PUT answered with.
 func ParseOp(offset int64, headHash, sourceName, path string, rawEnd int64, body []byte) (Op, error) {
-	panic("not implemented")
+	if offset < 0 {
+		return nil, errors.New("bad offset")
+	}
+	if headHash == "" || sourceName == "" || path == "" {
+		return nil, errors.New("missing query parameter")
+	}
+	if rawEnd < 0 {
+		return nil, errors.New("bad raw_end")
+	}
+	if len(body) == 0 && offset > 0 {
+		return Backfill{Offset: offset, HeadHash: headHash, RawEnd: rawEnd}, nil
+	}
+	l, err := ParseLines(body)
+	if err != nil {
+		return nil, err
+	}
+	if offset == 0 {
+		return Replace{HeadHash: headHash, SourceName: sourceName, Path: path, RawEnd: rawEnd, Lines: l}, nil
+	}
+	return Extend{Offset: offset, HeadHash: headHash, RawEnd: rawEnd, Lines: l}, nil
 }
 
-// Verdict is what the committer did with one request.
 type Verdict uint8
 
 const (
-	// Applied: the change is on disk; State is the source after it.
+	// Applied: State is the source after the change.
 	Applied Verdict = iota + 1
-	// Conflict: Offset or HeadHash did not match; nothing was written and
-	// State is the source as stored (zero when there is none).
+	// Conflict: nothing written; State is the source as stored, zero when
+	// there is none.
 	Conflict
 	// Duplicate: a server append whose request key was already applied.
 	Duplicate
 )
 
-// Ack is a request's answer. Its fields are unexported and the zero Ack is
-// invalid (Valid false), so outside this package an Ack exists only as
-// Ticket.Wait returns it, and Wait returns only after the request's batch
-// passed its last barrier. Inside, committed.acks is the one constructor
-// (scripts/check: one `Ack{` literal in internal/store).
+// Ack is a request's answer once its batch is durable. The zero Ack is
+// invalid; committed.acks makes every other one.
 type Ack struct {
 	verdict Verdict
 	state   wire.Source
@@ -115,183 +145,741 @@ func (a Ack) Valid() bool        { return a.batch != 0 }
 func (a Ack) Verdict() Verdict   { return a.verdict }
 func (a Ack) State() wire.Source { return a.state }
 
-// Ticket is one submitted request. Wait returns its Ack once the batch that
-// carries it is durable, or the error that stopped the committer.
 type Ticket struct {
 	done chan struct{}
 	ack  Ack
 	err  error
 }
 
-func (t *Ticket) Wait(ctx context.Context) (Ack, error) { panic("not implemented") }
+func newTicket() *Ticket { return &Ticket{done: make(chan struct{})} }
 
-// Committer is the one writer of raw/: every client PUT, stream Append and
-// server Append is a request on its queue, and one goroutine commits them in
-// batches. It holds every source's manifest in memory (the table), loaded at
-// Open; disk manifests are the table's persistence, written through.
-type Committer struct {
-	dataDir string
-	reqs    chan *request
-	budget  chan struct{} // TODO: a byte semaphore of queueBytes
+func (t *Ticket) resolve(a Ack) { t.ack = a; close(t.done) }
 
-	mu    sync.RWMutex
-	table map[layout.Key]*manifestBody // written only by run, after a batch's last barrier
+func (t *Ticket) fail(err error) { t.err = err; close(t.done) }
 
-	changes changes
-	seq     uint64 // batch number, from 1
-	stopped chan struct{}
-	err     error // set once when a barrier fails; every later Submit returns it
+// Wait returns the Ack once the request's batch passed its last barrier, or
+// the error that stopped the committer.
+func (t *Ticket) Wait(ctx context.Context) (a Ack, err error) {
+	select {
+	case <-t.done:
+		return t.ack, t.err
+	case <-ctx.Done():
+		return a, ctx.Err()
+	}
 }
 
-// request is a parsed, compressed change waiting for its batch.
+// Committer is the one writer of raw/. Every client change and server append
+// is a request on its queue; one goroutine commits them in batches. The table
+// is every source's manifest, loaded at Open and written through.
+type Committer struct {
+	dataDir string
+	barrier barrier
+	closeFS func() error
+	exit    func(error)
+
+	reqs   chan *request
+	budget budget
+
+	intake sync.RWMutex
+	closed bool
+
+	mu    sync.RWMutex
+	table map[layout.Key]*manifestBody
+
+	changes changes
+	seq     uint64
+	stopped chan struct{}
+	done    chan struct{}
+	err     error
+}
+
 type request struct {
 	key    layout.Key
 	op     Op
-	frame  []byte // zstd frame of the op's Lines, encoded by Submit's caller
+	frame  []byte
 	ticket *Ticket
 }
 
-// Open loads the table from every raw manifest under dataDir, removes temp
-// files a crash left (".<name>.json.*", ".<name>.jsonl.zst.*"), and starts
-// the committer.
-func Open(dataDir string) (*Committer, error) { panic("not implemented") }
+// Open loads the table from every manifest under dataDir, removes the temp
+// files a crash left, and starts the committer. A failed write or barrier
+// stops the committer and exits the process.
+func Open(dataDir string) (*Committer, error) {
+	b, closeFS, err := openBarrier(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	c, err := open(dataDir, b, func(err error) {
+		log.Printf("store: committer stopped: %v", err)
+		os.Exit(1)
+	})
+	if err != nil {
+		closeFS()
+		return nil, err
+	}
+	c.closeFS = closeFS
+	return c, nil
+}
+
+func open(dataDir string, b barrier, exit func(error)) (*Committer, error) {
+	table, err := loadTable(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	c := &Committer{
+		dataDir: dataDir,
+		barrier: b,
+		closeFS: func() error { return nil },
+		exit:    exit,
+		reqs:    make(chan *request, queueRequests),
+		budget:  newBudget(queueBytes),
+		table:   table,
+		changes: changes{keys: map[layout.Key]struct{}{}, ready: make(chan struct{}, 1)},
+		stopped: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	go c.run()
+	return c, nil
+}
+
+func loadTable(dataDir string) (map[layout.Key]*manifestBody, error) {
+	table := map[layout.Key]*manifestBody{}
+	root := filepath.Join(dataDir, "raw")
+	authors, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return table, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range authors {
+		author, ok := strings.CutPrefix(a.Name(), "author=")
+		if !ok || !a.IsDir() {
+			continue
+		}
+		machines, err := os.ReadDir(filepath.Join(root, a.Name()))
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range machines {
+			machine, ok := strings.CutPrefix(m.Name(), "machine=")
+			if !ok || !m.IsDir() {
+				continue
+			}
+			harnesses, err := os.ReadDir(filepath.Join(root, a.Name(), m.Name()))
+			if err != nil {
+				return nil, err
+			}
+			for _, h := range harnesses {
+				harness, ok := strings.CutPrefix(h.Name(), "harness=")
+				if !ok || !h.IsDir() {
+					continue
+				}
+				dir := filepath.Join(root, a.Name(), m.Name(), h.Name())
+				if err := loadDir(table, dir, layout.Key{Author: author, Machine: machine, Harness: harness}); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	return table, nil
+}
+
+func loadDir(table map[layout.Key]*manifestBody, dir string, k layout.Key) error {
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, f := range files {
+		name := f.Name()
+		if isTemp(name) {
+			if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			continue
+		}
+		srcID, ok := strings.CutSuffix(name, ".json")
+		if !ok || strings.HasPrefix(name, ".") {
+			continue
+		}
+		m, err := readManifest(filepath.Join(dir, name))
+		if err != nil {
+			log.Printf("store: skip manifest %s: %v", filepath.Join(dir, name), err)
+			continue
+		}
+		k.SrcID = srcID
+		table[k] = m
+	}
+	return nil
+}
+
+func isTemp(name string) bool {
+	return strings.HasPrefix(name, ".") &&
+		(strings.Contains(name, ".json.") || strings.Contains(name, ".jsonl.zst."))
+}
 
 // Close stops intake, commits what is queued, and returns the error that
 // stopped the committer, if any.
-func (c *Committer) Close() error { panic("not implemented") }
-
-// Submit queues op for src and returns its ticket. It encodes the frame on
-// the caller's goroutine (encodeFrame, the same zstd defaults as writeFrame,
-// so frames are byte-identical to today's), then blocks while queueBytes is
-// spent.
-func (c *Committer) Submit(ctx context.Context, src ClientSource, op Op) (*Ticket, error) {
-	panic("not implemented")
+func (c *Committer) Close() error {
+	c.intake.Lock()
+	if !c.closed {
+		c.closed = true
+		close(c.reqs)
+	}
+	c.intake.Unlock()
+	<-c.done
+	if err := c.closeFS(); c.err == nil {
+		return err
+	}
+	return c.err
 }
 
-// Append is the server-owned write (OTLP, annotations, controls): submit and
-// wait, same contract as today's Store.Append (append.go:73-83).
+var errClosed = errors.New("store: closed")
+
+// Submit queues op for src and returns its ticket. The frame is encoded on the
+// caller's goroutine; Submit blocks while queueBytes of frames are queued.
+func (c *Committer) Submit(ctx context.Context, src ClientSource, op Op) (*Ticket, error) {
+	var frame []byte
+	switch o := op.(type) {
+	case Replace:
+		frame = encodeFrame(o.Lines)
+	case Extend:
+		frame = encodeFrame(o.Lines)
+	case Backfill:
+	default:
+		return nil, fmt.Errorf("store: op %T is not a client op", op)
+	}
+	return c.submit(ctx, src.key, op, frame)
+}
+
+func (c *Committer) submit(ctx context.Context, k layout.Key, op Op, frame []byte) (*Ticket, error) {
+	n := min(int64(len(frame)), queueBytes)
+	if err := c.budget.acquire(ctx, n, c.stopped); err != nil {
+		if c.stoppedErr() != nil {
+			return nil, c.err
+		}
+		return nil, err
+	}
+	r := &request{key: k, op: op, frame: frame, ticket: newTicket()}
+	c.intake.RLock()
+	defer c.intake.RUnlock()
+	if c.closed {
+		c.budget.release(n)
+		return nil, errClosed
+	}
+	select {
+	case c.reqs <- r:
+		return r.ticket, nil
+	case <-c.stopped:
+		c.budget.release(n)
+		return nil, c.err
+	case <-ctx.Done():
+		c.budget.release(n)
+		return nil, ctx.Err()
+	}
+}
+
+func (c *Committer) stoppedErr() error {
+	select {
+	case <-c.stopped:
+		return c.err
+	default:
+		return nil
+	}
+}
+
+// Append is the server-owned write: lines onto src, created when missing. A
+// non-empty requestKey already applied to src or to the day before it changes
+// nothing and reports duplicate; an empty one never dedups.
 func (c *Committer) Append(src ServerSource, requestKey string, lines []byte) (_ wire.Source, duplicate bool, _ error) {
-	panic("not implemented")
+	if err := src.validate(); err != nil {
+		return wire.Source{}, false, err
+	}
+	l, err := ParseLines(lines)
+	if err != nil {
+		return wire.Source{}, false, fmt.Errorf("store: %w", err)
+	}
+	ctx := context.Background()
+	t, err := c.submit(ctx, src.key(), serverAppend{src: src, requestKey: requestKey, lines: l}, encodeFrame(l))
+	if err != nil {
+		return wire.Source{}, false, err
+	}
+	a, err := t.Wait(ctx)
+	if err != nil {
+		return wire.Source{}, false, err
+	}
+	return a.State(), a.Verdict() == Duplicate, nil
 }
 
 // Sources is author's sources on machine as the table holds them, sorted by
-// SrcID: the stream's Welcome and the adapter's GET manifest. No disk read.
-func (c *Committer) Sources(author, machine string) []wire.Source { panic("not implemented") }
+// SrcID.
+func (c *Committer) Sources(author, machine string) []wire.Source {
+	c.mu.RLock()
+	out := []wire.Source{}
+	for k, m := range c.table {
+		if k.Author == author && k.Machine == machine {
+			out = append(out, m.Source)
+		}
+	}
+	c.mu.RUnlock()
+	slices.SortFunc(out, func(a, b wire.Source) int { return strings.Compare(a.SrcID, b.SrcID) })
+	return out
+}
 
-// Changed fires after a batch that changed any source commits; TakeChanged
-// then returns every key changed since the last take and clears the set.
+// Changed fires after a batch that changed a source commits.
 func (c *Committer) Changed() <-chan struct{} { return c.changes.ready }
 
-func (c *Committer) TakeChanged() []layout.Key { panic("not implemented") }
+// TakeChanged returns every key changed since the last take and clears the
+// set.
+func (c *Committer) TakeChanged() []layout.Key {
+	c.changes.mu.Lock()
+	keys := c.changes.keys
+	c.changes.keys = map[layout.Key]struct{}{}
+	c.changes.mu.Unlock()
+	out := make([]layout.Key, 0, len(keys))
+	for k := range keys {
+		out = append(out, k)
+	}
+	slices.SortFunc(out, compareKeys)
+	return out
+}
 
-// changes is the dirty set: run adds a batch's keys after its last barrier,
-// the index cycle takes the whole set by swap. Two appends racing a take land
-// either in the taken set or in the next one, never in neither.
+func compareKeys(a, b layout.Key) int {
+	for _, p := range [...][2]string{{a.Author, b.Author}, {a.Machine, b.Machine}, {a.Harness, b.Harness}, {a.SrcID, b.SrcID}} {
+		if c := strings.Compare(p[0], p[1]); c != 0 {
+			return c
+		}
+	}
+	return 0
+}
+
 type changes struct {
 	mu    sync.Mutex
 	keys  map[layout.Key]struct{}
-	ready chan struct{} // cap 1, non-blocking send after each add
+	ready chan struct{}
 }
 
-// run is the committer loop.
+func (ch *changes) add(keys []layout.Key) {
+	if len(keys) == 0 {
+		return
+	}
+	ch.mu.Lock()
+	for _, k := range keys {
+		ch.keys[k] = struct{}{}
+	}
+	ch.mu.Unlock()
+	select {
+	case ch.ready <- struct{}{}:
+	default:
+	}
+}
+
 func (c *Committer) run() {
-	// TODO:
-	// for {
-	//   first := <-c.reqs (or stop)
-	//   reqs := [first] + every request already queued, up to maxBatchAppends
-	//           and maxBatchBytes (no wait)
-	//   p := plan(c.table, reqs, nowMs)                  // pure
-	//   w, err := p.write(c.dataDir)                     // W1
-	//   d, err := w.sync(c.barrier)                      // B1
-	//   r, err := d.linkRaws(c.barrier)                  // W2a (+B2 if any rewrite)
-	//   k, err := r.linkManifests(c.barrier, c.seq+1)    // W2b + B3
-	//   on any err: c.err = err; fail every ticket of this batch and every
-	//     later Submit; never touch the table again (the process exits; boot
-	//     reloads the truth from disk)
-	//   c.mu.Lock(); apply k.table into c.table; c.mu.Unlock()
-	//   c.changes.add(k.changed)
-	//   for i, a := range k.acks() { reqs[i].ticket resolve a }
-	//   release reqs' bytes from the budget
-	// }
-	panic("not implemented")
+	defer close(c.done)
+	var carry *request
+	for {
+		first := carry
+		carry = nil
+		if first == nil {
+			r, ok := <-c.reqs
+			if !ok {
+				return
+			}
+			first = r
+		}
+		reqs := []*request{first}
+		size := len(first.frame)
+	drain:
+		for len(reqs) < maxBatchAppends {
+			select {
+			case r, ok := <-c.reqs:
+				if !ok {
+					break drain
+				}
+				if size+len(r.frame) > maxBatchBytes {
+					carry = r
+					break drain
+				}
+				reqs = append(reqs, r)
+				size += len(r.frame)
+			default:
+				break drain
+			}
+		}
+		if err := c.commit(reqs); err != nil {
+			c.stop(err, reqs, carry)
+			return
+		}
+	}
 }
 
-// The batch states. Each transition takes the previous state and returns the
-// next; only the last returns committed, and only committed makes Acks.
+func (c *Committer) commit(reqs []*request) error {
+	p := plan(c.table, reqs, func() int64 { return time.Now().UnixMilli() })
+	w, err := p.write(c.dataDir)
+	if err != nil {
+		return err
+	}
+	d, err := w.sync(c.barrier)
+	if err != nil {
+		return err
+	}
+	r, err := d.linkRaws(c.barrier)
+	if err != nil {
+		return err
+	}
+	k, err := r.linkManifests(c.barrier, c.seq+1)
+	if err != nil {
+		return err
+	}
+	c.seq++
+	c.mu.Lock()
+	for _, sp := range p.srcs {
+		after := sp.after
+		c.table[sp.key] = &after
+	}
+	c.mu.Unlock()
+	c.changes.add(k.changed)
+	for i, a := range k.acks() {
+		reqs[i].ticket.resolve(a)
+	}
+	c.budget.release(int64(size(reqs)))
+	return nil
+}
 
-// planned is the batch decided in memory: per request a verdict, per touched
-// source its before and after manifest and the frames to write.
+func size(reqs []*request) int {
+	n := 0
+	for _, r := range reqs {
+		n += min(len(r.frame), queueBytes)
+	}
+	return n
+}
+
+func (c *Committer) stop(err error, reqs []*request, carry *request) {
+	c.err = err
+	close(c.stopped)
+	for _, r := range reqs {
+		r.ticket.fail(err)
+	}
+	if carry != nil {
+		carry.ticket.fail(err)
+	}
+	c.exit(err)
+	for r := range c.reqs {
+		r.ticket.fail(err)
+	}
+}
+
+// planned is the batch decided in memory: per request its verdict and the
+// source state it answers with, per touched source its after manifest and
+// frames.
 type planned struct {
 	reqs    []*request
 	verdict []Verdict
-	srcs    map[layout.Key]*sourcePlan
+	state   []wire.Source
+	srcs    []*sourcePlan
 }
 
-// sourcePlan is one source's change in the batch. rewrite is a Replace or a
-// server source's create: a new raw file from frames, the old manifest
-// unlinked first. Otherwise the raw is truncated to before.ZstSize and the
-// frames appended. Several requests on one source fold into one plan, in
-// queue order: the frames concatenate, the manifest is written once.
+// sourcePlan is one source's change. A rewrite (Replace, or a server
+// source's create) writes a new raw from frames and unlinks the old manifest
+// first; otherwise the raw is truncated to before.ZstSize and frames
+// appended. Requests on one source fold in queue order.
 type sourcePlan struct {
 	key     layout.Key
-	before  *manifestBody // nil when the source has no manifest
+	before  *manifestBody
 	after   manifestBody
 	rewrite bool
 	frames  [][]byte
 }
 
-// plan decides every request against the table as the batch's earlier
-// requests left it. Pure: no IO, now is the clock.
 func plan(table map[layout.Key]*manifestBody, reqs []*request, now func() int64) planned {
-	// TODO per request, in order, against cur := table overlaid with this
-	// batch's plans so far:
-	//   Replace: verdict Applied; plan.rewrite, frames = [frame];
-	//            after = Source{Size: len, HeadHash, SourceName, Path, RawEnd,
-	//            UpdatedMs: max(now, prev+1)}, ZstSize derived from frames.
-	//   Extend:  cur nil -> Conflict(zero); Offset/HeadHash mismatch ->
-	//            Conflict(cur.Source); else Applied, frames += frame,
-	//            Size += len, RawEnd, UpdatedMs = max(now, prev+1), ZstSize +=.
-	//   Backfill: same checks; Applied; RawEnd recorded only when > 0.
-	//   serverAppend: Duplicate when the key is in this or the day before's
-	//            Applied; else create (rewrite) or extend, Applied += key.
-	panic("not implemented")
+	p := planned{reqs: reqs, verdict: make([]Verdict, len(reqs)), state: make([]wire.Source, len(reqs))}
+	bySrc := map[layout.Key]*sourcePlan{}
+	cur := func(k layout.Key) *manifestBody {
+		if sp := bySrc[k]; sp != nil {
+			return &sp.after
+		}
+		return table[k]
+	}
+	touch := func(k layout.Key) *sourcePlan {
+		if sp := bySrc[k]; sp != nil {
+			return sp
+		}
+		sp := &sourcePlan{key: k, before: table[k]}
+		if sp.before != nil {
+			sp.after = *sp.before
+			sp.after.Applied = slices.Clone(sp.before.Applied)
+		}
+		bySrc[k] = sp
+		p.srcs = append(p.srcs, sp)
+		return sp
+	}
+	for i, r := range reqs {
+		m := cur(r.key)
+		switch op := r.op.(type) {
+		case Replace:
+			var prevMs int64
+			if m != nil {
+				prevMs = m.UpdatedMs
+			}
+			sp := touch(r.key)
+			sp.rewrite = true
+			sp.frames = [][]byte{r.frame}
+			sp.after = manifestBody{
+				Source: wire.Source{
+					SrcID:      r.key.SrcID,
+					Harness:    r.key.Harness,
+					SourceName: op.SourceName,
+					Path:       op.Path,
+					Size:       int64(len(op.Lines.b)),
+					RawEnd:     op.RawEnd,
+					HeadHash:   op.HeadHash,
+					UpdatedMs:  max(now(), prevMs+1),
+				},
+				ZstSize: int64(len(r.frame)),
+			}
+			p.verdict[i], p.state[i] = Applied, sp.after.Source
+		case Extend:
+			if m == nil || op.Offset != m.Size || op.HeadHash != m.HeadHash {
+				p.verdict[i], p.state[i] = Conflict, stateOf(m)
+				continue
+			}
+			sp := touch(r.key)
+			sp.frames = append(sp.frames, r.frame)
+			sp.after.Size += int64(len(op.Lines.b))
+			sp.after.RawEnd = op.RawEnd
+			sp.after.UpdatedMs = max(now(), sp.after.UpdatedMs+1)
+			sp.after.ZstSize += int64(len(r.frame))
+			p.verdict[i], p.state[i] = Applied, sp.after.Source
+		case Backfill:
+			if m == nil || op.Offset != m.Size || op.HeadHash != m.HeadHash {
+				p.verdict[i], p.state[i] = Conflict, stateOf(m)
+				continue
+			}
+			if op.RawEnd > 0 {
+				sp := touch(r.key)
+				sp.after.RawEnd = op.RawEnd
+				m = &sp.after
+			}
+			p.verdict[i], p.state[i] = Applied, m.Source
+		case serverAppend:
+			prev := op.src
+			prev.Day = op.src.Day.AddDate(0, 0, -1)
+			if pm := cur(prev.key()); pm != nil && op.requestKey != "" && slices.Contains(pm.Applied, op.requestKey) {
+				p.verdict[i], p.state[i] = Duplicate, pm.Source
+				continue
+			}
+			if m != nil && op.requestKey != "" && slices.Contains(m.Applied, op.requestKey) {
+				p.verdict[i], p.state[i] = Duplicate, m.Source
+				continue
+			}
+			sp := touch(r.key)
+			n := int64(len(op.lines.b))
+			if m == nil {
+				first, _, _ := bytes.Cut(op.lines.b, []byte{'\n'})
+				sp.rewrite = true
+				sp.frames = [][]byte{r.frame}
+				sp.after = manifestBody{
+					Source: wire.Source{
+						SrcID:      r.key.SrcID,
+						Harness:    r.key.Harness,
+						SourceName: op.src.name(),
+						Path:       op.src.name(),
+						Size:       n,
+						HeadHash:   wire.HeadHash(op.lines.b[:len(first)+1]),
+						UpdatedMs:  now(),
+					},
+					ZstSize: int64(len(r.frame)),
+				}
+			} else {
+				sp.frames = append(sp.frames, r.frame)
+				sp.after.Size += n
+				sp.after.UpdatedMs = max(now(), sp.after.UpdatedMs+1)
+				sp.after.ZstSize += int64(len(r.frame))
+			}
+			if op.requestKey != "" {
+				sp.after.Applied = append(sp.after.Applied, op.requestKey)
+			}
+			p.verdict[i], p.state[i] = Applied, sp.after.Source
+		}
+	}
+	return p
 }
 
-// written: W1 done, nothing synced. Extends truncated to before.ZstSize and
-// appended; rewrites' old manifests unlinked and new raws in temp files; every
-// after-manifest in a temp file.
+func stateOf(m *manifestBody) wire.Source {
+	if m == nil {
+		return wire.Source{}
+	}
+	return m.Source
+}
+
+// written: W1 done, nothing synced.
 type written struct {
-	p       planned
-	touched touched
+	dataDir  string
+	p        planned
+	tmpRaw   []string
+	tmpMan   []string
+	touched  touched
+	linkDirs []string
 }
 
-func (p planned) write(dataDir string) (written, error) { panic("not implemented") }
+func (p planned) write(dataDir string) (written, error) {
+	w := written{dataDir: dataDir, p: p, tmpRaw: make([]string, len(p.srcs)), tmpMan: make([]string, len(p.srcs))}
+	dirs := map[string]bool{}
+	addDir := func(d string) {
+		if !dirs[d] {
+			dirs[d] = true
+			w.linkDirs = append(w.linkDirs, d)
+		}
+	}
+	for i, sp := range p.srcs {
+		raw, man := sp.key.Raw(dataDir), sp.key.Manifest(dataDir)
+		dir := filepath.Dir(man)
+		created, err := mkdirs(dataDir, dir)
+		if err != nil {
+			return w, err
+		}
+		w.touched.dirs = append(w.touched.dirs, created...)
+		addDir(dir)
+		switch {
+		case sp.rewrite:
+			if err := os.Remove(man); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return w, err
+			}
+			w.touched.dirs = append(w.touched.dirs, dir)
+			tmp, err := writeTemp(raw, sp.frames)
+			if err != nil {
+				return w, err
+			}
+			w.tmpRaw[i] = tmp
+			w.touched.files = append(w.touched.files, tmp)
+		case len(sp.frames) > 0:
+			if err := appendFrames(raw, sp.before.ZstSize, sp.frames); err != nil {
+				return w, err
+			}
+			w.touched.files = append(w.touched.files, raw)
+		}
+		b, err := json.Marshal(sp.after)
+		if err != nil {
+			return w, err
+		}
+		tmp, err := writeTemp(man, [][]byte{b, {'\n'}})
+		if err != nil {
+			return w, err
+		}
+		w.tmpMan[i] = tmp
+		w.touched.files = append(w.touched.files, tmp)
+	}
+	w.touched.dirs = slices.Compact(w.touched.dirs)
+	return w, nil
+}
 
-// touched is what a barrier must make durable: files written and dirs whose
-// entries changed. Linux ignores it (syncfs); other systems fsync each.
+// mkdirs makes dir and returns the dirs whose entries it changed, so the
+// barrier can make the new entries durable.
+func mkdirs(dataDir, dir string) ([]string, error) {
+	if _, err := os.Stat(dir); err == nil {
+		return nil, nil
+	}
+	var parents []string
+	for d := dir; d != dataDir && d != filepath.Dir(d); d = filepath.Dir(d) {
+		if _, err := os.Stat(d); err == nil {
+			parents = append(parents, d)
+			break
+		}
+		parents = append(parents, filepath.Dir(d))
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	return slices.Compact(parents), nil
+}
+
+func writeTemp(path string, parts [][]byte) (string, error) {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
+	if err != nil {
+		return "", err
+	}
+	for _, b := range parts {
+		if _, err = f.Write(b); err != nil {
+			break
+		}
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
+}
+
+func appendFrames(raw string, zst int64, frames [][]byte) error {
+	f, err := os.OpenFile(raw, os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	if err = f.Truncate(zst); err == nil {
+		off := zst
+		for _, b := range frames {
+			if _, err = f.WriteAt(b, off); err != nil {
+				break
+			}
+			off += int64(len(b))
+		}
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// touched is what a barrier makes durable: written files, then dirs whose
+// entries changed.
 type touched struct {
 	files []string
 	dirs  []string
 }
 
-// barrier makes touched durable. barrier_linux.go: one syncfs(2) on the data
-// dir. barrier_other.go: fsync each file then each dir (darwin: F_FULLFSYNC
-// through os.File.Sync).
+func (t touched) empty() bool { return len(t.files) == 0 && len(t.dirs) == 0 }
+
 type barrier func(touched) error
 
-// durableData: B1 passed. Frames, temp raws, temp manifests and unlinks are
-// on disk; no rename has happened.
+func (b barrier) run(t touched) error {
+	if t.empty() {
+		return nil
+	}
+	if err := b(t); err != nil {
+		return fmt.Errorf("store: barrier: %w", err)
+	}
+	return nil
+}
+
+// durableData: B1 passed; no rename yet.
 type durableData struct{ w written }
 
-func (w written) sync(b barrier) (durableData, error) { panic("not implemented") }
+func (w written) sync(b barrier) (durableData, error) {
+	return durableData{w}, b.run(w.touched)
+}
 
-// rawsLinked: every rewrite's temp raw renamed over its raw, and B2 passed
-// when there was any; no manifest renamed yet.
+// rawsLinked: every rewrite's raw renamed into place and durable; no
+// manifest renamed yet.
 type rawsLinked struct{ d durableData }
 
-func (d durableData) linkRaws(b barrier) (rawsLinked, error) { panic("not implemented") }
+func (d durableData) linkRaws(b barrier) (rawsLinked, error) {
+	var t touched
+	for i, sp := range d.w.p.srcs {
+		if !sp.rewrite {
+			continue
+		}
+		if err := os.Rename(d.w.tmpRaw[i], sp.key.Raw(d.w.dataDir)); err != nil {
+			return rawsLinked{d}, err
+		}
+		t.dirs = append(t.dirs, filepath.Dir(d.w.tmpRaw[i]))
+	}
+	t.dirs = slices.Compact(t.dirs)
+	return rawsLinked{d}, b.run(t)
+}
 
-// committed: every temp manifest renamed and B3 passed. The batch is durable.
+// committed: every manifest renamed and durable.
 type committed struct {
 	r       rawsLinked
 	batch   uint64
@@ -299,12 +887,77 @@ type committed struct {
 }
 
 func (r rawsLinked) linkManifests(b barrier, batch uint64) (committed, error) {
-	panic("not implemented")
+	w := r.d.w
+	k := committed{r: r, batch: batch}
+	for i, sp := range w.p.srcs {
+		if err := os.Rename(w.tmpMan[i], sp.key.Manifest(w.dataDir)); err != nil {
+			return k, err
+		}
+		k.changed = append(k.changed, sp.key)
+	}
+	return k, b.run(touched{dirs: w.linkDirs})
 }
 
-// acks is the only place an Ack is made.
-func (k committed) acks() []Ack { panic("not implemented") }
+func (k committed) acks() []Ack {
+	p := k.r.d.w.p
+	out := make([]Ack, len(p.reqs))
+	for i := range p.reqs {
+		out[i] = Ack{verdict: p.verdict[i], state: p.state[i], batch: k.batch}
+	}
+	return out
+}
 
-// encodeFrame is writeFrame's zstd encoding into memory: the same
-// zstd.NewWriter defaults, one Write, Close.
-func encodeFrame(l Lines) []byte { panic("not implemented") }
+func encodeFrame(l Lines) []byte {
+	var buf bytes.Buffer
+	zw, err := zstd.NewWriter(&buf)
+	if err != nil {
+		panic(err)
+	}
+	if _, err := zw.Write(l.b); err != nil {
+		panic(err)
+	}
+	if err := zw.Close(); err != nil {
+		panic(err)
+	}
+	return buf.Bytes()
+}
+
+// budget is a byte semaphore over queued frames.
+type budget struct {
+	mu    sync.Mutex
+	avail int64
+	freed chan struct{}
+}
+
+func newBudget(n int64) budget { return budget{avail: n, freed: make(chan struct{})} }
+
+func (b *budget) acquire(ctx context.Context, n int64, stopped <-chan struct{}) error {
+	for {
+		b.mu.Lock()
+		if b.avail >= n {
+			b.avail -= n
+			b.mu.Unlock()
+			return nil
+		}
+		freed := b.freed
+		b.mu.Unlock()
+		select {
+		case <-freed:
+		case <-stopped:
+			return errClosed
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (b *budget) release(n int64) {
+	if n == 0 {
+		return
+	}
+	b.mu.Lock()
+	b.avail += n
+	close(b.freed)
+	b.freed = make(chan struct{})
+	b.mu.Unlock()
+}

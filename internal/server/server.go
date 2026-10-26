@@ -10,6 +10,7 @@ import (
 
 	"github.com/candyflipline/mnemonic/internal/auth"
 	"github.com/candyflipline/mnemonic/internal/index"
+	"github.com/candyflipline/mnemonic/internal/intake"
 	"github.com/candyflipline/mnemonic/internal/layout"
 	"github.com/candyflipline/mnemonic/internal/mcp"
 	"github.com/candyflipline/mnemonic/internal/otlp"
@@ -46,11 +47,16 @@ func New(dataDir string, tokens auth.Tokens) (*Server, error) {
 		return nil, err
 	}
 	wake := make(chan struct{}, 1)
-	st := &store.Store{DataDir: dataDir, Wake: wake}
+	st, err := store.Open(dataDir)
+	if err != nil {
+		lock.Unlock()
+		ix.Close()
+		return nil, err
+	}
 	tools := mcp.Handler(ix, index.Lookup)
 	rcv := otlp.NewReceiver(st)
 	mux := http.NewServeMux()
-	mux.Handle("/v1/", tokens.Require(auth.Push)(st.Handler()))
+	intake.Mount(mux, st, tokens)
 	mux.Handle("POST /v1/traces", tokens.Require(auth.Push)(rcv.Traces()))
 	mux.Handle("POST /v1/logs", tokens.Require(auth.Push)(rcv.Logs()))
 	mux.Handle("/mcp", tokens.Require(auth.Read)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

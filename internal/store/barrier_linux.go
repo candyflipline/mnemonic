@@ -1,19 +1,30 @@
 package store
 
-// SKETCH (docs/design/uploader.md): Linux's barrier is one syncfs(2) on the
-// data dir's filesystem, whatever the batch touched, so a batch costs at most
-// three syscalls however many sources it carries.
+import (
+	"os"
+	"path/filepath"
+	"syscall"
+)
 
-import "os"
+func openBarrier(dataDir string) (barrier, func() error, error) {
+	root := filepath.Join(dataDir, "raw")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return nil, nil, err
+	}
+	f, err := os.Open(root)
+	if err != nil {
+		return nil, nil, err
+	}
+	return syncfsBarrier(f), f.Close, nil
+}
 
-// syncfsBarrier returns the barrier over root's filesystem. root stays open
-// for the committer's life.
+// syncfsBarrier is one syncfs(2) on root's filesystem, whatever the batch
+// touched.
 func syncfsBarrier(root *os.File) barrier {
 	return func(touched) error {
-		// TODO: return unix.Syncfs(int(root.Fd())) (golang.org/x/sys/unix,
-		//       already linked through grpc, promoted to direct; std syscall
-		//       has no SYS_SYNCFS on amd64). Linux >= 5.8 reports writeback
-		//       errors through syncfs; the committer treats any error as fatal.
-		panic("not implemented")
+		if _, _, errno := syscall.Syscall(sysSyncfs, root.Fd(), 0, 0); errno != 0 {
+			return errno
+		}
+		return nil
 	}
 }
