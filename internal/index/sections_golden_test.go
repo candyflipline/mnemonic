@@ -343,8 +343,8 @@ func TestOtlpSpans(t *testing.T) {
 }
 
 // TestHotPartKeepsSectionAuthors: a part built by appending to a hot
-// component's image (delta.json) answers sessionAuthors and the annotation
-// author as the part built whole does. Tenancy reads sessionAuthors, so an
+// component's image (delta.json) answers sessionAuthors and the annotations
+// relation as the part built whole does. Tenancy reads sessionAuthors, so an
 // empty answer on a hot part would hide the session from its owners.
 func TestHotPartKeepsSectionAuthors(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "fixtures", "claude-code", "session.jsonl"))
@@ -393,7 +393,10 @@ func TestHotPartKeepsSectionAuthors(t *testing.T) {
 	}
 	hotAuthors, hotAnn := read(store)
 	coldAuthors, coldAnn := read(coldStore)
-	if want := []string{"alice", "bob", "carol"}; !reflect.DeepEqual(coldAuthors, want) || !reflect.DeepEqual(hotAuthors, want) {
+	// The annotation author carol is no longer a session author: annotation
+	// rows are in no part, so they enter no authors section (an annotation by
+	// an outside author must not change who may see the session).
+	if want := []string{"alice", "bob"}; !reflect.DeepEqual(coldAuthors, want) || !reflect.DeepEqual(hotAuthors, want) {
 		t.Fatalf("authors: hot %v, cold %v, want %v", hotAuthors, coldAuthors, want)
 	}
 	if len(hotAnn) != 1 || hotAnn[0].ID != "n1" || hotAnn[0].Author != "carol" || len(coldAnn) != 1 || coldAnn[0].Author != "carol" {
