@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"syscall"
@@ -400,6 +401,7 @@ func (st *Part) hydrateKept(sc *sessionScan) error {
 		}
 		rows = append(rows, t.selected...)
 	}
+	slices.SortFunc(rows, func(a, b *navRow) int { return a.doc - b.doc })
 	for _, r := range rows {
 		if err := st.hydrate(r); err != nil {
 			return err
