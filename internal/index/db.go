@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
 // manifestFile is CURRENT: the parts that make up the index and the source
@@ -20,10 +22,13 @@ type manifestFile struct {
 
 // DB is every part of one committed manifest. Parts partition sessions, so a
 // session's events, turns and rollups live in exactly one part; only BM25's
-// corpus statistics are summed across parts.
+// corpus statistics are summed across parts. The annotations relation rides
+// beside the parts: annotation rows are in no part, and every part of the DB
+// answers a session's annotations from the relation.
 type DB struct {
 	parts      []*Part
 	sessPart   map[string]int
+	anns       map[string][]schema.Annotation
 	scoredDocs uint64
 	totalLen   uint64
 	sources    []stSource
@@ -54,7 +59,13 @@ func (e *PartOpenError) Error() string {
 	return fmt.Sprintf("current names part %s, which does not open: %v", e.Part, e.Err)
 }
 
-func OpenDB(store string) (*DB, error) {
+func OpenDB(store string) (*DB, error) { return openDB(store, nil) }
+
+// openDB is OpenDB with the annotations relation handed in: the boot's cached
+// one, reused when the annotation checkpoints did not change. anns is
+// attached as-is and must not be mutated afterwards; nil builds the relation
+// from the store's annotation checkpoints.
+func openDB(store string, anns map[string][]schema.Annotation) (*DB, error) {
 	m, err := readManifest(store)
 	if err != nil {
 		return nil, err
@@ -79,7 +90,29 @@ func OpenDB(store string) (*DB, error) {
 		return nil, err
 	}
 	db.sources = m.Sources
+	if anns == nil {
+		var cks []ckpt
+		cks, err = listAnnCkpts(store)
+		if err == nil {
+			anns, err = buildAnns(store, cks)
+		}
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	db.attachAnns(anns)
 	return db, nil
+}
+
+// attachAnns gives the DB and its parts the annotations relation. The parts
+// are opened before the relation exists, so it is wired in here; the export
+// answers a part's annotations through it (Part.annOf).
+func (db *DB) attachAnns(anns map[string][]schema.Annotation) {
+	db.anns = anns
+	for _, st := range db.parts {
+		st.annRel = anns
+	}
 }
 
 // OpenParts is a DB over parts the caller opened. It answers every tool but

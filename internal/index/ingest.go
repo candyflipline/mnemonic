@@ -781,7 +781,8 @@ func publish(store string, sources []source, cur []*ckpt, quiet time.Duration, s
 		newest = max(newest, s.src.UpdatedMs)
 	}
 	var cks []ckpt
-	var from []int // from[i] is the index in sources of cks[i], -1 for an archive member
+	var annCks []ckpt // annotation-harness checkpoints: parsed, never planned
+	var from []int    // from[i] is the index in sources of cks[i], -1 for an archive member
 	var due, touched []bool
 	var srcs []stSource
 	var keepExtra []string
@@ -814,11 +815,19 @@ func publish(store string, sources []source, cur []*ckpt, quiet time.Duration, s
 		}
 		row := stSource{Author: s.key.Author, Machine: s.key.Machine, Harness: s.key.Harness, UpdatedMs: s.src.UpdatedMs, Size: s.src.Size}
 		if c := cur[si]; c != nil {
-			cks = append(cks, *c)
-			from = append(from, si)
-			due = append(due, settleAll || s.src.UpdatedMs <= newest-quiet.Milliseconds())
-			touched = append(touched, outcomes[sourceKey(s.key)] > Unchanged)
 			row.Events = c.Rows
+			if c.Harness == schema.AnnotationHarness {
+				// An annotation source's rows feed only the annotations
+				// relation and are in no part: its checkpoint joins no plan
+				// and no settle, so annotating a session builds only the
+				// annotation source's own logs. gcLogs keeps the logs.
+				annCks = append(annCks, *c)
+			} else {
+				cks = append(cks, *c)
+				from = append(from, si)
+				due = append(due, settleAll || s.src.UpdatedMs <= newest-quiet.Milliseconds())
+				touched = append(touched, outcomes[sourceKey(s.key)] > Unchanged)
+			}
 		}
 		srcs = append(srcs, row)
 	}
@@ -885,7 +894,7 @@ func publish(store string, sources []source, cur []*ckpt, quiet time.Duration, s
 	if err := retireSettled(store, cks, parts, planned); err != nil {
 		return cs, deferred, err
 	}
-	return cs, deferred, gcLogs(store, cks, keepExtra)
+	return cs, deferred, gcLogs(store, cks, annCks, keepExtra)
 }
 
 type builtPart struct {
@@ -1193,15 +1202,23 @@ func gcParts(store string, want map[string]bool) {
 
 // gcLogs removes log generations no checkpoint names, plus any file in
 // keepExtra: the archive files' checkpoints, which name member checkpoints
-// rather than logs.
-func gcLogs(store string, cks []ckpt, keepExtra []string) error {
+// rather than logs. annCks are the annotation-harness checkpoints, which name
+// logs no part reads — the annotations relation does — and are kept like the
+// rest.
+func gcLogs(store string, cks, annCks []ckpt, keepExtra []string) error {
 	keep := map[string]bool{}
-	for _, c := range cks {
+	keepCkpt := func(c ckpt) {
 		if !c.retired() {
 			keep[filepath.Base(logPath(store, c.Key, c.Gen, "light"))] = true
 			keep[filepath.Base(logPath(store, c.Key, c.Gen, "heavy"))] = true
 		}
 		keep[filepath.Base(ckptPath(store, c.Key))] = true
+	}
+	for _, c := range cks {
+		keepCkpt(c)
+	}
+	for _, c := range annCks {
+		keepCkpt(c)
 	}
 	for _, p := range keepExtra {
 		keep[filepath.Base(p)] = true

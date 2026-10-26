@@ -39,6 +39,10 @@ type Part struct {
 	spansAt, annAt            secOffsets
 	authOnce                  sync.Once
 	authBy                    map[string][]string
+	// annRel is the DB's annotations relation, wired in at attachAnns: the
+	// part's own annotations file stays in the format but holds no entries,
+	// so annotations answer through the relation. nil answers from annB.
+	annRel map[string][]schema.Annotation
 }
 
 // frameCache holds the last decoded light and heavy frames of every part of
@@ -203,7 +207,13 @@ func (st *Part) spansOf(id string) []schema.Span {
 	return decodeSpans(raw)
 }
 
+// annOf is session id's annotations: the DB's annotations relation when one
+// is attached (export.go reads a part, so it answers through here too), else
+// the part's own section bytes.
 func (st *Part) annOf(id string) []schema.Annotation {
+	if st.annRel != nil {
+		return st.annRel[id]
+	}
 	raw := st.annAt.raw(st.annB, id)
 	if raw == nil {
 		return nil

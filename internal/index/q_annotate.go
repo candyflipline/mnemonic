@@ -221,10 +221,7 @@ func requireTarget(ctx context.Context, db *DB, session, spanID string) error {
 	if err != nil {
 		return err
 	}
-	has, err := db.sessionHasEvents(session)
-	if err != nil {
-		return err
-	}
+	has := db.sessionHasEvents(session)
 	if !has || !f.Opened(session) {
 		return argErrorf("session not found")
 	}
@@ -265,26 +262,15 @@ func sessionHasSpan(db *DB, session, spanID string) bool {
 }
 
 // sessionHasEvents reports whether the part holding session has a winner row
-// of it that is an event (an annotation record's row never is).
-func (db *DB) sessionHasEvents(session string) (bool, error) {
+// of it. Every row of a part is an event: annotation records are a relation
+// of the index and never in a part, so no skip remains.
+func (db *DB) sessionHasEvents(session string) bool {
 	st, ok := db.part(session)
 	if !ok {
-		return false, nil
+		return false
 	}
 	lo, hi, ok := st.sessionRange(session)
-	if !ok {
-		return false, nil
-	}
-	for d := lo; d < hi; d++ {
-		r, err := st.row(d)
-		if err != nil {
-			return false, err
-		}
-		if r.Harness != schema.AnnotationHarness {
-			return true, nil
-		}
-	}
-	return false, nil
+	return ok && lo < hi
 }
 
 func valueText(v schema.Value) string {

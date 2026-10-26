@@ -8,16 +8,23 @@ import (
 
 	"github.com/candyflipline/mnemonic/internal/config"
 	"github.com/candyflipline/mnemonic/internal/redact"
+	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
 // Index is the engine handle the server, MCP and the harness hold: a store
 // dir and the DB of the CURRENT it last opened. Snapshot pins that DB for one
 // call; Refresh swaps in the DB of a newer CURRENT, and the old one is closed
-// once the last call pinning it releases it.
+// once the last call pinning it releases it. The annotations relation is
+// rebuilt only when the store's annotation checkpoints changed, so a publish
+// that touched no annotation source reuses the relation the last DB carried.
 type Index struct {
 	store string
 	mu    sync.Mutex
 	cur   *snapshot
+
+	annMu  sync.Mutex
+	annSig annSet
+	anns   map[string][]schema.Annotation
 }
 
 type snapshot struct {
@@ -74,7 +81,11 @@ func (ix *Index) Refresh() error {
 		return nil
 	}
 	for try := 1; ; try++ {
-		db, err := OpenDB(ix.store)
+		anns, err := ix.annsOf()
+		var db *DB
+		if err == nil {
+			db, err = openDB(ix.store, anns)
+		}
 		if err == nil {
 			ix.mu.Lock()
 			old := ix.cur
@@ -94,6 +105,31 @@ func (ix *Index) Refresh() error {
 			openRetryHook()
 		}
 	}
+}
+
+// annsOf is the relation of the store's current annotation checkpoints,
+// rebuilt only when their set changed since the one it returned last: an
+// annotation append grows its checkpoint's size and row count, a re-parse its
+// generation, and nothing else does. Each DB then carries the relation that
+// was current when it opened; the relation itself is never mutated, so DBs
+// may share it.
+func (ix *Index) annsOf() (map[string][]schema.Annotation, error) {
+	cks, err := listAnnCkpts(ix.store)
+	if err != nil {
+		return nil, err
+	}
+	sig := annSigOf(cks)
+	ix.annMu.Lock()
+	defer ix.annMu.Unlock()
+	if ix.anns != nil && ix.annSig.equal(sig) {
+		return ix.anns, nil
+	}
+	anns, err := buildAnns(ix.store, cks)
+	if err != nil {
+		return nil, err
+	}
+	ix.anns, ix.annSig = anns, sig
+	return anns, nil
 }
 
 // Snapshot pins the DB being served; release unpins it.
