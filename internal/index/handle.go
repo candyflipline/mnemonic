@@ -59,7 +59,8 @@ func (ix *Index) IngestPlain(globs []config.SourceGlob, author, machine string, 
 // caller rather than serve as an empty index.
 const openTries = 3
 
-// Refresh opens CURRENT when its bytes changed since the DB being served. No
+// Refresh opens CURRENT when its bytes changed since the DB being served,
+// taking from that DB the parts it still names (openDB). No
 // CURRENT is nothing published yet and keeps the DB being served (Open's is
 // empty); a part CURRENT names that no longer opens is retried on a freshly
 // read CURRENT a bounded number of times and, still failing, returns the
@@ -74,7 +75,9 @@ func (ix *Index) Refresh() error {
 		return nil
 	}
 	for try := 1; ; try++ {
-		db, err := OpenDB(ix.store)
+		prev, release := ix.Snapshot()
+		db, err := openDB(ix.store, prev)
+		release()
 		if err == nil {
 			ix.mu.Lock()
 			old := ix.cur

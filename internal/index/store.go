@@ -10,6 +10,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/candyflipline/mnemonic/internal/schema"
@@ -39,6 +40,8 @@ type Part struct {
 	spansAt, annAt            secOffsets
 	authOnce                  sync.Once
 	authBy                    map[string][]string
+	at                        dirStamp
+	refs                      atomic.Int32
 }
 
 // frameCache holds the last decoded light and heavy frames of every part of
@@ -132,8 +135,40 @@ func mmapFile(path string) ([]byte, error) {
 	return syscall.Mmap(int(f.Fd()), 0, int(fi.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
 }
 
+// dirStamp names one part dir: a dir GC removed and a build put back under
+// the same id differs in inode or mtime.
+type dirStamp struct {
+	ino   uint64
+	mtime int64
+}
+
+func dirStampOf(dir string) (dirStamp, error) {
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return dirStamp{}, err
+	}
+	at := dirStamp{mtime: fi.ModTime().UnixNano()}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		at.ino = uint64(st.Ino)
+	}
+	return at, nil
+}
+
 // OpenPartDir opens a part dir.
 func OpenPartDir(dir string) (*Part, error) {
+	at, err := dirStampOf(dir)
+	if err != nil {
+		return nil, err
+	}
+	st, err := openPartDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	st.at = at
+	return st, nil
+}
+
+func openPartDir(dir string) (*Part, error) {
 	if d, ok, err := readDelta(dir); ok || err != nil {
 		if err != nil {
 			return nil, err
@@ -188,6 +223,13 @@ func (st *Part) Close() {
 		if len(m) > 0 {
 			syscall.Munmap(m)
 		}
+	}
+}
+
+// release drops one DB's hold on st and closes it with the last.
+func (st *Part) release() {
+	if st.refs.Add(-1) == 0 {
+		st.Close()
 	}
 }
 
