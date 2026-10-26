@@ -7,9 +7,16 @@
 // counts and codes, never content.
 //
 //	capdrv -server host:port -token T -cap N [-prefix cap]
+//	capdrv -server host:port -token T -cap N -silent [-prefix cap]
 //
 // Exit 0 when exactly one of the N+1 clients was ResourceExhausted, the other
 // N were acked, the takeover was acked and the displaced stream ended Aborted.
+//
+// With -silent it opens N+4 streams (the server's stream cap) that never send
+// Hello, then one more: the extra one must end ResourceExhausted at once, each
+// held one must end DeadlineExceeded "no Hello within" 55 to 70 s after it
+// opened (the measured seconds are printed), and a new session must then be
+// admitted and acked. Exit 0 when all three hold.
 package main
 
 import (
@@ -17,6 +24,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -112,12 +120,99 @@ func ack(c *client) string {
 	return "-"
 }
 
+type silent struct {
+	conn   *grpc.ClientConn
+	cancel context.CancelFunc
+	start  time.Time
+	code   codes.Code
+	msg    string
+	secs   float64
+	done   chan struct{}
+}
+
+func openSilent(server, token string) (*silent, error) {
+	conn, err := grpc.NewClient("passthrough:///"+server, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithCancel(metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer "+token))
+	stream, err := pushpb.NewPushClient(conn).Sync(ctx)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	s := &silent{conn: conn, cancel: cancel, start: time.Now(), done: make(chan struct{})}
+	go func() {
+		_, err := stream.Recv()
+		s.secs = time.Since(s.start).Seconds()
+		s.code = status.Code(err)
+		s.msg = status.Convert(err).Message()
+		close(s.done)
+	}()
+	return s, nil
+}
+
+func runSilent(server, token string, capN int, prefix string) bool {
+	held := capN + 4
+	ss := make([]*silent, 0, held+1)
+	for i := 0; i <= held; i++ {
+		s, err := openSilent(server, token)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return false
+		}
+		ss = append(ss, s)
+		time.Sleep(200 * time.Millisecond)
+	}
+	extra := ss[held]
+	select {
+	case <-extra.done:
+	case <-time.After(10 * time.Second):
+	}
+	fmt.Printf("silent extra stream %d code=%s secs=%.1f msg=%q\n", held+1, extra.code, extra.secs, extra.msg)
+	ok := extra.code == codes.ResourceExhausted && extra.secs < 5
+	dropped := 0
+	for i, s := range ss[:held] {
+		select {
+		case <-s.done:
+		case <-time.After(90 * time.Second):
+		}
+		fmt.Printf("silent stream %d code=%s secs=%.1f msg=%q\n", i+1, s.code, s.secs, s.msg)
+		if s.code == codes.DeadlineExceeded && strings.Contains(s.msg, "no Hello within") && s.secs >= 55 && s.secs <= 70 {
+			dropped++
+		}
+	}
+	c, err := open(server, token, prefix+"-after")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return false
+	}
+	c.welcome()
+	c.appendAck()
+	fmt.Printf("silent reuse %s %s %s\n", c.machine, c.code, ack(c))
+	c.close()
+	for _, s := range ss {
+		s.cancel()
+		s.conn.Close()
+	}
+	ok = ok && dropped == held && c.code == codes.OK && c.acked
+	fmt.Printf("silent summary held=%d dropped_at_60s=%d reuse_acked=%v pass=%v\n", held, dropped, c.acked, ok)
+	return ok
+}
+
 func main() {
 	server := flag.String("server", "", "host:port of the plaintext push listener")
 	token := flag.String("token", "", "push-scope bearer token")
 	capN := flag.Int("cap", 10, "the server's live-session cap")
 	prefix := flag.String("prefix", "cap", "machine name prefix")
+	quiet := flag.Bool("silent", false, "run the silent pre-Hello stream gate instead of the session cap gate")
 	flag.Parse()
+	if *quiet {
+		if !runSilent(*server, *token, *capN, *prefix) {
+			os.Exit(1)
+		}
+		return
+	}
 	n := *capN + 1
 	cs := make([]*client, n)
 	var wg sync.WaitGroup
