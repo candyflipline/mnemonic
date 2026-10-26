@@ -38,6 +38,9 @@
 #                   the openat calls inside it on raw/**/*.json and *.jsonl.zst
 #                   are counted per probe ("opens" rows). Cycles seen in the window
 #                   are listed too: a second cycle racing the probe is counted.
+#   FIRST_MAX, IDX_MAX  seconds to wait for the cycle that counts the first push
+#                   (default 120) and for each probe's cycle (default 120); raise
+#                   them on a store whose cycles run long (a sweep).
 #   TAG             suffix on the home and output names, so one DIR can be probed
 #                   twice (default: none).
 #   ack_ms and index_ms print median, min, max, p95, p99 (nearest rank).
@@ -173,7 +176,7 @@ ps = subprocess.Popen(["pidstat", "-u", "-d", "-h", "-p", "%d,%d" % (real_pid, p
 try:
     t_first = time.time()
     wait(lambda: manifest_size() >= total, 60, "first push of the probe")
-    wait(lambda: next((c for c in cycles() if c[0] > t_first and c[3] >= 1), None), 120, "the cycle that counts the first push")
+    wait(lambda: next((c for c in cycles() if c[0] > t_first and c[3] >= 1), None), float(os.environ.get('FIRST_MAX', '120')), "the cycle that counts the first push")
     rows = []
     wins = []
     sweepflags = []
@@ -195,7 +198,7 @@ try:
                 break
             time.sleep(0.005)
         cyc = None
-        end = t0 + 120
+        end = t0 + float(os.environ.get('IDX_MAX', '120'))
         while time.time() < end:
             cyc = next((c for c in cycles() if c[0] > t0 and c[3] >= 1), None)
             if cyc:

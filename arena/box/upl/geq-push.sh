@@ -207,6 +207,8 @@ else:
     print("puts_append\t%d" % role["frame_append"])
 print("store_barriers\t%d" % barriers)
 print("batches_all\t%d" % n_batches)
+if not appends and not syncfs:
+    appends = str(role["manifest"])
 if appends:
     a = int(appends)
     print("appends\t%d" % a)
