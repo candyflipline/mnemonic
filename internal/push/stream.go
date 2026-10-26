@@ -64,6 +64,7 @@ type uplink struct {
 	queue   []inflight
 	queued  int64
 	redo    []string
+	full    map[string]bool
 	window  window
 	seq     uint64
 	acked   chan ack
@@ -111,7 +112,7 @@ func dial(ctx context.Context, cfg config.Client) (*uplink, error) {
 		return nil, err
 	}
 	sctx, cancel := context.WithCancel(metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+cfg.Token))
-	u := &uplink{cancel: cancel, sources: make(map[string]*wire.Source), unacked: make(map[string]int), fin: make(chan struct{})}
+	u := &uplink{cancel: cancel, sources: make(map[string]*wire.Source), unacked: make(map[string]int), full: make(map[string]bool), fin: make(chan struct{})}
 	stop := time.AfterFunc(welcomeLimit, cancel)
 	err = u.handshake(sctx, conn, cfg.Machine)
 	if !stop.Stop() && err == nil {
@@ -294,6 +295,7 @@ func (u *uplink) consume(a ack) error {
 	}
 	if u.applyAck(a) {
 		u.redo = append(u.redo, u.queue[0].path)
+		u.full[u.queue[0].srcID] = true
 	}
 	head := u.queue[0]
 	u.queue = u.queue[1:]
@@ -389,11 +391,14 @@ func retriable(err error) bool {
 // u.sources[srcID], the same decide/firstChunk/rawEndOf cut, every chunk sent
 // without waiting for its ack (the next chunk's offset is the previous one's
 // end). A conflict ack is the caller's: u.takeRedo names the path, and the
-// next pass re-decides it once from the server's state.
+// next streamSource of it re-decides from the server's state alone (no skip
+// shortcut, no tail), as the 409 retry did.
 func streamSource(ctx context.Context, red Redactor, u *uplink, f fileRef, st *Stats) error {
 	srcID := wire.SrcID(f.path)
 	entry := u.sources[srcID]
-	if entry != nil && entry.RawEnd > 0 && f.size == entry.RawEnd {
+	full := u.full[srcID]
+	delete(u.full, srcID)
+	if !full && entry != nil && entry.RawEnd > 0 && f.size == entry.RawEnd {
 		st.Unchanged++
 		return nil
 	}
@@ -401,11 +406,11 @@ func streamSource(ctx context.Context, red Redactor, u *uplink, f fileRef, st *S
 	// last write is older than that stamp (with a 5-minute margin for
 	// client/server clock skew) has nothing new; skip it unread. Entries with
 	// RawEnd 0 — the legacy shape — are saved the read by this skip alone.
-	if entry != nil && f.mtimeMs < entry.UpdatedMs-skewMs {
+	if !full && entry != nil && f.mtimeMs < entry.UpdatedMs-skewMs {
 		st.Unchanged++
 		return nil
 	}
-	legacy := entry != nil && entry.RawEnd == 0
+	legacy := !full && entry != nil && entry.RawEnd == 0
 	chunk := func(offset int64, head string, body []byte, rawEnd int64) error {
 		return u.send(ctx, put{
 			path: f.path, harness: f.harness, srcID: srcID, sourceName: f.sourceName,
@@ -413,7 +418,7 @@ func streamSource(ctx context.Context, red Redactor, u *uplink, f fileRef, st *S
 		})
 	}
 	sent, replaced := false, false
-	if entry != nil && entry.RawEnd > 0 && entry.Size > 0 {
+	if !full && entry != nil && entry.RawEnd > 0 && entry.Size > 0 {
 		tail, err := redactTail(f.path, red, entry, f.head)
 		if err != nil {
 			return err
