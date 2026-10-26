@@ -52,6 +52,17 @@
 #                   there); the client's server URL then points at it.
 #   ack_ms and index_ms print median, min, max, p95, p99 (nearest rank).
 #   ROWS            JSONL lines each probe appends in its one write(2) (default 1).
+# P4B additions (prod-shaped hot load):
+#   HOME_KEEP       a fixed client HOME (from hot-prep.sh), reused across runs so the
+#                   hot sources keep their ids and the client resumes them.
+#   HOT_EVERY       seconds between keep-alive appends to the HOT_ACTIVE files
+#                   (indices of hot-NN, default "5 6"); every HOT_IDLE s (30) one
+#                   other hot-NN file gets one line, round robin, so each stays
+#                   hot (settleSource is 15 min). Each appended line is the file's
+#                   last user/assistant line with a fresh uuid. index_ms then counts
+#                   to the end of the first cycle that started after the ack.
+#                   Steady rows (cycles ending after the first probe) print wall
+#                   and hot= median and range.
 set -eu
 
 BIN=${1:?usage: lag.sh BIN DIR}
@@ -68,9 +79,9 @@ NAME=$(basename "$DIR")
 P=$OUT/base-$NAME-lag${TAG:+-$TAG}
 [ -x "$BIN" ] || { echo "not executable: $BIN" >&2; exit 2; }
 [ -d "$DIR/raw" ] || { echo "$DIR/raw missing: lag.sh needs a populated store" >&2; exit 2; }
-HOME_DIR=$BOX/laghome-$NAME${TAG:+-$TAG}
+HOME_DIR=${HOME_KEEP:-$BOX/laghome-$NAME${TAG:+-$TAG}}
 CFG=$P-cfg
-[ -e "$HOME_DIR" ] && { echo "$HOME_DIR exists" >&2; exit 1; }
+[ -z "${HOME_KEEP:-}" ] && [ -e "$HOME_DIR" ] && { echo "$HOME_DIR exists" >&2; exit 1; }
 [ -e "$CFG" ] && { echo "$CFG exists" >&2; exit 1; }
 mkdir -p "$HOME_DIR/.claude/projects/lagprobe" "$CFG"
 chmod 700 "$CFG"
@@ -117,7 +128,7 @@ def reader():
         servelog.flush()
 threading.Thread(target=reader, daemon=True).start()
 
-CYC = re.compile(r"cycle (\w+): sources unchanged=(\d+) resumed=(\d+) fresh=(\d+) reparsed=(\d+) failed=(\d+) stale=(\d+);.* in ([0-9.]+)(ms|s|m[0-9.]*s?) err=(.*)$")
+CYC = re.compile(r"cycle (\w+): sources unchanged=(\d+) resumed=(\d+) fresh=(\d+) reparsed=(\d+) failed=(\d+) stale=(\d+);.* hot=(\d+) cold=\d+ in ([0-9.]+)(ms|s|m[0-9.]*s?) err=(.*)$")
 def dur(v, u):
     if u == "ms": return float(v) / 1000
     if u == "s": return float(v)
@@ -129,7 +140,7 @@ def cycles():
     for t, l in snap:
         m = CYC.search(l)
         if m:
-            out.append((t, l, m.group(1), int(m.group(3)) + int(m.group(4)) + int(m.group(5)), int(m.group(7)), dur(m.group(8), m.group(9)), m.group(10)))
+            out.append((t, l, m.group(1), int(m.group(3)) + int(m.group(4)) + int(m.group(5)), int(m.group(7)), dur(m.group(9), m.group(10)), m.group(11), int(m.group(8))))
     return out
 
 def wait(pred, limit, what):
@@ -186,6 +197,57 @@ pidlog = open(pfx + "-pidstat.txt", "w")
 vm = subprocess.Popen(["vmstat", "1"], stdout=open(pfx + "-vmstat.txt", "w"))
 push = subprocess.Popen([bin_, "push", "--watch", "--config", cfg + "/client.toml"], env=dict(os.environ, HOME=home),
                         stdout=open(pfx + "-client.out", "w"), stderr=subprocess.STDOUT)
+hot_every = float(os.environ.get("HOT_EVERY", "0"))
+hot_stop = threading.Event()
+hot_count = [0, 0]
+if hot_every > 0:
+    import glob, uuid
+    hot_files = sorted(glob.glob(os.path.join(home, ".claude/projects/hot-*/*.jsonl")))
+    def template(path):
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - (8 << 20)))
+            tail = f.read().split(b"\n")
+        for raw in reversed(tail):
+            try:
+                o = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(o, dict) and o.get("type") in ("user", "assistant") and o.get("uuid") and o.get("sessionId"):
+                return o
+        return None
+    hot = [(p, template(p)) for p in hot_files]
+    hot = [(p, t) for p, t in hot if t is not None]
+    active = [int(x) for x in os.environ.get("HOT_ACTIVE", "5 6").split()]
+    act = [hot[i] for i in active if i < len(hot)]
+    idle = [h for i, h in enumerate(hot) if i not in active]
+    print("hot_files\t%d\twith_template\t%d\tactive\t%d\tidle\t%d" % (len(hot_files), len(hot), len(act), len(idle)))
+    def hot_append(h):
+        p, t = h
+        o = dict(t)
+        o["parentUuid"], o["uuid"] = o["uuid"], str(uuid.uuid4())
+        o["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+        t.clear(); t.update(o)
+        try:
+            hfd = os.open(p, os.O_WRONLY | os.O_APPEND)
+            os.write(hfd, (json.dumps(o) + "\n").encode())
+            os.close(hfd)
+            hot_count[0] += 1
+        except OSError:
+            hot_count[1] += 1
+    def keepalive():
+        k = 0
+        last_idle = 0.0
+        for h in idle:
+            hot_append(h)
+        while not hot_stop.wait(hot_every):
+            for h in act:
+                hot_append(h)
+            if idle and time.time() - last_idle >= float(os.environ.get("HOT_IDLE", "30")):
+                hot_append(idle[k % len(idle)])
+                k += 1
+                last_idle = time.time()
+    threading.Thread(target=keepalive, daemon=True).start()
 ps = subprocess.Popen(["pidstat", "-u", "-d", "-h", "-p", "%d,%d" % (real_pid, push.pid), "1"], stdout=pidlog)
 try:
     t_first = time.time()
@@ -227,8 +289,9 @@ try:
             time.sleep(0.005)
         cyc = None
         end = t0 + float(os.environ.get('IDX_MAX', '120'))
+        after = ack if (hot_every > 0 and ack is not None) else t0
         while time.time() < end:
-            cyc = next((c for c in cycles() if c[0] > t0 and c[3] >= 1), None)
+            cyc = next((c for c in cycles() if c[0] > t0 and c[3] >= 1 and (hot_every == 0 or c[0] - c[5] >= after)), None)
             if cyc:
                 break
             time.sleep(0.02)
@@ -291,8 +354,18 @@ try:
     ds = sorted(c[5] for c in cs)
     if ds:
         print("cycle_s_after_quiet\tmedian %.2f\tmin %.2f\tmax %.2f\tn %d" % (statistics.median(ds), ds[0], ds[-1], len(ds)))
+    st = [c for c in cycles() if wins and c[0] > wins[0][1]]
+    if st:
+        sw = sorted(c[5] for c in st)
+        sh = sorted(c[7] for c in st)
+        print("cycle_s_steady\tmedian %.2f\tmin %.2f\tmax %.2f\tn %d" % (statistics.median(sw), sw[0], sw[-1], len(sw)))
+        print("hot_steady\tmedian %.0f\tmin %d\tmax %d\tn %d" % (statistics.median(sh), sh[0], sh[-1], len(sh)))
+        print("kinds_steady\t%s" % " ".join("%s=%d" % (k, len([c for c in st if c[2] == k])) for k in sorted({c[2] for c in st})))
+    if hot_every > 0:
+        print("hot_appends\t%d\terrors\t%d" % tuple(hot_count))
     print("cycle_err_not_nil\t%d" % len([c for c in cycles() if c[6] != "<nil>"]))
 finally:
+    hot_stop.set()
     with open(pfx + "-cycles.txt", "w") as f:
         for c in cycles():
             f.write("%.3f\t%s\n" % (c[0], c[1][:300]))

@@ -42,4 +42,4 @@ done
 wait $LAG && rc=0 || rc=$?
 trap - EXIT
 echo "lag_rc $rc vmhwm_kb_max $hwm oom_kill ${oom:-unread}" | tee "$L.mem.txt"
-grep -E '^(probe|index_ms|ack_ms|cycle_s_after_quiet|cycle_err|boot_to|warmup)' "$L.lag.txt" || true
+grep -E '^(probe|index_ms|ack_ms|cycle_s_after_quiet|cycle_s_steady|hot_steady|hot_appends|hot_files|kinds_steady|cycle_err|boot_to|warmup)' "$L.lag.txt" || true
