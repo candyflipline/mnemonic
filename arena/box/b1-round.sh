@@ -79,7 +79,7 @@ python3 -I - "${LOG%.log}.reply" "$(cat "$P/$CASE-sid")" >> "$LOG" <<'PY'
 import base64, json, sys
 r = json.loads(open(sys.argv[1]).readline()); t = sys.argv[2]
 ids = [(x.get("open") or {}).get("session_id") for x in ((r.get("data") or {}).get("results") or [])]
-tf = {t, "session:" + base64.b64encode(t.encode()).decode()}
+tf = {t, "session:" + base64.b64encode(t.encode()).decode(), "session:" + base64.urlsafe_b64encode(t.encode()).decode().rstrip("=")}
 print("correct target_found=%d hits=%d" % (int(any(i in tf for i in ids)), len(ids)))
 PY
 echo "rc=$RC" >> "$LOG"
