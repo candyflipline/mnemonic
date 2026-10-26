@@ -29,10 +29,13 @@ go vet ./...
 CGO_ENABLED=0 go build -o /dev/null ./cmd/mnemonic
 CGO_ENABLED=0 go build -tags server -o /dev/null ./cmd/mnemonic
 go test ./internal/<your package>/...
+go run ./scripts/check
 ```
+`go run ./scripts/check [range]` is the command CI runs (`.github/workflows/check.yml`); the range defaults to `origin/main..HEAD`.
 
 ## Rules
 - **The owner's machine is not a load box.** Never run push or index over the real corpus locally. Use `go test -p 2`, at most 3 `go test` processes across lanes, and no Docker. Corpus runs happen on the server.
 - **Tests.** One golden or table test per package that asserts literal values. No test that would pass if the code returned nothing. Scratch tests are `*_scratch_test.go`, which git ignores.
 - **Lane ownership.** A lane edits only the files its packet names. A stub that says `panic("lane X")` belongs to lane X.
-- **Commits.** No commit trailers. Work lands on `main`. Lane branches are `lane/<name>`, pushed, and deleted after merge.
+- **Commits.** No commit trailers (Co-Authored-By, Claude-Session). Enforced by `go run ./scripts/check`, which fails naming the commit. Work lands on `main`. Lane branches are `lane/<name>`, pushed, and deleted after merge.
+- **Dependencies.** A direct `require` in `go.mod` must be listed in `scripts/check/approved-deps.txt`; adding a module to that file takes the owner's go. Enforced by `go run ./scripts/check`, which fails naming the module.

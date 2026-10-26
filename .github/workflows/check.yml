@@ -1,0 +1,31 @@
+name: check
+on:
+  push:
+  pull_request:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: range
+        id: range
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            echo "range=$BASE..$HEAD" >> "$GITHUB_OUTPUT"
+          elif git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            echo "range=$BEFORE..$AFTER" >> "$GITHUB_OUTPUT"
+          else
+            echo "range=$(git merge-base origin/main "$AFTER")..$AFTER" >> "$GITHUB_OUTPUT"
+          fi
+      - run: go run ./scripts/check "${{ steps.range.outputs.range }}"

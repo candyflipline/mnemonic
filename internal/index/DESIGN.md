@@ -2,7 +2,7 @@
 
 The engine from lane/traces `arena/trace` (4758c19), moved without the keeper,
 router, object store, restore, router phases or D2 roots. It is pure Go
-(CGO_ENABLED=0); its only non-std dependency is klauspost/compress for zstd.
+(CGO_ENABLED=0); its non-std dependencies are the modules in scripts/check/approved-deps.txt.
 The parsers are the repo's own (`internal/normalize`). The MCP tools live in
 this package, one file per tool (`q_*.go`), and read the parts directly.
 
