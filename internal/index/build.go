@@ -304,17 +304,24 @@ func prevPartsMap(store string, prev manifestFile) map[string]string {
 // nil: its rows come from its logs whole.
 func openHolders(store string, cks []ckpt, byPrev map[string]string) (holders []*Part, close func(), err error) {
 	var opened []*Part
+	byID := map[string]*Part{}
 	holders = make([]*Part, len(cks))
 	for i, c := range cks {
 		id, ok := byPrev[c.Key]
 		if !ok {
 			continue
 		}
-		h, err := OpenPartDir(partDir(store, id))
-		if err != nil {
+		h, seen := byID[id]
+		if !seen {
+			if p, err := OpenPartDir(partDir(store, id)); err == nil {
+				h = p
+				opened = append(opened, p)
+			}
+			byID[id] = h
+		}
+		if h == nil {
 			continue
 		}
-		opened = append(opened, h)
 		if holderIndexOf(h, c.Key) >= 0 {
 			holders[i] = h
 		}
