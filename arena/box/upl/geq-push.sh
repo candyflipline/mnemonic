@@ -55,6 +55,7 @@ chmod 600 "$CFG/token"
 {
 	echo "data_dir = \"$DIR\""
 	echo "listen = \"127.0.0.1:$PORT\""
+	echo "push_listen = \"127.0.0.1:$((PORT + 1000))\""
 	tail -n +2 "$CFG/token.out"
 } > "$CFG/server.toml"
 i=0
@@ -63,7 +64,7 @@ for h in $HOMES; do
 	m=$MACHINE
 	[ "$K" -gt 1 ] && m=m$i
 	cat > "$CFG/client-$i.toml" <<CFGEOF
-server = "http://127.0.0.1:$PORT"
+server = "http://127.0.0.1:$((PORT + 1000))"
 token_file = "$CFG/token"
 machine = "$m"
 CFGEOF
@@ -80,7 +81,7 @@ fi
 LAUNCH=$!
 unset GOMAXPROCS
 for _ in $(seq 1 120); do
-	grep -q 'listening on' "$P-serve.log" 2>/dev/null && break
+	grep -q 'push serving' "$P-serve.log" 2>/dev/null && break
 	kill -0 "$LAUNCH" 2>/dev/null || { echo "serve died at start" >&2; cat "$P-serve.log" >&2; exit 1; }
 	sleep 0.5
 done

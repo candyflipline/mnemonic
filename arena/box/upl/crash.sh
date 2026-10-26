@@ -108,7 +108,14 @@ serve_start() {
 		[ $i -lt 600 ] || { echo "serve not listening after 120 s" >&2; return 1; }
 		sleep 0.2
 	done
-	if [ $# -gt 0 ]; then SPID=$(pgrep -P "$LAUNCH" -x mnemonic); else SPID=$LAUNCH; fi
+	i=0
+	until grep -q "push serving" "$d.$tag.serve.log" 2>/dev/null; do
+		kill -0 "$LAUNCH" 2>/dev/null || { echo "serve died before push serving ($d $tag)" >&2; return 1; }
+		i=$((i + 1))
+		[ $i -lt 1500 ] || { echo "push not serving after 300 s" >&2; return 1; }
+		sleep 0.2
+	done
+	if [ $# -gt 0 ]; then SPID=$(pgrep -P "$LAUNCH" | head -1); else SPID=$LAUNCH; fi
 }
 
 serve_stop() {
