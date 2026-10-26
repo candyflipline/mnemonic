@@ -1,5 +1,7 @@
-// Command check enforces two repo rules: no commit trailers in a range, and
-// no direct go.mod requirement outside scripts/check/approved-deps.txt.
+// Command check enforces the repo rules: no commit trailers in a range, no
+// direct go.mod requirement outside scripts/check/approved-deps.txt, one Ack
+// literal in internal/store, and committed pushpb code that matches
+// `go generate`.
 //
 //	go run ./scripts/check [range [go.mod]]
 //
@@ -31,10 +33,18 @@ func main() {
 	if len(os.Args) > 2 {
 		gomod = os.Args[2]
 	}
-	bad, err := trailers(rng)
-	if err == nil {
+	var bad []string
+	var err error
+	for _, run := range []func() ([]string, error){
+		func() ([]string, error) { return trailers(rng) },
+		func() ([]string, error) { return deps(gomod) },
+		acks,
+		pushpbDrift,
+	} {
 		var more []string
-		more, err = deps(gomod)
+		if more, err = run(); err != nil {
+			break
+		}
 		bad = append(bad, more...)
 	}
 	if err != nil {
