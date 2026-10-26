@@ -20,25 +20,77 @@ type SourceState struct {
 	Size, RawEnd, UpdatedMS    int64
 }
 
+// StoredSource adds the committed compressed read bound for index callers.
+// It is never serialized onto the upload wire.
+type StoredSource struct {
+	State         SourceState
+	CompressedEnd int64
+}
+
 // UploadInput is untrusted until AcceptUpload checks identity, reserved names,
 // offsets, whole lines and length. The body is one legacy PUT's body, possibly
 // spooled; ownership transfers on success. It is never several merged frames.
 type UploadInput struct {
 	Machine, Harness, SrcID, HeadHash, SourceName, Path string
 	Offset, RawEnd, BodyBytes                           int64
-	Body                                                io.ReadCloser
+	Body                                                io.ReadSeekCloser
 }
 
-type Mutation struct{ value *mutation }
-type mutation struct {
-	key  layout.Key
-	body io.ReadCloser
-	// TODO: closed union: replace | append-at-position | raw-end-backfill |
-	// server-owned append (with existing current/previous-day requestKey rules).
+// Upload and ServerMutation have distinct admission APIs: an upload cannot
+// bypass a machine lease through the server-owned append entry.
+type Upload struct{ value uploadChange }
+type ServerMutation struct{ value *serverChange }
+type mutation interface{ mutation() }
+type uploadChange interface {
+	mutation
+	uploadChange()
+}
+type payload struct {
+	reader io.ReadCloser
+	size   int64
+}
+type position struct {
+	size     int64
+	headHash string
+}
+type replaceUpload struct {
+	key                        layout.Key
+	headHash, sourceName, path string
+	rawEnd                     int64
+	body                       payload
+}
+type appendUpload struct {
+	key    layout.Key
+	at     position
+	rawEnd int64
+	body   payload
+}
+type backfillUpload struct {
+	key    layout.Key
+	at     position
+	rawEnd int64
+}
+type serverChange struct {
+	source     ServerSource
+	requestKey string
+	body       payload
 }
 
-func AcceptUpload(id auth.Identity, in UploadInput) (Mutation, error) { panic("not implemented") }
-func AcceptServerAppend(src ServerSource, requestKey string, lines []byte) (Mutation, error) {
+func (*replaceUpload) mutation()      { panic("not implemented") }
+func (*replaceUpload) uploadChange()  { panic("not implemented") }
+func (*appendUpload) mutation()       { panic("not implemented") }
+func (*appendUpload) uploadChange()   { panic("not implemented") }
+func (*backfillUpload) mutation()     { panic("not implemented") }
+func (*backfillUpload) uploadChange() { panic("not implemented") }
+func (*serverChange) mutation()       { panic("not implemented") }
+
+func AcceptUpload(id auth.Identity, in UploadInput) (Upload, error) {
+	// TODO: require Push; reject reserved segments; validate signed offsets and
+	// body length/newline using Seek, then rewind; offset zero -> replace, positive+empty -> backfill,
+	// positive+nonempty -> append. Do not validate against tentative disk state.
+	panic("not implemented")
+}
+func AcceptServerAppend(src ServerSource, requestKey string, lines []byte) (ServerMutation, error) {
 	panic("not implemented")
 }
 
@@ -76,7 +128,7 @@ type Committer struct {
 	catalog map[layout.Key]manifestBody
 }
 type admission struct {
-	mutation Mutation
+	mutation mutation
 	reply    chan commitResult
 }
 
@@ -86,17 +138,21 @@ func OpenCommitter(root string) (*Committer, error) {
 	// sync recovered state, seed catalog and Changes, then start worker.
 	panic("not implemented")
 }
-func (*Committer) Submit(context.Context, Mutation) (*Pending, error) {
-	// TODO: reserve bounded queue bytes before reading; reject zero Mutation.
+func (*Committer) Submit(context.Context, ServerMutation) (*Pending, error) {
+	// TODO: reserve bounded queue bytes before reading; reject zero ServerMutation.
 	// Cancellation before admission drops it; after admission outcome is unknown
 	// until Wait succeeds or next RPC's durable snapshot resolves it.
 	panic("not implemented")
 }
-func (*Committer) Close(context.Context) error { panic("not implemented") }
-func (*Committer) Changes() *Changes           { panic("not implemented") }
+func (*Committer) Close(context.Context) error        { panic("not implemented") }
+func (*Committer) Inventory() ([]StoredSource, error) { panic("not implemented") }
+func (*Committer) Store() *Store                      { panic("not implemented") }
+func (*Committer) Changes() *Changes                  { panic("not implemented") }
 
 // MachineLease serializes writers of one author's machine, not all clients.
 // Open waits for admitted writes of a disconnected predecessor to settle.
+// A lease accepts only Upload values with its authenticated author and machine;
+// reject a zero value, cross-machine value, or a closed lease before admission.
 type MachineLease struct {
 	owner           *Committer
 	author, machine string
@@ -105,9 +161,11 @@ type MachineLease struct {
 func (*Committer) OpenMachine(context.Context, auth.Identity, string) (*MachineLease, error) {
 	panic("not implemented")
 }
-func (*MachineLease) Snapshot() []SourceState                            { panic("not implemented") }
-func (*MachineLease) Submit(context.Context, Mutation) (*Pending, error) { panic("not implemented") }
-func (*MachineLease) Close() error                                       { panic("not implemented") }
+
+// Snapshot returns a stable copy; a second active stream gets AlreadyExists.
+func (*MachineLease) Snapshot() ([]SourceState, error)                 { panic("not implemented") }
+func (*MachineLease) Submit(context.Context, Upload) (*Pending, error) { panic("not implemented") }
+func (*MachineLease) Close() error                                     { panic("not implemented") }
 
 // CommittedSource pins a raw inode and a compressed prefix under the source
 // publication lock. Replacement renames cannot change this reader's inode.
@@ -126,9 +184,15 @@ func (*CommittedSource) Close() error                                 { panic("n
 // Distinct private phase types expose only the next legal durability step.
 // No phase before syncedBatch has a receipt-producing method.
 type collectingBatch struct{ items []*admission }
+type stagedSource struct {
+	key                        layout.Key
+	before                     *manifestBody
+	after                      manifestBody
+	raw, rawTemp, manifestTemp *os.File
+}
 type stagedBatch struct {
-	items []*admission
-	files []*os.File
+	items   []*admission
+	sources map[layout.Key]*stagedSource
 }
 type invalidatedBatch struct{ staged *stagedBatch }
 type installedBatch struct{ invalidated *invalidatedBatch }
@@ -138,6 +202,9 @@ func (*collectingBatch) stage(context.Context) (*stagedBatch, error) {
 	// TODO: fixed 8 ms from first admitted complete append, 128 operations or
 	// 64 MiB logical body, whichever first; oversized singleton goes immediately.
 	// Build one identical zstd frame per operation, one final manifest per key.
+	// Seal before a replacement of any key already in this batch; never ack a
+	// frame that another replacement in the same batch discarded. New-source
+	// server appends use the replacement/install path without client leases.
 	panic("not implemented")
 }
 func (*stagedBatch) invalidateAndSync(context.Context) (*invalidatedBatch, error) {
@@ -153,6 +220,8 @@ func (*invalidatedBatch) installAndSync(context.Context) (*installedBatch, error
 func (*installedBatch) publishAndSync(context.Context) (*syncedBatch, error) {
 	// TODO: rename final manifests; barrier C flushes their directory entries.
 	// A/B failure forbids publication; any IO failure poisons committer until boot.
+	// All stages use syncStoreBarrier; hold source publication locks in key order
+	// from staging through durable catalog publication, never across parsing.
 	panic("not implemented")
 }
 func (*syncedBatch) complete(*Committer) []Durable {

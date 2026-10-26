@@ -4,6 +4,7 @@ package index
 // local mode's IngestPlain or the offline package Ingest entry.
 import (
 	"context"
+
 	"github.com/candyflipline/mnemonic/internal/layout"
 	"github.com/candyflipline/mnemonic/internal/store"
 )
@@ -31,5 +32,9 @@ func (*LiveIngest) Cycle(context.Context, IngestOptions) (IngestStats, error) {
 	// On partial failure requeue failed keys; on publication failure requeue
 	// entire batch; a successful checkpoint never suppresses needed publication.
 	// readCkpts(all), publish planning/archive-member reads/GC remain O(all).
+	// Derive the archive path inventory from sources and pass it through publish,
+	// rematerialize/restreamMembers/ingestArchive to archiveSetFor. No serve-mode
+	// glob after boot, even on archive rematerialization; digest work stays global.
+	// Generalize raw window/reader helpers to io.ReaderAt for CommittedSource.
 	panic("not implemented")
 }

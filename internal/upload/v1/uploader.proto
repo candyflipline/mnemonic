@@ -25,6 +25,10 @@ message SourceState {
   string head_hash = 6;
   int64 updated_ms = 7;
 }
+// Starts use strictly consecutive sequences, beginning at 1. Only one body
+// may be receiving per RPC; no Start/Data/End interleaving. Completed appends
+// may remain unacked while the next body is sent. An invalid sequence closes
+// the RPC with InvalidArgument. uint64 body_bytes must fit a signed int64.
 // Logical append boundaries are exactly the old PUT boundaries. Fragmentation
 // is transport-only; end closes one zstd frame, never one frame per fragment.
 message AppendStart {
@@ -48,6 +52,10 @@ message ServerMessage {
 }
 // All SourceState messages precede Ready. No append may precede Ready.
 // Sequence starts at 1 per RPC; it is correlation, not durable dedup state.
+// Defaults: 8 outstanding appends, 64 MiB outstanding logical bytes, 1 MiB
+// fragments. One larger logical append is allowed only with no outstanding
+// append, and must be the sole outstanding append until ack (spooled to disk).
+// The server independently enforces these credits; HTTP/2 windows are separate.
 message Ready {
   uint32 version = 1;
   uint32 max_unacked = 2;
