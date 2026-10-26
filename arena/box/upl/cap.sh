@@ -6,6 +6,10 @@
 # must get ResourceExhausted, the other CAP must be acked, and a takeover of
 # an admitted machine at the cap must be acked with the displaced stream ended
 # Aborted. Then SIGTERM, and the wall from the signal to exit is printed.
+# With SILENT=1 a second CAPDRV run follows on the same server: CAP+4 streams
+# that never send Hello are held (the stream cap), one more is refused, each
+# held one is dropped with DeadlineExceeded at the 60 s Hello limit, and a new
+# session is then acked in the freed slot.
 # Synthetic input only; counts and codes. Run under the box lock:
 #   flock /var/lib/mnu/box.lock sh cap.sh BIN CAPDRV DIR
 BIN=$1 CAPDRV=$2 DIR=$3 CAP=${4:-10}
@@ -32,6 +36,14 @@ grep -q 'push serving' "$DIR/serve.log" || { echo 'push never served' >&2; exit 
 "$CAPDRV" -server "127.0.0.1:$PUSH_PORT" -token "$TOKEN" -cap "$CAP" > "$DIR/capdrv.out" 2>&1
 rc=$?
 cat "$DIR/capdrv.out"
+if [ -n "$SILENT" ]; then
+  sleep 3
+  "$CAPDRV" -server "127.0.0.1:$PUSH_PORT" -token "$TOKEN" -cap "$CAP" -silent -prefix sil > "$DIR/silent.out" 2>&1
+  src=$?
+  cat "$DIR/silent.out"
+  echo "silent_rc $src"
+  [ "$rc" -eq 0 ] && rc=$src
+fi
 t0=$(date +%s.%N)
 kill -TERM "$SERVE_PID"
 while kill -0 "$SERVE_PID" 2>/dev/null; do sleep 0.05; done
