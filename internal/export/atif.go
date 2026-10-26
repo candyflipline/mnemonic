@@ -149,6 +149,10 @@ func ATIF(db *index.DB, sessionID string, hidden map[string]bool) (*Trajectory, 
 	return buildTrajectory(sessionID, es.Harness, evs), nil
 }
 
+// ErrInvalidATIF is MarshalATIF's error when the validator refuses the
+// trajectory.
+var ErrInvalidATIF = errors.New("ATIF validation failed")
+
 // MarshalATIF builds the trajectory and returns its JSON, but only once the
 // ported validator accepts it; a failed rule comes back as the error.
 func MarshalATIF(db *index.DB, sessionID string, hidden map[string]bool) ([]byte, error) {
@@ -161,7 +165,7 @@ func MarshalATIF(db *index.DB, sessionID string, hidden map[string]bool) ([]byte
 		return nil, err
 	}
 	if msgs := ValidateJSON(b); len(msgs) > 0 {
-		return nil, errors.New("export: ATIF validation failed: " + strings.Join(msgs, "; "))
+		return nil, fmt.Errorf("export: %w: %s", ErrInvalidATIF, strings.Join(msgs, "; "))
 	}
 	return b, nil
 }

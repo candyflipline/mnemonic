@@ -54,8 +54,10 @@ func Handler(ix *index.Index, ctl *index.Controls) http.Handler {
 		switch {
 		case errors.Is(err, ErrSessionNotFound):
 			http.Error(w, err.Error(), http.StatusNotFound)
-		case err != nil:
+		case errors.Is(err, ErrInvalidATIF):
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		case err != nil:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 		default:
 			w.Header().Set("Content-Type", "application/json")
 			w.Write(body)
