@@ -1,0 +1,57 @@
+syntax = "proto3";
+package mnemonic.upload.v1;
+option go_package = "github.com/candyflipline/mnemonic/internal/upload/v1;uploadv1";
+
+// One authenticated RPC per (token author, machine). Author is never on wire.
+service Uploader {
+  rpc Push(stream ClientMessage) returns (stream ServerMessage);
+}
+message ClientMessage {
+  oneof message {
+    Hello hello = 1;
+    AppendStart start = 2;
+    AppendData data = 3;
+    AppendEnd end = 4;
+  }
+}
+message Hello { string machine = 1; uint32 version = 2; }
+message SourceID { string harness = 1; string src_id = 2; }
+message SourceState {
+  SourceID source = 1;
+  string source_name = 2;
+  string path = 3;
+  int64 size = 4;
+  int64 raw_end = 5;
+  string head_hash = 6;
+  int64 updated_ms = 7;
+}
+// Logical append boundaries are exactly the old PUT boundaries. Fragmentation
+// is transport-only; end closes one zstd frame, never one frame per fragment.
+message AppendStart {
+  uint64 sequence = 1;
+  SourceID source = 2;
+  int64 offset = 3;
+  string head_hash = 4;
+  string source_name = 5;
+  string path = 6;
+  int64 raw_end = 7;
+  uint64 body_bytes = 8;
+}
+message AppendData { uint64 sequence = 1; bytes body = 2; }
+message AppendEnd { uint64 sequence = 1; }
+message ServerMessage {
+  oneof message {
+    SourceState source = 1;
+    Ready ready = 2;
+    Ack ack = 3;
+  }
+}
+// All SourceState messages precede Ready. No append may precede Ready.
+// Sequence starts at 1 per RPC; it is correlation, not durable dedup state.
+message Ready {
+  uint32 version = 1;
+  uint32 max_unacked = 2;
+  uint64 unacked_bytes = 3;
+  uint32 fragment_bytes = 4;
+}
+message Ack { uint64 sequence = 1; SourceState source = 2; }
