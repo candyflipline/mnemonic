@@ -62,7 +62,7 @@ CFGEOF
 : > "$P-serve.log"
 export GOMAXPROCS=$SERVE_PROCS
 if [ "$STRACE" = 1 ]; then
-	strace -f --seccomp-bpf -y -e trace=fsync,fdatasync,syncfs,sync_file_range -o "$P-strace.txt" \
+	strace -f --seccomp-bpf -y -e signal=none -e trace=fsync,fdatasync,syncfs,sync_file_range -o "$P-strace.txt" \
 		"$BIN" serve --config "$CFG/server.toml" > "$P-serve.log" 2>&1 &
 else
 	"$BIN" serve --config "$CFG/server.toml" > "$P-serve.log" 2>&1 &
