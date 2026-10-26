@@ -1,12 +1,17 @@
-{
-	admin off
-}
-
-{$MNEMONIC_HOST} {
-	# Pushes send whole raw files; 256MB keeps the largest session files
-	# from being rejected while still bounding abuse.
-	request_body {
-		max_size 256MB
+{$MORAINE_HOST} {
+	# The push stream is gRPC over HTTP/2 cleartext. A stream's request body is
+	# every byte the client sends for its whole life, so this route has no body
+	# cap and no compression, and responses flush at once so acks arrive when sent.
+	@push path /mnemonic.push.v1.Push/*
+	handle @push {
+		reverse_proxy h2c://host.docker.internal:8740 {
+			flush_interval -1
+		}
 	}
-	reverse_proxy 127.0.0.1:8740
+
+	# Everything else is HTTP/1.1 to the server on the host, from this container.
+	handle {
+		encode zstd gzip
+		reverse_proxy host.docker.internal:8740
+	}
 }
