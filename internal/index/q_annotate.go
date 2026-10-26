@@ -213,9 +213,9 @@ func (annotate) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, str
 
 // requireTarget is nil when the caller may open session and, if spanID is
 // set, the session has that span. On the engine the events read of the
-// oracle's count is "the part holds a row of the session that is not an
-// annotation record": winners are the published rows, and annotation records
-// never load into events.
+// oracle's count is "the part holds a row of the session": annotation records
+// are rows of their own sources' parts, never of the session's part, so any
+// row of the session is an event.
 func requireTarget(ctx context.Context, db *DB, session, spanID string) error {
 	f, err := Sessions(ctx, db)
 	if err != nil {
@@ -264,27 +264,16 @@ func sessionHasSpan(db *DB, session, spanID string) bool {
 	return false
 }
 
-// sessionHasEvents reports whether the part holding session has a winner row
-// of it that is an event (an annotation record's row never is).
+// sessionHasEvents reports whether a part holds rows of session. Annotation
+// records are rows of their own sources' parts, so any row of the session's
+// part is an event and no annotation skip is needed.
 func (db *DB) sessionHasEvents(session string) (bool, error) {
 	st, ok := db.part(session)
 	if !ok {
 		return false, nil
 	}
-	lo, hi, ok := st.sessionRange(session)
-	if !ok {
-		return false, nil
-	}
-	for d := lo; d < hi; d++ {
-		r, err := st.row(d)
-		if err != nil {
-			return false, err
-		}
-		if r.Harness != schema.AnnotationHarness {
-			return true, nil
-		}
-	}
-	return false, nil
+	_, _, ok = st.sessionRange(session)
+	return ok, nil
 }
 
 func valueText(v schema.Value) string {

@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/candyflipline/mnemonic/internal/schema"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -322,7 +323,11 @@ func openHolders(store string, cks []ckpt, byPrev map[string]string) (holders []
 		if h == nil {
 			continue
 		}
-		if holderIndexOf(h, c.Key) >= 0 {
+		// A holder holding an annotation member is a regroup leftover from
+		// when annotation sources joined their targets' components: its
+		// sections carry the annotations' author, so its members read whole
+		// and none of that section is taken.
+		if holderIndexOf(h, c.Key) >= 0 && !slices.ContainsFunc(h.meta.Members, func(m member) bool { return m.Harness == schema.AnnotationHarness }) {
 			holders[i] = h
 		}
 	}
@@ -391,10 +396,36 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 		rows += int(c.Rows)
 	}
 	kp := newKeyPass(members, rows)
+	heavy := newHeavyReader(store, cks)
+	defer heavy.close()
+	annRows := map[string][]annRow{}
 	for si, c := range cks {
 		members[si] = memberOf(c)
 		if cold {
 			members[si].Gen, members[si].LightLen, members[si].HeavyLen = 0, 0, 0
+		}
+		if c.Harness == schema.AnnotationHarness {
+			// An annotation row feeds only the annotations section: it is no
+			// doc, so it never competes for a uid, adds no session author, and
+			// reaches no term, turn or rollup. Its target may be a session
+			// this part holds no rows of.
+			err := walkLog(store, c, 0, func(rec []byte, _ int64, _ int) error {
+				r := new(Row)
+				if _, err := r.decode(rec); err != nil {
+					return err
+				}
+				r.Author = c.Author
+				hrec, err := heavy.record(built{row: r, src: uint16(si)})
+				if err != nil {
+					return err
+				}
+				annRows[r.Session] = append(annRows[r.Session], annRow{payload: heavyPayload(hrec), author: c.Author})
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+			continue
 		}
 		holder := plan.holder[si]
 		if holder != nil && !merged[holder] {
@@ -413,8 +444,6 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 	sessionIDs := kp.sessions.list
 	kp = nil
 
-	heavy := newHeavyReader(store, cks)
-	defer heavy.close()
 	dir := partDir + ".tmp"
 	os.RemoveAll(dir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -541,6 +570,12 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 	}
 	if view.heavy.err != nil {
 		return view.heavy.err
+	}
+	// The annotations section: one entry per annotation_id over the
+	// annotation rows, in (source key, row) order, for sessions this part may
+	// hold no docs of.
+	for sid, rows := range annRows {
+		secs.ann[sid] = buildAnnotations(rows)
 	}
 
 	write := func(name string, b []byte) error { return os.WriteFile(filepath.Join(dir, name), b, 0o644) }
