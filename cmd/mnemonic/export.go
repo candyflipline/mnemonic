@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/candyflipline/mnemonic/internal/config"
+	"github.com/candyflipline/mnemonic/internal/export"
 )
 
 func init() { commands["export"] = exportCmd }
@@ -176,7 +177,7 @@ func (l *lastByte) Write(p []byte) (int, error) {
 }
 
 func printSkipped(trailer http.Header) {
-	for _, v := range trailer.Values("Mnemonic-Skipped") {
+	for _, v := range trailer.Values(export.SkippedTrailer) {
 		fmt.Fprintf(os.Stderr, "export: skipped session %s\n", v)
 	}
 }
