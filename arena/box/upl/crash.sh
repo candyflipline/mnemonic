@@ -229,11 +229,15 @@ server_point() {
 	entry=$(grep "^$tid " "$d.strace" | grep -v -e '+++ killed' -e ' resumed>' | tail -1 | sed "$short")
 	last=$(grep "^$tid " "$d.strace" | grep -v '+++ killed' | tail -1)
 	case $last in *'resumed>) = ?') entry="$entry) = ?" ;; *'= ?') ;; *) entry="$entry NOT-IN-CALL" ;; esac
-	proof="$entry; before it: syncfs_done=$(grep -cE 'syncfs(\(| resumed>).*= 0' "$d.strace" || true)"
-	proof="$proof man_renames=$(grep -cE "rename.*$MAN" "$d.strace" || true)"
-	proof="$proof raw_renames=$(grep -cE "rename.*$RAWRN" "$d.strace" || true)"
-	proof="$proof raw_extend_truncs=$(grep -cE "$EXT" "$d.strace" || true)"
-	proof="$proof man_unlinks=$(grep -cE "$MANUNLINK" "$d.strace" || true)"
+	awk '/ <unfinished \.\.\.>$/ { sub(/ <unfinished \.\.\.>$/, ""); p[$1] = $0; next }
+		/<\.\.\. [a-z0-9_]+ resumed>/ && ($1 in p) { r = $0; sub(/^.*resumed>/, "", r); print p[$1] r; delete p[$1]; next }
+		{ print }' "$d.strace" > "$d.strace-joined"
+	j=$d.strace-joined
+	proof="$entry; before it: syncfs_done=$(grep -cE 'syncfs\(.*= 0' "$j" || true)"
+	proof="$proof man_renames=$(grep -cE "rename.*$MAN" "$j" || true)"
+	proof="$proof raw_renames=$(grep -cE "rename.*$RAWRN" "$j" || true)"
+	proof="$proof raw_extend_truncs=$(grep -cE "$EXT" "$j" || true)"
+	proof="$proof man_unlinks=$(grep -cE "$MANUNLINK" "$j" || true)"
 	case $entry in *NOT-IN-CALL) FAILS=$((FAILS + 1)) ;; esac
 	converge "$p" "$row" "$d" "$home" "$cfg" "$mach" "$ref" "$proof"
 }
