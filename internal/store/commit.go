@@ -819,13 +819,21 @@ func mkdirs(dataDir, dir string) ([]string, error) {
 	return slices.Compact(parents), nil
 }
 
+// writeBatchFile is the W1 file-write seam; a negative offset means sequential IO.
+var writeBatchFile = func(f *os.File, b []byte, off int64) (int, error) {
+	if off < 0 {
+		return f.Write(b)
+	}
+	return f.WriteAt(b, off)
+}
+
 func writeTemp(path string, parts [][]byte) (string, error) {
 	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
 	if err != nil {
 		return "", err
 	}
 	for _, b := range parts {
-		if _, err = f.Write(b); err != nil {
+		if _, err = writeBatchFile(f, b, -1); err != nil {
 			break
 		}
 	}
@@ -847,7 +855,7 @@ func appendFrames(raw string, zst int64, frames [][]byte) error {
 	if err = f.Truncate(zst); err == nil {
 		off := zst
 		for _, b := range frames {
-			if _, err = f.WriteAt(b, off); err != nil {
+			if _, err = writeBatchFile(f, b, off); err != nil {
 				break
 			}
 			off += int64(len(b))
