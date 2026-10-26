@@ -4,8 +4,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 
@@ -22,17 +25,12 @@ func initCmd(args []string) error {
 	tokenFile := fs.String("token-file", "", "file holding the token minted by `mnemonic token new` (required)")
 	machine := fs.String("machine", "", "machine name (default: short hostname)")
 	force := fs.Bool("force", false, "overwrite an existing config.toml")
+	label := fs.String("label", launchdLabel, "launchd label (macOS)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
-	}
-	if *server == "" {
-		return fmt.Errorf("--server <url> is required")
-	}
-	if *tokenFile == "" {
-		return fmt.Errorf("--token-file <path> is required")
 	}
 
 	home, err := os.UserHomeDir()
@@ -42,6 +40,17 @@ func initCmd(args []string) error {
 	dir := filepath.Join(home, ".mnemonic")
 	configPath := filepath.Join(dir, "config.toml")
 	tokenPath := filepath.Join(dir, "token")
+
+	if _, err := os.Stat(configPath); err == nil && *server == "" && *tokenFile == "" && !*force {
+		fmt.Println("kept  " + configPath)
+		return installScheduler(home, *label)
+	}
+	if *server == "" {
+		return fmt.Errorf("--server <url> is required")
+	}
+	if *tokenFile == "" {
+		return fmt.Errorf("--token-file <path> is required")
+	}
 
 	if *machine == "" {
 		host, err := os.Hostname()
@@ -102,13 +111,17 @@ func initCmd(args []string) error {
 	}
 	fmt.Println("wrote " + configPath)
 
+	return installScheduler(home, *label)
+}
+
+func installScheduler(home, label string) error {
 	exe, err := runningBinary()
 	if err != nil {
 		return err
 	}
 	switch runtime.GOOS {
 	case "darwin":
-		return initLaunchd(home, exe, *force)
+		return initLaunchd(home, exe, label)
 	case "linux":
 		printSystemd(exe)
 		return nil
@@ -118,10 +131,10 @@ func initCmd(args []string) error {
 	}
 }
 
-func initLaunchd(home, exe string, force bool) error {
+func initLaunchd(home, exe, label string) error {
 	agents := filepath.Join(home, "Library", "LaunchAgents")
-	plistPath := filepath.Join(agents, launchdLabel+".plist")
-	plist, err := ops.RenderLaunchd(exe, home)
+	plistPath := filepath.Join(agents, label+".plist")
+	plist, err := ops.RenderLaunchd(label, exe, home)
 	if err != nil {
 		return fmt.Errorf("init: plist: %w", err)
 	}
@@ -132,12 +145,24 @@ func initLaunchd(home, exe string, force bool) error {
 		return fmt.Errorf("init: %s: %w", plistPath, err)
 	}
 	fmt.Println("wrote " + plistPath)
-	cmd := "launchctl bootstrap gui/$(id -u) " + plistPath
-	if force {
-		cmd = "launchctl bootout gui/$(id -u)/" + launchdLabel + " 2>/dev/null; " + cmd
+	domain := "gui/" + strconv.Itoa(os.Getuid())
+	if out, err := exec.Command("launchctl", "bootout", domain+"/"+label).CombinedOutput(); err != nil {
+		fmt.Printf("bootout %s/%s: not loaded (%s)\n", domain, label, trimOut(out, err))
+	} else {
+		fmt.Println("booted out " + domain + "/" + label)
 	}
-	fmt.Println(cmd)
+	if out, err := exec.Command("launchctl", "bootstrap", domain, plistPath).CombinedOutput(); err != nil {
+		return fmt.Errorf("init: launchctl bootstrap %s %s: %s", domain, plistPath, trimOut(out, err))
+	}
+	fmt.Println("bootstrapped " + domain + "/" + label)
 	return nil
+}
+
+func trimOut(out []byte, err error) string {
+	if s := strings.TrimSpace(string(out)); s != "" {
+		return s
+	}
+	return err.Error()
 }
 
 func printSystemd(exe string) {
