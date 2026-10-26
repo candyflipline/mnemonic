@@ -225,11 +225,16 @@ server_point() {
 	fi
 	tid=$(sed -n 's/.*tid=\([0-9]*\).*/\1/p' "$d.killat")
 	tail -n 12 "$d.strace" > "$d.strace-tail"
-	proof="$(grep "^$tid " "$d.strace" | grep -v '+++ killed' | tail -1 | sed "s#$d/raw/##g; s#^$tid [0-9.]* ##" | cut -c1-160)"
-	proof="$proof; syncfs_done=$(grep -cE 'syncfs(\(| resumed>).*= 0' "$d.strace" || true)"
+	short='s#^[0-9]* [0-9.]* ##; s#AT_FDCWD<[^>]*>#AT_FDCWD#g; s#"[^"]*/\([^"/]*\)"#"\1"#g; s#<[^>]*/\([^/>]*\)>#<\1>#g; s# <unfinished \.\.\.>##'
+	entry=$(grep "^$tid " "$d.strace" | grep -v -e '+++ killed' -e ' resumed>' | tail -1 | sed "$short")
+	last=$(grep "^$tid " "$d.strace" | grep -v '+++ killed' | tail -1)
+	case $last in *'resumed>) = ?') entry="$entry) = ?" ;; *'= ?') ;; *) entry="$entry NOT-IN-CALL" ;; esac
+	proof="$entry; before it: syncfs_done=$(grep -cE 'syncfs(\(| resumed>).*= 0' "$d.strace" || true)"
 	proof="$proof man_renames=$(grep -cE "rename.*$MAN" "$d.strace" || true)"
 	proof="$proof raw_renames=$(grep -cE "rename.*$RAWRN" "$d.strace" || true)"
-	proof="$proof man_unlinks=$(grep -cE 'unlinkat\(AT_FDCWD, "[^"]*/raw/[^"]*/[0-9a-f]{16}\.json", 0\) = 0' "$d.strace" || true)"
+	proof="$proof raw_extend_truncs=$(grep -cE "$EXT" "$d.strace" || true)"
+	proof="$proof man_unlinks=$(grep -cE "$MANUNLINK" "$d.strace" || true)"
+	case $entry in *NOT-IN-CALL) FAILS=$((FAILS + 1)) ;; esac
 	converge "$p" "$row" "$d" "$home" "$cfg" "$mach" "$ref" "$proof"
 }
 
@@ -271,6 +276,8 @@ printf 'home_files\t%s\n' "$(find "$H" -type f | wc -l)"
 
 MAN='/raw/[^"]*/[0-9a-f]{16}\.json"\) = 0'
 RAWRN='/raw/[^"]*/[0-9a-f]{16}\.jsonl\.zst"\) = 0'
+EXT='ftruncate\([0-9]+</[^>]*/raw/[^>]*\.jsonl\.zst>, [1-9]'
+MANUNLINK='unlinkat\(AT_FDCWD[^,]*, "[^"]*/raw/[^"]*/[0-9a-f]{16}\.json", 0\) = 0'
 reference R1 "$H" small -
 server_point S2 6 "$H" small gcrash - "$RUN/R1" rename,renameat,renameat2 -sys rename -timeout 300s -target '/raw/.*/[0-9a-f]{16}\.json$' -need "$MAN"
 server_point S3 7 "$H" small gcrash - "$RUN/R1" syncfs -sys syncfs -timeout 300s -need "$MAN"
@@ -290,9 +297,7 @@ crc=0
 erc=0
 sh "$HERE/equiv.sh" "$RUN/R1" "$d" > "$d.equiv" 2>&1 || erc=$?
 [ "$crc" = 0 ] && [ "$src" = 0 ] && [ "$erc" = 0 ] && ok=PASS || { ok=FAIL; FAILS=$((FAILS + 1)); }
-printf 'SER\tack-after-B3\t%s\tpush_rc=%s\tequiv_rc=%s\t%s\n' "$(cut -f2 "$d.ackcheck" | tr '\n' ' ' | sed 's/ $//')" "$src" "$erc" "$ok" | tee -a "$ROWS"
-grep -v '^crashdrv' "$d.ackcheck" | tr '\t' '=' | tr '\n' ' ' | tee -a "$RUN/ser-fields.txt"
-echo
+printf 'SER\tack-after-B3\t%s\tpush_rc=%s\tequiv_rc=%s\t%s\n' "$(tr '\t' '=' < "$d.ackcheck" | tr '\n' ' ' | sed 's/ $//')" "$src" "$erc" "$ok" | tee -a "$ROWS"
 
 python3 -I - "$H" <<'PYEOF'
 import os, sys
@@ -315,7 +320,7 @@ for _, q in sorted(sizes)[1:6]:
 print("extended\t5")
 PYEOF
 reference R2 "$H" small "$RUN/R1"
-server_point S1 2 "$H" small gcrash "$RUN/R1" "$RUN/R2" syncfs -sys syncfs -timeout 300s -need 'ftruncate\([0-9]+</[^>]*/raw/[^>]*\.jsonl\.zst>, [1-9]'
+server_point S1 2 "$H" small gcrash "$RUN/R1" "$RUN/R2" syncfs -sys syncfs -timeout 300s -need "$EXT"
 server_point S4 5 "$H" small gcrash "$RUN/R1" "$RUN/R2" syncfs -sys syncfs -timeout 300s -need "$RAWRN"
 
 T=$RUN/tiny
