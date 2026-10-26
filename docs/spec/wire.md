@@ -10,7 +10,7 @@ Related specs: [events](events.md) (what the server makes of the lines), [spans]
 
 ## Authentication
 
-The push stream carries a bearer token as `authorization` request metadata, and it reaches `tokens.Require(auth.Push)`. The server stores only `sha256(token)` as lowercase hex (`internal/auth/auth.go:120-123`) and maps it to an author. A missing or unknown token is gRPC `Unauthenticated` (`internal/auth/auth.go:143`), and a known token without the push scope is gRPC `PermissionDenied` (`internal/auth/auth.go:149`). The author a stream writes as is the token's author, never a field of the request (`internal/auth/auth.go:1-3`, `internal/store/store.go:104`).
+The push stream carries a bearer token as `authorization` request metadata. The push server's stream interceptor passes it to `Tokens.Check` with scope `auth.Push` (`internal/intake/intake.go:61-75`), the same check HTTP's `Require` uses. The server stores only `sha256(token)` as lowercase hex (`internal/auth/auth.go:120-123`) and maps it to an author. A missing or unknown token is gRPC `Unauthenticated` (`internal/auth/auth.go:142-146`), and a known token without the push scope is gRPC `PermissionDenied` (`internal/auth/auth.go:148-151`). The author a stream writes as is the token's author, never a field of the request (`internal/auth/auth.go:1-3`, `internal/store/store.go:104`).
 
 ## Identifiers
 
@@ -85,7 +85,7 @@ A producer that appends only, never rewrites, and computes its own head hash can
 
 ## Sources owned by the server
 
-Some sources are written by the server itself, such as those fed by [OTLP](otlp.md) or by annotations. They live under a machine name reserved for server-owned sources. A client stream `Append` that names that machine, or one of the harnesses `annotation`, `otlp` and `control` on any machine, is refused with `403 machine or harness is reserved for server-owned sources` (`internal/store/store.go:150-153`, `internal/store/append.go:24`), so no producer can write there. The reserved names are fixed by the server and may grow; treat any machine or harness your server documents as server-owned as unavailable to you.
+Some sources are written by the server itself, such as those fed by [OTLP](otlp.md) or by annotations. They live under a machine name reserved for server-owned sources. A client stream `Append` that names that machine, or one of the harnesses `annotation`, `otlp` and `control` on any machine, is refused with gRPC `PermissionDenied` and the message `machine or harness is reserved for server-owned sources` (`internal/store/commit.go:45`, `internal/intake/intake.go:298-302`), so no producer can write there. The reserved names are fixed by the server and may grow; treat any machine or harness your server documents as server-owned as unavailable to you.
 
 ## What the server does next
 
