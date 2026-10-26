@@ -57,6 +57,9 @@ func TestLoadServer(t *testing.T) {
 		"uppercase sha256": strings.Replace(validServerToml,
 			"6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
 			"6B86B273FF34FCE19D6B804EFF5A3F5747ADA4EAA22F1D49C01E52DDB7875B4B", 1),
+		"tls with a push_listen off 8741": strings.NewReplacer(
+			"127.0.0.1:8740", "0.0.0.0:443", "127.0.0.1:8741", "0.0.0.0:8742",
+		).Replace(validServerToml) + "\n[tls]\nhosts = [\"mnemonic.example\"]\n",
 		"duplicate hash": validServerToml + `
 [[tokens]]
 author = "sam"
