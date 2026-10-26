@@ -21,7 +21,9 @@ type Server struct {
 	dataDir string
 	ix      *index.Index
 	lock    *index.IndexLock
-	wake    chan struct{}
+	st      *store.Committer
+	lap     *index.Lap
+	drain   func()
 	handler http.Handler
 	otlp    *otlp.Receiver
 }
@@ -46,7 +48,6 @@ func New(dataDir string, tokens auth.Tokens) (*Server, error) {
 		ix.Close()
 		return nil, err
 	}
-	wake := make(chan struct{}, 1)
 	st, err := store.Open(dataDir)
 	if err != nil {
 		lock.Unlock()
@@ -56,13 +57,13 @@ func New(dataDir string, tokens auth.Tokens) (*Server, error) {
 	tools := mcp.Handler(ix, index.Lookup)
 	rcv := otlp.NewReceiver(st)
 	mux := http.NewServeMux()
-	intake.Mount(mux, st, tokens)
+	drain := intake.Mount(mux, st, tokens)
 	mux.Handle("POST /v1/traces", tokens.Require(auth.Push)(rcv.Traces()))
 	mux.Handle("POST /v1/logs", tokens.Require(auth.Push)(rcv.Logs()))
 	mux.Handle("/mcp", tokens.Require(auth.Read)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tools.ServeHTTP(w, r.WithContext(index.WithControls(store.WithStore(r.Context(), st), ctl)))
 	})))
-	return &Server{dataDir: dataDir, ix: ix, lock: lock, wake: wake, handler: mux, otlp: rcv}, nil
+	return &Server{dataDir: dataDir, ix: ix, lock: lock, st: st, drain: drain, handler: mux, otlp: rcv}, nil
 }
 
 func (s *Server) Handler() http.Handler { return s.handler }
@@ -71,8 +72,16 @@ func (s *Server) Handler() http.Handler { return s.handler }
 // is off until set.
 func (s *Server) StoreOTLPContent(on bool) { s.otlp.SetStoreContent(on) }
 
+// Drain ends every live push stream and refuses new ones; call it when the
+// HTTP server begins to shut down.
+func (s *Server) Drain() { s.drain() }
+
+// Close commits what the store has queued, then closes the index.
 func (s *Server) Close() error {
-	err := s.ix.Close()
+	err := s.st.Close()
+	if ierr := s.ix.Close(); err == nil {
+		err = ierr
+	}
 	if lerr := s.lock.Unlock(); err == nil {
 		err = lerr
 	}
@@ -80,45 +89,48 @@ func (s *Server) Close() error {
 }
 
 // Cycle ingests everything pending now.
-func (s *Server) Cycle(context.Context) error { return s.cycle("reconcile") }
+func (s *Server) Cycle(context.Context) error { return s.cycle("settle") }
 
 const (
 	settleQuiet = time.Second
 	settleMax   = 3 * time.Second
-	reconcile   = 5 * time.Minute
+	settleEvery = 5 * time.Minute
 	// settleSource is how long a source's manifest must go without a push
 	// before it leaves its hot part for a cold one.
 	settleSource = 15 * time.Minute
 )
 
-// Run ingests at boot, after each push once pushes settle (1 s quiet, 3 s
-// at most), and every 5 min without one, until ctx is done. A parser version
-// bump leaves sources for the sweep: cycles then run back to back, each
-// parsing stale sources under the sweep budget, until none are left.
+// Run lists everything once at boot, then ingests the sources changed since
+// the last cycle: after each push once pushes settle (1 s quiet, 3 s at most),
+// and every 5 min without one so hot sources settle cold, until ctx is done. A
+// parser version bump leaves sources for the sweep: cycles then run back to
+// back, each parsing stale sources under the sweep budget, until none are
+// left.
 func (s *Server) Run(ctx context.Context) {
-	pushPending := func() bool { return len(s.wake) > 0 }
+	changed := s.st.Changed()
+	pushPending := func() bool { return len(changed) > 0 }
 	s.cycle("boot")
-	reconciled := time.Now()
+	settled := time.Now()
 	for {
 		reason := "sweep"
-		if due := time.Until(reconciled.Add(reconcile)); due <= 0 {
-			reason = "reconcile"
+		if due := time.Until(settled.Add(settleEvery)); due <= 0 {
+			reason = "settle"
 		} else if s.ix.SweepStale() == 0 || pushPending() {
-			reason = "reconcile"
+			reason = "settle"
 			select {
 			case <-ctx.Done():
 				return
-			case <-s.wake:
+			case <-changed:
 				reason = "put"
-				settle(ctx, s.wake)
+				settle(ctx, changed)
 			case <-time.After(due):
 			}
 		}
 		if ctx.Err() != nil {
 			return
 		}
-		if reason == "reconcile" {
-			reconciled = time.Now()
+		if reason == "settle" {
+			settled = time.Now()
 		}
 		s.cycle(reason)
 	}
@@ -145,7 +157,14 @@ func settle(ctx context.Context, wake <-chan struct{}) {
 
 func (s *Server) cycle(reason string) error {
 	start := time.Now()
-	st, err := s.ix.Ingest(s.dataDir, index.IngestOptions{Quiet: settleSource})
+	opts := index.IngestOptions{Quiet: settleSource}
+	var st index.IngestStats
+	var err error
+	if s.lap == nil {
+		s.lap, st, err = s.ix.Boot(s.dataDir, opts)
+	} else {
+		st, err = s.lap.Next(s.st.TakeChanged(), opts)
+	}
 	cs := s.ix.LastCycle()
 	log.Printf("cycle %s: sources unchanged=%d resumed=%d fresh=%d reparsed=%d failed=%d stale=%d; "+
 		"wrote logs=%d parts=%d built=%d hot=%d cold=%d in %s err=%v",
