@@ -81,14 +81,14 @@ func TestBootFailureKeepsServeUpAndRetries(t *testing.T) {
 	defer web.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ran := make(chan error, 1)
-	go func() { ran <- srv.Run(ctx) }()
+	ran := make(chan struct{})
+	go func() { srv.Run(ctx); close(ran) }()
 
 	var failing *bootJSON
 	for deadline := time.Now().Add(5 * time.Second); failing == nil || failing.Attempts < 2; {
 		select {
-		case err := <-ran:
-			t.Fatalf("Run ended with %v; serve must stay up and retry the boot", err)
+		case <-ran:
+			t.Fatal("Run ended; serve must stay up and retry the boot")
 		case <-time.After(10 * time.Millisecond):
 		}
 		if time.Now().After(deadline) {
@@ -110,8 +110,8 @@ func TestBootFailureKeepsServeUpAndRetries(t *testing.T) {
 	}
 	select {
 	case <-srv.Booted():
-	case err := <-ran:
-		t.Fatalf("Run ended with %v before the boot succeeded", err)
+	case <-ran:
+		t.Fatal("Run ended before the boot succeeded")
 	case <-time.After(5 * time.Second):
 		t.Fatal("boot did not succeed after the failure was cleared")
 	}
