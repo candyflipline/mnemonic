@@ -85,10 +85,14 @@ type Backfill struct {
 	RawEnd   int64
 }
 
+// serverAppend is reduced at Append to what plan reads: how much the source
+// grows by and the first line's hash, never the lines themselves — the bytes
+// stay with the caller.
 type serverAppend struct {
 	src        ServerSource
 	requestKey string
-	lines      Lines
+	linesLen   int64
+	firstHash  string
 }
 
 func (Replace) isOp()      {}
@@ -193,11 +197,16 @@ type Committer struct {
 	err     error
 }
 
+// request holds a frame and the op reduced to its metadata: linesLen is the
+// length plan adds to the source's Size, carried at Submit so the queue
+// counts true — the budget bounds frames, so a queued body would be memory
+// the count does not see.
 type request struct {
-	key    layout.Key
-	op     Op
-	frame  []byte
-	ticket *Ticket
+	key      layout.Key
+	op       Op
+	linesLen int64
+	frame    []byte
+	ticket   *Ticket
 }
 
 // Open loads the table from every manifest under dataDir, removes the temp
@@ -344,22 +353,29 @@ func (c *Committer) Close() error {
 var errClosed = errors.New("store: closed")
 
 // Submit queues op for src and returns its ticket. The frame is encoded on the
-// caller's goroutine; Submit blocks while queueBytes of frames are queued.
+// caller's goroutine, and the queued request keeps the op's metadata plus the
+// body's length, not the body; Submit blocks while queueBytes of frames are
+// queued.
 func (c *Committer) Submit(ctx context.Context, src ClientSource, op Op) (*Ticket, error) {
 	var frame []byte
+	var n int64
 	switch o := op.(type) {
 	case Replace:
-		frame = encodeFrame(o.Lines)
+		n, frame = int64(len(o.Lines.b)), encodeFrame(o.Lines)
+		o.Lines = Lines{}
+		op = o
 	case Extend:
-		frame = encodeFrame(o.Lines)
+		n, frame = int64(len(o.Lines.b)), encodeFrame(o.Lines)
+		o.Lines = Lines{}
+		op = o
 	case Backfill:
 	default:
 		return nil, fmt.Errorf("store: op %T is not a client op", op)
 	}
-	return c.submit(ctx, src.key, op, frame)
+	return c.submit(ctx, src.key, op, frame, n)
 }
 
-func (c *Committer) submit(ctx context.Context, k layout.Key, op Op, frame []byte) (*Ticket, error) {
+func (c *Committer) submit(ctx context.Context, k layout.Key, op Op, frame []byte, linesLen int64) (*Ticket, error) {
 	n := min(int64(len(frame)), queueBytes)
 	if err := c.budget.acquire(ctx, n, c.stopped); err != nil {
 		if c.stoppedErr() != nil {
@@ -367,7 +383,7 @@ func (c *Committer) submit(ctx context.Context, k layout.Key, op Op, frame []byt
 		}
 		return nil, err
 	}
-	r := &request{key: k, op: op, frame: frame, ticket: newTicket()}
+	r := &request{key: k, op: op, linesLen: linesLen, frame: frame, ticket: newTicket()}
 	c.intake.RLock()
 	defer c.intake.RUnlock()
 	if c.closed {
@@ -410,8 +426,15 @@ func (c *Committer) Append(src ServerSource, requestKey string, lines []byte) (_
 	if err != nil {
 		return wire.Source{}, false, fmt.Errorf("store: %w", err)
 	}
+	first, _, _ := bytes.Cut(l.b, []byte{'\n'})
+	op := serverAppend{
+		src:        src,
+		requestKey: requestKey,
+		linesLen:   int64(len(l.b)),
+		firstHash:  wire.HeadHash(l.b[:len(first)+1]),
+	}
 	ctx := context.Background()
-	t, err := c.submit(ctx, src.key(), serverAppend{src: src, requestKey: requestKey, lines: l}, encodeFrame(l))
+	t, err := c.submit(ctx, src.key(), op, encodeFrame(l), op.linesLen)
 	if err != nil {
 		return wire.Source{}, false, err
 	}
@@ -657,7 +680,7 @@ func plan(table map[layout.Key]*manifestBody, reqs []*request, now func() int64)
 					Harness:    r.key.Harness,
 					SourceName: op.SourceName,
 					Path:       op.Path,
-					Size:       int64(len(op.Lines.b)),
+					Size:       r.linesLen,
 					RawEnd:     op.RawEnd,
 					HeadHash:   op.HeadHash,
 					UpdatedMs:  max(now(), prevMs+1),
@@ -672,7 +695,7 @@ func plan(table map[layout.Key]*manifestBody, reqs []*request, now func() int64)
 			}
 			sp := touch(r.key)
 			sp.frames = append(sp.frames, r.frame)
-			sp.after.Size += int64(len(op.Lines.b))
+			sp.after.Size += r.linesLen
 			sp.after.RawEnd = op.RawEnd
 			sp.after.UpdatedMs = max(now(), sp.after.UpdatedMs+1)
 			sp.after.ZstSize += int64(len(r.frame))
@@ -700,9 +723,8 @@ func plan(table map[layout.Key]*manifestBody, reqs []*request, now func() int64)
 				continue
 			}
 			sp := touch(r.key)
-			n := int64(len(op.lines.b))
+			n := r.linesLen
 			if m == nil {
-				first, _, _ := bytes.Cut(op.lines.b, []byte{'\n'})
 				sp.rewrite = true
 				sp.frames = [][]byte{r.frame}
 				sp.after = manifestBody{
@@ -712,7 +734,7 @@ func plan(table map[layout.Key]*manifestBody, reqs []*request, now func() int64)
 						SourceName: op.src.name(),
 						Path:       op.src.name(),
 						Size:       n,
-						HeadHash:   wire.HeadHash(op.lines.b[:len(first)+1]),
+						HeadHash:   op.firstHash,
 						UpdatedMs:  now(),
 					},
 					ZstSize: int64(len(r.frame)),
