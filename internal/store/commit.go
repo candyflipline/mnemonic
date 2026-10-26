@@ -575,13 +575,6 @@ func (c *Committer) commit(reqs []*request) (int, error) {
 		if cleanupErr := w.rollback(); cleanupErr != nil {
 			return 0, fmt.Errorf("store: W1 rollback: %w", errors.Join(err, cleanupErr))
 		}
-		// A rewrite already unlinked its manifest. Match crash row 3 rather
-		// than trying to restore it with another write on a full disk.
-		c.mu.Lock()
-		for _, key := range w.unlinked {
-			delete(c.table, key)
-		}
-		c.mu.Unlock()
 		for _, req := range p.reqs {
 			req.ticket.fail(err)
 		}
@@ -647,8 +640,8 @@ type planned struct {
 }
 
 // sourcePlan is one source's change. A rewrite (Replace, or a server
-// source's create) writes a new raw from frames and unlinks the old manifest
-// first; otherwise the raw is truncated to before.ZstSize and frames
+// source's create) writes a new raw from frames and, once every temp is written, unlinks the
+// old manifest; otherwise the raw is truncated to before.ZstSize and frames
 // appended. Requests on one source fold in queue order.
 type sourcePlan struct {
 	key     layout.Key
@@ -790,7 +783,6 @@ type written struct {
 	tmpMan   []string
 	touched  touched
 	linkDirs []string
-	unlinked []layout.Key
 	tails    []*sourcePlan
 }
 
@@ -814,11 +806,6 @@ func (p planned) write(dataDir string) (written, error) {
 		addDir(dir)
 		switch {
 		case sp.rewrite:
-			if err := os.Remove(man); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return w, err
-			}
-			w.unlinked = append(w.unlinked, sp.key)
-			w.touched.dirs = append(w.touched.dirs, dir)
 			tmp, err := writeTemp(raw, sp.frames)
 			w.tmpRaw[i] = tmp
 			if err != nil {
@@ -843,12 +830,22 @@ func (p planned) write(dataDir string) (written, error) {
 		}
 		w.touched.files = append(w.touched.files, tmp)
 	}
+	for _, sp := range p.srcs {
+		if !sp.rewrite {
+			continue
+		}
+		man := sp.key.Manifest(dataDir)
+		if err := os.Remove(man); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return w, err
+		}
+		w.touched.dirs = append(w.touched.dirs, filepath.Dir(man))
+	}
 	return w, nil
 }
 
 // rollback undoes W1's raw tails and temps only; no link or barrier has run.
 // Repeating it is safe, including after a partial cleanup. A crash partway
-// through leaves only the tails, missing manifests and temps of rows 2-4.
+// through leaves only the tails and temps of rows 2-4.
 // Empty directories are harmless and need not be removed.
 func (w written) rollback() error {
 	for _, sp := range w.tails {

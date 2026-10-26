@@ -191,7 +191,7 @@ func (s *Server) cycle(reason string) error {
 	var st index.IngestStats
 	var err error
 	if s.lap == nil {
-		s.lap, st, err = s.ix.Boot(s.dataDir, opts)
+		s.lap, st, err = s.ix.Boot(s.dataDir, s.st.Manifests(), opts)
 		if s.lap != nil {
 			s.bootOne.Do(func() { close(s.booted) })
 		}
