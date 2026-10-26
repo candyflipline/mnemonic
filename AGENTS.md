@@ -5,7 +5,7 @@ Collects agent session traces (Claude Code, Codex, Cursor, ...) from every machi
 ## Shape
 - `mnemonic push --watch` on each machine (resident under launchd or systemd, wakes on kernel file events and uploads within 5 s of a write) sends **redacted raw lines** to the server over one gRPC stream per client (`internal/wire/pushpb/push.proto`; [spec](docs/spec/wire.md)). It is pure Go, built with `CGO_ENABLED=0`, and has no parser or index in it.
 - `mnemonic serve` on the server:
-  - accepts the push stream, and keeps the HTTP `PUT` and manifest `GET` (`/v1/*`) only as a time-boxed adapter that expires 2026-12-01;
+  - accepts the push stream, the one client path in (the old HTTP `PUT`/manifest `GET` adapter was deleted in the October 2026 deploy, after the PUT census);
   - commits appends in groups, one set of fsyncs per batch, and acks each append after its bytes are durable;
   - ingests appended raw straight into the engine's store (`internal/index`), woken by each commit after 1 s of quiet and every 5 min without one. A cycle reads only the sources changed since the last cycle; the full listing happens at boot;
   - answers MCP on `POST /mcp` (`internal/mcp`, over `internal/index`).
