@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -542,7 +543,24 @@ func (c *Committer) commit(reqs []*request) (int, error) {
 	p := plan(c.table, reqs, func() int64 { return time.Now().UnixMilli() })
 	w, err := p.write(c.dataDir)
 	if err != nil {
-		return 0, err
+		if _, ok := err.(*writeSpaceError); !ok {
+			return 0, err
+		}
+		if cleanupErr := w.rollback(); cleanupErr != nil {
+			return 0, fmt.Errorf("store: W1 rollback: %w", errors.Join(err, cleanupErr))
+		}
+		// A rewrite already unlinked its manifest. Match crash row 3 rather
+		// than trying to restore it with another write on a full disk.
+		c.mu.Lock()
+		for _, key := range w.unlinked {
+			delete(c.table, key)
+		}
+		c.mu.Unlock()
+		for _, req := range p.reqs {
+			req.ticket.fail(err)
+		}
+		c.budget.release(int64(size(p.reqs)))
+		return len(p.reqs), nil
 	}
 	d, err := w.sync(c.barrier)
 	if err != nil {
@@ -747,6 +765,8 @@ type written struct {
 	tmpMan   []string
 	touched  touched
 	linkDirs []string
+	unlinked []layout.Key
+	tails    []*sourcePlan
 }
 
 func (p planned) write(dataDir string) (written, error) {
@@ -772,14 +792,16 @@ func (p planned) write(dataDir string) (written, error) {
 			if err := os.Remove(man); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return w, err
 			}
+			w.unlinked = append(w.unlinked, sp.key)
 			w.touched.dirs = append(w.touched.dirs, dir)
 			tmp, err := writeTemp(raw, sp.frames)
+			w.tmpRaw[i] = tmp
 			if err != nil {
 				return w, err
 			}
-			w.tmpRaw[i] = tmp
 			w.touched.files = append(w.touched.files, tmp)
 		case len(sp.frames) > 0:
+			w.tails = append(w.tails, sp)
 			if err := appendFrames(raw, sp.before.ZstSize, sp.frames); err != nil {
 				return w, err
 			}
@@ -790,13 +812,53 @@ func (p planned) write(dataDir string) (written, error) {
 			return w, err
 		}
 		tmp, err := writeTemp(man, [][]byte{b, {'\n'}})
+		w.tmpMan[i] = tmp
 		if err != nil {
 			return w, err
 		}
-		w.tmpMan[i] = tmp
 		w.touched.files = append(w.touched.files, tmp)
 	}
 	return w, nil
+}
+
+// rollback undoes W1's raw tails and temps only; no link or barrier has run.
+// Repeating it is safe, including after a partial cleanup. A crash partway
+// through leaves only the tails, missing manifests and temps of rows 2-4.
+// Empty directories are harmless and need not be removed.
+func (w written) rollback() error {
+	for _, sp := range w.tails {
+		if err := os.Truncate(sp.key.Raw(w.dataDir), sp.before.ZstSize); err != nil {
+			return err
+		}
+	}
+	for _, temps := range [][]string{w.tmpRaw, w.tmpMan} {
+		for _, path := range temps {
+			if path == "" {
+				continue
+			}
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// Only allocation/write failures in W1 get this marker. Close, truncate,
+// unlink, barrier, link and cleanup errors remain fatal, even for ENOSPC.
+type writeSpaceError struct{ cause error }
+
+func (e *writeSpaceError) Error() string { return "store: W1: " + e.cause.Error() }
+func (e *writeSpaceError) Unwrap() error { return e.cause }
+
+// Intake already maps ENOSPC to ResourceExhausted; preserve EDQUOT as well.
+func (e *writeSpaceError) Is(target error) bool { return target == syscall.ENOSPC }
+
+func writeError(err error) error {
+	if errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) {
+		return &writeSpaceError{cause: err}
+	}
+	return err
 }
 
 // mkdirs makes dir and returns the dirs whose entries it changed, so the
@@ -814,7 +876,7 @@ func mkdirs(dataDir, dir string) ([]string, error) {
 		parents = append(parents, filepath.Dir(d))
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, err
+		return nil, writeError(err)
 	}
 	return slices.Compact(parents), nil
 }
@@ -830,21 +892,20 @@ var writeBatchFile = func(f *os.File, b []byte, off int64) (int, error) {
 func writeTemp(path string, parts [][]byte) (string, error) {
 	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
 	if err != nil {
-		return "", err
+		return "", writeError(err)
 	}
 	for _, b := range parts {
 		if _, err = writeBatchFile(f, b, -1); err != nil {
+			err = writeError(err)
 			break
 		}
 	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
+	if cerr := f.Close(); cerr != nil {
+		return f.Name(), fmt.Errorf("store: close temp: %w", errors.Join(err, cerr))
 	}
-	if err != nil {
-		os.Remove(f.Name())
-		return "", err
-	}
-	return f.Name(), nil
+	// Return even a partial temp: rollback owns its removal, and a removal
+	// error must reach stop rather than hiding behind the original ENOSPC.
+	return f.Name(), err
 }
 
 func appendFrames(raw string, zst int64, frames [][]byte) error {
@@ -856,13 +917,14 @@ func appendFrames(raw string, zst int64, frames [][]byte) error {
 		off := zst
 		for _, b := range frames {
 			if _, err = writeBatchFile(f, b, off); err != nil {
+				err = writeError(err)
 				break
 			}
 			off += int64(len(b))
 		}
 	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
+	if cerr := f.Close(); cerr != nil {
+		return fmt.Errorf("store: close raw: %w", errors.Join(err, cerr))
 	}
 	return err
 }
