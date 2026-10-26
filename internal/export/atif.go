@@ -124,10 +124,13 @@ type session struct {
 	rows        iter.Seq[eventRow]
 }
 
+// errStopRows stops a rows walk early, the iterator's break.
+var errStopRows = errors.New("export: rows stopped")
+
 // openSession reads one session from the index. Only published rows take
-// part (the events table's rows, in event order, which ExportSession's rows
-// are). A session in hidden (deleted, per the server's session controls) is
-// not found.
+// part (the events table's rows, in event order, which EachRow walks). A
+// session in hidden (deleted, per the server's session controls) is not
+// found.
 func openSession(db *index.DB, sessionID string, hidden map[string]bool) (session, error) {
 	if hidden[sessionID] {
 		return session{}, notFound(sessionID)
@@ -136,15 +139,16 @@ func openSession(db *index.DB, sessionID string, hidden map[string]bool) (sessio
 	if err != nil {
 		return session{}, err
 	}
-	if !ok || len(es.Rows) == 0 {
+	if !ok || es.NRows == 0 {
 		return session{}, notFound(sessionID)
 	}
 	return session{id: sessionID, harness: es.Harness, rows: func(yield func(eventRow) bool) {
-		for i := range es.Rows {
-			if !yield(eventRowOf(&es.Rows[i])) {
-				return
+		_ = es.EachRow(func(r *index.Row) error {
+			if yield(eventRowOf(r)) {
+				return nil
 			}
-		}
+			return errStopRows
+		})
 	}}, nil
 }
 

@@ -7,19 +7,48 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-// ExportSession is one session as the exports read it: its winner rows in
-// event order, heavy columns included, plus the annotations targeting it.
-// Harness and FirstCwd are the first row's, LastEventUs the newest row's
-// event_time, the sessions-table columns the dataset export orders by.
+// ExportSession is one session as the exports read it: the session's columns,
+// the annotations targeting it, and its winner rows read one at a time through
+// EachRow. Harness and FirstCwd are the first row's, LastEventUs the newest
+// row's event_time, the sessions-table columns the dataset export orders by.
 type ExportSession struct {
 	ID          string
-	Rows        []Row
-	Payloads    []string
-	TokenUsages []string
 	Annotations []schema.Annotation
 	Harness     string
 	FirstCwd    string
 	LastEventUs int64
+
+	// NRows is the count of the session's winner rows, the ones EachRow
+	// walks: the part's rows minus the annotation harness's.
+	NRows int
+
+	st *Part
+	si int
+}
+
+// EachRow calls fn for each of the session's winner rows in event order, one
+// st.row(d) at a time, skipping the annotation harness's rows (its files land
+// in the annotations relation and never in events, so no export sees them
+// here). fn's *Row borrows the part's frame cache and is valid only during its
+// call; the next call reuses it. EachRow may be called any number of times.
+func (es ExportSession) EachRow(fn func(*Row) error) error {
+	if es.st == nil {
+		return nil
+	}
+	s := es.st.session(es.si)
+	for d := s.start; d < s.end; d++ {
+		r, err := es.st.row(d)
+		if err != nil {
+			return err
+		}
+		if r.Harness == schema.AnnotationHarness {
+			continue
+		}
+		if err := fn(r); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // EachSession calls fn for every session the export may read, in session id
@@ -82,31 +111,24 @@ func (db *DB) ExportHasSession(id string) bool {
 // time, span id).
 func (db *DB) ExportSpans(id string) []schema.Span { return db.sessionSpans(id) }
 
-// exportSession folds the part's session i into an ExportSession.
+// exportSession reads the part's session i's columns in one pass that keeps
+// no row: Harness and FirstCwd from the first winner row, LastEventUs the
+// newest winner row's event_time, NRows the count of winner rows.
 func (st *Part) exportSession(i int) (ExportSession, error) {
 	s := st.session(i)
-	es := ExportSession{ID: s.id}
-	for d := s.start; d < s.end; d++ {
-		r, err := st.row(d)
-		if err != nil {
-			return es, err
-		}
-		if r.Harness == schema.AnnotationHarness {
-			continue
+	es := ExportSession{ID: s.id, st: st, si: i}
+	err := es.EachRow(func(r *Row) error {
+		if es.NRows == 0 {
+			es.Harness, es.FirstCwd = r.Harness, r.Cwd
 		}
 		if us := eventTimeUs(r); us > es.LastEventUs {
 			es.LastEventUs = us
 		}
-		payload, usage, err := st.heavyOf(r)
-		if err != nil {
-			return es, err
-		}
-		es.Rows = append(es.Rows, *r)
-		es.Payloads = append(es.Payloads, payload)
-		es.TokenUsages = append(es.TokenUsages, usage)
-	}
-	if len(es.Rows) > 0 {
-		es.Harness, es.FirstCwd = es.Rows[0].Harness, es.Rows[0].Cwd
+		es.NRows++
+		return nil
+	})
+	if err != nil {
+		return es, err
 	}
 	es.Annotations = st.annOf(s.id)
 	return es, nil

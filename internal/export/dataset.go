@@ -81,7 +81,7 @@ func Dataset(w io.Writer, db *index.DB, f AnnotationFilter, perTask int, hidden 
 	err = db.EachSession(hidden, func(es index.ExportSession) error {
 		// A session the annotations relation targets but events never held
 		// is not among the export's sessions.
-		if len(es.Rows) == 0 || !listed(es.ID) {
+		if es.NRows == 0 || !listed(es.ID) {
 			return nil
 		}
 		for _, a := range es.Annotations {
