@@ -105,6 +105,10 @@ type eventRow struct {
 	CacheWrite      uint64
 }
 
+// ErrInvalidATIF is an ATIF export's error when the validator refuses the
+// trajectory.
+var ErrInvalidATIF = errors.New("ATIF validation failed")
+
 // ErrSessionNotFound is what an export answers for a session the index does
 // not know and for one in hidden, so the two cannot be told apart.
 var ErrSessionNotFound = errors.New("session not found")
@@ -289,7 +293,7 @@ func (t *trajectory) validate() error {
 	}
 	v.trajectoryTail(obj)
 	if len(v.errs) > 0 {
-		return errors.New("export: ATIF validation failed: " + strings.Join(v.errs, "; "))
+		return fmt.Errorf("export: %w: %s", ErrInvalidATIF, strings.Join(v.errs, "; "))
 	}
 	return nil
 }

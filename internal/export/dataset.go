@@ -3,6 +3,7 @@ package export
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -58,13 +59,18 @@ type sessionKey struct {
 	annotations       []schema.Annotation
 }
 
+// ErrEveryFailed is Dataset's error when every matching session failed
+// validation.
+var ErrEveryFailed = errors.New("every matching session failed")
+
 // Dataset writes the sessions matching the annotation to w as JSONL, at most
 // perTask per task, newest first, one session and one step at a time. A task
-// is the cwd of the session's first published event. Sessions in hidden are
-// left out. A session that fails validation does not count toward its task's
-// cap and comes back in skipped; Dataset errs only when every matching session
-// failed.
-func Dataset(w io.Writer, db *index.DB, f AnnotationFilter, perTask int, hidden map[string]bool) (skipped []SessionError, err error) {
+// is the cwd of the session's first published event. Sessions in hidden, and
+// those listed refuses, are left out. A session that fails validation does not
+// count toward its task's cap and comes back in skipped; Dataset errs with
+// ErrEveryFailed only when every matching session failed, and with w's error
+// when a write fails.
+func Dataset(w io.Writer, db *index.DB, f AnnotationFilter, perTask int, hidden map[string]bool, listed func(sessionID string) bool) (skipped []SessionError, err error) {
 	if f.Name == "" {
 		return nil, fmt.Errorf("export: --annotation needs a name")
 	}
@@ -75,7 +81,7 @@ func Dataset(w io.Writer, db *index.DB, f AnnotationFilter, perTask int, hidden 
 	err = db.EachSession(hidden, func(es index.ExportSession) error {
 		// A session the annotations relation targets but events never held
 		// is not among the export's sessions.
-		if len(es.Rows) == 0 {
+		if len(es.Rows) == 0 || !listed(es.ID) {
 			return nil
 		}
 		for _, a := range es.Annotations {
@@ -120,7 +126,7 @@ func Dataset(w io.Writer, db *index.DB, f AnnotationFilter, perTask int, hidden 
 		}
 	}
 	if emitted == 0 && len(skipped) > 0 {
-		return skipped, fmt.Errorf("export: every matching session failed (%d)", len(skipped))
+		return skipped, fmt.Errorf("export: %w (%d)", ErrEveryFailed, len(skipped))
 	}
 	return skipped, nil
 }
