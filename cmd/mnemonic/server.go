@@ -55,16 +55,14 @@ func serve(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	ended := make(chan error, 3)
 	looped := make(chan struct{})
 	go func() {
 		defer close(looped)
-		if err := srv.Run(ctx); err != nil {
-			ended <- err
-		}
+		srv.Run(ctx)
 	}()
 
 	hs := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	ended := make(chan error, 2)
 	go func() { ended <- hs.Serve(httpListener) }()
 	go func() {
 		select {

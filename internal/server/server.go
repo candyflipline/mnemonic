@@ -4,7 +4,6 @@ package server
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -31,6 +30,7 @@ type Server struct {
 	push    *grpc.Server
 	drain   func()
 	booted  chan struct{}
+	boot    *index.BootStatus
 	bootOne sync.Once
 	handler http.Handler
 	otlp    *otlp.Receiver
@@ -63,15 +63,16 @@ func New(dataDir string, tokens auth.Tokens) (*Server, error) {
 		return nil, err
 	}
 	tools := mcp.Handler(ix, index.Lookup)
+	boot := &index.BootStatus{}
 	rcv := otlp.NewReceiver(st)
 	mux := http.NewServeMux()
 	push, drain := intake.Mount(st, tokens)
 	mux.Handle("POST /v1/traces", tokens.Require(auth.Push)(rcv.Traces()))
 	mux.Handle("POST /v1/logs", tokens.Require(auth.Push)(rcv.Logs()))
 	mux.Handle("/mcp", tokens.Require(auth.Read)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tools.ServeHTTP(w, r.WithContext(index.WithControls(store.WithStore(r.Context(), st), ctl)))
+		tools.ServeHTTP(w, r.WithContext(index.WithBootStatus(index.WithControls(store.WithStore(r.Context(), st), ctl), boot)))
 	})))
-	return &Server{dataDir: dataDir, ix: ix, lock: lock, st: st, push: push, drain: drain, booted: make(chan struct{}), handler: mux, otlp: rcv}, nil
+	return &Server{dataDir: dataDir, ix: ix, lock: lock, st: st, push: push, drain: drain, booted: make(chan struct{}), boot: boot, handler: mux, otlp: rcv}, nil
 }
 
 // Booted is closed once the index has booted: from then on its steady memory
@@ -122,6 +123,10 @@ func (s *Server) Close() error {
 // Cycle ingests everything pending now.
 func (s *Server) Cycle(context.Context) error { return s.cycle("settle") }
 
+// bootFirstDelay is the wait after a failed boot attempt and bootMaxDelay the
+// cap on the doubled wait, so a restart loop never hammers the manifests.
+var bootFirstDelay, bootMaxDelay = 5 * time.Second, 60 * time.Second
+
 const (
 	settleQuiet = time.Second
 	settleMax   = 3 * time.Second
@@ -136,14 +141,15 @@ const (
 // and every 5 min without one so hot sources settle cold, until ctx is done. A
 // parser version bump leaves sources for the sweep: cycles then run back to
 // back, each parsing stale sources under the sweep budget, until none are
-// left. A boot that yields no lap ends Run with its error: push is served
-// only after boot, so the process cannot do its job and its supervisor
-// restarts it.
-func (s *Server) Run(ctx context.Context) error {
+// left. A boot that yields no lap does not end Run: MCP and OTLP keep
+// serving from the index New opened, get_ingest_status carries the boot error
+// and attempt count, and the boot retries after bootFirstDelay, doubling to
+// bootMaxDelay, until it succeeds. Push is served only after it does.
+func (s *Server) Run(ctx context.Context) {
 	changed := s.st.Changed()
 	pushPending := func() bool { return len(changed) > 0 }
-	if err := s.cycle("boot"); s.lap == nil {
-		return fmt.Errorf("index boot: %w", err)
+	if !s.bootRetrying(ctx) {
+		return
 	}
 	settled := time.Now()
 	for {
@@ -154,7 +160,7 @@ func (s *Server) Run(ctx context.Context) error {
 			reason = "settle"
 			select {
 			case <-ctx.Done():
-				return nil
+				return
 			case <-changed:
 				reason = "put"
 				settle(ctx, changed)
@@ -162,12 +168,31 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 		}
 		if ctx.Err() != nil {
-			return nil
+			return
 		}
 		if reason == "settle" {
 			settled = time.Now()
 		}
 		s.cycle(reason)
+	}
+}
+
+func (s *Server) bootRetrying(ctx context.Context) bool {
+	delay := bootFirstDelay
+	for attempt := 1; ; attempt++ {
+		err := s.cycle("boot")
+		if s.lap != nil {
+			s.boot.Booted()
+			return true
+		}
+		s.boot.Failed(attempt, err)
+		log.Printf("index boot attempt %d failed: %v; retrying in %s", attempt, err, delay)
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(delay):
+		}
+		delay = min(2*delay, bootMaxDelay)
 	}
 }
 

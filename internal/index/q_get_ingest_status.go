@@ -28,7 +28,11 @@ func (getIngestStatus) Call(ctx context.Context, db *DB, args json.RawMessage) (
 	}
 	status := stDerive(read, stUnixNow())
 	data := stStatusJSON(status)
-	return data, stStatusText(status), nil
+	text := stStatusText(status)
+	if msg, attempts, failing := bootFailureFrom(ctx); failing {
+		text = stBootText(text, msg, attempts)
+	}
+	return data, text, nil
 }
 
 func stEmptyArgs(args json.RawMessage) bool {
@@ -132,6 +136,15 @@ type stStatusJSONShape struct {
 	Rate             *stRateJSON          `json:"rate"`
 	Eta              *stEtaJSON           `json:"eta"`
 	History          []stHistoryPointJSON `json:"history"`
+}
+
+func stBootText(text, msg string, attempts int) string {
+	line := sprintf("Index boot failing, retrying: attempt %d: %s.", attempts, msg)
+	first, rest, found := strings.Cut(text, "\n")
+	if !found {
+		return first + "\n" + line
+	}
+	return first + "\n" + line + "\n" + rest
 }
 
 type stCurrentJSON struct {
