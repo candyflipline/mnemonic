@@ -8,7 +8,8 @@
 # the target syscall, and `crashdrv killat` SIGKILLs serve while a thread is
 # held at that call's entry. strace's own inject when=N counts per thread on
 # strace 6.8 (checked on the box), and the committer moves between threads,
-# so the point is counted by killat from the strace log, globally, as "the
+# so the point is counted by killat from the strace log (piped: strace fully
+# buffers -o file, line-buffers a pipe), globally, as "the
 # first target call after these completed calls since the last syncfs":
 #   S1 row 2  syncfs after an extend's ftruncate of a raw (B1), seeded from
 #             R1 after the HOME copy's 5 next-smallest files got a line
@@ -94,7 +95,7 @@ serve_start() {
 		[ $i -lt 600 ] || { echo "serve not listening after 120 s" >&2; return 1; }
 		sleep 0.2
 	done
-	if [ $# -gt 0 ]; then SPID=$(pgrep -P "$LAUNCH" | head -1); else SPID=$LAUNCH; fi
+	if [ $# -gt 0 ]; then SPID=$(pgrep -P "$LAUNCH" -x mnemonic); else SPID=$LAUNCH; fi
 }
 
 serve_stop() {
@@ -200,7 +201,7 @@ server_point() {
 	shift 8
 	d=$RUN/$p
 	seed "$d" "$sd"
-	serve_start "$d" kill -f -qq -ttt -T -y -s 4096 -o "$d.strace" \
+	serve_start "$d" kill -f -qq -ttt -T -y -s 4096 -o "|cat > $d.strace" \
 		-e signal=none -e trace=syncfs,rename,renameat,renameat2,ftruncate,unlinkat \
 		-e "inject=$inj:delay_enter=$DELAY_US"
 	"$DRV" killat -pid "$SPID" -strace "$d.strace" "$@" > "$d.killat" 2>&1 &

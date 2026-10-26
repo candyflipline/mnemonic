@@ -364,6 +364,7 @@ func killatCmd(args []string) error {
 	var needs multiFlag
 	fs.Var(&needs, "need", "regexp a completed strace call must match since the last completed syncfs; repeatable, all must hold")
 	timeout := fs.Duration("timeout", 10*time.Minute, "give up after")
+	debug := fs.Bool("debug", false, "print the counters every second on stderr")
 	fs.Parse(args)
 	nrs, ok := sysNrs[*sys]
 	if !ok || *pid == 0 || *logPath == "" {
@@ -388,24 +389,34 @@ func killatCmd(args []string) error {
 	type cand struct {
 		tid   int
 		since time.Time
-		gen   int
+		done  int
 	}
 	var cur *cand
-	gen := 0
+	doneBy := map[int]int{}
 	deadline := time.Now().Add(*timeout)
+	lastDebug := time.Now()
 	for time.Now().Before(deadline) {
+		if *debug && time.Since(lastDebug) > time.Second {
+			lastDebug = time.Now()
+			counts := make([]string, len(ns))
+			for i, n := range ns {
+				counts[i] = strconv.Itoa(n.n)
+			}
+			tid, path := heldThread(*pid, nrs, tre != nil)
+			fmt.Fprintf(os.Stderr, "debug\tneeds=%s\tcalls=%d\theld_tid=%d\theld_path=%q\n", strings.Join(counts, ","), len(doneBy), tid, path)
+		}
 		for {
 			s, err := rd.ReadString('\n')
 			if err != nil {
 				partial += s
 				break
 			}
-			c := sp.feed(partial + s)
+			c := sp.feed(strings.TrimRight(partial+s, "\n"))
 			partial = ""
 			if c == nil {
 				continue
 			}
-			gen++
+			doneBy[c.tid]++
 			if c.name == "syncfs" {
 				lastBarrier = c.start
 				for _, n := range ns {
@@ -434,8 +445,8 @@ func killatCmd(args []string) error {
 			time.Sleep(2 * time.Millisecond)
 			continue
 		}
-		if cur == nil || cur.tid != tid || cur.gen != gen {
-			cur = &cand{tid: tid, since: time.Now(), gen: gen}
+		if cur == nil || cur.tid != tid || cur.done != doneBy[tid] {
+			cur = &cand{tid: tid, since: time.Now(), done: doneBy[tid]}
 		} else if time.Since(cur.since) >= 20*time.Millisecond {
 			if err := syscall.Kill(*pid, syscall.SIGKILL); err != nil {
 				return err
