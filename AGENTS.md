@@ -3,13 +3,14 @@
 Collects agent session traces (Claude Code, Codex, Cursor, ...) from every machine, keeps them on one server, and serves them to agents over MCP from its own index (`internal/index`, pure Go, no DuckDB). Replaced a ClickHouse-backed predecessor (see NOTICE), for personal and team use.
 
 ## Shape
-- `mnemonic push --watch` on each machine (resident under launchd or systemd, wakes on kernel file events and uploads within 5 s of a write) sends **redacted raw lines** to the server. It is pure Go, built with `CGO_ENABLED=0`, and has no parser or index in it.
+- `mnemonic push --watch` on each machine (resident under launchd or systemd, wakes on kernel file events and uploads within 5 s of a write) sends **redacted raw lines** to the server over one gRPC stream per client (`internal/wire/pushpb/push.proto`; [spec](docs/spec/wire.md)). It is pure Go, built with `CGO_ENABLED=0`, and has no parser or index in it.
 - `mnemonic serve` on the server:
-  - accepts pushes (`/v1/*`);
-  - ingests appended raw straight into the engine's store (`internal/index`), woken by each PUT after 1 s of quiet and every 5 min without one;
+  - accepts the push stream, and keeps the HTTP `PUT` and manifest `GET` (`/v1/*`) only as a time-boxed adapter that expires 2026-12-01;
+  - commits appends in groups, one set of fsyncs per batch, and acks each append after its bytes are durable;
+  - ingests appended raw straight into the engine's store (`internal/index`), woken by each commit after 1 s of quiet and every 5 min without one. A cycle reads only the sources changed since the last cycle; the full listing happens at boot;
   - answers MCP on `POST /mcp` (`internal/mcp`, over `internal/index`).
 - Raw is the source of truth, and the index store is derived. Each parser has its own `Version()`; a source's checkpoint records the version it was parsed at, and serve re-parses a source recorded below its parser's version, so a fix re-parses only its harness. `TestVersionNamesOutput` hashes each harness's goldens and fails naming the harness whose output changed without a bump, and the number to bump to (one past every version in its table). Goldens miss changes their fixtures do not exercise (7587f30 moved none), so a fix whose output change they miss bumps by hand.
-- Paths live in `internal/layout`. The push protocol is `internal/wire`. Auth (bearer token → author) is `internal/auth`; the author is never taken from a request.
+- Paths live in `internal/layout`. The push protocol is `internal/wire` (messages in `internal/wire/pushpb/push.proto`). Auth (bearer token → author) is `internal/auth`; the author is never taken from a request.
 
 ## Contracts (change only with the owner)
 | Contract | File | Pinned by |
@@ -31,7 +32,7 @@ CGO_ENABLED=0 go build -tags server -o /dev/null ./cmd/mnemonic
 go test ./internal/<your package>/...
 go run ./scripts/check
 ```
-`go run ./scripts/check [range]` is the command CI runs (`.github/workflows/check.yml`); the range defaults to `origin/main..HEAD`.
+`go run ./scripts/check [range]` is the command CI runs (`.github/workflows/check.yml`); the range defaults to `origin/main..HEAD`. The pushpb drift check needs `protoc` and prints a one-line skip without it; CI installs protoc 35.1.
 
 ## Rules
 - **The owner's machine is not a load box.** Never run push or index over the real corpus locally. Use `go test -p 2`, at most 3 `go test` processes across lanes, and no Docker. Corpus runs happen on the server.
@@ -39,3 +40,5 @@ go run ./scripts/check
 - **Lane ownership.** A lane edits only the files its packet names. A stub that says `panic("lane X")` belongs to lane X.
 - **Commits.** No commit trailers (Co-Authored-By, Claude-Session). Enforced by `go run ./scripts/check`, which fails naming the commit. Work lands on `main`. Lane branches are `lane/<name>`, pushed, and deleted after merge.
 - **Dependencies.** A direct `require` in `go.mod` must be listed in `scripts/check/approved-deps.txt`; adding a module to that file takes the owner's go. Enforced by `go run ./scripts/check`, which fails naming the module.
+- **Acks.** An `Ack` is built only by `committed.acks`, after the batch's last barrier (`docs/design/uploader.md`). Enforced by `go run ./scripts/check`, which fails when `internal/store` holds any other number of `Ack{` literals (it waits while `commit.go` still has `panic("not implemented")` stubs).
+- **Generated pushpb.** `internal/wire/pushpb/*.pb.go` is output of `go generate ./internal/wire/pushpb/`, never hand-edited. Enforced by `go run ./scripts/check`, which regenerates and fails naming the changed file.
