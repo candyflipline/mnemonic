@@ -164,7 +164,7 @@ func (c *Controls) loadSource(manifest string) error {
 
 // record appends r as author's, stamped now, and applies it. A request key
 // already appended changes nothing: its record was applied when appended.
-func (c *Controls) record(st *store.Store, author string, r controlRecord) (duplicate bool, err error) {
+func (c *Controls) record(st *store.Committer, author string, r controlRecord) (duplicate bool, err error) {
 	c.write.Lock()
 	defer c.write.Unlock()
 	r.TS, r.Writer = time.Now().UTC(), writer

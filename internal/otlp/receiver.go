@@ -51,12 +51,12 @@ const (
 // Receiver appends OTLP requests to st. Message content is stored only after
 // SetStoreContent(true).
 type Receiver struct {
-	st           *store.Store
+	st           *store.Committer
 	storeContent atomic.Bool
 	slots        chan struct{}
 }
 
-func NewReceiver(st *store.Store) *Receiver {
+func NewReceiver(st *store.Committer) *Receiver {
 	return &Receiver{st: st, slots: make(chan struct{}, DecodeSlots)}
 }
 
