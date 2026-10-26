@@ -11,12 +11,10 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/status"
 
 	"github.com/candyflipline/mnemonic/internal/config"
 	"github.com/candyflipline/mnemonic/internal/wire"
@@ -376,16 +374,6 @@ func (u *uplink) close(ctx context.Context) error {
 
 // ended returns a channel closed when the stream ended; cause says why.
 func (u *uplink) ended() <-chan struct{} { return u.fin }
-
-// retriable reports whether err is a stream end the client treats as normal:
-// back off, redial, run a full pass.
-func retriable(err error) bool {
-	switch status.Code(err) {
-	case codes.Aborted, codes.Unavailable:
-		return true
-	}
-	return false
-}
 
 // streamSource replaces syncSource: the same skip rules against
 // u.sources[srcID], the same decide/firstChunk/rawEndOf cut, every chunk sent
