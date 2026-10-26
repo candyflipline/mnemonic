@@ -59,26 +59,27 @@ func deltasDir(store, image string) string { return filepath.Join(store, "deltas
 
 // hotPart returns the ID of the part that answers for the hot component
 // members, building it if it is missing: a delta append over the base it
-// extends, else a full build. It reports whether it wrote and how many bytes.
-func hotPart(store string, members []ckpt, prev manifestFile, byPrev map[string]string) (id string, built bool, written int64, err error) {
+// extends, else a full build. It reports whether it wrote and how many bytes,
+// and the delta part an append opened, which the caller owns.
+func hotPart(store string, members []ckpt, prev manifestFile, byPrev map[string]string) (id string, built bool, written int64, opened *Part, err error) {
 	id = fingerprint(members)
 	if _, err := os.Stat(partDir(store, id)); err == nil {
-		return id, false, 0, nil
+		return id, false, 0, nil, nil
 	}
 	did := deltaID(members)
 	if _, err := os.Stat(partDir(store, did)); err == nil {
-		return did, false, 0, nil
+		return did, false, 0, nil, nil
 	}
 	if base, ok := deltaBase(store, members, prev); ok {
-		ok, written, err := appendDelta(store, members, base, did)
+		ok, written, opened, err := appendDelta(store, members, base, did)
 		if err != nil || ok {
-			return did, ok, written, err
+			return did, ok, written, opened, err
 		}
 	}
 	if err := buildIndex(store, members, id, partDir(store, id), byPrev); err != nil {
-		return id, false, 0, err
+		return id, false, 0, nil, err
 	}
-	return id, true, dirSize(partDir(store, id)), nil
+	return id, true, dirSize(partDir(store, id)), nil, nil
 }
 
 // deltaBase is the delta of the hot part in prev that members extend and that
@@ -166,16 +167,32 @@ func mkdirDeltas(dd string) error {
 // appendDelta appends to base's delta logs the rows members hold past it and
 // commits part did over them. It reports false, writing nothing, when the
 // delta would outgrow foldRatio times the image, and otherwise the bytes it
-// wrote: the delta logs' growth and the committed delta.json.
-func appendDelta(store string, members []ckpt, base delta, did string) (bool, int64, error) {
+// wrote: the delta logs' growth and the committed delta.json, and the part it
+// opened over them, stamped with the committed dir.
+func appendDelta(store string, members []ckpt, base delta, did string) (bool, int64, *Part, error) {
+	ok, written, st, err := writeDelta(store, members, base, did)
+	if st == nil {
+		return ok, written, nil, err
+	}
+	if err == nil {
+		st.at, err = dirStampOf(partDir(store, did))
+	}
+	if err != nil {
+		st.Close()
+		return ok, written, nil, err
+	}
+	return ok, written, st, nil
+}
+
+func writeDelta(store string, members []ckpt, base delta, did string) (bool, int64, *Part, error) {
 	img := partDir(store, base.Image)
 	imgLight, err := logSize(img, "light")
 	if err != nil {
-		return false, 0, nil
+		return false, 0, nil, nil
 	}
 	imgHeavy, err := logSize(img, "heavy")
 	if err != nil {
-		return false, 0, nil
+		return false, 0, nil, nil
 	}
 	at := map[string]int{}
 	for i, m := range base.Members {
@@ -191,26 +208,26 @@ func appendDelta(store string, members []ckpt, base delta, did string) (bool, in
 		}
 	}
 	if grow > foldRatio*(imgLight+imgHeavy) {
-		return false, 0, nil
+		return false, 0, nil, nil
 	}
 
 	dd := deltasDir(store, base.Image)
 	if err := mkdirDeltas(dd); err != nil {
-		return false, 0, err
+		return false, 0, nil, err
 	}
 	lightF, err := openLog(filepath.Join(dd, "light"), base.LightLen)
 	if err != nil {
-		return false, 0, err
+		return false, 0, nil, err
 	}
 	defer lightF.Close()
 	heavyF, err := openLog(filepath.Join(dd, "heavy"), base.HeavyLen)
 	if err != nil {
-		return false, 0, err
+		return false, 0, nil, err
 	}
 	defer heavyF.Close()
 	srcF, err := openLog(filepath.Join(dd, "src"), 2*base.Rows)
 	if err != nil {
-		return false, 0, err
+		return false, 0, nil, err
 	}
 	defer srcF.Close()
 	lw := &frameWriter{f: lightF, off: base.LightLen, target: lightFrame, enc: partEncoder}
@@ -229,24 +246,24 @@ func appendDelta(store string, members []ckpt, base delta, did string) (bool, in
 		next.Members[i] = memberOf(c)
 		rows, err := loadSourceRows(store, 0, c, from)
 		if err != nil {
-			return false, 0, fmt.Errorf("%s: %w", c.Key, err)
+			return false, 0, nil, fmt.Errorf("%s: %w", c.Key, err)
 		}
 		heavy := newHeavyReader(store, []ckpt{c})
 		for _, b := range rows {
 			hrec, err := heavy.record(b)
 			if err != nil {
 				heavy.close()
-				return false, 0, err
+				return false, 0, nil, err
 			}
 			hf, hi, err := hw.add(hrec)
 			if err != nil {
 				heavy.close()
-				return false, 0, err
+				return false, 0, nil, err
 			}
 			b.row.HeavyFrame, b.row.HeavyIdx = uint64(imgHeavy+hf), uint64(hi)
 			if _, _, err := lw.add(b.row.append(nil)); err != nil {
 				heavy.close()
-				return false, 0, err
+				return false, 0, nil, err
 			}
 			srcs = binary.LittleEndian.AppendUint16(srcs, uint16(i))
 			next.Rows++
@@ -254,41 +271,40 @@ func appendDelta(store string, members []ckpt, base delta, did string) (bool, in
 		heavy.close()
 	}
 	if err := hw.flush(); err != nil {
-		return false, 0, err
+		return false, 0, nil, err
 	}
 	if err := lw.flush(); err != nil {
-		return false, 0, err
+		return false, 0, nil, err
 	}
 	if _, err := srcF.Write(srcs); err != nil {
-		return false, 0, err
+		return false, 0, nil, err
 	}
 	for _, f := range []*os.File{lightF, heavyF, srcF} {
 		if err := f.Sync(); err != nil {
-			return false, 0, err
+			return false, 0, nil, err
 		}
 	}
 	if err := syncDir(dd); err != nil {
-		return false, 0, err
+		return false, 0, nil, err
 	}
 	next.LightLen, next.HeavyLen = lw.off, hw.off
 	written := lw.off - base.LightLen + hw.off - base.HeavyLen + int64(len(srcs))
 	dir := partDir(store, did) + ".tmp"
 	os.RemoveAll(dir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return false, 0, err
+		return false, 0, nil, err
 	}
 	st, err := openDelta(dir, next)
 	if err != nil {
-		return false, 0, err
+		return false, 0, nil, err
 	}
 	next.listed = listedOf(st)
-	st.Close()
 	b, _ := json.Marshal(next)
 	if err := os.WriteFile(filepath.Join(dir, deltaFile), b, 0o644); err != nil {
-		return false, 0, err
+		return false, 0, st, err
 	}
 	written += int64(len(b))
-	return true, written, commitPart(dir, partDir(store, did))
+	return true, written, st, commitPart(dir, partDir(store, did))
 }
 
 // openDelta indexes the image's docs and the delta's rows in memory.
