@@ -145,7 +145,7 @@ States, in order. Each transition is a method on the previous state's type, and 
 | committed | W2b rename each temp manifest, then B3 | every manifest durable: the commit point |
 | (after) | table updated, keys added to changes, tickets resolved with `committed.acks()` | same |
 
-The plan folds several requests on one source into one `sourcePlan`, in queue order. The frames concatenate, so the raw holds the same bytes as sequential PUTs, and the manifest is written once with the final fields. `updated_ms` advances by `max(now, prev+1)` per applied request, as today; it is a run-to-run time field under C1.
+The plan cuts the batch before a Replace of a key already planned in it, so that Replace starts the next batch; otherwise an Extend acked APPLIED in the same batch would name a frame that never reached disk. The plan folds several requests on one source into one `sourcePlan`, in queue order. The frames concatenate, so the raw holds the same bytes as sequential PUTs, and the manifest is written once with the final fields. `updated_ms` advances by `max(now, prev+1)` per applied request, as today; it is a run-to-run time field under C1.
 
 The ordering rules are today's, made batch-wide:
 
@@ -165,11 +165,11 @@ Nine crash points. A kill -9 keeps the page cache, so a write that returned surv
 | 4 | W1, temp manifests | temp files | Deleted by `Open`; the real manifests are untouched (as 2 or 3). |
 | 5 | after B1, during W2a | some rewrites' raws renamed, their manifests unlinked (durable) | No manifest: the client replaces from 0; the rename is repeated over whatever raw is there. |
 | 6 | after B2, during W2b | some manifests renamed | A renamed manifest covers durable frames (B1) and a linked raw (B2), so it is consistent: Welcome reports it and the client sends nothing. An un-renamed one is case 2 or 5. |
-| 7 | after W2b, before B3 | all renamed, not yet durable | kill -9: the same as committed. Power loss: each rename is atomic and either landed or not, so case 6. |
+| 7 | after W2b, before B3 | all renamed, not yet durable | kill -9: the same as committed, but only after `Open`'s boot barrier makes the renamed manifests durable before any Welcome or Boot listing reads them; without it a later power loss could take back a manifest a client already skipped. Power loss: each rename is atomic and either landed or not, so case 6. |
 | 8 | after B3, before acks | durable | Acks are lost; Welcome shows the new state; `decide` returns noop. Server-owned retries hit the request key (`Duplicate`). |
 | 9 | client kill -9 mid-stream | whatever batches committed; a gRPC message is never delivered in part | Requests already submitted still commit. On rerun, Welcome gives the sizes and the client cuts the rest from there. For a file that did not change, `firstChunk` lands on the same boundaries, so the frames are the same. |
 
-Every row ends in the bytes an uninterrupted run writes. Rows 2 and 5 rely on the rerun re-sending, which the client always does because Welcome still shows the old state. Rows 3 and 4 rely on `Open`'s temp sweep, which today's code lacks (today a crash leaves temp files behind forever).
+Every row ends in the bytes an uninterrupted run writes. Rows 2 and 5 rely on the rerun re-sending, which the client always does because Welcome still shows the old state. Row 7 relies on `Open`'s boot barrier (one syncfs on Linux, per-file and per-dir fsync elsewhere) after the temp sweep and before `Open` returns. `Open` neither truncates raw tails nor deletes raw files that lack a manifest: the next Extend truncates (`store.go:298`). Rows 3 and 4 rely on `Open`'s temp sweep, which today's code lacks (today a crash leaves temp files behind forever).
 
 ## Dirty-set handoff
 
