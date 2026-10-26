@@ -12,7 +12,8 @@
 # sessions with it through the annotate tool and compares one dataset run. Prints counts, sha agreement, wall and peak RSS (median, range,
 # n) per side, serve VmHWM over an idle settle cycle and over the export
 # window, and the serve cgroup's oom_kill. Never prints output content.
-# Run under the box lock: flock /var/lib/mnu/box.lock sh perf-export.sh ...
+# Its numbers are timed: run under the exclusive box lock,
+# flock -x /var/lib/mnu/box.lock sh perf-export.sh ...
 set -eu
 
 store=${1:?usage: perf-export.sh STORE OLD NEW [ANNOTATION]}
@@ -52,6 +53,12 @@ sha256 = "$(hash "$TMP/admin.tok")"
 scopes = ["read", "annotate"]
 EOF
 
+serves=$(pgrep -c -f ' serve --config ' || true)
+avail=$(free -g | awk '/^Mem:/{print $7}')
+if [ "$serves" -ge 3 ] || [ "$avail" -lt 10 ]; then
+	echo "refusing to start serve: $serves serves running, ${avail} GiB available" >&2
+	exit 1
+fi
 systemd-run --scope -q -p MemoryMax=8G -p MemorySwapMax=0 env GOMAXPROCS=4 "$new" serve --config "$TMP/serve.toml" > "$TMP/serve.log" 2>&1 &
 SERVE=$!
 cg=/sys/fs/cgroup$(cut -d: -f3 "/proc/$SERVE/cgroup")
