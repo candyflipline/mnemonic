@@ -10,10 +10,11 @@ import (
 	"strings"
 
 	"github.com/candyflipline/mnemonic/internal/layout"
+	"github.com/candyflipline/mnemonic/internal/store"
 )
 
 // Lap is the server's index between cycles: the source list and checkpoints
-// the boot listing read, kept in listSources order (manifest path, then
+// the boot listing read, kept in listing order (manifest path, then
 // archive files), patched by each cycle's changed keys. Boot is the only way
 // to one, so no cycle can skip the full listing it depends on.
 //
@@ -31,11 +32,13 @@ type Lap struct {
 	carry   map[layout.Key]bool
 }
 
-// Boot is today's cycle over a full listing (listSources, readCkpts), and
-// keeps what it read. The Lap comes back whenever the listing and checkpoints
-// were read, even when the cycle failed: a later Next publishes again.
-func (ix *Index) Boot(root string, opts IngestOptions) (*Lap, IngestStats, error) {
-	sources, err := listSources(root)
+// Boot is today's cycle over a full listing (the store's manifests,
+// readCkpts), and keeps what it read. The Lap comes back whenever the listing
+// and checkpoints were read, even when the cycle failed: a later Next
+// publishes again. manifests is the store's table: the committer has already
+// read every manifest file once at Open, so boot does not read them again.
+func (ix *Index) Boot(root string, manifests []store.Manifest, opts IngestOptions) (*Lap, IngestStats, error) {
+	sources, err := bootSources(root, manifests)
 	if err != nil {
 		return nil, IngestStats{}, err
 	}
@@ -136,6 +139,21 @@ func (l *Lap) patch(changed map[layout.Key]bool) error {
 		}
 	}
 	return oneKeyEach(l.sources)
+}
+
+// bootSources is listSources over the store's manifests: store sources in
+// manifest path order, then the archive files.
+func bootSources(root string, manifests []store.Manifest) ([]source, error) {
+	out := make([]source, len(manifests))
+	for i, m := range manifests {
+		out[i] = source{kind: KindStore, mpath: m.Key.Manifest(root), key: m.Key, src: manifest{Source: m.Source, ZstSize: m.ZstSize}}
+	}
+	slices.SortFunc(out, func(a, b source) int { return strings.Compare(a.mpath, b.mpath) })
+	archive, err := listArchiveSources(root)
+	if err != nil {
+		return nil, err
+	}
+	return append(out, archive...), nil
 }
 
 // readSourceManifest is one raw manifest as listSources reads it: false when

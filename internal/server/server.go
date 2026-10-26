@@ -184,7 +184,7 @@ func (s *Server) cycle(reason string) error {
 	var st index.IngestStats
 	var err error
 	if s.lap == nil {
-		s.lap, st, err = s.ix.Boot(s.dataDir, opts)
+		s.lap, st, err = s.ix.Boot(s.dataDir, s.st.Manifests(), opts)
 	} else {
 		st, err = s.lap.Next(s.st.TakeChanged(), opts)
 	}
