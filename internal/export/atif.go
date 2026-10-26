@@ -121,7 +121,28 @@ func notFound(sessionID string) error {
 // read them; rows may be ranged more than once.
 type session struct {
 	id, harness string
-	rows        iter.Seq[eventRow]
+	src         index.ExportSession
+	// rowErr is the first rows-walk read error, set by rows and returned
+	// after every range, so a frame read failure fails the export instead
+	// of writing a short document.
+	rowErr error
+}
+
+// rows walks the session's rows one at a time, remembering the first read
+// error in rowErr for the caller to return after its range. errStopRows, the
+// early break, is not an error.
+func (s *session) rows() iter.Seq[eventRow] {
+	return func(yield func(eventRow) bool) {
+		err := s.src.EachRow(func(r *index.Row) error {
+			if yield(eventRowOf(r)) {
+				return nil
+			}
+			return errStopRows
+		})
+		if err != nil && err != errStopRows && s.rowErr == nil {
+			s.rowErr = err
+		}
+	}
 }
 
 // errStopRows stops a rows walk early, the iterator's break.
@@ -142,14 +163,7 @@ func openSession(db *index.DB, sessionID string, hidden map[string]bool) (sessio
 	if !ok || es.NRows == 0 {
 		return session{}, notFound(sessionID)
 	}
-	return session{id: sessionID, harness: es.Harness, rows: func(yield func(eventRow) bool) {
-		_ = es.EachRow(func(r *index.Row) error {
-			if yield(eventRowOf(r)) {
-				return nil
-			}
-			return errStopRows
-		})
-	}}, nil
+	return session{id: sessionID, harness: es.Harness, src: es}, nil
 }
 
 func eventRowOf(r *index.Row) eventRow {
@@ -201,7 +215,10 @@ func newTrajectory(db *index.DB, sessionID string, hidden map[string]bool) (*tra
 		version = p.Version()
 	}
 	t := &trajectory{session: s, agent: Agent{Name: s.harness, Version: strconv.Itoa(version)}}
-	t.plan, t.last = planSteps(s.harness, s.rows)
+	t.plan, t.last = planSteps(s.harness, s.rows())
+	if err := s.rowErr; err != nil {
+		return nil, err
+	}
 	return t, nil
 }
 
@@ -395,12 +412,23 @@ func planSteps(harness string, rows iter.Seq[eventRow]) (plan []rowPlan, last []
 }
 
 // eachStep builds the planned steps from the rows and hands each to fn, in
-// order, as soon as its last row is read.
+// order, as soon as its last row is read. A rows read error comes back after
+// the range, the writers' cue to fail rather than end a short document.
 func (t *trajectory) eachStep(fn func(*Step) error) error {
+	err := buildSteps(t.plan, t.last, t.rows(), fn)
+	if err == nil {
+		err = t.session.rowErr
+	}
+	return err
+}
+
+// buildSteps is the step builder over any rows iterator, plan and last from
+// planSteps.
+func buildSteps(plan []rowPlan, last []int32, rows iter.Seq[eventRow], fn func(*Step) error) error {
 	building := map[int32]*Step{}
 	next, r := int32(0), int32(0)
-	for ev := range t.rows {
-		p := t.plan[r]
+	for ev := range rows {
+		p := plan[r]
 		if p.step >= 0 {
 			s := building[p.step]
 			switch {
@@ -427,7 +455,7 @@ func (t *trajectory) eachStep(fn func(*Step) error) error {
 				}
 			}
 		}
-		for ; next < int32(len(t.last)) && t.last[next] <= r; next++ {
+		for ; next < int32(len(last)) && last[next] <= r; next++ {
 			s := building[next]
 			delete(building, next)
 			if metricsEmpty(s.Metrics) {

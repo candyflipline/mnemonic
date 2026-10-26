@@ -217,10 +217,9 @@ func TestRequestsSplitAgentSteps(t *testing.T) {
 		{EventTime: at, ActorKind: "tool", EventKind: "tool_result", ToolCallID: "call_1", TextContent: "file body"},
 		{EventTime: at, ActorKind: "assistant", EventKind: "message", RequestID: "req-2", TextContent: "done", InputTokens: 200, OutputTokens: 9},
 	}
-	traj := &trajectory{session: session{id: "s1", harness: "claude-code", rows: slices.Values(evs)}}
-	traj.plan, traj.last = planSteps(traj.harness, traj.rows)
+	plan, last := planSteps("claude-code", slices.Values(evs))
 	var steps []Step
-	if err := traj.eachStep(func(s *Step) error { steps = append(steps, *s); return nil }); err != nil {
+	if err := buildSteps(plan, last, slices.Values(evs), func(s *Step) error { steps = append(steps, *s); return nil }); err != nil {
 		t.Fatal(err)
 	}
 	type stepGot struct {
