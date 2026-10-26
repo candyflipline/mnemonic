@@ -10,7 +10,8 @@
 # tail write (commit.go appendFrames), so strace attaches for the injected
 # push alone and fails every pwrite64 in that window; it also traces the
 # barrier, link and rollback calls, and the log must show exactly one failed
-# call, the injected pwrite64 on the seeded raw.
+# call, the injected pwrite64 on the seeded raw. A second, injection-free
+# trace of the retry must show syncfs and renames and no failed call.
 set -eu
 BIN=${1:?usage: nospc.sh BIN NEW_DIR}
 DIR=${2:?usage: nospc.sh BIN NEW_DIR}
@@ -105,28 +106,26 @@ push_ok fault-seed
 RAW=$(find "$DIR/fault/raw" -type f -name '*.jsonl.zst')
 [ "$(printf '%s\n' "$RAW" | wc -l)" -eq 1 ] && [ -f "$RAW" ] || { echo 'expected one seeded raw' >&2; exit 1; }
 sha256sum "$RAW" | cut -d' ' -f1 > "$DIR/before-raw.sha"
-strace -f -p "$SERVE_PID" -ttt -y -s 8 -e signal=none \
- -e trace=pwrite64,syncfs,fsync,fdatasync,rename,renameat,renameat2,linkat,truncate,ftruncate,unlinkat \
- -e inject=pwrite64:error=ENOSPC:when=1+ -o "$DIR/fault-strace.log" \
- 2> "$DIR/strace-attach.log" &
-TRACE_PID=$!
-printf '%s\n' "$TRACE_PID" > "$DIR/strace.pid"
-attached=0
-for _ in $(seq 1 100); do
- kill -0 "$TRACE_PID" 2>/dev/null || { echo 'strace attach failed' >&2; exit 1; }
- if grep -q 'attached' "$DIR/strace-attach.log"; then attached=1; break; fi
- sleep 0.1
-done
-[ "$attached" = 1 ] || { echo 'strace attach timeout' >&2; exit 1; }
-append_input
-rc=0
-timeout 60 "$BIN" push --config "$DIR/client.toml" > "$DIR/injected-client.log" 2>&1 || rc=$?
-stop_trace
-[ "$rc" -ne 0 ] && [ "$rc" -ne 124 ] || { echo 'injected push did not fail as expected' >&2; exit 1; }
-grep -q ResourceExhausted "$DIR/injected-client.log"
-if python3 -I - "$DIR/fault-strace.log" "$RAW" > "$DIR/fault-strace.check" <<'PY'
+start_trace() {
+ name=$1
+ shift
+ strace -f -p "$SERVE_PID" -ttt -y -s 8 -e signal=none \
+  -e trace=pwrite64,syncfs,fsync,fdatasync,rename,renameat,renameat2,linkat,truncate,ftruncate,unlinkat \
+  "$@" -o "$DIR/$name-strace.log" 2> "$DIR/$name-strace-attach.log" &
+ TRACE_PID=$!
+ printf '%s\n' "$TRACE_PID" > "$DIR/$name-strace.pid"
+ for _ in $(seq 1 100); do
+  kill -0 "$TRACE_PID" 2>/dev/null || { echo 'strace attach failed' >&2; exit 1; }
+  if grep -q 'attached' "$DIR/$name-strace-attach.log"; then return 0; fi
+  sleep 0.1
+ done
+ echo 'strace attach timeout' >&2
+ exit 1
+}
+check_trace() {
+ if python3 -I - "$DIR/$1-strace.log" "$RAW" "$1" > "$DIR/$1-strace.check" <<'PY'
 import re, sys
-log, raw = sys.argv[1], sys.argv[2]
+log, raw, mode = sys.argv[1], sys.argv[2], sys.argv[3]
 pend, calls = {}, []
 for line in open(log):
     tid, _, rest = line.rstrip('\n').split(' ', 2)
@@ -146,13 +145,28 @@ for c in calls:
     names[n] = names.get(n, 0) + 1
 print('calls\t%d\t%s' % (len(calls), ' '.join('%s=%d' % kv for kv in sorted(names.items()))))
 print('failed\t%d\tinjected_w1_pwrite64_on_raw\t%d' % (len(failed), len(injected)))
-sys.exit(0 if len(failed) == 1 and len(injected) == 1 else 1)
+if mode == 'fault':
+    sys.exit(0 if len(failed) == 1 and len(injected) == 1 else 1)
+renames = sum(v for k, v in names.items() if k.startswith('rename'))
+sys.exit(0 if not failed and names.get('syncfs', 0) and renames else 1)
 PY
-then cat "$DIR/fault-strace.check"; else cat "$DIR/fault-strace.check"; exit 1; fi
+ then printf '%s\t' "$1"; cat "$DIR/$1-strace.check"; else cat "$DIR/$1-strace.check"; exit 1; fi
+}
+start_trace fault -e inject=pwrite64:error=ENOSPC:when=1+
+append_input
+rc=0
+timeout 60 "$BIN" push --config "$DIR/client.toml" > "$DIR/injected-client.log" 2>&1 || rc=$?
+stop_trace
+[ "$rc" -ne 0 ] && [ "$rc" -ne 124 ] || { echo 'injected push did not fail as expected' >&2; exit 1; }
+grep -q ResourceExhausted "$DIR/injected-client.log"
+check_trace fault
 kill -0 "$SERVE_PID"
 sha256sum "$RAW" | cut -d' ' -f1 > "$DIR/rolled-back-raw.sha"
 cmp "$DIR/before-raw.sha" "$DIR/rolled-back-raw.sha"
+start_trace retry
 push_ok after-fault
+stop_trace
+check_trace retry
 kill -0 "$SERVE_PID"
 printf 'serve_pid\t%s\tsame_pid_after_fault_and_retry\tyes\n' "$SERVE_PID"
 stop_server
