@@ -12,6 +12,10 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
+// traceBudget is the most raw spans JSON, in bytes, get_trace decodes for one
+// session; a test lowers it.
+var traceBudget = 64 << 20
+
 type getTrace struct{}
 
 func init() { register(getTrace{}) }
