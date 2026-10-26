@@ -107,7 +107,8 @@ func (l *Lap) cycle(work []int, opts IngestOptions, release func()) (IngestStats
 // patch re-reads the manifest of each changed key: a new key is inserted at
 // its sorted position with the checkpoint the store has for it, a changed one
 // replaced, one whose manifest is gone (a replace crashed between unlink and
-// rename) or does not parse removed, as the full listing would. A key that is
+// rename) or does not parse removed, as the full listing would, and two
+// sources on one key refused as Ingest refuses them. A key that is
 // not a raw source (an archive file's) reads no manifest and changes nothing.
 func (l *Lap) patch(changed map[layout.Key]bool) error {
 	for k := range changed {
@@ -134,7 +135,7 @@ func (l *Lap) patch(changed map[layout.Key]bool) error {
 			l.cks = slices.Delete(l.cks, i, i+1)
 		}
 	}
-	return nil
+	return oneKeyEach(l.sources)
 }
 
 // readSourceManifest is one raw manifest as listSources reads it: false when
