@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"syscall"
@@ -400,6 +401,7 @@ func (st *Part) hydrateKept(sc *sessionScan) error {
 		}
 		rows = append(rows, t.selected...)
 	}
+	slices.SortFunc(rows, func(a, b *navRow) int { return a.doc - b.doc })
 	for _, r := range rows {
 		if err := st.hydrate(r); err != nil {
 			return err
@@ -427,8 +429,8 @@ func navRowOf(r *Row, d int, turnSeq uint32) navRow {
 		harness:           r.Harness,
 		inferenceProvider: r.InfProv,
 		textContent:       r.Text,
-		tokenUsageBuckets: decodeUintMap(r.Buckets),
-		tokenUsageNative:  decodeFloatMap(r.Native),
+		tokenUsageBuckets: r.Buckets,
+		tokenUsageNative:  r.Native,
 		endpointKind:      r.EndpointKind,
 		turnSeq:           turnSeq,
 		doc:               d,

@@ -573,11 +573,11 @@ func fullEventContent(r *navRow, eventType string, toolName string, payload any)
 	if strings.TrimSpace(r.tokenUsageJSON) != "" {
 		content["token_usage_json"] = r.tokenUsageJSON
 	}
-	if len(r.tokenUsageBuckets) > 0 {
-		content["token_usage_buckets"] = r.tokenUsageBuckets
+	if buckets := decodeUintMap(r.tokenUsageBuckets); len(buckets) > 0 {
+		content["token_usage_buckets"] = buckets
 	}
-	if len(r.tokenUsageNative) > 0 {
-		content["token_usage_native_units"] = r.tokenUsageNative
+	if native := decodeFloatMap(r.tokenUsageNative); len(native) > 0 {
+		content["token_usage_native_units"] = native
 	}
 	return content
 }

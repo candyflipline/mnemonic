@@ -31,8 +31,8 @@ type navRow struct {
 	tokenUsageJSON    string
 	lakeFile          string
 	lakeRow           int64
-	tokenUsageBuckets map[string]uint64
-	tokenUsageNative  map[string]float64
+	tokenUsageBuckets string
+	tokenUsageNative  string
 	endpointKind      string
 	doc               int
 	hydrated          bool
