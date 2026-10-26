@@ -57,7 +57,8 @@
 #                   hot sources keep their ids and the client resumes them.
 #   HOT_EVERY       seconds between keep-alive appends to the HOT_ACTIVE files
 #                   (indices of hot-NN, default "5 6"); every HOT_IDLE s (30) one
-#                   other hot-NN file gets one line, round robin, so each stays
+#                   file of HOT_IDLE_SET (indices; default every other hot-NN)
+#                   gets one line, round robin, so each stays
 #                   hot (settleSource is 15 min). Each appended line is the file's
 #                   last user/assistant line with a fresh uuid. index_ms then counts
 #                   to the end of the first cycle that started after the ack.
@@ -202,7 +203,7 @@ hot_stop = threading.Event()
 hot_count = [0, 0]
 if hot_every > 0:
     import glob, uuid
-    hot_files = sorted(glob.glob(os.path.join(home, ".claude/projects/hot-*/*.jsonl")))
+    hot_files = sorted(glob.glob(os.path.join(home, ".claude/projects/hot-*/*.jsonl")), key=lambda p: int(p.split("/")[-2][4:]))
     def template(path):
         with open(path, "rb") as f:
             f.seek(0, 2)
@@ -220,7 +221,8 @@ if hot_every > 0:
     hot = [(p, t) for p, t in hot if t is not None]
     active = [int(x) for x in os.environ.get("HOT_ACTIVE", "5 6").split()]
     act = [hot[i] for i in active if i < len(hot)]
-    idle = [h for i, h in enumerate(hot) if i not in active]
+    iset = os.environ.get("HOT_IDLE_SET")
+    idle = [h for i, h in enumerate(hot) if i not in active and (iset is None or i in [int(x) for x in iset.split()])]
     print("hot_files\t%d\twith_template\t%d\tactive\t%d\tidle\t%d" % (len(hot_files), len(hot), len(act), len(idle)))
     def hot_append(h):
         p, t = h

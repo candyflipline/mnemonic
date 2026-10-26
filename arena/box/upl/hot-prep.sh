@@ -9,11 +9,36 @@
 # session (original plus copy). Prints counts and sizes only, never content.
 # Env: BIG (0.7 1.7 5 15 17 26 40, prod's hot images on Oct 26, halved),
 #      SMALL (13 targets from 0.1 to 0.7).
+#      SYNTH=N instead writes N synthetic one-session files of SYNTH_LINES (200)
+#      lines each as hot-FROM.. (SYNTH_FROM, 20): standalone small components,
+#      the idle hot sessions prod carries between pauses.
 set -eu
 DIR=${1:?usage: hot-prep.sh DIR HOME_DIR}
 HOME_DIR=${2:?usage: hot-prep.sh DIR HOME_DIR}
 BIG=${BIG:-0.7 1.7 5 15 17 26 40}
 SMALL=${SMALL:-0.1 0.15 0.2 0.25 0.3 0.35 0.4 0.45 0.5 0.55 0.6 0.65 0.7}
+if [ -n "${SYNTH:-}" ]; then
+	python3 -I - "$HOME_DIR" "$SYNTH" "${SYNTH_FROM:-20}" "${SYNTH_LINES:-200}" <<'PYEOF'
+import json, os, sys, uuid
+home, n, first, lines = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
+for i in range(first, first + n):
+    d = os.path.join(home, ".claude/projects", "hot-%02d" % i)
+    os.makedirs(d)
+    sid = str(uuid.uuid4())
+    out = os.path.join(d, sid + ".jsonl")
+    parent = None
+    with open(out, "w") as f:
+        for k in range(lines):
+            u = str(uuid.uuid4())
+            role = "user" if k % 2 == 0 else "assistant"
+            f.write(json.dumps({"type": role, "uuid": u, "parentUuid": parent, "sessionId": sid,
+                                "timestamp": "2026-10-26T12:%02d:%02dZ" % (k // 60 % 60, k % 60), "cwd": "/synth/%02d" % i, "version": "2.0.0",
+                                "message": {"role": role, "content": "synthetic hot session %d line %d" % (i, k)}}) + "\n")
+            parent = u
+    print("hot-%02d\tsynthetic\tjsonl_bytes\t%d\tlines\t%d" % (i, os.path.getsize(out), lines))
+PYEOF
+	exit 0
+fi
 [ -e "$HOME_DIR/.claude/projects" ] && { echo "$HOME_DIR/.claude/projects exists" >&2; exit 1; }
 mkdir -p "$HOME_DIR/.claude/projects"
 python3 -I - "$DIR" "$HOME_DIR" "$BIG" "$SMALL" <<'PYEOF'
