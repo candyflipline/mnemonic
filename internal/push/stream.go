@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"time"
 
@@ -70,35 +71,45 @@ type uplink struct {
 	err     error // why the stream ended; valid once fin is closed
 }
 
+// pushPort is where the server's push listener answers an https server URL.
+const pushPort = "8741"
+
 // target maps the config's server URL to a gRPC target and credentials:
-// https dials host:443 (or the URL's port) with the system roots, http dials
-// plaintext HTTP/2 (the box and tests).
-func target(server string) (string, credentials.TransportCredentials, error) {
+// https dials the URL's host on pushPort with the system roots, http dials
+// the URL's host:port in plaintext HTTP/2 (the box and tests). A non-empty
+// pushAddress replaces the host:port and keeps the scheme's credentials.
+func target(server, pushAddress string) (string, credentials.TransportCredentials, error) {
 	u, err := url.Parse(server)
 	if err != nil || u.Hostname() == "" {
 		return "", nil, fmt.Errorf("server %q is not an http(s) URL", server)
 	}
-	port := u.Port()
+	var addr string
+	var creds credentials.TransportCredentials
 	switch u.Scheme {
 	case "https":
-		if port == "" {
-			port = "443"
-		}
-		return "passthrough:///" + u.Hostname() + ":" + port, credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12}), nil
+		addr = net.JoinHostPort(u.Hostname(), pushPort)
+		creds = credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12})
 	case "http":
+		port := u.Port()
 		if port == "" {
 			port = "80"
 		}
-		return "passthrough:///" + u.Hostname() + ":" + port, insecure.NewCredentials(), nil
+		addr = net.JoinHostPort(u.Hostname(), port)
+		creds = insecure.NewCredentials()
+	default:
+		return "", nil, fmt.Errorf("server %q is not an http(s) URL", server)
 	}
-	return "", nil, fmt.Errorf("server %q is not an http(s) URL", server)
+	if pushAddress != "" {
+		addr = pushAddress
+	}
+	return "passthrough:///" + addr, creds, nil
 }
 
 // dial opens Sync on cfg.Server, sends Hello with cfg.Machine and the bearer
 // token as metadata, reads Welcome pages until more is false, and starts the
 // ack reader. The client pings every pingEvery while the stream is open.
 func dial(ctx context.Context, cfg config.Client) (*uplink, error) {
-	tgt, creds, err := target(cfg.Server)
+	tgt, creds, err := target(cfg.Server, cfg.PushAddress)
 	if err != nil {
 		return nil, err
 	}

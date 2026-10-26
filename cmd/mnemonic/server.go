@@ -8,7 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -42,15 +41,11 @@ func serve(args []string) error {
 	defer srv.Close()
 	srv.StoreOTLPContent(cfg.OTLP.StoreContent)
 
-	httpListener, err := net.Listen("tcp", cfg.Listen)
+	httpListener, pushListener, err := listen(cfg)
 	if err != nil {
-		return fmt.Errorf("listen on %s: %w", cfg.Listen, err)
+		return err
 	}
 	defer httpListener.Close()
-	pushListener, err := net.Listen("tcp", cfg.PushListen)
-	if err != nil {
-		return fmt.Errorf("listen on %s: %w", cfg.PushListen, err)
-	}
 	defer pushListener.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -61,7 +56,7 @@ func serve(args []string) error {
 		srv.Run(ctx)
 	}()
 
-	hs := &http.Server{Handler: srv.Handler()}
+	hs := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	ended := make(chan error, 2)
 	go func() { ended <- hs.Serve(httpListener) }()
 	go func() { ended <- srv.ServePush(pushListener) }()
