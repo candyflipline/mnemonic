@@ -26,6 +26,21 @@
 #   flock /var/lib/mnu/box.lock sh lag.sh BIN DIR
 # Env: BOX (/var/lib/mnu), OUT ($BOX/out), N (10), SPACING (15), PORT (7793),
 #      MACHINE (plainbox), AUTHOR (uplbox), QUIET_MAX (3600 s wait for the quiet cycle).
+# GEQ additions (lane/upl-geq):
+#   SWEEP=1         do not wait for a quiet cycle: probe while the boot sweep
+#                   (version-stale sources) runs. Each probe row says whether the
+#                   first quiet cycle had been logged yet (sweeping=1/0); index_ms
+#                   is then not meaningful (every cycle reparses) and is printed
+#                   only as logged.
+#   STRACE_OPENAT=1 serve runs under strace -f --seccomp-bpf -ttt -y -e trace=openat,open
+#                   (to $P-openat.txt); each probe's window [write, end of the
+#                   first cycle that counts it) is written to $P-probes.tsv and
+#                   the openat calls inside it on raw/**/*.json and *.jsonl.zst
+#                   are counted per probe ("opens" rows). Cycles seen in the window
+#                   are listed too: a second cycle racing the probe is counted.
+#   TAG             suffix on the home and output names, so one DIR can be probed
+#                   twice (default: none).
+#   ack_ms and index_ms print median, min, max, p95, p99 (nearest rank).
 set -eu
 
 BIN=${1:?usage: lag.sh BIN DIR}
@@ -38,7 +53,7 @@ PORT=${PORT:-7793}
 MACHINE=${MACHINE:-plainbox}
 AUTHOR=${AUTHOR:-uplbox}
 QUIET_MAX=${QUIET_MAX:-3600}
-NAME=$(basename "$DIR")
+NAME=$(basename "$DIR")${TAG:-}
 P=$OUT/base-$NAME-lag
 [ -x "$BIN" ] || { echo "not executable: $BIN" >&2; exit 2; }
 [ -d "$DIR/raw" ] || { echo "$DIR/raw missing: lag.sh needs a populated store" >&2; exit 2; }
@@ -63,9 +78,10 @@ token_file = "$CFG/token"
 machine = "$MACHINE"
 CFGEOF
 
-python3 -u -I - "$BIN" "$DIR" "$CFG" "$HOME_DIR" "$P" "$N" "$SPACING" "$PORT" "$MACHINE" "$AUTHOR" "$QUIET_MAX" <<'PYEOF'
+python3 -u -I - "$BIN" "$DIR" "$CFG" "$HOME_DIR" "$P" "$N" "$SPACING" "$PORT" "$MACHINE" "$AUTHOR" "$QUIET_MAX" "${SWEEP:-0}" "${STRACE_OPENAT:-0}" <<'PYEOF'
 import hashlib, json, os, re, signal, statistics, subprocess, sys, threading, time
-bin_, data, cfg, home, pfx, n, spacing, port, machine, author, quiet_max = sys.argv[1:12]
+bin_, data, cfg, home, pfx, n, spacing, port, machine, author, quiet_max, sweep, stropen = sys.argv[1:14]
+sweep, stropen = sweep == "1", stropen == "1"
 n, spacing, quiet_max = int(n), float(spacing), float(quiet_max)
 probe = os.path.join(home, ".claude/projects/lagprobe/lag.jsonl")
 src = hashlib.sha256(probe.encode()).hexdigest()[:16]
@@ -73,7 +89,10 @@ manifest = os.path.join(data, "raw", "author=" + author, "machine=" + machine, "
 
 lines = []
 lock = threading.Lock()
-serve = subprocess.Popen([bin_, "serve", "--config", cfg + "/server.toml"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+cmd = [bin_, "serve", "--config", cfg + "/server.toml"]
+if stropen:
+    cmd = ["strace", "-f", "--seccomp-bpf", "-ttt", "-y", "-e", "signal=none", "-e", "trace=openat,open", "-o", pfx + "-openat.txt"] + cmd
+serve = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          env=dict(os.environ, GOMAXPROCS="4"), text=True, bufsize=1)
 def reader():
     for l in serve.stdout:
@@ -113,10 +132,22 @@ q0 = time.time()
 def quiet():
     cs = cycles()
     return next((c for c in cs if c[3] == 0 and c[4] == 0), None)
-qc = wait(quiet, quiet_max, "a quiet cycle")
-quiet_wait = qc[0] - t_start
-print("boot_to_first_quiet_cycle_s\t%.1f" % quiet_wait)
-print("cycles_before_quiet\t%d" % len([c for c in cycles() if c[0] <= qc[0]]))
+real = serve
+if stropen:
+    def child():
+        r = subprocess.run(["pgrep", "-P", str(serve.pid)], capture_output=True, text=True)
+        return int(r.stdout.split()[0]) if r.stdout.split() else None
+    real_pid = wait(child, 30, "the serve child of strace")
+else:
+    real_pid = serve.pid
+if sweep:
+    qc = (t_start, "", "", 0, 0, 0.0, "")
+    print("sweep_mode\t1: probing from boot, quiet cycle not awaited")
+else:
+    qc = wait(quiet, quiet_max, "a quiet cycle")
+    quiet_wait = qc[0] - t_start
+    print("boot_to_first_quiet_cycle_s\t%.1f" % quiet_wait)
+    print("cycles_before_quiet\t%d" % len([c for c in cycles() if c[0] <= qc[0]]))
 
 def line(i):
     return (json.dumps({"type": "user", "uuid": "00000000-0000-4000-8000-%012d" % i, "sessionId": "00000000-0000-4000-8000-0000000000aa",
@@ -138,12 +169,14 @@ pidlog = open(pfx + "-pidstat.txt", "w")
 vm = subprocess.Popen(["vmstat", "1"], stdout=open(pfx + "-vmstat.txt", "w"))
 push = subprocess.Popen([bin_, "push", "--watch", "--config", cfg + "/client.toml"], env=dict(os.environ, HOME=home),
                         stdout=open(pfx + "-client.out", "w"), stderr=subprocess.STDOUT)
-ps = subprocess.Popen(["pidstat", "-u", "-d", "-h", "-p", "%d,%d" % (serve.pid, push.pid), "1"], stdout=pidlog)
+ps = subprocess.Popen(["pidstat", "-u", "-d", "-h", "-p", "%d,%d" % (real_pid, push.pid), "1"], stdout=pidlog)
 try:
     t_first = time.time()
     wait(lambda: manifest_size() >= total, 60, "first push of the probe")
     wait(lambda: next((c for c in cycles() if c[0] > t_first and c[3] >= 1), None), 120, "the cycle that counts the first push")
     rows = []
+    wins = []
+    sweepflags = []
     prev = time.time()
     for i in range(1, n + 1):
         gap = prev + spacing - time.time()
@@ -169,14 +202,60 @@ try:
                 break
             time.sleep(0.02)
         rows.append((i, None if ack is None else (ack - t0) * 1000, None if cyc is None else (cyc[0] - t0) * 1000, cyc))
-        print("probe\t%d\tack_ms\t%s\tindex_ms\t%s\tcycle_s\t%s\tchanged\t%s" % (
+        wins.append((i, t0, cyc[0] if cyc else None))
+        qn = next((c for c in cycles() if c[3] == 0 and c[4] == 0), None)
+        sweeping = 1 if (sweep and (qn is None or qn[0] > t0)) else 0
+        print("probe\t%d\tack_ms\t%s\tindex_ms\t%s\tcycle_s\t%s\tchanged\t%s\tsweeping\t%d" % (
             i, "%.0f" % rows[-1][1] if rows[-1][1] is not None else "MISSING", "%.0f" % rows[-1][2] if rows[-1][2] is not None else "MISSING",
-            "%.2f" % cyc[5] if cyc else "", cyc[3] if cyc else ""))
+            "%.2f" % cyc[5] if cyc else "", cyc[3] if cyc else "", sweeping))
+        sweepflags.append(sweeping)
         sys.stdout.flush()
-    for name, k in (("ack_ms", 1), ("index_ms", 2)):
-        xs = sorted(r[k] for r in rows if r[k] is not None)
-        if xs:
-            print("%s\tmedian %.0f\tmin %.0f\tmax %.0f\tn %d of %d" % (name, statistics.median(xs), xs[0], xs[-1], len(xs), n))
+    def pct(xs, p):
+        return xs[max(0, min(len(xs) - 1, -(-int(p * len(xs)) // 100) - 1))]
+    def summarize(label, sel):
+        for name, k in (("ack_ms", 1), ("index_ms", 2)):
+            xs = sorted(r[k] for r, f in zip(rows, sweepflags) if r[k] is not None and sel(f))
+            if xs:
+                print("%s%s\tmedian %.0f\tmin %.0f\tmax %.0f\tp95 %.0f\tp99 %.0f\tn %d of %d" % (name, label, statistics.median(xs), xs[0], xs[-1], pct(xs, 95), pct(xs, 99), len(xs), n))
+    summarize("", lambda f: True)
+    if sweep:
+        summarize("_during_sweep", lambda f: f == 1)
+        summarize("_after_sweep", lambda f: f == 0)
+    if stropen:
+        os_ = []
+        for l in open(pfx + "-openat.txt", errors="replace"):
+            m = re.match(r"^(?:\d+\s+)?([0-9.]+) open(?:at)?\(.*", l)
+            if not m or "ENOENT" in l:
+                continue
+            q = re.findall(r"<([^>]*)>", l)
+            p = re.findall(r'"([^"]*)"', l)
+            path = p[-1] if p else ""
+            if not q and not path.startswith("/"):
+                continue
+            full = path if path.startswith("/") else (q[0] if q else "") + "/" + path
+            os_.append((float(m.group(1)), full))
+        rawroot = os.path.join(data, "raw")
+        with open(pfx + "-probes.tsv", "w") as f:
+            f.write("probe\tt0\tcycle_end\n")
+            for i, t0, te in wins:
+                f.write("%d\t%.3f\t%s\n" % (i, t0, "%.3f" % te if te else ""))
+        jm, zm, cyc_n = [], [], []
+        for i, t0, te in wins:
+            if te is None:
+                continue
+            j = z = 0
+            for t, fp in os_:
+                if t0 <= t <= te and fp.startswith(rawroot):
+                    if fp.endswith(".json"):
+                        j += 1
+                    elif ".jsonl.zst" in fp:
+                        z += 1
+            nc = len([c for c in cycles() if t0 < c[0] <= te])
+            jm.append(j); zm.append(z); cyc_n.append(nc)
+            print("opens\t%d\tmanifests(.json)\t%d\tframes(.jsonl.zst)\t%d\tcycles_in_window\t%d" % (i, j, z, nc))
+        if jm:
+            print("opens_manifest\tmedian %.0f\tmin %d\tmax %d\tn %d" % (statistics.median(jm), min(jm), max(jm), len(jm)))
+            print("opens_frame\tmedian %.0f\tmin %d\tmax %d\tn %d" % (statistics.median(zm), min(zm), max(zm), len(zm)))
     cs = [c for c in cycles() if c[0] > qc[0]]
     ds = sorted(c[5] for c in cs)
     if ds:
@@ -186,9 +265,10 @@ try:
         for c in cycles():
             f.write("%.3f\t%s\n" % (c[0], c[1][:300]))
 finally:
-    for p in (push, serve):
-        if p.poll() is None:
-            p.send_signal(signal.SIGTERM)
+    if push.poll() is None:
+        push.send_signal(signal.SIGTERM)
+    if serve.poll() is None:
+        os.kill(real_pid, signal.SIGTERM)
     for p in (push, serve):
         try:
             p.wait(timeout=120)
