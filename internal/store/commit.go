@@ -366,6 +366,10 @@ func (c *Committer) submit(ctx context.Context, k layout.Key, op Op, frame []byt
 		c.budget.release(n)
 		return nil, errClosed
 	}
+	if err := c.stoppedErr(); err != nil {
+		c.budget.release(n)
+		return nil, err
+	}
 	select {
 	case c.reqs <- r:
 		return r.ticket, nil
@@ -768,7 +772,6 @@ func (p planned) write(dataDir string) (written, error) {
 		w.tmpMan[i] = tmp
 		w.touched.files = append(w.touched.files, tmp)
 	}
-	w.touched.dirs = slices.Compact(w.touched.dirs)
 	return w, nil
 }
 
@@ -847,6 +850,8 @@ func (b barrier) run(t touched) error {
 	if t.empty() {
 		return nil
 	}
+	slices.Sort(t.dirs)
+	t.dirs = slices.Compact(t.dirs)
 	if err := b(t); err != nil {
 		return fmt.Errorf("store: barrier: %w", err)
 	}
@@ -875,7 +880,6 @@ func (d durableData) linkRaws(b barrier) (rawsLinked, error) {
 		}
 		t.dirs = append(t.dirs, filepath.Dir(d.w.tmpRaw[i]))
 	}
-	t.dirs = slices.Compact(t.dirs)
 	return rawsLinked{d}, b.run(t)
 }
 
