@@ -44,11 +44,14 @@ hosts = ["mnemonic.example"]
 MCP and HTTP OTLP answer on 443, the push stream on 8741, both with one
 Let's Encrypt certificate. It is issued on the first TLS handshake by
 tls-alpn-01 on 443 (no port 80) and cached in `/var/lib/mnemonic/autocert`
-(0700). The unit grants `CAP_NET_BIND_SERVICE` so the `mnemonic` user can
+(0700) for the default Let's Encrypt directory, and in
+`/var/lib/mnemonic/autocert-<host of acme_directory>` for any other (staging:
+`autocert-acme-staging-v02.api.letsencrypt.org`), so switching a hostname from
+staging to prod asks for a new certificate instead of serving the staging one. The unit grants `CAP_NET_BIND_SERVICE` so the `mnemonic` user can
 bind 443. `acme_directory =
 "https://acme-staging-v02.api.letsencrypt.org/directory"` under `[tls]` uses
 Let's Encrypt staging for a trial host. Without `[tls]` both listeners are
-plaintext (boxes and tests). With `[tls]`, `listen` must be on port 443.
+plaintext (boxes and tests). With `[tls]`, `listen` must be on port 443 and `push_listen` on 8741.
 
 Open 443 and 8741 to the internet and 22 to your allowlist. A client whose
 `server` is `https://mnemonic.example` pushes to `mnemonic.example:8741`;
