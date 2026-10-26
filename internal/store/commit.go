@@ -221,8 +221,11 @@ func Open(dataDir string) (*Committer, error) {
 }
 
 func open(dataDir string, b barrier, exit func(error)) (*Committer, error) {
-	table, err := loadTable(dataDir)
+	table, loaded, err := loadTable(dataDir)
 	if err != nil {
+		return nil, err
+	}
+	if err := b.run(loaded); err != nil {
 		return nil, err
 	}
 	c := &Committer{
@@ -241,15 +244,19 @@ func open(dataDir string, b barrier, exit func(error)) (*Committer, error) {
 	return c, nil
 }
 
-func loadTable(dataDir string) (map[layout.Key]*manifestBody, error) {
+// loadTable reads every manifest into the table, removes temp files, and
+// returns what it read as touched: a manifest renamed before a crash may not
+// be durable yet, and Open makes it so before any Welcome reports it.
+func loadTable(dataDir string) (map[layout.Key]*manifestBody, touched, error) {
 	table := map[layout.Key]*manifestBody{}
+	var loaded touched
 	root := filepath.Join(dataDir, "raw")
 	authors, err := os.ReadDir(root)
 	if errors.Is(err, os.ErrNotExist) {
-		return table, nil
+		return table, loaded, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, loaded, err
 	}
 	for _, a := range authors {
 		author, ok := strings.CutPrefix(a.Name(), "author=")
@@ -258,7 +265,7 @@ func loadTable(dataDir string) (map[layout.Key]*manifestBody, error) {
 		}
 		machines, err := os.ReadDir(filepath.Join(root, a.Name()))
 		if err != nil {
-			return nil, err
+			return nil, loaded, err
 		}
 		for _, m := range machines {
 			machine, ok := strings.CutPrefix(m.Name(), "machine=")
@@ -267,7 +274,7 @@ func loadTable(dataDir string) (map[layout.Key]*manifestBody, error) {
 			}
 			harnesses, err := os.ReadDir(filepath.Join(root, a.Name(), m.Name()))
 			if err != nil {
-				return nil, err
+				return nil, loaded, err
 			}
 			for _, h := range harnesses {
 				harness, ok := strings.CutPrefix(h.Name(), "harness=")
@@ -275,16 +282,16 @@ func loadTable(dataDir string) (map[layout.Key]*manifestBody, error) {
 					continue
 				}
 				dir := filepath.Join(root, a.Name(), m.Name(), h.Name())
-				if err := loadDir(table, dir, layout.Key{Author: author, Machine: machine, Harness: harness}); err != nil {
-					return nil, err
+				if err := loadDir(table, &loaded, dir, layout.Key{Author: author, Machine: machine, Harness: harness}); err != nil {
+					return nil, loaded, err
 				}
 			}
 		}
 	}
-	return table, nil
+	return table, loaded, nil
 }
 
-func loadDir(table map[layout.Key]*manifestBody, dir string, k layout.Key) error {
+func loadDir(table map[layout.Key]*manifestBody, loaded *touched, dir string, k layout.Key) error {
 	files, err := os.ReadDir(dir)
 	if err != nil {
 		return err
@@ -308,7 +315,9 @@ func loadDir(table map[layout.Key]*manifestBody, dir string, k layout.Key) error
 		}
 		k.SrcID = srcID
 		table[k] = m
+		loaded.files = append(loaded.files, filepath.Join(dir, name))
 	}
+	loaded.dirs = append(loaded.dirs, dir)
 	return nil
 }
 
@@ -479,60 +488,74 @@ func (ch *changes) add(keys []layout.Key) {
 
 func (c *Committer) run() {
 	defer close(c.done)
-	var carry *request
+	var held []*request
 	for {
-		first := carry
-		carry = nil
-		if first == nil {
+		if len(held) == 0 {
 			r, ok := <-c.reqs
 			if !ok {
 				return
 			}
-			first = r
+			held = append(held, r)
 		}
-		reqs := []*request{first}
-		size := len(first.frame)
-	drain:
-		for len(reqs) < maxBatchAppends {
-			select {
-			case r, ok := <-c.reqs:
-				if !ok {
-					break drain
-				}
-				if size+len(r.frame) > maxBatchBytes {
-					carry = r
-					break drain
-				}
-				reqs = append(reqs, r)
-				size += len(r.frame)
-			default:
-				break drain
-			}
-		}
-		if err := c.commit(reqs); err != nil {
-			c.stop(err, reqs, carry)
+		held = c.fill(held)
+		n, err := c.commit(batchOf(held))
+		if err != nil {
+			c.stop(err, held)
 			return
 		}
+		held = held[n:]
 	}
 }
 
-func (c *Committer) commit(reqs []*request) error {
+// fill takes every request already queued, without waiting, until the batch
+// caps are reached.
+func (c *Committer) fill(held []*request) []*request {
+	size := 0
+	for _, r := range held {
+		size += len(r.frame)
+	}
+	for len(held) < maxBatchAppends && size <= maxBatchBytes {
+		select {
+		case r, ok := <-c.reqs:
+			if !ok {
+				return held
+			}
+			held = append(held, r)
+			size += len(r.frame)
+		default:
+			return held
+		}
+	}
+	return held
+}
+
+func batchOf(held []*request) []*request {
+	n, size := 1, len(held[0].frame)
+	for n < len(held) && n < maxBatchAppends && size+len(held[n].frame) <= maxBatchBytes {
+		size += len(held[n].frame)
+		n++
+	}
+	return held[:n]
+}
+
+// commit commits the prefix of reqs plan admits and returns its length.
+func (c *Committer) commit(reqs []*request) (int, error) {
 	p := plan(c.table, reqs, func() int64 { return time.Now().UnixMilli() })
 	w, err := p.write(c.dataDir)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	d, err := w.sync(c.barrier)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	r, err := d.linkRaws(c.barrier)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	k, err := r.linkManifests(c.barrier, c.seq+1)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	c.seq++
 	c.mu.Lock()
@@ -545,8 +568,8 @@ func (c *Committer) commit(reqs []*request) error {
 	for i, a := range k.acks() {
 		reqs[i].ticket.resolve(a)
 	}
-	c.budget.release(int64(size(reqs)))
-	return nil
+	c.budget.release(int64(size(p.reqs)))
+	return len(p.reqs), nil
 }
 
 func size(reqs []*request) int {
@@ -557,14 +580,11 @@ func size(reqs []*request) int {
 	return n
 }
 
-func (c *Committer) stop(err error, reqs []*request, carry *request) {
+func (c *Committer) stop(err error, held []*request) {
 	c.err = err
 	close(c.stopped)
-	for _, r := range reqs {
+	for _, r := range held {
 		r.ticket.fail(err)
-	}
-	if carry != nil {
-		carry.ticket.fail(err)
 	}
 	c.exit(err)
 	for r := range c.reqs {
@@ -574,7 +594,8 @@ func (c *Committer) stop(err error, reqs []*request, carry *request) {
 
 // planned is the batch decided in memory: per request its verdict and the
 // source state it answers with, per touched source its after manifest and
-// frames.
+// frames. A Replace of a source already planned ends the batch before it, so
+// no acked frame is overwritten inside one batch.
 type planned struct {
 	reqs    []*request
 	verdict []Verdict
@@ -620,6 +641,10 @@ func plan(table map[layout.Key]*manifestBody, reqs []*request, now func() int64)
 		m := cur(r.key)
 		switch op := r.op.(type) {
 		case Replace:
+			if bySrc[r.key] != nil {
+				p.reqs, p.verdict, p.state = reqs[:i], p.verdict[:i], p.state[:i]
+				return p
+			}
 			var prevMs int64
 			if m != nil {
 				prevMs = m.UpdatedMs
