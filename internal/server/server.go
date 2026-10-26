@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -28,6 +29,8 @@ type Server struct {
 	lap     *index.Lap
 	push    *grpc.Server
 	drain   func()
+	booted  chan struct{}
+	bootOne sync.Once
 	handler http.Handler
 	otlp    *otlp.Receiver
 }
@@ -67,8 +70,12 @@ func New(dataDir string, tokens auth.Tokens) (*Server, error) {
 	mux.Handle("/mcp", tokens.Require(auth.Read)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tools.ServeHTTP(w, r.WithContext(index.WithControls(store.WithStore(r.Context(), st), ctl)))
 	})))
-	return &Server{dataDir: dataDir, ix: ix, lock: lock, st: st, push: push, drain: drain, handler: mux, otlp: rcv}, nil
+	return &Server{dataDir: dataDir, ix: ix, lock: lock, st: st, push: push, drain: drain, booted: make(chan struct{}), handler: mux, otlp: rcv}, nil
 }
+
+// Booted is closed once the index has booted: from then on its steady memory
+// is all that sits beside push sessions.
+func (s *Server) Booted() <-chan struct{} { return s.booted }
 
 func (s *Server) Handler() http.Handler { return s.handler }
 
@@ -185,6 +192,9 @@ func (s *Server) cycle(reason string) error {
 	var err error
 	if s.lap == nil {
 		s.lap, st, err = s.ix.Boot(s.dataDir, opts)
+		if s.lap != nil {
+			s.bootOne.Do(func() { close(s.booted) })
+		}
 	} else {
 		st, err = s.lap.Next(s.st.TakeChanged(), opts)
 	}
