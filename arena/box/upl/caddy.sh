@@ -200,11 +200,11 @@ caddy_up() { # setting
 }
 caddy_down() { # tag
 	docker logs "$CNAME" > "$R/caddy-$1.log" 2>&1
-	l0=$(leaves)
+	lc0=$(leaves)
 	docker rm -f "$CNAME" >/dev/null 2>&1
 	sleep 1
 	balance
-	echo $(( $(leaves) - l0 ))
+	echo $(( $(leaves) - lc0 ))
 }
 
 SSL=$R/bundle.pem
@@ -400,6 +400,14 @@ for (cp, direction), f in sorted(flows.items()):
             if ty == 23 and ln == 34:
                 r["ping"].append(when(marks, p))
             p += 5 + ln
+def paired(reqs, reps):
+    reps = sorted(reps)
+    used, delays = set(), []
+    for t in sorted(reqs):
+        for i, u in enumerate(reps):
+            if i not in used and u >= t and u - t < 2.0:
+                used.add(i); delays.append(u - t); break
+    return "replied=%d_of_%d max_delay_ms=%.1f" % (len(delays), len(reqs), max(delays) * 1000 if delays else 0)
 def gaps(xs):
     xs = sorted(xs)
     g = [b - a for a, b in zip(xs, xs[1:])]
@@ -413,6 +421,10 @@ for direction in ("c2s", "s2c"):
         print("%s conns=%d ping=%d pingack=%d goaway=%d%s rst=%d%s %s" % (direction, r["conns"], len(r["ping"]), len(r["pingack"]), len(r["goaway"]), r["goaway"], len(r["rst"]), r["rst"], gaps(r["ping"])))
     else:
         print("%s conns=%d ping_records=%d %s" % (direction, r["conns"], len(r["ping"]), gaps(r["ping"])))
+if mode == "h2" and "s2c" in res and "c2s" in res:
+    print("serve_pings_vs_caddy_acks " + paired(res["s2c"]["ping"], res["c2s"]["pingack"]))
+if mode == "tls" and "s2c" in res and "c2s" in res:
+    print("client_pings_vs_caddy_replies " + paired(res["c2s"]["ping"], res["s2c"]["ping"]))
 PY
 cap_up() { # tag filter iface
 	tcpdump -U -n -i "$3" -w "$R/$1.pcap" "$2" > "$R/$1.tcpdump.log" 2>&1 &
@@ -459,20 +471,20 @@ for f in ping-caddy-to-8741 ping-client-to-caddy ping-client-to-caddy-lo; do sed
 n_srv=$(( IDLE_S / 45 - 1 )); n_cli=$(( IDLE_S / 30 - 1 ))
 getn() { sed -n "s/^$2 .*[ ]$3=\([0-9]*\).*/\1/p" "$1" | head -1; }
 srv_ping=$(getn "$R/ping-caddy-to-8741.txt" s2c ping)
-srv_ack=$(getn "$R/ping-caddy-to-8741.txt" c2s pingack)
+srv_ack=$(sed -n "s/^serve_pings_vs_caddy_acks replied=\([0-9]*\)_of.*/\1/p" "$R/ping-caddy-to-8741.txt")
 cad_ping=$(getn "$R/ping-caddy-to-8741.txt" c2s ping)
 go_c=$(getn "$R/ping-caddy-to-8741.txt" c2s goaway); go_s=$(getn "$R/ping-caddy-to-8741.txt" s2c goaway)
 cli_ping=$(getn "$R/ping-client-to-caddy.txt" c2s ping_records)
-cli_ack=$(getn "$R/ping-client-to-caddy.txt" s2c ping_records)
+cli_ack=$(sed -n "s/^client_pings_vs_caddy_replies replied=\([0-9]*\)_of.*/\1/p" "$R/ping-client-to-caddy.txt")
 cli_ping_lo=$(getn "$R/ping-client-to-caddy-lo.txt" c2s ping_records)
-cli_ack_lo=$(getn "$R/ping-client-to-caddy-lo.txt" s2c ping_records)
+cli_ack_lo=$(sed -n "s/^client_pings_vs_caddy_replies replied=\([0-9]*\)_of.*/\1/p" "$R/ping-client-to-caddy-lo.txt")
 [ "${cli_ping:-0}" -ge "${cli_ping_lo:-0}" ] || { cli_ping=$cli_ping_lo; cli_ack=$cli_ack_lo; }
 bad_logs=$(cat "$R/C-serve.log" "$R/caddy-phaseA2.log" "$R/idle.out" | grep -Eci 'GOAWAY|ENHANCE_YOUR_CALM|too_many_pings')
 if [ $((s1 - s0)) -eq 1 ] && [ $((l1 - l0)) -eq 0 ] && [ "$(wc -l < "$R/idle.out")" -eq $((n1 + 1)) ] && echo "$last" | grep -q 'appended 1' \
 	&& awk -v x="$lag" 'BEGIN{exit !(x <= 5)}' && [ "$IDLE_S" -ge 660 ] \
 	&& [ "${srv_ping:-0}" -ge "$n_srv" ] && [ "${srv_ack:-0}" -ge "$n_srv" ] && [ "${go_c:-1}" -eq 0 ] && [ "${go_s:-1}" -eq 0 ] \
 	&& [ "${cli_ping:-0}" -ge "$n_cli" ] && [ "${cli_ack:-0}" -ge "$n_cli" ] && [ "$bad_logs" -eq 0 ]; then v=PASS; else v=FAIL; fi
-row idle $SETA "idle_s=$IDLE_S ack_after_append_s=$lag streams_opened=$((s1 - s0)) streams_ended=$((l1 - l0)) client_lines_before=$n1 client_lines_after=$(wc -l < "$R/idle.out") last=[$last] caddy_to_8741(serve_pings=${srv_ping:-?} caddy_pings=${cad_ping:-?} caddy_pingacks=${srv_ack:-?} goaway_c2s=${go_c:-?} goaway_s2c=${go_s:-?} want_serve_pings>=$n_srv) client_to_caddy(client_ping_records=${cli_ping:-?} caddy_reply_records=${cli_ack:-?} want>=$n_cli) goaway_or_ratelimit_lines_in_logs=$bad_logs" $v
+row idle $SETA "idle_s=$IDLE_S ack_after_append_s=$lag streams_opened=$((s1 - s0)) streams_ended=$((l1 - l0)) client_lines_before=$n1 client_lines_after=$(wc -l < "$R/idle.out") last=[$last] caddy_to_8741(serve_pings=${srv_ping:-?} caddy_pings=${cad_ping:-?} serve_pings_acked_by_caddy=${srv_ack:-?} goaway_c2s=${go_c:-?} goaway_s2c=${go_s:-?} want_serve_pings>=$n_srv) client_to_caddy(client_ping_records=${cli_ping:-?} client_pings_replied=${cli_ack:-?} want>=$n_cli) goaway_or_ratelimit_lines_in_logs=$bad_logs" $v
 
 # ---- phase B: alternating arms, latency and cancellation
 : > "$R/kills.tsv"
