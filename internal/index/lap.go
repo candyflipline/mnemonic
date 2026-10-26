@@ -47,15 +47,14 @@ func (ix *Index) Boot(root string, opts IngestOptions) (*Lap, IngestStats, error
 		return nil, IngestStats{}, err
 	}
 	l := &Lap{ix: ix, root: root, sources: sources, cks: readCkpts(ix.store, sources)}
-	stats, err := l.cycle(allOf(sources), opts)
-	release()
-	return l, stats, errors.Join(err, ix.Refresh())
+	stats, err := l.cycle(allOf(sources), opts, release)
+	return l, stats, err
 }
 
 // Next runs one cycle over every source but parses only changed, carry (the
-// keys whose manifest read or parse failed last time) and the version-stale
-// ones the sweep picks from the cached checkpoints. Every other source is
-// Unchanged without a read. publish still sees every source, and its settle
+// keys the last cycle did not finish) and the version-stale ones the sweep
+// picks from the cached checkpoints. Every other source is Unchanged without
+// a read. publish still sees every source, and its settle
 // writes land in l.cks.
 func (l *Lap) Next(changed []layout.Key, opts IngestOptions) (IngestStats, error) {
 	for _, k := range changed {
@@ -65,12 +64,11 @@ func (l *Lap) Next(changed []layout.Key, opts IngestOptions) (IngestStats, error
 	if err != nil {
 		return IngestStats{}, err
 	}
-	var stats IngestStats
-	if err = l.patch(l.carry); err == nil {
-		stats, err = l.cycle(l.work(), opts)
+	if err := l.patch(l.carry); err != nil {
+		release()
+		return IngestStats{}, errors.Join(err, l.ix.Refresh())
 	}
-	release()
-	return stats, errors.Join(err, l.ix.Refresh())
+	return l.cycle(l.work(), opts, release)
 }
 
 // work is the sources a cycle after boot parses: the carried keys (changed
@@ -89,13 +87,17 @@ func (l *Lap) work() []int {
 	return work
 }
 
-// cycle parses the sources work names and publishes all of them; carry
-// becomes the keys among work whose parse did not complete.
-func (l *Lap) cycle(work []int, opts IngestOptions) (IngestStats, error) {
+// cycle parses the sources work names, publishes all of them, releases the
+// writer lock and serves the result. carry becomes the keys among work whose
+// parse did not complete, or all of work when the publish or the serve failed:
+// their checkpoints may have moved past what CURRENT names.
+func (l *Lap) cycle(work []int, opts IngestOptions, release func()) (IngestStats, error) {
 	stats, outcomes, err := cycle(l.root, l.ix.store, l.sources, l.cks, work, opts.Quiet, opts.SettleAll, opts.Red)
+	release()
+	err = errors.Join(err, l.ix.Refresh())
 	l.carry = map[layout.Key]bool{}
 	for _, i := range work {
-		if _, ok := outcomes[sourceKey(l.sources[i].key)]; !ok {
+		if _, ok := outcomes[sourceKey(l.sources[i].key)]; !ok || err != nil {
 			l.carry[l.sources[i].key] = true
 		}
 	}
