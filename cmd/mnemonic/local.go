@@ -129,8 +129,12 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 	if err != nil {
 		return err
 	}
-	wake := make(chan struct{}, 1)
-	st := &store.Store{DataDir: opts.dataDir, Wake: wake}
+	st, err := store.Open(opts.dataDir)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	wake := st.Changed()
 	sink := &indexSink{ix: ix, srcs: srcs, author: author, machine: machine, red: red}
 	if err := firstIngest(ix, srcs, logger, author, machine, red); err != nil {
 		return err

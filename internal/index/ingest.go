@@ -271,11 +271,13 @@ func wantCkpt(s source, parser normalize.Parser) ckpt {
 }
 
 // extends reports whether the input up to end still holds the bytes prev was
-// parsed from, under the same kind, parser and identity, from a State that is
-// not Provisional, so only the bytes past it parse. The byte test is the kind's.
+// parsed from, under the same kind, parser and identity, so only the bytes
+// past it parse. Past a Provisional State they cannot: its rows take a
+// timestamp from lines not read yet. The byte test is the kind's.
 func extends(raw *os.File, end int64, want, prev ckpt) bool {
-	if prev.State.Provisional() || prev.Kind != want.Kind || prev.Parser != want.Parser || prev.Harness != want.Harness || prev.SourceName != want.SourceName ||
-		prev.SourceFile != want.SourceFile || prev.Layout != want.Layout || prev.ZstSize > end {
+	if prev.Kind != want.Kind || prev.Parser != want.Parser || prev.Harness != want.Harness || prev.SourceName != want.SourceName ||
+		prev.SourceFile != want.SourceFile || prev.Layout != want.Layout || prev.ZstSize > end ||
+		prev.State.Provisional() && prev.ZstSize < end {
 		return false
 	}
 	return want.Kind.extends(raw, end, prev)
@@ -602,25 +604,49 @@ func IngestPlain(store string, globs []config.SourceGlob, author, machine string
 // ingest and the harness subcommand all exclude each other here, and a
 // process holding the dir for its whole life (serve, local) borrows its own
 // lock instead of refusing itself.
-func ingest(root, store string, sources []source, quiet time.Duration, settleAll bool, red *redact.Redactor) (stats IngestStats, err error) {
-	// One key, one source: two sources on one key would run two ingestSource
-	// workers over the same checkpoint and light/heavy logs, each truncating
-	// what the other appends. IngestPlain drops the raw copy behind a plain
-	// file; every other caller's list is one source per key by construction,
-	// so a duplicate here is refused loudly instead of corrupting the store.
-	seen := make(map[string]bool, len(sources))
-	for _, s := range sources {
-		k := sourceKey(s.key)
-		if seen[k] {
-			return IngestStats{}, fmt.Errorf("ingest: duplicate source key %s", k)
-		}
-		seen[k] = true
+func ingest(root, store string, sources []source, quiet time.Duration, settleAll bool, red *redact.Redactor) (IngestStats, error) {
+	if err := oneKeyEach(sources); err != nil {
+		return IngestStats{}, err
 	}
 	release, err := IngestLock(store)
 	if err != nil {
 		return IngestStats{}, err
 	}
 	defer release()
+	stats, _, err := cycle(root, store, sources, readCkpts(store, sources), allOf(sources), quiet, settleAll, red)
+	return stats, err
+}
+
+// oneKeyEach refuses two sources on one key: they would run two ingestSource
+// workers over the same checkpoint and light/heavy logs, each truncating what
+// the other appends. IngestPlain drops the raw copy behind a plain file; every
+// other caller's list is one source per key by construction, so a duplicate
+// here is refused loudly instead of corrupting the store.
+func oneKeyEach(sources []source) error {
+	seen := make(map[string]bool, len(sources))
+	for _, s := range sources {
+		k := sourceKey(s.key)
+		if seen[k] {
+			return fmt.Errorf("ingest: duplicate source key %s", k)
+		}
+		seen[k] = true
+	}
+	return nil
+}
+
+func allOf(sources []source) []int {
+	all := make([]int, len(sources))
+	for i := range all {
+		all[i] = i
+	}
+	return all
+}
+
+// cycle parses the sources work indexes, counts every other one Unchanged,
+// publishes them all and records the lap. cks holds each source's checkpoint
+// and is updated to the one its parse or settle leaves. The caller holds the
+// dir's writer lock.
+func cycle(root, store string, sources []source, cks []*ckpt, work []int, quiet time.Duration, settleAll bool, red *redact.Redactor) (stats IngestStats, outcomes map[string]Outcome, err error) {
 	debug.SetGCPercent(25)
 	var rec cycleRecord
 	defer func() { recordCycle(store, rec) }()
@@ -628,20 +654,20 @@ func ingest(root, store string, sources []source, quiet time.Duration, settleAll
 		return
 	}
 	take := takeCycle(store)
-	cks := readCkpts(store, sources)
-	outcomes, logBytes, stale, failSweep := parseSources(root, store, sources, cks, take.failSweep, red)
+	outcomes, logBytes, stale, failSweep := parseSources(root, store, sources, cks, work, take.failSweep, red)
 	for _, o := range outcomes {
 		stats[o]++
 	}
+	stats[Unchanged] += len(sources) - len(work)
 	rec = cycleRecord{stats: CycleStats{LogBytes: logBytes}, stale: stale,
-		failed: len(sources) - len(outcomes), failSweep: failSweep}
+		failed: len(work) - len(outcomes), failSweep: failSweep}
 	cs, deferred, perr := publish(store, sources, cks, quiet, settleAll, outcomes)
 	cs.LogBytes = logBytes
 	rec.stats, rec.settle = cs, deferred
-	return stats, perr
+	return stats, outcomes, perr
 }
 
-// parseSources runs ingestSource over sources on GOMAXPROCS workers and
+// parseSources runs ingestSource over the sources work indexes on GOMAXPROCS workers and
 // returns each outcome by source key, how many log bytes the parses appended,
 // how many version-stale sources the sweep budget left for the next cycle, and
 // the failSweep to carry into it: the version-stale sources whose re-parse
@@ -649,15 +675,16 @@ func ingest(root, store string, sources []source, quiet time.Duration, settleAll
 // the keys already known to fail at their version. A source that failed has no
 // outcome. cks holds each source's checkpoint (readCkpts) and is updated to
 // the one each parse leaves.
-func parseSources(root, store string, sources []source, cks []*ckpt, skip map[string]int, red *redact.Redactor) (outcomes map[string]Outcome, logBytes int64, stale int, failSweep map[string]int) {
-	outcomes = make(map[string]Outcome, len(sources))
+func parseSources(root, store string, sources []source, cks []*ckpt, work []int, skip map[string]int, red *redact.Redactor) (outcomes map[string]Outcome, logBytes int64, stale int, failSweep map[string]int) {
+	outcomes = make(map[string]Outcome, len(work))
 	failSweep = map[string]int{}
 	for k, v := range skip {
 		failSweep[k] = v
 	}
 	var now []int // pushed, fresh or appended: parsed whatever the sweep is doing
 	var sweep []int
-	for i, s := range sources {
+	for _, i := range work {
+		s := sources[i]
 		if versionStale(s, cks[i]) && failSweep[sourceKey(s.key)] != parserVersion(s) {
 			sweep = append(sweep, i)
 			continue
@@ -666,7 +693,7 @@ func parseSources(root, store string, sources []source, cks []*ckpt, skip map[st
 		now = append(now, i)
 	}
 	var mu sync.Mutex
-	work := make(chan int)
+	jobs := make(chan int)
 	done := make(chan []int)
 	var wg sync.WaitGroup
 	for range runtime.GOMAXPROCS(0) {
@@ -674,7 +701,7 @@ func parseSources(root, store string, sources []source, cks []*ckpt, skip map[st
 		go func() {
 			defer wg.Done()
 			var failed []int
-			for i := range work {
+			for i := range jobs {
 				s := sources[i]
 				o, written, c, err := ingestSource(root, store, s, cks[i], red)
 				if err != nil {
@@ -692,7 +719,7 @@ func parseSources(root, store string, sources []source, cks []*ckpt, skip map[st
 		}()
 	}
 	for _, i := range now {
-		work <- i
+		jobs <- i
 	}
 	sweepEnd := time.Now().Add(sweepBudget)
 	for n, i := range sweep {
@@ -700,9 +727,9 @@ func parseSources(root, store string, sources []source, cks []*ckpt, skip map[st
 			stale = len(sweep) - n
 			break
 		}
-		work <- i
+		jobs <- i
 	}
-	close(work)
+	close(jobs)
 	go func() {
 		wg.Wait()
 		close(done)
@@ -742,8 +769,8 @@ func versionStale(s source, c *ckpt) bool {
 // publish plans the parts of the sources' checkpoints, builds the missing ones
 // and points CURRENT at them, reporting what it wrote and how many components
 // whose quiet window has passed it left hot for a later cycle (settleSet).
-// cur holds each source's checkpoint (parseSources), outcomes what this
-// cycle's parse did, by source key.
+// cur holds each source's checkpoint (parseSources) and takes the ones a
+// settle writes; outcomes is what this cycle's parse did, by source key.
 func publish(store string, sources []source, cur []*ckpt, quiet time.Duration, settleAll bool, outcomes map[string]Outcome) (CycleStats, int, error) {
 	parsedAny := false
 	for _, o := range outcomes {
@@ -754,6 +781,7 @@ func publish(store string, sources []source, cur []*ckpt, quiet time.Duration, s
 		newest = max(newest, s.src.UpdatedMs)
 	}
 	var cks []ckpt
+	var from []int // from[i] is the index in sources of cks[i], -1 for an archive member
 	var due, touched []bool
 	var srcs []stSource
 	var keepExtra []string
@@ -778,6 +806,7 @@ func publish(store string, sources []source, cur []*ckpt, quiet time.Duration, s
 					continue
 				}
 				cks = append(cks, c)
+				from = append(from, -1)
 				due = append(due, settleAll || s.src.UpdatedMs <= newest-quiet.Milliseconds())
 				touched = append(touched, outcomes[fk] > Unchanged)
 			}
@@ -786,6 +815,7 @@ func publish(store string, sources []source, cur []*ckpt, quiet time.Duration, s
 		row := stSource{Author: s.key.Author, Machine: s.key.Machine, Harness: s.key.Harness, UpdatedMs: s.src.UpdatedMs, Size: s.src.Size}
 		if c := cur[si]; c != nil {
 			cks = append(cks, *c)
+			from = append(from, si)
 			due = append(due, settleAll || s.src.UpdatedMs <= newest-quiet.Milliseconds())
 			touched = append(touched, outcomes[sourceKey(s.key)] > Unchanged)
 			row.Events = c.Rows
@@ -801,6 +831,10 @@ func publish(store string, sources []source, cur []*ckpt, quiet time.Duration, s
 		b, _ := json.Marshal(cks[i])
 		if err := writeFileAtomic(ckptPath(store, cks[i].Key), b); err != nil {
 			return CycleStats{}, deferred, err
+		}
+		if si := from[i]; si >= 0 {
+			c := cks[i]
+			cur[si] = &c
 		}
 	}
 	parts := planParts(cks)

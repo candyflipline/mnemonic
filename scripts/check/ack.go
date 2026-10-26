@@ -1,33 +1,20 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
 	"path/filepath"
 	"strings"
 )
 
 const (
-	storeDir   = "internal/store"
-	commitFile = "internal/store/commit.go"
+	storeDir = "internal/store"
 )
 
-// acks fails unless internal/store builds an Ack in exactly one place. While
-// commit.go still holds a `panic("not implemented")` stub there is no
-// constructor to count, so the check waits; remove that condition once the
-// store lane has merged.
+// acks fails unless internal/store builds an Ack in exactly one place.
 func acks() ([]string, error) {
-	commit, err := os.ReadFile(commitFile)
-	if err != nil {
-		return nil, err
-	}
-	if bytes.Contains(commit, []byte(`panic("not implemented")`)) {
-		return nil, nil
-	}
 	files, err := filepath.Glob(filepath.Join(storeDir, "*.go"))
 	if err != nil {
 		return nil, err
