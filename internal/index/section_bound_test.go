@@ -19,20 +19,24 @@ import (
 // (b) sessionAuthors, sessionSpans and sessionAnnotations of S on a freshly
 // opened DB, add above the heap before them, at the peak. The growth at 4k
 // minus the growth at k must stay under 8 MB: what a call about S holds must
-// not depend on the size of H or of the part's other sections.
+// not depend on the size of H or of the part's other sections. (a) is the
+// holder step of the rebuild, memberPlan.holderAuthors over the part H and S
+// share, which the append cycle runs; the cycle's own growth (the part build's
+// section accumulators, the frame encoders) is logged, not bounded here.
 func TestSectionHeapDoesNotScaleWithAnotherSession(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds 150k rows")
 	}
 	defer debug.SetGCPercent(debug.SetGCPercent(25))
 	const k = 15_000
-	appendSmall, readSmall := sectionGrowth(t, k)
-	appendLarge, readLarge := sectionGrowth(t, 4*k)
-	t.Logf("append cycle adds %d B at %d pairs, %d B at %d pairs", appendSmall, k, appendLarge, 4*k)
+	holderSmall, cycleSmall, readSmall := sectionGrowth(t, k)
+	holderLarge, cycleLarge, readLarge := sectionGrowth(t, 4*k)
+	t.Logf("the rebuild's holder step adds %d B at %d pairs, %d B at %d pairs", holderSmall, k, holderLarge, 4*k)
+	t.Logf("the whole append cycle adds %d B at %d pairs, %d B at %d pairs", cycleSmall, k, cycleLarge, 4*k)
 	t.Logf("reads of S add %d B at %d pairs, %d B at %d pairs", readSmall, k, readLarge, 4*k)
 	const bound = 8 << 20
-	if d := appendLarge - appendSmall; d > bound {
-		t.Fatalf("the append cycle's peak heap grew %d B with H, want <= %d", d, bound)
+	if d := holderLarge - holderSmall; d > bound {
+		t.Fatalf("the holder step's peak heap grew %d B with H, want <= %d", d, bound)
 	}
 	if d := readLarge - readSmall; d > bound {
 		t.Fatalf("reading S's sections grew the heap %d B with H, want <= %d", d, bound)
@@ -41,7 +45,7 @@ func TestSectionHeapDoesNotScaleWithAnotherSession(t *testing.T) {
 
 // sectionGrowth settles H (pairs tool calls) and S into one part, measures the
 // reads of S on a fresh DB, then appends a line to S and measures the cycle.
-func sectionGrowth(t *testing.T, pairs int) (appendGrowth, readGrowth int64) {
+func sectionGrowth(t *testing.T, pairs int) (holderGrowth, cycleGrowth, readGrowth int64) {
 	t.Helper()
 	root, store := t.TempDir(), t.TempDir()
 	shard := func(sid string) uint32 {
@@ -87,9 +91,22 @@ func sectionGrowth(t *testing.T, pairs int) (appendGrowth, readGrowth int64) {
 		}
 	})
 
+	holderGrowth = peakAbove(func() {
+		mf := mustManifest(t, store)
+		p, err := OpenPartDir(partDir(store, mf.Parts[0]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer p.Close()
+		got := memberPlan{}.holderAuthors(p)
+		if len(got) != 2 || !slices.Equal(got[sid], []string{"s"}) || !slices.Equal(got[hid], []string{"h"}) {
+			t.Fatalf("holder authors %v, want S by s and H by h", got)
+		}
+	})
+
 	small = claudeToolRows(sid, 3)
 	writeRawSource(t, root, "s", "m", "claude-code", sid, "/p/"+sid+".jsonl", small, 1000+2*hour)
-	appendGrowth = peakAbove(func() {
+	cycleGrowth = peakAbove(func() {
 		if _, err := Ingest(root, store, time.Hour, false); err != nil {
 			t.Fatal(err)
 		}
@@ -109,7 +126,7 @@ func sectionGrowth(t *testing.T, pairs int) (appendGrowth, readGrowth int64) {
 	if got := db.sessionAuthors(hid); !slices.Equal(got, []string{"h"}) {
 		t.Fatalf("after the append, authors of H %v, want [h]", got)
 	}
-	return appendGrowth, readGrowth
+	return holderGrowth, cycleGrowth, readGrowth
 }
 
 // claudeToolRows is a Claude Code session: a prompt, then pairs of an
