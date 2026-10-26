@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"slices"
 	"sort"
@@ -132,23 +133,39 @@ func (t Tokens) Context(ctx context.Context, token string) (context.Context, boo
 	return id.withContext(ctx), true
 }
 
+// ErrUnauthorized distinguishes an unknown token from a missing scope.
+var ErrUnauthorized = errors.New("unauthorized")
+
+// Check authenticates the authorization header, checks scopes, and attaches
+// the token identity to ctx. Both HTTP and gRPC use this one policy.
+func (t Tokens) Check(ctx context.Context, authorization string, need ...Scope) (context.Context, error) {
+	token, bearer := strings.CutPrefix(authorization, "Bearer ")
+	ctx, known := t.Context(ctx, token)
+	if !bearer || !known {
+		return ctx, ErrUnauthorized
+	}
+	id, _ := From(ctx)
+	for _, s := range need {
+		if !id.Can(s) {
+			return ctx, errors.New("token lacks scope " + string(s))
+		}
+	}
+	return ctx, nil
+}
+
 // Require rejects a request without a known bearer token (401) or whose
 // token lacks one of need (403), and puts the token's Identity on its ctx.
 func (t Tokens) Require(need ...Scope) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			token, bearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-			ctx, known := t.Context(r.Context(), token)
-			if !bearer || !known {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			id, _ := From(ctx)
-			for _, s := range need {
-				if !id.Can(s) {
-					http.Error(w, "token lacks scope "+string(s), http.StatusForbidden)
-					return
+			ctx, err := t.Check(r.Context(), r.Header.Get("Authorization"), need...)
+			if err != nil {
+				code := http.StatusForbidden
+				if errors.Is(err, ErrUnauthorized) {
+					code = http.StatusUnauthorized
 				}
+				http.Error(w, err.Error(), code)
+				return
 			}
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})

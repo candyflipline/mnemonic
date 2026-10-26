@@ -10,6 +10,7 @@ import (
 
 const validServerToml = `data_dir = "/var/lib/mnemonic"
 listen = "127.0.0.1:8740"
+push_listen = "127.0.0.1:8741"
 
 [[tokens]]
 author = "chris"
@@ -32,8 +33,9 @@ func TestLoadServer(t *testing.T) {
 			t.Fatal(err)
 		}
 		want := Server{
-			DataDir: "/var/lib/mnemonic",
-			Listen:  "127.0.0.1:8740",
+			DataDir:    "/var/lib/mnemonic",
+			Listen:     "127.0.0.1:8740",
+			PushListen: "127.0.0.1:8741",
 			Tokens: []TokenEntry{{
 				Author: "chris",
 				SHA256: "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
@@ -47,7 +49,7 @@ func TestLoadServer(t *testing.T) {
 	for name, body := range map[string]string{
 		"empty data_dir": strings.Replace(validServerToml, `/var/lib/mnemonic`, ``, 1),
 		"empty listen":   strings.Replace(validServerToml, "127.0.0.1:8740", `""`, 1),
-		"no tokens":      "data_dir = \"/tmp\"\nlisten = \"127.0.0.1:8740\"\n",
+		"no tokens":      "data_dir = \"/tmp\"\nlisten = \"127.0.0.1:8740\"\npush_listen = \"127.0.0.1:8741\"\n",
 		"empty author": strings.Replace(validServerToml,
 			`author = "chris"`, `author = ""`, 1),
 		"short sha256": strings.Replace(validServerToml,

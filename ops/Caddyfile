@@ -4,7 +4,7 @@
 	# cap and no compression, and responses flush at once so acks arrive when sent.
 	@push path /mnemonic.push.v1.Push/*
 	handle @push {
-		reverse_proxy h2c://host.docker.internal:8740 {
+		reverse_proxy h2c://host.docker.internal:8741 {
 			flush_interval -1
 		}
 	}

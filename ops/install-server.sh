@@ -28,6 +28,7 @@ if [[ ! -f /etc/mnemonic/server.toml ]]; then
 	cat > /etc/mnemonic/server.toml <<'EOF'
 data_dir = "/var/lib/mnemonic"
 listen   = "127.0.0.1:8740"
+push_listen = "127.0.0.1:8741"
 
 # One block per teammate, from: mnemonic token new --author <name>
 # [[tokens]]
