@@ -136,7 +136,7 @@ const (
 // parser version bump leaves sources for the sweep: cycles then run back to
 // back, each parsing stale sources under the sweep budget, until none are
 // left.
-func (s *Server) Run(ctx context.Context) {
+func (s *Server) Run(ctx context.Context) error {
 	changed := s.st.Changed()
 	pushPending := func() bool { return len(changed) > 0 }
 	s.cycle("boot")
@@ -149,7 +149,7 @@ func (s *Server) Run(ctx context.Context) {
 			reason = "settle"
 			select {
 			case <-ctx.Done():
-				return
+				return nil
 			case <-changed:
 				reason = "put"
 				settle(ctx, changed)
@@ -157,7 +157,7 @@ func (s *Server) Run(ctx context.Context) {
 			}
 		}
 		if ctx.Err() != nil {
-			return
+			return nil
 		}
 		if reason == "settle" {
 			settled = time.Now()
