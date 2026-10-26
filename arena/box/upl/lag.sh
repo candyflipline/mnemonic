@@ -51,6 +51,7 @@
 #   PUSH_PORT       the final tree's gRPC listener (server.toml push_listen, required
 #                   there); the client's server URL then points at it.
 #   ack_ms and index_ms print median, min, max, p95, p99 (nearest rank).
+#   ROWS            JSONL lines each probe appends in its one write(2) (default 1).
 set -eu
 
 BIN=${1:?usage: lag.sh BIN DIR}
@@ -89,9 +90,10 @@ token_file = "$CFG/token"
 machine = "$MACHINE"
 CFGEOF
 
-python3 -u -I - "$BIN" "$DIR" "$CFG" "$HOME_DIR" "$P" "$N" "$SPACING" "$PORT" "$MACHINE" "$AUTHOR" "$QUIET_MAX" "${SWEEP:-0}" "${STRACE_OPENAT:-0}" <<'PYEOF'
+python3 -u -I - "$BIN" "$DIR" "$CFG" "$HOME_DIR" "$P" "$N" "$SPACING" "$PORT" "$MACHINE" "$AUTHOR" "$QUIET_MAX" "${SWEEP:-0}" "${STRACE_OPENAT:-0}" "${ROWS:-1}" <<'PYEOF'
 import hashlib, json, os, re, signal, statistics, subprocess, sys, threading, time
-bin_, data, cfg, home, pfx, n, spacing, port, machine, author, quiet_max, sweep, stropen = sys.argv[1:14]
+bin_, data, cfg, home, pfx, n, spacing, port, machine, author, quiet_max, sweep, stropen, nrows = sys.argv[1:15]
+nrows = int(nrows)
 sweep, stropen = sweep == "1", stropen == "1"
 n, spacing, quiet_max = int(n), float(spacing), float(quiet_max)
 probe = os.path.join(home, ".claude/projects/lagprobe/lag-%d.jsonl" % int(time.time()))
@@ -211,7 +213,7 @@ try:
         gap = prev + spacing - time.time()
         if gap > 0:
             time.sleep(gap)
-        b = line(i)
+        b = line(i) if nrows == 1 else b"".join(line(10000 + i * 100 + r) for r in range(nrows))
         t0 = time.time()
         os.write(fd, b)
         total += len(b)
