@@ -3,12 +3,14 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.mnemonic.push</string>
+	<string>{{.Label}}</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>{{.Exe}}</string>
 		<string>push</string>
 		<string>--watch</string>
+		<string>--config</string>
+		<string>{{.Home}}/.mnemonic/config.toml</string>
 	</array>
 	<key>KeepAlive</key>
 	<true/>
