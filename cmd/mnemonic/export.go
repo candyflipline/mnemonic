@@ -3,8 +3,8 @@
 package main
 
 import (
+	"bufio"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -103,76 +103,84 @@ func exportCmd(args []string) error {
 	db, release := ix.Snapshot()
 	defer release()
 
-	var body []byte
+	w := &outFile{path: *out}
 	switch kind {
 	case "atif":
-		if body, err = export.MarshalATIF(db, sessionID, hidden); err == nil {
-			body = indent(body)
-		}
+		err = export.WriteATIF(w, db, sessionID, hidden)
 	case "otlp":
-		var doc any
-		if doc, err = export.OTLP(db, sessionID, hidden); err == nil {
-			body, err = json.MarshalIndent(doc, "", "  ")
-		}
+		err = export.WriteOTLP(w, db, sessionID, hidden)
 	case "dataset":
 		f, parseErr := parseAnnotation(*annotation)
 		if parseErr != nil {
 			return parseErr
 		}
-		rows, skipped, dsErr := export.Dataset(db, f, *perTask, hidden)
+		var skipped []export.SessionError
+		skipped, err = export.Dataset(w, db, f, *perTask, hidden)
 		for _, s := range skipped {
 			fmt.Fprintf(os.Stderr, "export: skipped session %s: %v\n", s.SessionID, s.Err)
 		}
-		if dsErr != nil {
-			return dsErr
-		}
-		body = datasetLines(rows)
-	default:
-		err = fmt.Errorf("export: unknown kind %q", kind)
 	}
-	if err != nil {
-		return err
-	}
-	return writeOut(*out, body)
+	return w.finish(err)
 }
 
-// indent makes a single-session document readable on a terminal.
-func indent(body []byte) []byte {
-	var doc any
-	dec := json.NewDecoder(strings.NewReader(string(body)))
-	dec.UseNumber()
-	if err := dec.Decode(&doc); err != nil {
-		return body
-	}
-	out, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return body
-	}
-	return out
+// outFile is --out, or stdout for "" and "-", written through a buffer. The
+// file is created at the first write, or empty when an export that wrote
+// nothing succeeds; an export that fails after writing removes it. Stdout gets
+// a final newline when the export did not end in one.
+type outFile struct {
+	path string
+	f    *os.File
+	buf  *bufio.Writer
+	last byte
 }
 
-func datasetLines(rows []export.DatasetRow) []byte {
-	var b strings.Builder
-	for _, row := range rows {
-		line, err := json.Marshal(row)
+func (o *outFile) toStdout() bool { return o.path == "" || o.path == "-" }
+
+func (o *outFile) open() error {
+	if o.buf != nil {
+		return nil
+	}
+	dst := os.Stdout
+	if !o.toStdout() {
+		f, err := os.OpenFile(o.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 		if err != nil {
-			continue
+			return err
 		}
-		b.Write(line)
-		b.WriteByte('\n')
+		o.f, dst = f, f
 	}
-	return []byte(b.String())
+	o.buf = bufio.NewWriterSize(dst, 1<<16)
+	return nil
 }
 
-func writeOut(path string, body []byte) error {
-	if path == "" || path == "-" {
-		_, err := os.Stdout.Write(body)
-		if err == nil && len(body) > 0 && body[len(body)-1] != '\n' {
-			_, err = os.Stdout.WriteString("\n")
-		}
-		return err
+func (o *outFile) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
 	}
-	return os.WriteFile(path, body, 0o644)
+	if err := o.open(); err != nil {
+		return 0, err
+	}
+	o.last = p[len(p)-1]
+	return o.buf.Write(p)
+}
+
+func (o *outFile) finish(err error) error {
+	if err == nil {
+		if err = o.open(); err == nil && o.toStdout() && o.last != 0 && o.last != '\n' {
+			err = o.buf.WriteByte('\n')
+		}
+		if err == nil {
+			err = o.buf.Flush()
+		}
+	}
+	if o.f != nil {
+		if cerr := o.f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			os.Remove(o.path)
+		}
+	}
+	return err
 }
 
 // parseAnnotation splits --annotation's name[=value].

@@ -1,11 +1,14 @@
 package export
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -94,8 +97,12 @@ func TestFixtureExports(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			db := engineDB(t, tc.fixture)
-			traj, err := ATIF(db, tc.session, nil)
-			if err != nil {
+			var b bytes.Buffer
+			if err := WriteATIF(&b, db, tc.session, nil); err != nil {
+				t.Fatal(err)
+			}
+			var traj Trajectory
+			if err := json.Unmarshal(b.Bytes(), &traj); err != nil {
 				t.Fatal(err)
 			}
 			if len(traj.Steps) != tc.steps {
@@ -112,11 +119,7 @@ func TestFixtureExports(t *testing.T) {
 					t.Fatalf("step %d = %+v, want %+v", i+1, got, w)
 				}
 			}
-			b, err := json.Marshal(traj)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if msgs := ValidateJSON(b); len(msgs) != 0 {
+			if msgs := ValidateJSON(b.Bytes()); len(msgs) != 0 {
 				t.Fatalf("validator rejected the export:\n%s", strings.Join(msgs, "\n"))
 			}
 		})
@@ -168,8 +171,12 @@ func TestFixtureExports(t *testing.T) {
 
 	t.Run("otlp-claude", func(t *testing.T) {
 		db := engineDB(t, [2]string{"claude-code", "session.jsonl"})
-		doc, err := OTLP(db, "7c666c01-d38e-4658-8650-854ffb5b626e", nil)
-		if err != nil {
+		var b bytes.Buffer
+		if err := WriteOTLP(&b, db, "7c666c01-d38e-4658-8650-854ffb5b626e", nil); err != nil {
+			t.Fatal(err)
+		}
+		var doc otlpRequest
+		if err := json.Unmarshal(b.Bytes(), &doc); err != nil {
 			t.Fatal(err)
 		}
 		spans := doc.ResourceSpans[0].ScopeSpans[0].Spans
@@ -210,14 +217,19 @@ func TestRequestsSplitAgentSteps(t *testing.T) {
 		{EventTime: at, ActorKind: "tool", EventKind: "tool_result", ToolCallID: "call_1", TextContent: "file body"},
 		{EventTime: at, ActorKind: "assistant", EventKind: "message", RequestID: "req-2", TextContent: "done", InputTokens: 200, OutputTokens: 9},
 	}
-	traj := buildTrajectory("s1", "claude-code", evs)
+	traj := &trajectory{session: session{id: "s1", harness: "claude-code", rows: slices.Values(evs)}}
+	traj.plan, traj.last = planSteps(traj.harness, traj.rows)
+	var steps []Step
+	if err := traj.eachStep(func(s *Step) error { steps = append(steps, *s); return nil }); err != nil {
+		t.Fatal(err)
+	}
 	type stepGot struct {
 		source, message string
 		calls, results  int
 		prompt          uint64
 	}
 	var got []stepGot
-	for _, s := range traj.Steps {
+	for _, s := range steps {
 		g := stepGot{source: s.Source, message: s.Message, calls: len(s.ToolCalls)}
 		if s.Observation != nil {
 			g.results = len(s.Observation.Results)
@@ -231,7 +243,7 @@ func TestRequestsSplitAgentSteps(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("steps = %+v, want %+v", got, want)
 	}
-	if id := traj.Steps[1].Observation.Results[0].SourceCallID; id != "call_1" {
+	if id := steps[1].Observation.Results[0].SourceCallID; id != "call_1" {
 		t.Fatalf("result source_call_id = %q, want call_1", id)
 	}
 }
@@ -242,10 +254,10 @@ func TestDeletedSessionRefused(t *testing.T) {
 	const session = "7c666c01-d38e-4658-8650-854ffb5b626e"
 	db := engineDB(t, [2]string{"claude-code", "session.jsonl"})
 	hidden := map[string]bool{session: true}
-	if _, err := ATIF(db, session, hidden); !errors.Is(err, ErrSessionNotFound) {
+	if err := WriteATIF(io.Discard, db, session, hidden); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("ATIF of a deleted session: %v, want %v", err, ErrSessionNotFound)
 	}
-	if _, err := OTLP(db, session, hidden); !errors.Is(err, ErrSessionNotFound) {
+	if err := WriteOTLP(io.Discard, db, session, hidden); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("OTLP of a deleted session: %v, want %v", err, ErrSessionNotFound)
 	}
 }
