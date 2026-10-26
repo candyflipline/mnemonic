@@ -72,7 +72,7 @@ func (a adapter) put(w http.ResponseWriter, r *http.Request) {
 	src, op, err := parse(author, machine, harness, srcID, offset, q.Get("head_hash"), q.Get("source_name"), q.Get("path"), rawEnd, body)
 	if err != nil {
 		code := http.StatusBadRequest
-		if errors.Is(err, errReserved) {
+		if errors.Is(err, store.ErrReserved) {
 			code = http.StatusForbidden
 		}
 		http.Error(w, err.Error(), code)

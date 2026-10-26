@@ -33,7 +33,6 @@ const (
 
 var (
 	errBadSegment = errors.New("bad path segment")
-	errReserved   = errors.New("machine or harness is reserved for server-owned sources")
 )
 
 // Mount serves Push.Sync and the adapter routes on mux, all behind the push
@@ -261,7 +260,7 @@ func causeOr(ctx context.Context, err error) error {
 }
 
 func editCode(err error) codes.Code {
-	if errors.Is(err, errReserved) {
+	if errors.Is(err, store.ErrReserved) {
 		return codes.PermissionDenied
 	}
 	return codes.InvalidArgument
@@ -299,7 +298,7 @@ func parse(author, machine, harness, srcID string, offset int64, headHash, sourc
 	}
 	src, err := store.NewClientSource(author, machine, harness, srcID)
 	if err != nil {
-		return store.ClientSource{}, nil, errReserved
+		return store.ClientSource{}, nil, err
 	}
 	return src, op, nil
 }

@@ -64,7 +64,11 @@ func TestIngestPlainReportsToolRecords(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stStore := &store.Store{DataDir: dataDir}
+	stStore, err := store.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stStore.Close()
 	if _, duplicate, err := stStore.Append(store.Today(author, schema.AnnotationHarness, ""), "", append(line, '\n')); err != nil || duplicate {
 		t.Fatalf("append annotation: duplicate=%v err=%v", duplicate, err)
 	}
@@ -120,7 +124,12 @@ func TestAnnotateStoresOnlyRedactedText(t *testing.T) {
 	if !ok {
 		t.Fatal("token")
 	}
-	ctx = store.WithStore(ctx, &store.Store{DataDir: dir})
+	stc, err := store.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stc.Close()
+	ctx = store.WithStore(ctx, stc)
 
 	data, text, err := Call(ctx, db, "annotate", args)
 	if err != nil {

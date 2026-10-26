@@ -1,11 +1,8 @@
 package store
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"fmt"
-	"io/fs"
 	"slices"
 	"strings"
 	"time"
@@ -70,91 +67,16 @@ func (src ServerSource) validate() error {
 	return nil
 }
 
-// Append adds lines, whole lines each ending in '\n', to the server-owned
-// source src, creating it when missing, and wakes converge. A non-empty
-// requestKey makes it idempotent: a key already applied to src, or to the day
-// before it, changes nothing and reports duplicate. An empty requestKey means
-// no dedup: the lines are appended and nothing is recorded in Applied, for a
-// caller whose events dedup on their own uid and whose volume would grow the
-// manifest without bound. It holds the day before's key lock and
-// then src's, always in that order, so a retry across midnight cannot miss a
-// key still in flight on the day before. The manifest is written last and
-// records the applied keys, so a crash before it leaves the key unapplied and
-// the retry truncates the torn frame and writes it again.
-func (s *Store) Append(src ServerSource, requestKey string, lines []byte) (_ wire.Source, duplicate bool, _ error) {
-	if err := src.validate(); err != nil {
-		return wire.Source{}, false, err
-	}
-	if len(lines) == 0 || lines[len(lines)-1] != '\n' {
-		return wire.Source{}, false, errors.New("store: body must be non-empty whole lines")
-	}
-	prev := src
-	prev.Day = src.Day.AddDate(0, 0, -1)
-	defer s.lockKey(prev.key())()
-	k := src.key()
-	defer s.lockKey(k)()
-
-	switch pm, err := readManifest(prev.key().Manifest(s.DataDir)); {
-	case errors.Is(err, fs.ErrNotExist):
-	case err != nil:
-		return wire.Source{}, false, err
-	case requestKey != "" && slices.Contains(pm.Applied, requestKey):
-		return pm.Source, true, nil
-	}
-
-	m, err := readManifest(k.Manifest(s.DataDir))
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		zst, err := writeZst(k.Raw(s.DataDir), lines)
-		if err != nil {
-			return wire.Source{}, false, err
-		}
-		first, _, _ := bytes.Cut(lines, []byte{'\n'})
-		m = &manifestBody{
-			Source: wire.Source{
-				SrcID:      k.SrcID,
-				Harness:    k.Harness,
-				SourceName: src.name(),
-				Path:       src.name(),
-				Size:       int64(len(lines)),
-				HeadHash:   wire.HeadHash(lines[:len(first)+1]),
-				UpdatedMs:  time.Now().UnixMilli(),
-			},
-			ZstSize: zst,
-		}
-	case err != nil:
-		return wire.Source{}, false, err
-	case requestKey != "" && slices.Contains(m.Applied, requestKey):
-		return m.Source, true, nil
-	default:
-		zst, err := appendZst(k.Raw(s.DataDir), m.ZstSize, lines)
-		if err != nil {
-			return wire.Source{}, false, err
-		}
-		m.Size += int64(len(lines))
-		m.UpdatedMs = max(time.Now().UnixMilli(), m.UpdatedMs+1)
-		m.ZstSize = zst
-	}
-	if requestKey != "" {
-		m.Applied = append(m.Applied, requestKey)
-	}
-	if err := writeManifest(k.Manifest(s.DataDir), *m); err != nil {
-		return wire.Source{}, false, err
-	}
-	s.wake()
-	return m.Source, false, nil
-}
-
 type ctxKey struct{}
 
 // WithStore puts st on ctx, the way an MCP tool reaches Append; the caller's
 // author is auth.Author on the same ctx.
-func WithStore(ctx context.Context, st *Store) context.Context {
+func WithStore(ctx context.Context, st *Committer) context.Context {
 	return context.WithValue(ctx, ctxKey{}, st)
 }
 
-// From is the Store WithStore put on ctx, nil when there is none.
-func From(ctx context.Context) *Store {
-	st, _ := ctx.Value(ctxKey{}).(*Store)
+// From is the Committer WithStore put on ctx, nil when there is none.
+func From(ctx context.Context) *Committer {
+	st, _ := ctx.Value(ctxKey{}).(*Committer)
 	return st
 }
