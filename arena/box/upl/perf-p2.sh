@@ -31,9 +31,16 @@
 # prints the share of samples under archiveSetFor and buildPart.
 # Counts, sizes and timings only. Run under the box lock:
 #   flock /var/lib/mnu/box.lock sh perf-p2.sh BIN DIR
+# RESET=1 runs on a fresh overlay over the prepped DIR.up (DIR unmounted), so
+# each run starts from the same settled store. SETTLE=1 then stops serve and
+# runs one `index ingest -settle` on that run's store under MemoryMax=SETTLE_MEM:
+# after two rounds the targets' hot parts are deltas, and this settle cycle is
+# the one whose rematerialize opened the holder once per member (wall, max RSS,
+# exit status or the killing signal printed).
 # Env: BOX (/var/lib/mnu), SRC ($BOX/http-1), OUT ($BOX/out), N (6),
 #      SPACING (20), PORT (7795), PERF (0), CH_MAX (all), TARGETS (9),
-#      MEM (8G), FLOOR (15).
+#      MEM (8G), FLOOR (15), RESET (0), SETTLE (0), SETTLE_MEM (16G),
+#      PREP_ONLY (0: 1 stops after the prep).
 set -eu
 
 BIN=${1:?usage: perf-p2.sh BIN DIR}
@@ -45,6 +52,9 @@ N=${N:-6}
 SPACING=${SPACING:-20}
 PORT=${PORT:-7795}
 PERF=${PERF:-0}
+RESET=${RESET:-0}
+SETTLE=${SETTLE:-0}
+SETTLE_MEM=${SETTLE_MEM:-16G}
 CH_MAX=${CH_MAX:-1000000000000}
 TARGETS=${TARGETS:-9}
 MEM=${MEM:-8G}
@@ -58,11 +68,24 @@ avail=$(awk '/MemAvailable/ {print int($2/1048576)}' /proc/meminfo)
 [ "$avail" -ge 8 ] || { echo "MemAvailable ${avail} GB < 8 GB, refusing" >&2; exit 2; }
 
 freegb() { df --output=avail -B1G / | tail -1 | tr -d ' '; }
-if ! mountpoint -q "$DIR"; then
+RUN=$DIR
+if [ "$RESET" = 1 ]; then
+	[ -e "$DIR.up/.p2-settled" ] || { echo "RESET=1 needs a prepped $DIR (run once without RESET)" >&2; exit 2; }
+	! mountpoint -q "$DIR" || umount "$DIR"
+	RUN=$DIR-r$STAMP
+	mkdir -p "$RUN" "$RUN.up" "$RUN.work"
+	mount -t overlay overlay -o "lowerdir=$DIR.up:$SRC,upperdir=$RUN.up,workdir=$RUN.work" "$RUN"
+	mkdir -p "$P-cfg"
+	chmod 700 "$P-cfg"
+	sed "s#^data_dir = .*#data_dir = \"$RUN\"#" "$RUN/.p2-cfg/server.toml" > "$P-cfg/server.toml"
+	cp "$RUN/.p2-cfg/target" "$RUN/.p2-cfg/token.out" "$P-cfg/"
+	CFG=$P-cfg
+	echo "reset: fresh overlay $RUN over the prepped $DIR.up"
+elif ! mountpoint -q "$DIR"; then
 	mkdir -p "$DIR" "$DIR.up" "$DIR.work"
 	mount -t overlay overlay -o "lowerdir=$SRC,upperdir=$DIR.up,workdir=$DIR.work" "$DIR"
 fi
-if [ ! -e "$DIR/.p2-settled" ]; then
+if [ "$RESET" != 1 ] && [ ! -e "$DIR/.p2-settled" ]; then
 	mkdir -p "$DIR/events"
 	cp "$BOX/events/.parser-version" "$DIR/events/" 2>/dev/null || true
 	find "$BOX/events" -name 'ch-*.parquet' -size -"$CH_MAX"c | while IFS= read -r f; do
@@ -71,9 +94,9 @@ if [ ! -e "$DIR/.p2-settled" ]; then
 		[ -e "$DIR/events/$rel" ] || ln -s "$f" "$DIR/events/$rel"
 	done
 fi
-CHB=$(find -L "$DIR/events" -name 'ch-*.parquet' -printf '%s\n' | awk '{s+=$1} END {print s+0}')
-echo "ch files: $(find "$DIR/events" -name 'ch-*.parquet' | wc -l) of $(find "$BOX/events" -name 'ch-*.parquet' | wc -l), bytes $CHB of $(find "$BOX/events" -name 'ch-*.parquet' -printf '%s\n' | awk '{s+=$1} END {print s+0}')"
-if [ ! -e "$DIR/.p2-settled" ]; then
+CHB=$(find -L "$RUN/events" -name 'ch-*.parquet' -printf '%s\n' | awk '{s+=$1} END {print s+0}')
+echo "ch files: $(find "$RUN/events" -name 'ch-*.parquet' | wc -l) of $(find "$BOX/events" -name 'ch-*.parquet' | wc -l), bytes $CHB of $(find "$BOX/events" -name 'ch-*.parquet' -printf '%s\n' | awk '{s+=$1} END {print s+0}')"
+if [ ! -e "$RUN/.p2-settled" ]; then
 	need=$((FLOOR + 2 * CHB / 1000000000 + 4))
 	[ "$(freegb)" -ge "$need" ] || { echo "df: $(freegb) GB free < $need (FLOOR + twice the ch bytes + 4)" >&2; exit 2; }
 	PU=p2-prep-$STAMP
@@ -94,7 +117,7 @@ if [ ! -e "$DIR/.p2-settled" ]; then
 	touch "$DIR/.p2-settled"
 fi
 
-CFG=$DIR/.p2-cfg
+[ "$RESET" = 1 ] || CFG=$DIR/.p2-cfg
 if [ ! -e "$CFG/server.toml" ]; then
 	mkdir -p "$CFG"
 	chmod 700 "$CFG"
@@ -130,7 +153,8 @@ PY
 	} > "$CFG/server.toml"
 fi
 
-python3 -u -I - "$BIN" "$DIR" "$CFG" "$P" "$N" "$SPACING" "$PORT" "$PERF" "$MEM" "p2-serve-$STAMP" <<'PY'
+[ "${PREP_ONLY:-0}" != 1 ] || exit 0
+python3 -u -I - "$BIN" "$RUN" "$CFG" "$P" "$N" "$SPACING" "$PORT" "$PERF" "$MEM" "p2-serve-$STAMP" <<'PY'
 import json, os, queue, re, statistics, subprocess, sys, threading, time, urllib.request, uuid
 BIN, DIR, CFG, P, N, SPACING, PORT, PERF, MEM, UNIT = sys.argv[1:11]
 N, SPACING, PERF = int(N), int(SPACING), PERF == "1"
@@ -268,3 +292,16 @@ if prof:
         if re.search(r"archiveSetFor|buildPart|ingestArchive|restreamMembers|rematerialize|\.cycle$|Ingest$|windowSHA", l):
             print("perf " + " ".join(l.split()))
 PY
+
+if [ "$SETTLE" = 1 ]; then
+	SU=p2-settle-$STAMP
+	systemd-run --unit="$SU" --quiet -p MemoryMax="$SETTLE_MEM" -p WorkingDirectory=/ --setenv=GOMAXPROCS=4 \
+		/usr/bin/time.gnu -v -o "$P-settle.time" "$BIN" index ingest -root "$RUN" -store "$RUN/index" -settle
+	while systemctl is-active -q "$SU"; do
+		sleep 5
+	done
+	echo "settle cycle (index ingest -settle, GOMAXPROCS=4, MemoryMax=$SETTLE_MEM):"
+	journalctl -u "$SU" -o cat --no-pager | grep -E '^ingest:' || true
+	grep -E 'Command terminated|Exit status|Elapsed .wall|Maximum resident|Percent of CPU' "$P-settle.time"
+fi
+[ "$RESET" != 1 ] || umount "$RUN"
