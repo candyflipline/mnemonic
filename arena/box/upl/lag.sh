@@ -9,7 +9,10 @@
 # Starts `BIN serve` on DIR (GOMAXPROCS=4) and waits for a quiet cycle (changed
 # = resumed+fresh+reparsed = 0, stale = 0), starts `BIN push --watch` on a fresh
 # HOME holding one probe file under .claude/projects/, waits for its first push
-# and the cycle that counts it, then N times (spaced >= SPACING s from the
+# and the cycle that counts it, appends warm-up lines until a counting cycle takes
+# under 20 s (the first put cycles after boot convert every source quiet for
+# settleSource, 15 min, from its hot part to a cold one, minutes of work that is
+# not the steady state), then N times (spaced >= SPACING s from the
 # previous write): append one JSONL line to the probe file with one write(2),
 # and record, from that write
 #   ack_ms    until DIR/raw/.../<src_id>.json shows the new Size (manifest polled
@@ -25,7 +28,8 @@
 # alongside to $OUT/base-<name>-lag-*.txt. Hold the box lock for the whole run:
 #   flock /var/lib/mnu/box.lock sh lag.sh BIN DIR
 # Env: BOX (/var/lib/mnu), OUT ($BOX/out), N (10), SPACING (15), PORT (7793),
-#      MACHINE (plainbox), AUTHOR (uplbox), QUIET_MAX (3600 s wait for the quiet cycle).
+#      MACHINE (plainbox), AUTHOR (uplbox), QUIET_MAX (3600 s wait for the quiet cycle),
+#      TAG (suffix for the output and HOME names of a repeat run on the same DIR).
 set -eu
 
 BIN=${1:?usage: lag.sh BIN DIR}
@@ -39,10 +43,10 @@ MACHINE=${MACHINE:-plainbox}
 AUTHOR=${AUTHOR:-uplbox}
 QUIET_MAX=${QUIET_MAX:-3600}
 NAME=$(basename "$DIR")
-P=$OUT/base-$NAME-lag
+P=$OUT/base-$NAME-lag${TAG:+-$TAG}
 [ -x "$BIN" ] || { echo "not executable: $BIN" >&2; exit 2; }
 [ -d "$DIR/raw" ] || { echo "$DIR/raw missing: lag.sh needs a populated store" >&2; exit 2; }
-HOME_DIR=$BOX/laghome-$NAME
+HOME_DIR=$BOX/laghome-$NAME${TAG:+-$TAG}
 CFG=$P-cfg
 [ -e "$HOME_DIR" ] && { echo "$HOME_DIR exists" >&2; exit 1; }
 [ -e "$CFG" ] && { echo "$CFG exists" >&2; exit 1; }
@@ -67,7 +71,7 @@ python3 -u -I - "$BIN" "$DIR" "$CFG" "$HOME_DIR" "$P" "$N" "$SPACING" "$PORT" "$
 import hashlib, json, os, re, signal, statistics, subprocess, sys, threading, time
 bin_, data, cfg, home, pfx, n, spacing, port, machine, author, quiet_max = sys.argv[1:12]
 n, spacing, quiet_max = int(n), float(spacing), float(quiet_max)
-probe = os.path.join(home, ".claude/projects/lagprobe/lag.jsonl")
+probe = os.path.join(home, ".claude/projects/lagprobe/lag-%d.jsonl" % int(time.time()))
 src = hashlib.sha256(probe.encode()).hexdigest()[:16]
 manifest = os.path.join(data, "raw", "author=" + author, "machine=" + machine, "harness=claude-code", src + ".json")
 
@@ -75,10 +79,13 @@ lines = []
 lock = threading.Lock()
 serve = subprocess.Popen([bin_, "serve", "--config", cfg + "/server.toml"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          env=dict(os.environ, GOMAXPROCS="4"), text=True, bufsize=1)
+servelog = open(pfx + "-serve.log", "w")
 def reader():
     for l in serve.stdout:
         with lock:
             lines.append((time.time(), l.rstrip("\n")))
+        servelog.write("%.3f %s" % (time.time(), l))
+        servelog.flush()
 threading.Thread(target=reader, daemon=True).start()
 
 CYC = re.compile(r"cycle (\w+): sources unchanged=(\d+) resumed=(\d+) fresh=(\d+) reparsed=(\d+) failed=(\d+) stale=(\d+);.* in ([0-9.]+)(ms|s|m[0-9.]*s?) err=(.*)$")
@@ -142,7 +149,21 @@ ps = subprocess.Popen(["pidstat", "-u", "-d", "-h", "-p", "%d,%d" % (serve.pid, 
 try:
     t_first = time.time()
     wait(lambda: manifest_size() >= total, 60, "first push of the probe")
-    wait(lambda: next((c for c in cycles() if c[0] > t_first and c[3] >= 1), None), 120, "the cycle that counts the first push")
+    wait(lambda: next((c for c in cycles() if c[0] > t_first and c[3] >= 1), None), 1800, "the cycle that counts the first push")
+    warm = []
+    for w in range(1, 7):
+        b = line(100 + w)
+        t0 = time.time()
+        os.write(fd, b)
+        total += len(b)
+        wait(lambda: manifest_size() >= total, 60, "warm-up ack")
+        cyc = wait(lambda: next((c for c in cycles() if c[0] > t0 and c[3] >= 1), None), 1800, "the warm-up cycle")
+        warm.append(cyc[5])
+        print("warmup\t%d\tcycle_s\t%.2f\tend_after_write_s\t%.1f" % (w, cyc[5], cyc[0] - t0))
+        sys.stdout.flush()
+        if cyc[5] < 20:
+            break
+        time.sleep(3)
     rows = []
     prev = time.time()
     for i in range(1, n + 1):
@@ -177,15 +198,15 @@ try:
         xs = sorted(r[k] for r in rows if r[k] is not None)
         if xs:
             print("%s\tmedian %.0f\tmin %.0f\tmax %.0f\tn %d of %d" % (name, statistics.median(xs), xs[0], xs[-1], len(xs), n))
-    cs = [c for c in cycles() if c[0] > qc[0]]
+    cs = [c for c in cycles() if c[0] > qc[0] and c[0] > t_first + 1]
     ds = sorted(c[5] for c in cs)
     if ds:
         print("cycle_s_after_quiet\tmedian %.2f\tmin %.2f\tmax %.2f\tn %d" % (statistics.median(ds), ds[0], ds[-1], len(ds)))
     print("cycle_err_not_nil\t%d" % len([c for c in cycles() if c[6] != "<nil>"]))
+finally:
     with open(pfx + "-cycles.txt", "w") as f:
         for c in cycles():
             f.write("%.3f\t%s\n" % (c[0], c[1][:300]))
-finally:
     for p in (push, serve):
         if p.poll() is None:
             p.send_signal(signal.SIGTERM)

@@ -20,6 +20,7 @@
 # on the client. Hold the box lock for the whole run:
 #   flock /var/lib/mnu/box.lock sh push-run.sh BIN DIR
 # Env: BOX (/var/lib/mnu), PH ($BOX/plainhome), OUT ($BOX/out), PORT (7791),
+#      QUIESCE (0; 1 waits, after the timing, for a cycle that changed nothing before stopping serve),
 #      MACHINE (plainbox), AUTHOR (uplbox), SERVE_PROCS (4: serve GOMAXPROCS),
 #      CLIENT_PROCS (unset: the Go default, every core), STRACE (1; 0 runs serve bare).
 set -eu
@@ -95,6 +96,15 @@ wait "$TPID" || RC=$?
 END=$(date +%s.%N)
 kill "$PST" "$VMS" 2>/dev/null || true
 wait "$PST" "$VMS" 2>/dev/null || true
+if [ "${QUIESCE:-0}" = 1 ]; then
+	# after the clock stopped: let serve index everything and stop on a clean
+	# shutdown, so a later serve on this store boots from a settled index
+	for _ in $(seq 1 360); do
+		last=$(grep 'cycle ' "$P-serve.log" | tail -1)
+		case $last in *"resumed=0 fresh=0 reparsed=0"*"stale=0;"*) break ;; esac
+		sleep 5
+	done
+fi
 kill -TERM "$SERVE"
 for _ in $(seq 1 120); do kill -0 "$LAUNCH" 2>/dev/null || break; sleep 1; done
 if kill -0 "$LAUNCH" 2>/dev/null; then echo "serve did not stop in 120 s" >&2; fi
