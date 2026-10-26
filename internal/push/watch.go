@@ -21,6 +21,9 @@ const (
 	flushWithin   = 5 * time.Second
 	errorRetryMin = 5 * time.Second
 	errorRetryMax = time.Minute
+	// reconcileEvery is local mode's (WatchSink) full rescan; the push
+	// stream needs none, because Welcome supplies the server's state.
+	reconcileEvery = 6 * time.Hour
 )
 
 const lostEvents = ""
@@ -117,6 +120,13 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 	var firstEvent time.Time
 	var window <-chan time.Time
 	retry := time.After(0)
+	var periodic <-chan time.Time
+	var periodicT *time.Timer
+	if w.sink != nil {
+		periodicT = time.NewTimer(reconcileEvery)
+		periodic = periodicT.C
+		defer periodicT.Stop()
+	}
 	var fresh, delivered bool
 	for {
 		var acks <-chan ack
@@ -154,6 +164,8 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 			}
 		case <-retry:
 			retry = nil
+		case <-periodic:
+			w.stale = true
 		case a := <-acks:
 			if err := w.up.consume(a); err != nil {
 				fmt.Fprintln(out, "push:", err)
@@ -192,6 +204,9 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 			w.stale = true
 		case w.stale:
 			st = w.reconcile(ctx)
+			if periodicT != nil {
+				periodicT.Reset(reconcileEvery)
+			}
 		default:
 			st = w.flush(ctx, dirty)
 		}
