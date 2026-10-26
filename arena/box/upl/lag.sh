@@ -63,7 +63,7 @@ token_file = "$CFG/token"
 machine = "$MACHINE"
 CFGEOF
 
-python3 -I - "$BIN" "$DIR" "$CFG" "$HOME_DIR" "$P" "$N" "$SPACING" "$PORT" "$MACHINE" "$AUTHOR" "$QUIET_MAX" <<'PYEOF'
+python3 -u -I - "$BIN" "$DIR" "$CFG" "$HOME_DIR" "$P" "$N" "$SPACING" "$PORT" "$MACHINE" "$AUTHOR" "$QUIET_MAX" <<'PYEOF'
 import hashlib, json, os, re, signal, statistics, subprocess, sys, threading, time
 bin_, data, cfg, home, pfx, n, spacing, port, machine, author, quiet_max = sys.argv[1:12]
 n, spacing, quiet_max = int(n), float(spacing), float(quiet_max)
