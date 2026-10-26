@@ -93,6 +93,10 @@ func (getTrace) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, str
 	if err != nil {
 		return nil, "", err
 	}
+	if n := db.sessionSpansSize(id.session); n > traceBudget && f.Opened(id.session) {
+		return nil, "", argErrorf("trace too large for get_trace: %d MB of spans (limit %d MB); export it with: mnemonic export otlp --data-dir <data dir> --session %s",
+			(n+1<<20-1)>>20, traceBudget>>20, a.SessionID)
+	}
 	spans := loadSpans(db, id.session, f)
 	res := traceResult{SessionID: a.SessionID, Tree: []*traceSpan{}}
 	res.Tree, res.Totals = buildTree(spans)

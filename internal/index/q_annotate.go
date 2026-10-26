@@ -231,12 +231,37 @@ func requireTarget(ctx context.Context, db *DB, session, spanID string) error {
 	if spanID == "" {
 		return nil
 	}
-	for _, s := range db.sessionSpans(session) {
-		if s.SpanID == spanID {
-			return nil
-		}
+	if sessionHasSpan(db, session, spanID) {
+		return nil
 	}
 	return argErrorf("span not found in the session")
+}
+
+// sessionHasSpan walks the session's raw spans array one element at a time,
+// so the check holds one span, not the session's spans.
+func sessionHasSpan(db *DB, session, spanID string) bool {
+	st, ok := db.part(session)
+	if !ok {
+		return false
+	}
+	raw := st.sessionSpansRaw(session)
+	if raw == nil {
+		return false
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if t, err := dec.Token(); err != nil || t != json.Delim('[') {
+		return false
+	}
+	for dec.More() {
+		var s struct{ SpanID string }
+		if dec.Decode(&s) != nil {
+			return false
+		}
+		if s.SpanID == spanID {
+			return true
+		}
+	}
+	return false
 }
 
 // sessionHasEvents reports whether the part holding session has a winner row

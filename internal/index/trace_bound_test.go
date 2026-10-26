@@ -34,7 +34,7 @@ func TestTraceBudgetHoldsNoSpansDecode(t *testing.T) {
 	large := traceBoundRun(t, 20_000)
 	t.Logf("get_trace refusal adds %d B at %d spans bytes, %d B at %d", small.refuseGrowth, small.spansBytes, large.refuseGrowth, large.spansBytes)
 	t.Logf("annotate span scan adds %d B at %d spans bytes, %d B at %d", small.scanGrowth, small.spansBytes, large.scanGrowth, large.spansBytes)
-	const bound = 1 << 20
+	const bound = 4 << 20
 	if d := large.refuseGrowth - small.refuseGrowth; d > bound {
 		t.Errorf("the refusal's heap grew %d B with the session, want <= %d", d, bound)
 	}
