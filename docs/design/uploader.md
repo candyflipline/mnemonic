@@ -155,7 +155,7 @@ States, in order. Each transition is a method on the previous state's type, and 
 |---|---|---|
 | queued (`request`) | `Submit` (frame encoded) | nothing |
 | planned | `plan(table, reqs, now)`, pure | nothing |
-| written | W1 `planned.write`: extends truncate raw to `before.ZstSize` and append frames; rewrites unlink the old manifest and write the new raw to a temp file; every after-manifest written to a temp file. No sync. | frames past zst_size, temp raws, temp manifests, unlinks, all possibly unsynced |
+| written | W1 `planned.write`: extends truncate raw to `before.ZstSize` and append frames; rewrites write the new raw to a temp file; every after-manifest written to a temp file; then, last, each rewrite's old manifest is unlinked. No sync. | frames past zst_size, temp raws, temp manifests, unlinks, all possibly unsynced |
 | durableData | B1 barrier | all of the above durable |
 | rawsLinked | W2a rename each temp raw over its raw, then B2 (skipped when the batch has no rewrite) | new raws linked and durable, rewrites still without a manifest |
 | committed | W2b rename each temp manifest, then B3 | every manifest durable: the commit point |
@@ -185,7 +185,7 @@ Nine crash points. A kill -9 keeps the page cache, so a write that returned surv
 | 8 | after B3, before acks | durable | Acks are lost; Welcome shows the new state; `decide` returns noop. Server-owned retries hit the request key (`Duplicate`). |
 | 9 | client kill -9 mid-stream | whatever batches committed; a gRPC message is never delivered in part | Requests already submitted still commit. On rerun, Welcome gives the sizes and the client cuts the rest from there. For a file that did not change, `firstChunk` lands on the same boundaries, so the frames are the same. |
 
-ENOSPC/EDQUOT in W1 (before B1): truncate every attempted extend back to its before `zst_size`, remove all batch temps (including the partial failing temp), and drop from the table every key whose rewrite already unlinked its manifest. Do not restore that manifest with a new write on a full disk: no manifest is the valid state in row 3, and the client replaces from 0. Empty directories are harmless. Cleanup is idempotent; any cleanup error is fatal. A kill during cleanup leaves only the states in rows 2–4, which `Open` and client retry already recover. No barrier or link is reordered, and no failed ticket is acked.
+ENOSPC/EDQUOT in W1 (before B1): truncate every attempted extend back to its before `zst_size` and remove all batch temps (including the partial failing temp). The unlinks come after every write in W1, so a write that fails has never unlinked a manifest: every source keeps its acked manifest and the table already describes the disk. Empty directories are harmless. Cleanup is idempotent; any cleanup error is fatal. A kill during cleanup leaves only the states in rows 2–4, which `Open` and client retry already recover. No barrier or link is reordered, and no failed ticket is acked.
 
 Every row ends in the bytes an uninterrupted run writes. Rows 2 and 5 rely on the rerun re-sending, which the client always does because Welcome still shows the old state. Row 7 relies on `Open`'s boot barrier (one syncfs on Linux, per-file and per-dir fsync elsewhere) after the temp sweep and before `Open` returns. `Open` neither truncates raw tails nor deletes raw files that lack a manifest: the next Extend truncates (`store.go:298`). Rows 3 and 4 rely on `Open`'s temp sweep, which today's code lacks (today a crash leaves temp files behind forever).
 
