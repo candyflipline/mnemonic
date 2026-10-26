@@ -1,8 +1,7 @@
-// Package intake is every transport onto the store's one write path: the
-// push stream (gRPC Push.Sync over h2c on the server's one listener) and,
-// until its expiry, the HTTP PUT and manifest adapter. Each parses its wire
-// into store types here, at the edge, and answers only with what
-// store.Ticket.Wait returned.
+// Package intake is the transport onto the store's one write path: the
+// push stream (gRPC Push.Sync over h2c on the server's one listener). It
+// parses its wire into store types here, at the edge, and answers only with
+// what store.Ticket.Wait returned.
 package intake
 
 import (
@@ -35,7 +34,7 @@ var (
 	errBadSegment = errors.New("bad path segment")
 )
 
-// Mount serves Push.Sync and the adapter routes on mux, all behind the push
+// Mount serves Push.Sync on mux, behind the push
 // scope (the bearer token rides as gRPC metadata "authorization", which is
 // the HTTP header Require already reads). The returned drain ends every live
 // stream with Unavailable and refuses new ones; call it when the HTTP server
@@ -46,7 +45,6 @@ func Mount(mux *http.ServeMux, st *store.Committer, tokens auth.Tokens) (drain f
 	pushpb.RegisterPushServer(gs, svc)
 	require := tokens.Require(auth.Push)
 	mux.Handle("POST /mnemonic.push.v1.Push/", require(gs))
-	mux.Handle("/v1/", require(newAdapter(st)))
 	return svc.drain
 }
 

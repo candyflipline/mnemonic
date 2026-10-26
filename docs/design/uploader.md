@@ -6,7 +6,9 @@ Candidate A of the `/architect` exploration, sketched on `lane/upl-arch-a` off m
 |---|---|
 | Proto and generated code | `internal/wire/pushpb/push.proto`, `push.pb.go`, `push_grpc.pb.go`, `gen.go` |
 | Committer, batch state machine, dirty set | `internal/store/commit.go`, `barrier_linux.go`, `barrier_other.go` |
-| Server transports (stream, HTTP adapter) | `internal/intake/intake.go`, `internal/intake/adapter.go` |
+| Server transport (stream) | `internal/intake/intake.go` |
+
+(The sketch's HTTP `PUT`/manifest `GET` adapter is not in the build: the PUT census found a single client ever (`users-mac-mini`), it moved to the stream, and the adapter was deleted in this deploy — the rollback pair is the 83b0042 server binary and that client's old one.)
 | Client stream | `internal/push/stream.go` |
 | Index cycle over a dirty set | `internal/index/lap.go` |
 
@@ -44,7 +46,7 @@ The server, in `server.New`, one line replacing the `/v1/` mount (`internal/serv
 
 ```go
 st, err := store.Open(dataDir)            // loads every manifest once, starts the committer
-intake.Mount(mux, st, tokens)             // Push.Sync over h2c + the HTTP adapter, push scope
+intake.Mount(mux, st, tokens)             // Push.Sync over h2c, push scope
 ```
 
 The server-owned writers do not change (`internal/otlp/receiver.go:132`, `internal/index/controls.go:175`, `internal/index/q_annotate.go:202`):
@@ -81,7 +83,7 @@ msg, err := ackOf(seq, a)           // takes a store.Ack; nothing else makes one
 - `store.Op` is a sum type: `Replace`, `Extend`, `Backfill`, plus the unexported `serverAppend` (`internal/store/commit.go`). It replaces the offset/body flag combinations `servePut` branches on (`store.go:138-162`). Only `ParseOp` builds a client op and only `ParseLines` builds `Lines`, so "non-empty whole lines" is checked once at the edge (per boundary-discipline).
 - `store.ClientSource` wraps a `layout.Key` whose segments are valid and not server-owned. `NewClientSource(author, ...)` is its only constructor. The 403 rule (`store.go:150-153`) lives there once for both transports.
 - `store.Ack` has unexported fields, and the zero value is invalid. Outside `store`, an Ack exists only as `Ticket.Wait` returns it, and `Wait` returns only after the batch passed its last barrier. Inside `store`, `committed.acks` is the one constructor, and `committed` is reachable only through `planned.write`, then `written.sync`, then `durableData.linkRaws`, then `rawsLinked.linkManifests`. That is C2 as a type (per type-discipline). A one-line check (`grep -c 'Ack{' internal/store/*.go` equals 1) keeps a second literal from appearing.
-- The committer's table, `map[layout.Key]*manifestBody`, is every source's manifest in memory, loaded once at `Open` (about 9k entries, a few MB). Disk manifests are its write-through persistence. The committer goroutine is the only writer; `Sources` reads it under an RWMutex for Welcome and the adapter's GET. This deletes the per-key lock map (`store.go:47-60`, never pruned) and the manifest read per append (`store.go:213`, `append.go:105`).
+- The committer's table, `map[layout.Key]*manifestBody`, is every source's manifest in memory, loaded once at `Open` (about 9k entries, a few MB). Disk manifests are its write-through persistence. The committer goroutine is the only writer; `Sources` reads it under an RWMutex for Welcome. This deletes the per-key lock map (`store.go:47-60`, never pruned) and the manifest read per append (`store.go:213`, `append.go:105`).
 - The dirty set `changes` is owned by the store: the committer adds a batch's keys after its last barrier, and the cycle takes the whole set by swap (`TakeChanged`). Failed parses are carried by the index's `Lap`, never handed back. Two actors, two pieces of state, merged when the cycle reads them (per separate-before-serializing).
 - `index.Lap` is the source list and checkpoints the boot listing read, kept in `listSources` order. Only `Index.Boot` makes one, so a dirty-set cycle cannot run before the full listing it depends on (per model-the-domain).
 
@@ -245,7 +247,7 @@ Blocking scaffold, first and alone: merge this sketch (proto, generated code, `g
 | Lane | Owns | Implements (seeded contract) | Gate |
 |---|---|---|---|
 | L1 store | `internal/store/*`, `cmd/mnemonic/local.go`; the one-token `*store.Store` -> `*store.Committer` rename in `internal/otlp/receiver.go`, `internal/index/controls.go`, `internal/index/q_annotate.go` (by `gofmt -r`) | `Open`, `Close`, `Submit`, `Append`, `Sources`, `Changed`, `TakeChanged`, `Ticket.Wait`, `Ack`, `ParseOp`, `ParseLines`, `NewClientSource`, the batch states, both barriers; deletes the old `Store` and its HTTP handlers | `go test ./internal/store` with one table test: three requests on one source in one batch give the literal frame bytes and manifest of three sequential PUTs at 83b0042 |
-| L2 intake + server | `internal/intake/*`, `internal/server/server.go`, `cmd/mnemonic/server.go`, `ops/Caddyfile` | `Mount`, `service.Sync`, `parseAppend`, `ackOf`, `welcome`, `adapter.ServeHTTP` (servePut and serveManifest moved verbatim), h2c `Protocols`, the `Run` loop over `Boot`/`Next`/`Changed` | `go test ./internal/intake`: an in-process h2c server; Welcome then three Appends return three APPLIED acks with literal sizes |
+| L2 intake + server | `internal/intake/*`, `internal/server/server.go`, `cmd/mnemonic/server.go`, `ops/Caddyfile` | `Mount`, `service.Sync`, `parseAppend`, `ackOf`, `welcome` (the sketch's `adapter.ServeHTTP` — servePut and serveManifest — was deleted on the PUT census instead of built), h2c `Protocols`, the `Run` loop over `Boot`/`Next`/`Changed` | `go test ./internal/intake`: an in-process h2c server; Welcome then three Appends return three APPLIED acks with literal sizes |
 | L3 index | `internal/index/lap.go`, `internal/index/ingest.go` | `Boot`, `Lap.Next`, `Lap.patch`; `parseSources` over a work subset; `publish` writing settled checkpoints back | `go test ./internal/index`, the arena parity 126/126, and a scratch count: `Next` with one changed key reads 1 manifest |
 | L4 client | `internal/push/*`, `cmd/mnemonic/main.go`, `cmd/mnemonic/init.go` | `dial`, `send`, `acks`, `applyAck`, `ended`, `close`, `streamSource`; deletes `fetchManifest`, `putSource`, the 409 loop, `reconcileEvery`, `conflictRetry` | `go test ./internal/push` against L2's in-process server (after merging L1 and L2) |
 | L5 spec + checks | `docs/spec/wire.md`, `AGENTS.md`, `scripts/` checks | the stream section of the spec; a check that `Ack{` appears once in `internal/store`; a check that regenerating pushpb leaves no diff | the two checks fail on a planted second literal and on a hand-edited `push.pb.go` |
