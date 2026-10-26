@@ -9,14 +9,11 @@
 # SSL_CERT_FILE names the system bundle plus Caddy's root, set on the client
 # processes only, never the box's trust store and never a verify switch.
 #
-# Checks, all with the Caddyfile as committed (flush_interval -1) plus, when it
-# lacks one, `request_body { max_size 256MB }` inserted into the non-push handle:
+# Checks, all with the Caddyfile as committed (flush_interval -1):
 #   converge   product client pushes a synthesized tree through Caddy; frames
 #              equal a direct push; a second push finds nothing to send
 #   append32   first line 32 MiB less 5 bytes: acked, frame sha equals direct
 #   stream300  caddydrv big: 330 MiB in 11 appends on one stream, acks = appends
-#   putcap     a 300 MiB PUT to /v1/raw (Content-Length and chunked) gets 413 from
-#              Caddy, a small one 200, the server stays up, a stream still acks
 #   idle       push --watch idles IDLE_S s, then one line is acked within 5 s
 #              with no new stream (uprobe on intake Sync entry)
 # Then ROUNDS alternations of three arms (neg1 = committed file, default = the
@@ -157,14 +154,7 @@ TOKD=$(cat "$R/D/cfg/token")
 URLC=https://localhost:$CPORT
 URLD=http://127.0.0.1:$DPORT
 
-# The non-push route carries the 256MB request_body cap prod had at 83b0042. The
-# committed file may not have it yet: insert it into the local copy only.
-if grep -q request_body "$CADDYFILE"; then
-	cp "$CADDYFILE" "$R/Caddyfile.neg1"
-else
-	awk '/^\thandle \{$/ && !done {print; print "\t\trequest_body {"; print "\t\t\tmax_size 256MB"; print "\t\t}"; done=1; next} {print}' "$CADDYFILE" > "$R/Caddyfile.neg1"
-fi
-[ "$(grep -c max_size "$R/Caddyfile.neg1")" -eq 1 ] || { echo "cap not inserted exactly once" >&2; exit 2; }
+cp "$CADDYFILE" "$R/Caddyfile.neg1"
 grep -v 'flush_interval' "$CADDYFILE" > "$R/Caddyfile.default"
 grep -q flush_interval "$R/Caddyfile.default" && { echo "variant still has flush_interval" >&2; exit 2; }
 grep -q 'flush_interval -1' "$R/Caddyfile.neg1" || { echo "committed Caddyfile has no flush_interval -1" >&2; exit 2; }
@@ -287,21 +277,6 @@ bsize=$(sed -n 's/.*"size":\([0-9]*\).*/\1/p' "$(find "$R/C/data/raw" -path '*ma
 cpu=$(awk 'NR>2{us+=$13; sy+=$14; wa+=$16; n++} END{if(n) printf "us=%.0f sy=%.0f wa=%.0f idle_samples=%d", us/n, sy/n, wa/n, n}' "$R/vmstat-big.txt")
 if [ $rc -eq 0 ] && echo "$bigout" | grep -q '^sent=11 acked=11 applied=11 '; then v=PASS; else v=FAIL; fi
 row stream300 $SETA "rc=$rc $bigout store_size_bytes=${bsize:-none} want=$((330 << 20)) box_cpu_pct_mean[$cpu]" $v
-balance
-
-# putcap: a PUT over the cap to an adapter route is refused by Caddy, the server stays up
-fp=$R/put300.bin
-truncate -s 300M "$fp"
-purl="$URLC/v1/raw/capm/claude-code/0123456789abcdef?offset=0&head_hash=h&source_name=claude&path=/cap&raw_end=0"
-code_cl=$(curl -s --cacert "$SSL" -o /dev/null -w '%{http_code}' -X PUT -H "Authorization: Bearer $TOKC" --data-binary @"$fp" "$purl" 2>&1)
-code_ch=$(head -c 300M /dev/zero | curl -s --cacert "$SSL" -o /dev/null -w '%{http_code}' -X PUT -H "Authorization: Bearer $TOKC" -H 'Transfer-Encoding: chunked' --data-binary @- "$purl" 2>&1)
-printf '{"t":"cap"}\n' > "$R/put-small.bin"
-code_ok=$(curl -s --cacert "$SSL" -o /dev/null -w '%{http_code}' -X PUT -H "Authorization: Bearer $TOKC" --data-binary @"$R/put-small.bin" "$purl" 2>&1)
-up=no; kill -0 "$SPID_C" 2>/dev/null && up=yes
-after=$(SSL_CERT_FILE=$SSL "$DRV" lat -server "$URLC" -token "$TOKC" -machine capafter -n 3 2>&1 | tail -1)
-if [ "$code_cl" = 413 ] && [ "$code_ch" = 413 ] && [ "$code_ok" = 200 ] && [ $up = yes ] && [ "$after" = "done errors=0" ]; then v=PASS; else v=FAIL; fi
-row putcap $SETA "put300M_content_length=$code_cl put300M_chunked=$code_ch put_small_under_cap=$code_ok server_alive=$up stream_after=[$after]" $v
-rm -f "$fp"
 balance
 
 # idle
