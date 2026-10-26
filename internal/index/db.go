@@ -57,14 +57,17 @@ func (e *PartOpenError) Error() string {
 	return fmt.Sprintf("current names part %s, which does not open: %v", e.Part, e.Err)
 }
 
-func OpenDB(store string) (*DB, error) { return openDB(store, nil) }
+func OpenDB(store string) (*DB, error) { return openDB(store, nil, nil) }
 
 // openDB opens the parts CURRENT names, taking from prev each one it opened
 // from the same dir. A committed part dir is never written again, and the
 // delta logs a delta part reads are truncated only to the length the delta
 // in CURRENT names, so a part taken from prev reads what a fresh open would.
-// The caller keeps prev pinned until openDB returns.
-func openDB(store string, prev *DB) (*DB, error) {
+// The caller keeps prev pinned until openDB returns. opened is parts the
+// caller opened, by id, and hands over: each one CURRENT names joins the DB
+// when its stamp matches the dir's, and every other one closes.
+func openDB(store string, prev *DB, opened map[string]*Part) (*DB, error) {
+	defer func() { closeParts(opened) }()
 	m, err := readManifest(store)
 	if err != nil {
 		return nil, err
@@ -88,8 +91,19 @@ func openDB(store string, prev *DB) (*DB, error) {
 				return
 			}
 		}
+		if p := opened[m.Parts[i]]; p != nil {
+			if at, err := dirStampOf(dir); err == nil && at == p.at {
+				parts[i] = p
+				return
+			}
+		}
 		parts[i], errs[i] = OpenPartDir(dir)
 	})
+	for i, p := range parts {
+		if p != nil && opened[m.Parts[i]] == p {
+			delete(opened, m.Parts[i])
+		}
+	}
 	for i, err := range errs {
 		if err != nil {
 			for j, p := range parts {

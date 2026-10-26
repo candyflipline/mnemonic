@@ -66,17 +66,23 @@ const openTries = 3
 // read CURRENT a bounded number of times and, still failing, returns the
 // error — never an empty DB with a nil error, which is what export would
 // write out.
-func (ix *Index) Refresh() error {
+func (ix *Index) Refresh() error { return ix.refresh(nil) }
+
+// refresh is Refresh taking also the parts a cycle opened, by id, which it
+// owns: each one CURRENT names joins the DB, the rest close.
+func (ix *Index) refresh(opened map[string]*Part) error {
 	stamp, ok := CurrentStamp(ix.store)
 	ix.mu.Lock()
 	same := !ok || stamp == ix.cur.stamp
 	ix.mu.Unlock()
 	if same {
+		closeParts(opened)
 		return nil
 	}
 	for try := 1; ; try++ {
 		prev, release := ix.Snapshot()
-		db, err := openDB(ix.store, prev)
+		db, err := openDB(ix.store, prev, opened)
+		opened = nil
 		release()
 		if err == nil {
 			ix.mu.Lock()

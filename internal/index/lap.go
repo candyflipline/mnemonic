@@ -95,9 +95,9 @@ func (l *Lap) work() []int {
 // parse did not complete, or all of work when the publish or the serve failed:
 // their checkpoints may have moved past what CURRENT names.
 func (l *Lap) cycle(work []int, opts IngestOptions, release func()) (IngestStats, error) {
-	stats, outcomes, err := cycle(l.root, l.ix.store, l.sources, l.cks, work, opts.Quiet, opts.SettleAll, opts.Red)
+	stats, outcomes, opened, err := cycle(l.root, l.ix.store, l.sources, l.cks, work, opts.Quiet, opts.SettleAll, opts.Red)
 	release()
-	err = errors.Join(err, l.ix.Refresh())
+	err = errors.Join(err, l.ix.refresh(opened))
 	l.carry = map[layout.Key]bool{}
 	for _, i := range work {
 		if _, ok := outcomes[sourceKey(l.sources[i].key)]; !ok || err != nil {
