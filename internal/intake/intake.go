@@ -1,5 +1,5 @@
 // Package intake is every transport onto the store's one write path: the
-// push stream (gRPC Push.Sync over h2c on the server's one listener) and,
+// push stream (gRPC Push.Sync over h2c on a native gRPC listener) and,
 // until its expiry, the HTTP PUT and manifest adapter. Each parses its wire
 // into store types here, at the edge, and answers only with what
 // store.Ticket.Wait returned.
@@ -13,9 +13,12 @@ import (
 	"net/http"
 	"sync"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	"github.com/candyflipline/mnemonic/internal/auth"
@@ -35,20 +38,56 @@ var (
 	errBadSegment = errors.New("bad path segment")
 )
 
-// Mount serves Push.Sync and the adapter routes on mux, all behind the push
-// scope (the bearer token rides as gRPC metadata "authorization", which is
-// the HTTP header Require already reads). The returned drain ends every live
-// stream with Unavailable and refuses new ones; call it when the HTTP server
-// begins to shut down, since a bidi stream never ends by itself.
-func Mount(mux *http.ServeMux, st *store.Committer, tokens auth.Tokens) (drain func()) {
+// Mount registers the HTTP adapter and constructs the native Push server.
+// The caller owns its listener. Stop accepting, call drain to end live
+// sessions with Unavailable, then GracefulStop (with a bounded Stop fallback)
+// before closing the committer. Push must never use grpc.Server.ServeHTTP:
+// its handler transport buffers request bodies independently of Recv.
+func Mount(mux *http.ServeMux, st *store.Committer, tokens auth.Tokens) (*grpc.Server, func()) {
 	svc := &service{st: st, live: map[streamKey]*session{}}
-	gs := grpc.NewServer(grpc.MaxRecvMsgSize(maxMsg))
+	gs := grpc.NewServer(
+		grpc.MaxRecvMsgSize(maxMsg),
+		grpc.InitialWindowSize(64<<10),
+		grpc.InitialConnWindowSize(256<<10),
+		grpc.MaxConcurrentStreams(4),
+		grpc.MaxHeaderListSize(16<<10),
+		grpc.ConnectionTimeout(10*time.Second),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime: 20 * time.Second, PermitWithoutStream: true,
+		}),
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time: 45 * time.Second, Timeout: 20 * time.Second,
+			MaxConnectionIdle: 5 * time.Minute,
+		}),
+		grpc.StreamInterceptor(func(srv any, stream grpc.ServerStream, _ *grpc.StreamServerInfo, next grpc.StreamHandler) error {
+			md, _ := metadata.FromIncomingContext(stream.Context())
+			authorization := ""
+			if values := md.Get("authorization"); len(values) > 0 {
+				authorization = values[0]
+			}
+			ctx, err := tokens.Check(stream.Context(), authorization, auth.Push)
+			if err != nil {
+				code := codes.PermissionDenied
+				if errors.Is(err, auth.ErrUnauthorized) {
+					code = codes.Unauthenticated
+				}
+				return status.Error(code, err.Error())
+			}
+			return next(srv, &identityStream{ServerStream: stream, ctx: ctx})
+		}),
+	)
 	pushpb.RegisterPushServer(gs, svc)
 	require := tokens.Require(auth.Push)
-	mux.Handle("POST /mnemonic.push.v1.Push/", require(gs))
 	mux.Handle("/v1/", require(newAdapter(st)))
-	return svc.drain
+	return gs, svc.drain
 }
+
+type identityStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (s *identityStream) Context() context.Context { return s.ctx }
 
 type streamKey struct{ author, machine string }
 

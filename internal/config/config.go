@@ -50,7 +50,8 @@ var DefaultSources = []SourceGlob{
 // Server is the server's config file.
 //
 //	data_dir = "/var/lib/mnemonic"
-//	listen   = "127.0.0.1:8740"
+//	listen   = "0.0.0.0:8740"
+//	push_listen = "0.0.0.0:8741"
 //	[[tokens]]
 //	author = "chris"; sha256 = "<auth.Hash(token)>"
 //	tenant = "acme"            # optional, default "default"; an author sits in one tenant
@@ -61,10 +62,11 @@ var DefaultSources = []SourceGlob{
 // An author no token entry names is in the "default" tenant, so every
 // default-tenant token reads what such an author's data holds.
 type Server struct {
-	DataDir string       `toml:"data_dir"`
-	Listen  string       `toml:"listen"`
-	Tokens  []TokenEntry `toml:"tokens"`
-	OTLP    OTLP         `toml:"otlp"`
+	DataDir    string       `toml:"data_dir"`
+	Listen     string       `toml:"listen"`
+	PushListen string       `toml:"push_listen"`
+	Tokens     []TokenEntry `toml:"tokens"`
+	OTLP       OTLP         `toml:"otlp"`
 }
 
 type OTLP struct {

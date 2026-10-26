@@ -44,7 +44,8 @@ The server, in `server.New`, one line replacing the `/v1/` mount (`internal/serv
 
 ```go
 st, err := store.Open(dataDir)            // loads every manifest once, starts the committer
-intake.Mount(mux, st, tokens)             // Push.Sync over h2c + the HTTP adapter, push scope
+push, drain := intake.Mount(mux, st, tokens) // native Push server; shared push-scope check
+// Serve push on its own listener; stop accepting, drain, then close st.
 ```
 
 The server-owned writers do not change (`internal/otlp/receiver.go:132`, `internal/index/controls.go:175`, `internal/index/q_annotate.go:202`):
@@ -92,7 +93,7 @@ One bidirectional RPC, `mnemonic.push.v1.Push/Sync` (`internal/wire/pushpb/push.
 - The client sends `Hello{machine}` once, then `Append{seq, harness, src_id, offset, head_hash, source_name, path, raw_end, body}`. These are a PUT's fields one for one (`docs/spec/wire.md:54-99`), so `ParseOp` serves both transports.
 - The server sends `Welcome{sources, more, window}` pages of 4096 `SourceState`s (src_id, harness, size, head_hash, raw_end, updated_ms: exactly what the skip rules read, `push.go:94-106`). Then it sends one `Ack{seq, APPLIED|CONFLICT, state}` per Append, in send order.
 - Rejected requests do not get a per-append error code. A bad segment, reserved name or malformed body ends the stream with a gRPC status (InvalidArgument, PermissionDenied). A correct client never sends one, and today's 400/403 are not retried either.
-- Auth: the bearer token rides as `authorization` metadata, which is the HTTP header `tokens.Require(auth.Push)` already reads, because the gRPC server is mounted on the existing mux through `grpc.Server.ServeHTTP`. One auth path for both transports. A 401/403 reaches the client as Unauthenticated/PermissionDenied.
+- Auth: the bearer token rides as `authorization` metadata. The native gRPC stream interceptor and HTTP `tokens.Require` both call `tokens.Check`; only that function parses the bearer header, checks the token and scopes, and attaches its Identity. Push requires `auth.Push`. Unknown tokens and missing scopes become Unauthenticated and PermissionDenied, respectively. The author still comes only from the token.
 - Resume: the client keeps nothing on disk, as today (`internal/wire/wire.go:1-4`). On any stream end it backs off (`watch.go:201-209`), dials, reads Welcome and runs one full pass with the skip rules. Unacked appends are forgotten; Welcome says what landed. This deletes the manifest GET (`push.go:67-91`), the 6 h reconcile (`watch.go:26, 211-246`), `conflictRetry` and the 409 retry loop (`push.go:166-172`, `syncTail`'s fallback).
 - Pipelining: `streamSource` sends a file's chunks without waiting for acks. The next chunk's offset is the previous one's end, which `syncSource` already assumes (`push.go:176`). `uplink.sources` is the server's state plus what is in flight; an APPLIED ack writes the server's state back only once no later append of that source is in flight. A CONFLICT ack writes it back and marks the path dirty, and every later in-flight append of that source conflicts too, because its offset no longer matches. Only the watcher goroutine touches `sources`; the ack reader goroutine only delivers.
 
@@ -104,9 +105,18 @@ Three bounds, each with one owner:
 2. Server per-stream: the ticket channel has 64 slots. A client that ignores the window only stalls its own `Recv`.
 3. Server global: `Submit` takes the compressed frame's bytes from a 256 MiB budget and blocks while it is spent. The bytes come back when the batch commits.
 
-On a slow disk, batches take longer and grow to their caps. The budget fills, `Submit` blocks, `Recv` stops, and HTTP/2 flow control closes the stream window. The client's `send` then blocks in the watcher loop and file events queue in the notifier; an overflow already becomes a full pass (`lostEvents`, `watch.go:29`). Memory stays bounded at every hop, and nothing is dropped, because the server's state is re-read at the next Welcome.
+On a slow disk, batches take longer and grow to their caps. The budget fills, `Submit` blocks, `Recv` stops, and HTTP/2 flow control closes the stream window. The client's `send` then blocks in the watcher loop and file events queue in the notifier; an overflow already becomes a full pass (`lostEvents`, `watch.go:29`). The native transport stops reading beyond its fixed stream credit; it does not spool the rest of the request into an unbounded handler buffer. The server's state is re-read at the next Welcome. The compressed-frame budget is not a bound on all store memory (see below).
 
 Message size: one chunk is up to 32 MiB (`push.go:219`), so the server sets `grpc.MaxRecvMsgSize(33 MiB)`. The chunk size cannot shrink without breaking C1.
+
+Native transport limits (`internal/intake/intake.go`):
+
+- `InitialWindowSize(64 KiB)` and `InitialConnWindowSize(256 KiB)` disable BDP estimation; `MaxConcurrentStreams(4)` bounds streams per connection. grpc-go's `inFlow.maybeAdjust` can temporarily grant a whole message of extra credit to finish an active read, so 64 KiB alone is not the peak receive-buffer bound. A 32 MiB Append still fits.
+- For receive payloads, allow 33 MiB wire buffers plus 33 MiB decoded message per active stream, plus 64 KiB outstanding credit: four streams use at most 264.25 MiB of payload storage. Round to **272 MiB per connection** for the receive-transport accounting envelope, including frame/header bookkeeping. This is a receive-transport estimate, not a whole-process heap guarantee or an allocator/RSS cap.
+- Headers are limited to 16 KiB and connection handshakes to 10 s. Keepalive enforcement is `MinTime: 20s, PermitWithoutStream: true`; server parameters are `Time: 45s, Timeout: 20s, MaxConnectionIdle: 5min` (idle means no active RPC). The client's 30 s pings are allowed.
+- There is no connection cap. With one connection each for the owner and three teammates, the receive-transport envelope plus the global 256 MiB compressed Submit budget is **4 × 272 + 256 = 1344 MiB**. For N connections it is **272N + 256 MiB**; four connections is an operational expectation, not enforced admission control.
+
+**Store memory caveat:** `Submit` also retains uncompressed `Op.Lines`, and encodes a frame before acquiring the compressed budget. The 64-ticket channel allows up to 66 submitted/in-progress requests per stream (64 queued, one being acked, one submitting). At the 33 MiB message limit, raw payloads alone can therefore reach **4 × 66 × 33 = 8712 MiB per connection**, or **34848 MiB for four connections**, before transport buffers and compressed frames. The store's 1024-request queue and up-to-512-request held batch also retain bodies, including completed requests retained by batch backing arrays; their coarse global raw-payload ceiling is **1536 × 33 = 50688 MiB**, plus active callers. Compression workspace, source manifests, index memory and Go GC headroom are additional. Thus neither 1344 MiB nor the 256 MiB budget is a worst-case total server-heap cap. Native flow control fixes the unbounded ServeHTTP receive queue; a tighter whole-process bound requires store raw-byte accounting/admission work outside this listener change. Do not infer safety under MemoryMax=8G from the transport calculation.
 
 ### Group commit
 
@@ -204,15 +214,16 @@ Until the profile lands, which of these limits the 8 s cycle is unknown. The dir
 
 ## Gateway (C8)
 
-- One listener, two protocols. `cmd/mnemonic/server.go:55` sets `hs.Protocols` to HTTP/1.1 plus unencrypted HTTP/2 (Go 1.24+), and gRPC is served by `grpc.Server.ServeHTTP` on the same mux.
-- Caddy routes `/mnemonic.push.v1.Push/*` to `h2c://127.0.0.1:8740` with `flush_interval -1`. Everything else stays on the current HTTP/1.1 upstream.
+- Two listeners in one process: `listen = "0.0.0.0:8740"` serves HTTP/1.1 (MCP and HTTP OTLP), and required `push_listen = "0.0.0.0:8741"` serves native `grpc.Server.Serve`. No implicit port default; missing, malformed or identical push addresses fail configuration load. The HTTP h2c configuration is removed. The push listener is firewalled exactly like 8740 by `loyal-agent-memory`; main must verify public 8741 times out from outside at deploy.
+- Shutdown closes the push listener first, cancels live sessions with Unavailable, and runs GracefulStop with a 10 s shutdown deadline and Stop fallback for peers stalled before Hello or on responses. HTTP shutdown and the cycle-loop join finish before the deferred committer Close commits its queued writes and releases the index.
+- Caddy routes `/mnemonic.push.v1.Push/*` to `h2c://host.docker.internal:8741` with `flush_interval -1`. Everything else stays on the current HTTP/1.1 upstream.
 - The `request_body max_size 256MB` block must move into the non-gRPC route. Caddy caps a request's whole body, and a stream's body is every byte the client sends for its whole life, so the cap would cut the stream after 256 MB.
 - OTLP over gRPC: left for later. No known client asks for it. When one does, it is two `Register*ServiceServer` calls on the same `grpc.Server` over the receiver's existing decode path, behind the same route rule.
 
 ## Tradeoffs accepted
 
 - We accept that a syncfs waits on every dirty page in the filesystem, including the index's writes, in exchange for O(batches) barriers with no new on-disk format. Steady-state index writes are small (logs 120 KB and parts 437 KB per put cycle in the quoted journal line). A parser-bump sweep or a rebuild writes far more, so ack latency rises then.
-- We accept `grpc.ServeHTTP` (marked experimental, slower than grpc's own transport) in exchange for one listener, one auth middleware and one Caddy upstream. The stream carries MB/s, not GB/s.
+- We accept a second listener and required config key to obtain native gRPC flow control. Auth policy remains one shared token check; no HTTP/2 handler transport is used for Push.
 - We accept that a failed barrier exits the process, in exchange for never acking from a page cache we cannot trust.
 - We accept two boot listings, the store's table and the index's `Boot`, in exchange for keeping the index independent of the store's internals.
 - We accept that the dirty set's premise (only the committer writes raw/) turns hand edits of raw/ into "restart required".
@@ -223,7 +234,7 @@ Until the profile lands, which of these limits the 8 s cycle is unknown. The dir
 - Write-ahead log for group commit. Each batch appends one record (frames plus after-manifests) to a journal, takes one fdatasync and acks; raw files and manifests are applied without fsync and checkpointed later; boot replays. It reaches 1 barrier per batch and is not coupled to index writeback. It lost because it adds an on-disk format, a replay path and a checkpoint cycle, and raw files still need a later fsync. Its interface is the same as ours, but the complexity it hides is larger and new. If syncfs latency under sweeps turns out to matter, this is the fallback, behind the same `Submit` and `Ack`.
 - Per-file fsync with folding. Fsync each touched raw and manifest once per batch and share dir syncs. This is portable and has no syncfs coupling, but the fsync count is 2 × distinct sources per batch. A first push or a catch-up after sleep touches thousands of distinct sources, so it stays O(N) where it matters.
 - A timer batching window (for example 5 ms). It adds latency at low load and needs tuning; drain-on-idle needs neither.
-- A separate native gRPC listener (:8741). It gets grpc's own transport (BDP flow control, keepalive enforcement), but costs a second listen key, a second Caddy upstream and a gRPC copy of `tokens.Require`.
+- A separate native gRPC listener (:8741) was initially rejected for configuration and auth duplication. That decision is reversed: grpc-go v1.84.0 `internal/transport/handler_server.go:435-453` drains req.Body into an unbounded recvBuffer independently of application Recv, bypassing backpressure through net/http. Native transport with fixed windows fixes that buffer, and shared `Tokens.Check` avoids a second token policy.
 - Dirty set as manifest values instead of keys. The cycle would read zero manifests, but the index would depend on the store's table type. Keys plus a re-read of a handful of files keeps the boundary narrow.
 - A persisted dirty set, to skip the boot listing. Boot is once; the listing is its safety net.
 
@@ -256,5 +267,6 @@ L1's `plan` and `planned.write` against the three-sequential-PUTs table test, be
 
 ## Note: rejected, and least sure
 
-- Rejected: the WAL (new on-disk format and replay for one fewer barrier), per-file fsync (stays O(N) on a first push), a timer window (latency at low load), a second gRPC listener (a second auth path), hand-written protowire (hand-synced with the .proto), a persisted or value-carrying dirty set.
+- Rejected: the WAL (new on-disk format and replay for one fewer barrier), per-file fsync (stays O(N) on a first push), a timer window (latency at low load), hand-written protowire (hand-synced with the .proto), a persisted or value-carrying dirty set.
+- Reversed rejection: the second native gRPC listener is now required because ServeHTTP has an unbounded recvBuffer (`handler_server.go:435-453`). Both transports call one token check.
 - Least sure: syncfs latency while the index writes heavily. The design's O(batches) claim holds by construction, but whether the per-batch barrier is cheap on prod's disk during a sweep is unmeasured. It is the one thing that would send this design to the WAL alternative.

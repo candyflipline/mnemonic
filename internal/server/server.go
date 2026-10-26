@@ -5,6 +5,9 @@ package server
 import (
 	"context"
 	"log"
+	"net"
+
+	"google.golang.org/grpc"
 	"net/http"
 	"time"
 
@@ -23,6 +26,7 @@ type Server struct {
 	lock    *index.IndexLock
 	st      *store.Committer
 	lap     *index.Lap
+	push    *grpc.Server
 	drain   func()
 	handler http.Handler
 	otlp    *otlp.Receiver
@@ -57,13 +61,13 @@ func New(dataDir string, tokens auth.Tokens) (*Server, error) {
 	tools := mcp.Handler(ix, index.Lookup)
 	rcv := otlp.NewReceiver(st)
 	mux := http.NewServeMux()
-	drain := intake.Mount(mux, st, tokens)
+	push, drain := intake.Mount(mux, st, tokens)
 	mux.Handle("POST /v1/traces", tokens.Require(auth.Push)(rcv.Traces()))
 	mux.Handle("POST /v1/logs", tokens.Require(auth.Push)(rcv.Logs()))
 	mux.Handle("/mcp", tokens.Require(auth.Read)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tools.ServeHTTP(w, r.WithContext(index.WithControls(store.WithStore(r.Context(), st), ctl)))
 	})))
-	return &Server{dataDir: dataDir, ix: ix, lock: lock, st: st, drain: drain, handler: mux, otlp: rcv}, nil
+	return &Server{dataDir: dataDir, ix: ix, lock: lock, st: st, push: push, drain: drain, handler: mux, otlp: rcv}, nil
 }
 
 func (s *Server) Handler() http.Handler { return s.handler }
@@ -72,12 +76,31 @@ func (s *Server) Handler() http.Handler { return s.handler }
 // is off until set.
 func (s *Server) StoreOTLPContent(on bool) { s.otlp.SetStoreContent(on) }
 
-// Drain ends every live push stream and refuses new ones; call it when the
-// HTTP server begins to shut down.
-func (s *Server) Drain() { s.drain() }
+// ServePush serves native gRPC on the separately bound push listener.
+func (s *Server) ServePush(l net.Listener) error { return s.push.Serve(l) }
+
+// Drain ends live sessions with Unavailable. The caller first closes the
+// push listener; GracefulStop sends the statuses before closing transports.
+// Stop also releases streams stuck before Hello or on an unread response.
+func (s *Server) Drain(ctx context.Context) {
+	s.drain()
+	done := make(chan struct{})
+	go func() {
+		s.push.GracefulStop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		s.push.Stop()
+		<-done
+	}
+}
 
 // Close commits what the store has queued, then closes the index.
 func (s *Server) Close() error {
+	s.drain()
+	s.push.Stop()
 	err := s.st.Close()
 	if ierr := s.ix.Close(); err == nil {
 		err = ierr

@@ -2,8 +2,10 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"regexp"
 	"slices"
+	"strconv"
 
 	"github.com/BurntSushi/toml"
 
@@ -23,6 +25,17 @@ func LoadServer(path string) (Server, error) {
 	}
 	if cfg.Listen == "" {
 		return Server{}, fmt.Errorf("%s: listen must be set", path)
+	}
+	if cfg.PushListen == "" {
+		return Server{}, fmt.Errorf("%s: push_listen must be set", path)
+	}
+	_, port, err := net.SplitHostPort(cfg.PushListen)
+	n, portErr := strconv.Atoi(port)
+	if err != nil || portErr != nil || n < 1 || n > 65535 {
+		return Server{}, fmt.Errorf("%s: push_listen must be a host:port with port 1..65535", path)
+	}
+	if cfg.PushListen == cfg.Listen {
+		return Server{}, fmt.Errorf("%s: push_listen must differ from listen", path)
 	}
 	if len(cfg.Tokens) == 0 {
 		return Server{}, fmt.Errorf("%s: at least one [[tokens]] entry is required", path)

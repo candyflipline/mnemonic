@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -17,11 +18,6 @@ import (
 
 	"github.com/candyflipline/mnemonic/internal/config"
 	"github.com/candyflipline/mnemonic/internal/server"
-)
-
-const (
-	streamWindow = 34 << 20
-	connWindow   = 128 << 20
 )
 
 func init() {
@@ -46,46 +42,50 @@ func serve(args []string) error {
 	defer srv.Close()
 	srv.StoreOTLPContent(cfg.OTLP.StoreContent)
 
+	httpListener, err := net.Listen("tcp", cfg.Listen)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", cfg.Listen, err)
+	}
+	defer httpListener.Close()
+	pushListener, err := net.Listen("tcp", cfg.PushListen)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", cfg.PushListen, err)
+	}
+	defer pushListener.Close()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	looped := make(chan struct{})
 	go func() {
 		defer close(looped)
 		srv.Run(ctx)
 	}()
-	defer func() {
-		stop()
-		<-looped
-	}()
 
-	var protocols http.Protocols
-	protocols.SetHTTP1(true)
-	protocols.SetUnencryptedHTTP2(true)
-	hs := &http.Server{
-		Addr:      cfg.Listen,
-		Handler:   srv.Handler(),
-		Protocols: &protocols,
-		HTTP2: &http.HTTP2Config{
-			MaxReceiveBufferPerStream:     streamWindow,
-			MaxReceiveBufferPerConnection: connWindow,
-			SendPingTimeout:               45 * time.Second,
-			PingTimeout:                   15 * time.Second,
-		},
+	hs := &http.Server{Handler: srv.Handler()}
+	ended := make(chan error, 2)
+	go func() { ended <- hs.Serve(httpListener) }()
+	go func() { ended <- srv.ServePush(pushListener) }()
+	log.Printf("mnemonic serve: HTTP %s, push %s (data_dir %s)", cfg.Listen, cfg.PushListen, cfg.DataDir)
+	var serveErr error
+	select {
+	case <-ctx.Done():
+	case serveErr = <-ended:
 	}
-	shutdown := make(chan struct{})
-	go func() {
-		defer close(shutdown)
-		<-ctx.Done()
-		srv.Drain()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := hs.Shutdown(shutdownCtx); err != nil {
-			log.Printf("shutdown: %v", err)
-		}
-	}()
-	log.Printf("mnemonic serve: listening on %s (data_dir %s)", cfg.Listen, cfg.DataDir)
-	if err := hs.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("listen on %s: %w", cfg.Listen, err)
+	// Stop accepting push first, drain sessions and transports, then HTTP.
+	// The deferred Close runs only after the cycle loop stops, and commits
+	// queued writes before releasing the store and index.
+	pushListener.Close()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	srv.Drain(shutdownCtx)
+	if err := hs.Shutdown(shutdownCtx); err != nil {
+		log.Printf("shutdown: %v", err)
+		hs.Close()
 	}
-	<-shutdown
+	stop()
+	<-looped
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		return fmt.Errorf("serve: %w", serveErr)
+	}
 	return nil
 }
