@@ -19,36 +19,40 @@ build on any Linux box and copy the binary over.
 
 ## Server install
 
-Copy the repo to the server (or at least `ops/` and the binary), then:
+Point an A record for the public hostname at the server (not proxied), copy
+the repo to the server (or at least `ops/` and the binary), then:
 
 ```
-sudo ./ops/install-server.sh ./mnemonic
+sudo ./ops/install-server.sh ./mnemonic mnemonic.example
 ```
 
 The script creates the `mnemonic` user, `/var/lib/mnemonic`,
-`/usr/local/bin/mnemonic`, and the systemd unit, then enables the service.
+`/usr/local/bin/mnemonic`, the systemd unit and, on a first install,
+`/etc/mnemonic/server.toml`, then enables the service.
 
-Caddy fronts it from a Docker container (image `caddy:2.10.2-alpine`) that
-reaches HTTP at `host.docker.internal:8740` and native gRPC at
-`host.docker.internal:8741`. Mount `ops/Caddyfile` as the
-container's Caddyfile, set `MORAINE_HOST` to the public hostname, and reload
-Caddy. The push stream (`/mnemonic.push.v1.Push/*`) goes to port 8741 over h2c;
-everything else goes over HTTP/1.1.
-
-Set both required listener fields in `/etc/mnemonic/server.toml`:
+mnemonic terminates TLS itself; there is no proxy. The config the script
+writes:
 
 ```toml
-listen = "0.0.0.0:8740"
-push_listen = "0.0.0.0:8741"
+listen = ":443"
+push_listen = ":8741"
+
+[tls]
+hosts = ["mnemonic.example"]
 ```
 
-There is no default for `push_listen`; a missing field, malformed host:port,
-or the same address as `listen` fails startup. Bind 8741 like 8740 and keep
-both blocked publicly by the hcloud firewall `loyal-agent-memory`, while
-allowing the Docker Caddy host connection. Before promotion, main checks
-from outside the server that `nc -vz -w 5 PUBLIC_IP 8741` times out (not a
-successful connection), as for 8740, and verifies HTTPS push through Caddy.
-The client still dials HTTPS port 443; it needs no config change.
+MCP and HTTP OTLP answer on 443, the push stream on 8741, both with one
+Let's Encrypt certificate. It is issued on the first TLS handshake by
+tls-alpn-01 on 443 (no port 80) and cached in `/var/lib/mnemonic/autocert`
+(0700). The unit grants `CAP_NET_BIND_SERVICE` so the `mnemonic` user can
+bind 443. `acme_directory =
+"https://acme-staging-v02.api.letsencrypt.org/directory"` under `[tls]` uses
+Let's Encrypt staging for a trial host. Without `[tls]` both listeners are
+plaintext (boxes and tests). With `[tls]`, `listen` must be on port 443.
+
+Open 443 and 8741 to the internet and 22 to your allowlist. A client whose
+`server` is `https://mnemonic.example` pushes to `mnemonic.example:8741`;
+`push_address = "host:port"` in its config overrides that.
 
 ## Tokens
 

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strings"
 
@@ -22,6 +23,11 @@ func LoadClient(path string) (Client, error) {
 	}
 	if cfg.Server == "" {
 		return Client{}, fmt.Errorf("config: %s: server is required", path)
+	}
+	if cfg.PushAddress != "" {
+		if _, port, err := net.SplitHostPort(cfg.PushAddress); err != nil || port == "" {
+			return Client{}, fmt.Errorf("config: %s: push_address %q must be host:port", path, cfg.PushAddress)
+		}
 	}
 	if cfg.Token == "" && cfg.TokenFile != "" {
 		tokenFile, err := ExpandHome(cfg.TokenFile)

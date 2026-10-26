@@ -6,7 +6,8 @@ import "github.com/candyflipline/mnemonic/internal/auth"
 
 // Client is ~/.mnemonic/config.toml.
 //
-//	server  = "https://mnemonic.example"
+//	server  = "https://mnemonic.example"   # push dials mnemonic.example:8741 over TLS
+//	push_address = "host:port" # optional; overrides the push target, same scheme as server
 //	token   = "..."            # or token_file = "~/.mnemonic/token"
 //	machine = "chris-mbp"      # defaults to the short hostname
 //	[[sources]]
@@ -14,12 +15,13 @@ import "github.com/candyflipline/mnemonic/internal/auth"
 //	[redaction]
 //	extra_patterns = []
 type Client struct {
-	Server    string          `toml:"server"`
-	Token     string          `toml:"token"`
-	TokenFile string          `toml:"token_file"`
-	Machine   string          `toml:"machine"`
-	Sources   []SourceGlob    `toml:"sources"`
-	Redaction ClientRedaction `toml:"redaction"`
+	Server      string          `toml:"server"`
+	PushAddress string          `toml:"push_address"`
+	Token       string          `toml:"token"`
+	TokenFile   string          `toml:"token_file"`
+	Machine     string          `toml:"machine"`
+	Sources     []SourceGlob    `toml:"sources"`
+	Redaction   ClientRedaction `toml:"redaction"`
 }
 
 type SourceGlob struct {
@@ -50,8 +52,11 @@ var DefaultSources = []SourceGlob{
 // Server is the server's config file.
 //
 //	data_dir = "/var/lib/mnemonic"
-//	listen   = "0.0.0.0:8740"
-//	push_listen = "0.0.0.0:8741"
+//	listen   = ":443"
+//	push_listen = ":8741"
+//	[tls]                    # omit for plaintext listeners
+//	hosts = ["mnemonic.example"]
+//	acme_directory = "https://acme-staging-v02.api.letsencrypt.org/directory"  # optional; default Let's Encrypt production
 //	[[tokens]]
 //	author = "chris"; sha256 = "<auth.Hash(token)>"
 //	tenant = "acme"            # optional, default "default"; an author sits in one tenant
@@ -65,8 +70,16 @@ type Server struct {
 	DataDir    string       `toml:"data_dir"`
 	Listen     string       `toml:"listen"`
 	PushListen string       `toml:"push_listen"`
+	TLS        TLS          `toml:"tls"`
 	Tokens     []TokenEntry `toml:"tokens"`
 	OTLP       OTLP         `toml:"otlp"`
+}
+
+// TLS serves both listeners with Let's Encrypt certificates for Hosts,
+// cached under data_dir/autocert.
+type TLS struct {
+	Hosts         []string `toml:"hosts"`
+	ACMEDirectory string   `toml:"acme_directory"`
 }
 
 type OTLP struct {

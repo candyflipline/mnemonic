@@ -9,6 +9,7 @@ require (
 	github.com/bmatcuk/doublestar/v4 v4.8.0
 	github.com/parquet-go/parquet-go v0.32.0
 	go.opentelemetry.io/proto/otlp v1.11.1
+	golang.org/x/crypto v0.57.0
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260928230214-8a89bd6388cc
 	google.golang.org/grpc v1.84.0
 	google.golang.org/protobuf v1.36.12
