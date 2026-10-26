@@ -614,14 +614,15 @@ func indexRows(bySession map[string][]built, place func(built) (*Row, int64, int
 		secs.addSession(sid, view.rows(), view.payload)
 		delete(bySession, sid)
 	}
+	meta, err := acc.finish(write)
+	if err != nil {
+		return indexMeta{}, nil, err
+	}
+	// finish appends hot.off's closing offset, so the buffers are written after it.
 	for name, b := range map[string][]byte{"hot": hot.Bytes(), "hot.off": hotOff.Bytes(), "docs": docs.Bytes(), "fa.blob": blob.Bytes()} {
 		if err := write(name, b); err != nil {
 			return indexMeta{}, nil, err
 		}
-	}
-	meta, err := acc.finish(write)
-	if err != nil {
-		return indexMeta{}, nil, err
 	}
 	for name, b := range secs.files() {
 		if err := write(name, b); err != nil {
