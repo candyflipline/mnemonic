@@ -1,0 +1,92 @@
+// The push stream between `mnemonic push --watch` and `mnemonic serve`
+// (docs/spec/wire.md). Regenerate with `go generate ./internal/wire/pushpb`.
+syntax = "proto3";
+
+package mnemonic.push.v1;
+
+option go_package = "github.com/candyflipline/mnemonic/internal/wire/pushpb";
+
+// Push carries one client machine's uploads. The bearer token rides as
+// "authorization: Bearer <token>" request metadata and needs the push scope;
+// the author is the token's, never a field.
+service Push {
+  // Sync is one upload session. The client opens with Hello; the server
+  // answers with the machine's source states in Welcome pages, the last one
+  // carrying the window; then each Append gets exactly one Ack, in send
+  // order, sent only after the append's bytes and manifest are on disk.
+  rpc Sync(stream ClientMsg) returns (stream ServerMsg);
+}
+
+message ClientMsg {
+  oneof msg {
+    Hello hello = 1;
+    Append append = 2;
+  }
+}
+
+message ServerMsg {
+  oneof msg {
+    Welcome welcome = 1;
+    Ack ack = 2;
+  }
+}
+
+// Hello is the first client message, sent once.
+message Hello {
+  string machine = 1;
+}
+
+// Welcome is one page of the server's state for every source the token's
+// author has on Hello.machine. more is true on every page but the last; the
+// last carries the window.
+message Welcome {
+  repeated SourceState sources = 1;
+  bool more = 2;
+  Window window = 3;
+}
+
+// Window bounds what the client may have sent and not yet seen acked.
+message Window {
+  uint32 appends = 1;
+  uint64 bytes = 2;
+}
+
+// SourceState is what the client's skip and resume rules read: the fields of
+// wire.Source except source_name and path.
+message SourceState {
+  string src_id = 1;
+  string harness = 2;
+  int64 size = 3;
+  string head_hash = 4;
+  int64 raw_end = 5;
+  int64 updated_ms = 6;
+}
+
+// Append is one PUT of the HTTP protocol: offset 0 with a body replaces the
+// source, offset > 0 with a body extends it, offset > 0 with no body records
+// raw_end. body is whole redacted lines. seq starts at 1 and rises by 1.
+message Append {
+  uint64 seq = 1;
+  string harness = 2;
+  string src_id = 3;
+  int64 offset = 4;
+  string head_hash = 5;
+  string source_name = 6;
+  string path = 7;
+  int64 raw_end = 8;
+  bytes body = 9;
+}
+
+// Ack answers the Append with the same seq. APPLIED: state is the source
+// after it. CONFLICT: nothing was written; state is the source as stored
+// (size 0 and no head hash when there is none).
+message Ack {
+  enum Result {
+    RESULT_UNSPECIFIED = 0;
+    APPLIED = 1;
+    CONFLICT = 2;
+  }
+  uint64 seq = 1;
+  Result result = 2;
+  SourceState state = 3;
+}
