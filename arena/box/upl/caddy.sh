@@ -1,9 +1,11 @@
 #!/bin/sh
 # caddy.sh BIN — the push stream through the Caddy prod runs, one row per check.
 #
-# Starts two `BIN serve` processes (C on the docker0 gateway 172.17.0.1:8740,
-# where the container's host.docker.internal lands; D on 127.0.0.1:8741 as the
-# no-Caddy control) and a container of caddy:2.10.2-alpine with the repo's
+# Starts two `BIN serve` processes (C on the docker0 gateway 172.17.0.1, where
+# the container's host.docker.internal lands: HTTP listen 8740 and the native
+# gRPC push_listen 8741 behind Caddy's @push route; D on 127.0.0.1 listen 8744
+# and push_listen 8745 as the no-Caddy control) and a container of
+# caddy:2.10.2-alpine with the repo's
 # ops/Caddyfile mounted read-only (MORAINE_HOST=localhost:8443, so Caddy
 # serves its internal CA's certificate). Clients verify that certificate:
 # SSL_CERT_FILE names the system bundle plus Caddy's root, set on the client
@@ -14,8 +16,15 @@
 #              equal a direct push; a second push finds nothing to send
 #   append32   first line 32 MiB less 5 bytes: acked, frame sha equals direct
 #   stream300  caddydrv big: 330 MiB in 11 appends on one stream, acks = appends
-#   idle       push --watch idles IDLE_S s, then one line is acked within 5 s
-#              with no new stream (uprobe on intake Sync entry)
+#   idle       on a fresh Caddy (tcpdump already running), push --watch idles
+#              IDLE_S s, then one line is acked within 5 s with no new stream
+#              (uprobe on intake Sync entry); the capture of Caddy to 8741
+#              (docker0, plaintext h2c) is parsed into HTTP/2 PING / GOAWAY /
+#              RST_STREAM frames per direction, and the client to Caddy leg
+#              (lo:8443, TLS) into 34-byte application-data records (a PING
+#              frame, 9 + 8 bytes, plus the TLS 1.3 type byte and tag)
+#   separate   8741 is bound only on the docker0 gateway; the HTTP listener
+#              answers no Push path; Caddy's non-push route cannot reach it
 # Then ROUNDS alternations of three arms (neg1 = committed file, default = the
 # same file with the flush_interval line removed, direct = no Caddy), each:
 #   latency    LATN appends one at a time, client send-to-ack
@@ -25,8 +34,8 @@
 # time is read from the same clock the instant before kill(2).
 #
 # Rows go to stdout and $R/rows.tsv: row<TAB>check<TAB>setting<TAB>numbers<TAB>PASS|FAIL
-#   flock /var/lib/mnu/box.lock sh caddy.sh /var/lib/mnu/gcaddy-bin/mnemonic
-# Env: BOX, W (work dir), CADDYFILE, DRV (caddydrv binary), IDLE_S (360),
+#   flock /var/lib/mnu/box.lock sh caddy.sh /var/lib/mnu/fgcaddy-bin/mnemonic
+# Env: BOX, W (work dir), CADDYFILE, DRV (caddydrv binary), IDLE_S (700),
 #      ROUNDS (5), LATN (20), KILLCAP (60 s to wait for a handler end).
 set -u
 
@@ -34,17 +43,19 @@ BIN=${1:?usage: caddy.sh BIN}
 BOX=${BOX:-/var/lib/mnu}
 HERE=$(cd "$(dirname "$0")" && pwd)
 CADDYFILE=${CADDYFILE:-$HERE/../../../ops/Caddyfile}
-DRV=${DRV:-$BOX/gcaddy-bin/caddydrv}
-W=${W:-$BOX/gcaddy}
-IDLE_S=${IDLE_S:-360}
+DRV=${DRV:-$BOX/fgcaddy-bin/caddydrv}
+W=${W:-$BOX/fgcaddy}
+IDLE_S=${IDLE_S:-700}
 ROUNDS=${ROUNDS:-5}
 LATN=${LATN:-20}
 KILLCAP=${KILLCAP:-60}
 IMG=caddy:2.10.2-alpine
-CNAME=gcaddy-caddy
+CNAME=fgcaddy-caddy
 CPORT=8443
 SPORT=8740
-DPORT=8741
+PPORT=8741
+DPORT=8744
+DPUSH=8745
 TR=/sys/kernel/tracing
 GO=/usr/local/go/bin/go
 
@@ -56,7 +67,7 @@ R=$W/run-$(TZ=America/Los_Angeles date +%Y%m%d-%H%M%S)
 docker image inspect "$IMG" >/dev/null 2>&1 || { echo "image $IMG missing" >&2; exit 2; }
 docker inspect "$CNAME" >/dev/null 2>&1 && { echo "container $CNAME exists and is not this run's" >&2; exit 2; }
 grep -q gcaddy "$TR/uprobe_events" && { echo "uprobe group gcaddy already registered" >&2; exit 2; }
-for p in $CPORT $SPORT $DPORT; do
+for p in $CPORT $SPORT $PPORT $DPORT $DPUSH; do
 	ss -ltn | grep -q ":$p " && { echo "port $p is in use" >&2; exit 2; }
 done
 mkdir -p "$R" "$W/caddy-data"
@@ -72,10 +83,13 @@ SPID_D=
 RPID=
 VPID=
 WPID=
+TPID=
+TPID2=
+TPID3=
 OLDCLOCK=$(sed -n 's/.*\[\(.*\)\].*/\1/p' "$TR/trace_clock")
 cleanup() {
 	trap - EXIT INT TERM
-	for p in $WPID $VPID $SPID_C $SPID_D; do
+	for p in $WPID $VPID $TPID $TPID2 $TPID3 $SPID_C $SPID_D; do
 		[ -n "$p" ] && kill "$p" 2>/dev/null
 	done
 	docker rm -f "$CNAME" >/dev/null 2>&1
@@ -125,7 +139,7 @@ balance() {
 	[ "$(syncs)" -eq "$(leaves)" ]
 }
 
-start_serve() { # name listen
+start_serve() { # name listen push_listen
 	d=$R/$1
 	mkdir -p "$d/data" "$d/cfg"
 	chmod 700 "$d/cfg"
@@ -135,24 +149,25 @@ start_serve() { # name listen
 	{
 		echo "data_dir = \"$d/data\""
 		echo "listen = \"$2\""
+		echo "push_listen = \"$3\""
 		tail -n +2 "$d/cfg/token.out"
 	} > "$d/cfg/server.toml"
-	GOMAXPROCS=4 "$BIN" serve --config "$d/cfg/server.toml" > "$R/$1-serve.log" 2>&1 &
+	GRPC_GO_LOG_SEVERITY_LEVEL=info GOMAXPROCS=4 "$BIN" serve --config "$d/cfg/server.toml" > "$R/$1-serve.log" 2>&1 &
 	pid=$!
 	i=0
-	until grep -q 'listening on' "$R/$1-serve.log"; do
+	until grep -q 'mnemonic serve: HTTP .*, push ' "$R/$1-serve.log"; do
 		kill -0 "$pid" 2>/dev/null || { echo "serve $1 died" >&2; cat "$R/$1-serve.log" >&2; exit 1; }
 		i=$((i + 1)); [ "$i" -lt 100 ] || { echo "serve $1 not up" >&2; exit 1; }
 		sleep 0.2
 	done
 	echo "$pid"
 }
-SPID_C=$(start_serve C "172.17.0.1:$SPORT") || exit 1
-SPID_D=$(start_serve D "127.0.0.1:$DPORT") || exit 1
+SPID_C=$(start_serve C "172.17.0.1:$SPORT" "172.17.0.1:$PPORT") || exit 1
+SPID_D=$(start_serve D "127.0.0.1:$DPORT" "127.0.0.1:$DPUSH") || exit 1
 TOKC=$(cat "$R/C/cfg/token")
 TOKD=$(cat "$R/D/cfg/token")
 URLC=https://localhost:$CPORT
-URLD=http://127.0.0.1:$DPORT
+URLD=http://127.0.0.1:$DPUSH
 
 cp "$CADDYFILE" "$R/Caddyfile.neg1"
 grep -v 'flush_interval' "$CADDYFILE" > "$R/Caddyfile.default"
@@ -279,7 +294,143 @@ if [ $rc -eq 0 ] && echo "$bigout" | grep -q '^sent=11 acked=11 applied=11 '; th
 row stream300 $SETA "rc=$rc $bigout store_size_bytes=${bsize:-none} want=$((330 << 20)) box_cpu_pct_mean[$cpu]" $v
 balance
 
-# idle
+# separate: what 8741 accepts is only what reaches it
+sepok=1
+l8741=$(ss -ltnH | awk '{print $4}' | grep ':8741$' | tr '\n' ',')
+[ "$l8741" = "172.17.0.1:8741," ] || sepok=0
+loop=$(python3 -I -c 'import socket
+s = socket.socket(); s.settimeout(3)
+try:
+    s.connect(("127.0.0.1", 8741)); print("accepted")
+except OSError as e:
+    print(type(e).__name__)')
+[ "$loop" = ConnectionRefusedError ] || sepok=0
+http_push=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/grpc' -H "authorization: Bearer $TOKC" http://172.17.0.1:$SPORT/mnemonic.push.v1.Push/Sync)
+[ "$http_push" = 404 ] || sepok=0
+badtok=$(SSL_CERT_FILE=$SSL "$DRV" lat -server "$URLC" -token "x$TOKC" -machine badtok -n 1 2>&1 | head -1 | cut -c1-160)
+case "$badtok" in *Unauthenticated*) ;; *) sepok=0;; esac
+if [ $sepok -eq 1 ]; then v=PASS; else v=FAIL; fi
+row separate $SETA "listeners_on_8741=[$l8741] loopback_127.0.0.1:8741=$loop http_listener_push_path_status=$http_push bad_token_via_caddy=[$badtok]" $v
+balance
+
+# idle: a fresh Caddy (and so a fresh upstream connection) is created while the captures run
+caddy_down phaseA >/dev/null
+cat > "$R/h2scan.py" <<'PY'
+import bisect, struct, sys
+# h2scan.py PCAP PORT MODE. MODE h2: plaintext HTTP/2 frames of the flows to/from PORT.
+# MODE tls: TLS application-data records of length 34 (one PING frame) to/from PORT.
+pcap, port, mode = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+d = open(pcap, "rb").read()
+magic = d[:4]
+ns = magic == bytes.fromhex("4d3cb2a1")
+le = magic in (bytes.fromhex("d4c3b2a1"), bytes.fromhex("4d3cb2a1"))
+e = "<" if le else ">"
+link = struct.unpack(e + "I", d[20:24])[0]
+hl = {1: 14, 113: 16, 276: 20}[link]
+flows = {}
+t0 = None
+off = 24
+while off + 16 <= len(d):
+    sec, frac, cap, _ = struct.unpack(e + "IIII", d[off:off + 16])
+    pkt = d[off + 16:off + 16 + cap]
+    off += 16 + cap
+    ts = sec + frac / (1e9 if ns else 1e6)
+    if t0 is None:
+        t0 = ts
+    ip = pkt[hl:]
+    if len(ip) < 20 or ip[0] >> 4 != 4 or ip[9] != 6:
+        continue
+    ihl = (ip[0] & 15) * 4
+    tl = struct.unpack(">H", ip[2:4])[0]
+    tcp = ip[ihl:tl]
+    sp, dp, seq = struct.unpack(">HHI", tcp[:8])
+    fl = tcp[13]
+    pl = tcp[(tcp[12] >> 4) * 4:]
+    if port not in (sp, dp):
+        continue
+    cport = sp if dp == port else dp
+    direction = "c2s" if dp == port else "s2c"
+    f = flows.setdefault((cport, direction), {"isn": None, "segs": {}})
+    if fl & 2:
+        f["isn"] = seq
+    if pl:
+        f["segs"].setdefault(seq, (ts, pl))
+def assemble(f):
+    base = f["isn"] + 1 if f["isn"] is not None else min(f["segs"])
+    out, marks, nxt = bytearray(), [], base
+    for seq in sorted(f["segs"]):
+        ts, pl = f["segs"][seq]
+        if seq + len(pl) <= nxt:
+            continue
+        if seq > nxt:
+            break
+        pl = pl[nxt - seq:]
+        marks.append((len(out), ts))
+        out += pl
+        nxt += len(pl)
+    return bytes(out), marks
+def when(marks, o):
+    return marks[bisect.bisect_right([m[0] for m in marks], o) - 1][1] - t0
+res = {}
+for (cp, direction), f in sorted(flows.items()):
+    buf, marks = assemble(f)
+    if not buf:
+        continue
+    r = res.setdefault(direction, {"conns": 0, "ping": [], "pingack": [], "goaway": [], "rst": []})
+    r["conns"] += 1
+    if mode == "h2":
+        p = 24 if buf.startswith(b"PRI * HTTP/2.0") else 0
+        while p + 9 <= len(buf):
+            ln = int.from_bytes(buf[p:p + 3], "big")
+            ty = buf[p + 3]
+            fl = buf[p + 4]
+            t = when(marks, p)
+            if ty == 6:
+                r["pingack" if fl & 1 else "ping"].append(t)
+            elif ty == 7 and p + 17 <= len(buf):
+                r["goaway"].append((round(t, 1), int.from_bytes(buf[p + 13:p + 17], "big")))
+            elif ty == 3 and p + 13 <= len(buf):
+                r["rst"].append((round(t, 1), int.from_bytes(buf[p + 9:p + 13], "big")))
+            p += 9 + ln
+    else:
+        p = 0
+        while p + 5 <= len(buf):
+            ty = buf[p]
+            ln = int.from_bytes(buf[p + 3:p + 5], "big")
+            if ty == 23 and ln == 34:
+                r["ping"].append(when(marks, p))
+            p += 5 + ln
+def gaps(xs):
+    xs = sorted(xs)
+    g = [b - a for a, b in zip(xs, xs[1:])]
+    return "gap_s min=%.1f max=%.1f" % (min(g), max(g)) if g else "gap_s none"
+for direction in ("c2s", "s2c"):
+    r = res.get(direction)
+    if not r:
+        print("%s conns=0 ping=0 pingack=0 goaway=0 ping_records=0" % direction)
+        continue
+    if mode == "h2":
+        print("%s conns=%d ping=%d pingack=%d goaway=%d%s rst=%d%s %s" % (direction, r["conns"], len(r["ping"]), len(r["pingack"]), len(r["goaway"]), r["goaway"], len(r["rst"]), r["rst"], gaps(r["ping"])))
+    else:
+        print("%s conns=%d ping_records=%d %s" % (direction, r["conns"], len(r["ping"]), gaps(r["ping"])))
+PY
+cap_up() { # tag filter iface
+	tcpdump -U -n -i "$3" -w "$R/$1.pcap" "$2" > "$R/$1.tcpdump.log" 2>&1 &
+	eval "TP_$1=$!"
+	i=0
+	until grep -q 'listening on' "$R/$1.tcpdump.log"; do
+		i=$((i + 1)); [ "$i" -lt 50 ] || { cat "$R/$1.tcpdump.log" >&2; return 1; }
+		sleep 0.1
+	done
+}
+cap_up h2c "tcp port $PPORT" docker0 || exit 1
+TPID=$TP_h2c
+cap_up tls "tcp port $CPORT" docker0 || exit 1
+TPID2=$TP_tls
+cap_up tlslo "tcp port $CPORT" lo || exit 1
+TPID3=$TP_tlslo
+caddy_up neg1 || { echo "caddy did not come up (idle)" >&2; exit 1; }
+balance
 s0=$(syncs); l0=$(leaves)
 HOME=$R/home-idle SSL_CERT_FILE=$SSL "$BIN" push --watch --config "$R/client-c-idle.toml" > "$R/idle.out" 2>&1 &
 WPID=$!
@@ -295,11 +446,33 @@ until [ "$(wc -l < "$R/idle.out")" -gt "$n1" ] || [ $i -ge 300 ]; do i=$((i + 1)
 tB=$(date +%s.%N)
 lag=$(awk -v a="$tA" -v b="$tB" 'BEGIN{printf "%.2f", b-a}')
 last=$(tail -1 "$R/idle.out")
-if [ $((s1 - s0)) -eq 1 ] && [ $((l1 - l0)) -eq 0 ] && [ "$(wc -l < "$R/idle.out")" -eq $((n1 + 1)) ] && echo "$last" | grep -q 'appended 1' \
-	&& awk -v x="$lag" 'BEGIN{exit !(x <= 5)}'; then v=PASS; else v=FAIL; fi
-row idle $SETA "idle_s=$IDLE_S ack_after_append_s=$lag streams_opened=$((s1 - s0)) streams_ended=$((l1 - l0)) client_lines_before=$n1 client_lines_after=$(wc -l < "$R/idle.out") last=[$last]" $v
+sleep 2
+kill "$TPID" "$TPID2" "$TPID3" 2>/dev/null
+wait "$TPID" "$TPID2" "$TPID3" 2>/dev/null
+TPID=; TPID2=; TPID3=
 kill "$WPID" 2>/dev/null; WPID=
-caddy_down phaseA >/dev/null
+caddy_down phaseA2 >/dev/null
+python3 -I "$R/h2scan.py" "$R/h2c.pcap" $PPORT h2 > "$R/ping-caddy-to-8741.txt" 2>&1
+python3 -I "$R/h2scan.py" "$R/tls.pcap" $CPORT tls > "$R/ping-client-to-caddy.txt" 2>&1
+python3 -I "$R/h2scan.py" "$R/tlslo.pcap" $CPORT tls > "$R/ping-client-to-caddy-lo.txt" 2>&1
+for f in ping-caddy-to-8741 ping-client-to-caddy ping-client-to-caddy-lo; do sed "s/^/ping_evidence\t$f\t/" "$R/$f.txt"; done
+n_srv=$(( IDLE_S / 45 - 1 )); n_cli=$(( IDLE_S / 30 - 1 ))
+getn() { sed -n "s/^$2 .*[ ]$3=\([0-9]*\).*/\1/p" "$1" | head -1; }
+srv_ping=$(getn "$R/ping-caddy-to-8741.txt" s2c ping)
+srv_ack=$(getn "$R/ping-caddy-to-8741.txt" c2s pingack)
+cad_ping=$(getn "$R/ping-caddy-to-8741.txt" c2s ping)
+go_c=$(getn "$R/ping-caddy-to-8741.txt" c2s goaway); go_s=$(getn "$R/ping-caddy-to-8741.txt" s2c goaway)
+cli_ping=$(getn "$R/ping-client-to-caddy.txt" c2s ping_records)
+cli_ack=$(getn "$R/ping-client-to-caddy.txt" s2c ping_records)
+cli_ping_lo=$(getn "$R/ping-client-to-caddy-lo.txt" c2s ping_records)
+cli_ack_lo=$(getn "$R/ping-client-to-caddy-lo.txt" s2c ping_records)
+[ "${cli_ping:-0}" -ge "${cli_ping_lo:-0}" ] || { cli_ping=$cli_ping_lo; cli_ack=$cli_ack_lo; }
+bad_logs=$(cat "$R/C-serve.log" "$R/caddy-phaseA2.log" "$R/idle.out" | grep -Eci 'GOAWAY|ENHANCE_YOUR_CALM|too_many_pings')
+if [ $((s1 - s0)) -eq 1 ] && [ $((l1 - l0)) -eq 0 ] && [ "$(wc -l < "$R/idle.out")" -eq $((n1 + 1)) ] && echo "$last" | grep -q 'appended 1' \
+	&& awk -v x="$lag" 'BEGIN{exit !(x <= 5)}' && [ "$IDLE_S" -ge 660 ] \
+	&& [ "${srv_ping:-0}" -ge "$n_srv" ] && [ "${srv_ack:-0}" -ge "$n_srv" ] && [ "${go_c:-1}" -eq 0 ] && [ "${go_s:-1}" -eq 0 ] \
+	&& [ "${cli_ping:-0}" -ge "$n_cli" ] && [ "${cli_ack:-0}" -ge "$n_cli" ] && [ "$bad_logs" -eq 0 ]; then v=PASS; else v=FAIL; fi
+row idle $SETA "idle_s=$IDLE_S ack_after_append_s=$lag streams_opened=$((s1 - s0)) streams_ended=$((l1 - l0)) client_lines_before=$n1 client_lines_after=$(wc -l < "$R/idle.out") last=[$last] caddy_to_8741(serve_pings=${srv_ping:-?} caddy_pings=${cad_ping:-?} caddy_pingacks=${srv_ack:-?} goaway_c2s=${go_c:-?} goaway_s2c=${go_s:-?} want_serve_pings>=$n_srv) client_to_caddy(client_ping_records=${cli_ping:-?} caddy_reply_records=${cli_ack:-?} want>=$n_cli) goaway_or_ratelimit_lines_in_logs=$bad_logs" $v
 
 # ---- phase B: alternating arms, latency and cancellation
 : > "$R/kills.tsv"
