@@ -30,7 +30,6 @@ func (getIngestStatus) Call(ctx context.Context, db *DB, args json.RawMessage) (
 	data := stStatusJSON(status)
 	text := stStatusText(status)
 	if msg, attempts, failing := bootFailureFrom(ctx); failing {
-		data.Boot = &stBootJSON{Error: msg, Attempts: attempts}
 		text = stBootText(text, msg, attempts)
 	}
 	return data, text, nil
@@ -137,13 +136,6 @@ type stStatusJSONShape struct {
 	Rate             *stRateJSON          `json:"rate"`
 	Eta              *stEtaJSON           `json:"eta"`
 	History          []stHistoryPointJSON `json:"history"`
-	Boot             *stBootJSON          `json:"boot,omitempty"`
-}
-
-// stBootJSON is present only while the index has not booted.
-type stBootJSON struct {
-	Error    string `json:"error"`
-	Attempts int    `json:"attempts"`
 }
 
 func stBootText(text, msg string, attempts int) string {

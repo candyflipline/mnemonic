@@ -784,22 +784,6 @@
               },
               "type": "array"
             },
-            "boot": {
-              "additionalProperties": false,
-              "properties": {
-                "attempts": {
-                  "type": "integer"
-                },
-                "error": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "error",
-                "attempts"
-              ],
-              "type": "object"
-            },
             "conditions": {
               "items": {
                 "additionalProperties": false,

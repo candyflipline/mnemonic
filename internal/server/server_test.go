@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,12 +16,10 @@ import (
 	"github.com/candyflipline/mnemonic/internal/layout"
 )
 
-type bootJSON struct {
-	Error    string `json:"error"`
-	Attempts int    `json:"attempts"`
-}
+const bootPrefix = "Index boot failing, retrying: attempt "
 
-func ingestStatusBoot(t *testing.T, url string) *bootJSON {
+// bootLine is get_ingest_status's boot-failure text line, "" when it has none.
+func bootLine(t *testing.T, url string) string {
 	t.Helper()
 	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_ingest_status","arguments":{}}}`
 	req, err := http.NewRequest(http.MethodPost, url+"/mcp", bytes.NewBufferString(body))
@@ -38,12 +37,10 @@ func ingestStatusBoot(t *testing.T, url string) *bootJSON {
 	defer resp.Body.Close()
 	var out struct {
 		Result struct {
-			IsError           bool `json:"isError"`
-			StructuredContent struct {
-				Data struct {
-					Boot *bootJSON `json:"boot"`
-				} `json:"data"`
-			} `json:"structuredContent"`
+			IsError bool `json:"isError"`
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
 		} `json:"result"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
@@ -52,7 +49,14 @@ func ingestStatusBoot(t *testing.T, url string) *bootJSON {
 	if out.Result.IsError {
 		t.Fatalf("get_ingest_status answered an error")
 	}
-	return out.Result.StructuredContent.Data.Boot
+	for _, c := range out.Result.Content {
+		for _, line := range strings.Split(c.Text, "\n") {
+			if strings.HasPrefix(line, bootPrefix) {
+				return line
+			}
+		}
+	}
+	return ""
 }
 
 func TestBootFailureKeepsServeUpAndRetries(t *testing.T) {
@@ -84,20 +88,20 @@ func TestBootFailureKeepsServeUpAndRetries(t *testing.T) {
 	ran := make(chan struct{})
 	go func() { srv.Run(ctx); close(ran) }()
 
-	var failing *bootJSON
-	for deadline := time.Now().Add(5 * time.Second); failing == nil || failing.Attempts < 2; {
+	var failing string
+	for deadline := time.Now().Add(5 * time.Second); failing == "" || strings.HasPrefix(failing, bootPrefix+"1:"); {
 		select {
 		case <-ran:
 			t.Fatal("Run ended; serve must stay up and retry the boot")
 		case <-time.After(10 * time.Millisecond):
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("get_ingest_status never showed a boot error with 2 attempts: %+v", failing)
+			t.Fatalf("get_ingest_status never showed a boot failure past attempt 1: %q", failing)
 		}
-		failing = ingestStatusBoot(t, web.URL)
+		failing = bootLine(t, web.URL)
 	}
-	if failing.Error == "" {
-		t.Fatal("boot status has attempts but no error")
+	if !strings.Contains(failing, "permission denied") {
+		t.Fatalf("boot line does not carry the boot error: %q", failing)
 	}
 	select {
 	case <-srv.Booted():
@@ -115,7 +119,7 @@ func TestBootFailureKeepsServeUpAndRetries(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("boot did not succeed after the failure was cleared")
 	}
-	if b := ingestStatusBoot(t, web.URL); b != nil {
-		t.Fatalf("get_ingest_status still reports a boot error after boot: %+v", b)
+	if l := bootLine(t, web.URL); l != "" {
+		t.Fatalf("get_ingest_status still reports a boot failure after boot: %q", l)
 	}
 }
