@@ -108,7 +108,12 @@ func traceBoundCalls(t *testing.T, dir, hid, sid, late string, spansBytes int) (
 	if !ok {
 		t.Fatal("token h")
 	}
-	ctxH = store.WithStore(ctxH, &store.Store{DataDir: dir})
+	stc, err := store.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stc.Close()
+	ctxH = store.WithStore(ctxH, stc)
 	ctxZ, ok := tokens.Context(base, "tok-z")
 	if !ok {
 		t.Fatal("token z")

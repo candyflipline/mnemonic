@@ -310,8 +310,7 @@ func loadDir(table map[layout.Key]*manifestBody, loaded *touched, dir string, k 
 		}
 		m, err := readManifest(filepath.Join(dir, name))
 		if err != nil {
-			log.Printf("store: skip manifest %s: %v", filepath.Join(dir, name), err)
-			continue
+			return fmt.Errorf("store: manifest %s: %w", filepath.Join(dir, name), err)
 		}
 		k.SrcID = srcID
 		table[k] = m
