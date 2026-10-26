@@ -42,6 +42,8 @@ machine    = "chris-mbp"
 
 Leave out `[[sources]]` to use the built-in list of harness directories.
 
+Push streams to SERVER on port 8741 over TLS, and MCP uses port 443, so both must be reachable from your machine. To send push somewhere else, add `push_address = "host:port"` to `config.toml`.
+
 ## Upgrade the client
 
 Replace the binary, then run `init` with no flags. It keeps your config and token and registers the agent again.
