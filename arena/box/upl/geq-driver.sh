@@ -3,7 +3,10 @@
 # other lanes interleave between stages. Not itself under the lock. Stops at once
 # when parity is not 126/126 or an equiv.sh pair is not EQUIVALENT.
 # Log: $OUT/geq-driver.log. Run detached: setsid nohup sh geq-driver.sh ... &
-# Stages (STAGES, space separated, default all): matrix fullH fullS lag strace sweep
+# Stages (STAGES, space separated, default all): prep matrix lag strace sweep fullH fullS
+# prep: snapshot http-1 and stream-1 (path, inode, size, mtime), then `cp -al` them to geqc-http / geqc-stream
+# (no disk used; the lag, strace and sweep runs only add new sources and new-generation
+# files, and snapshot after the stages proves the originals unchanged).
 # Env: BOX, SRC, DEN (32), ROUNDS (5), LAG_N (8), LAG_SPACING (15), SWEEP_N (40), SWEEP_SPACING (5)
 set -eu
 BOX=${BOX:-/var/lib/mnu}
@@ -15,23 +18,55 @@ S=$BOX/geq-bin/mnemonic-3829b3c
 SB=$BOX/geq-bin/mnemonic-3829b3c-bump
 DEN=${DEN:-32}
 ROUNDS=${ROUNDS:-5}
-STAGES=${STAGES:-matrix fullH fullS lag strace sweep}
+STAGES=${STAGES:-prep matrix lag strace sweep fullH fullS}
 LOG=$OUT/geq-driver.log
 say() { echo "$(TZ=America/Los_Angeles date '+%H:%M:%S PT') $*" >> "$LOG"; }
 have() { case " $STAGES " in *" $1 "*) return 0;; esac; return 1; }
 FH=$BOX/geqf-http-1
 FS=$BOX/geqf-stream-1
+CH=$BOX/geqc-http
+CS=$BOX/geqc-stream
+snap() { find "$1" -type f -printf '%p %i %s %T@\n' | LC_ALL=C sort | sha256sum | cut -d' ' -f1; }
 
 say "driver start stages=$STAGES"
 until grep -q '^calls_passed' "$OUT/geq-parity.log" 2>/dev/null; do sleep 10; done
 if ! grep -q '^calls_passed.126$' "$OUT/geq-parity.log" || ! grep -q '^rc=0' "$OUT/geq-parity.log"; then say "STOP parity not 126/126"; exit 1; fi
 say "parity 126/126"
 
+have prep && {
+	[ -e "$CH" ] || { snap "$BOX/http-1" > "$OUT/geq-snap-http-1.before"; snap "$BOX/stream-1" > "$OUT/geq-snap-stream-1.before"; cp -al "$BOX/http-1" "$CH"; cp -al "$BOX/stream-1" "$CS"; }
+	say "prep done $(cat "$OUT/geq-snap-http-1.before" | cut -c1-12) $(cat "$OUT/geq-snap-stream-1.before" | cut -c1-12)"
+}
 have matrix && {
 	[ -d "$BOX/geqhome/s$DEN-all" ] || sh "$SRC/geq-subset.sh" "$DEN" "s$DEN" >> "$LOG" 2>&1
 	say "matrix wait"
 	flock "$LOCK" sh "$SRC/geq-matrix.sh" "$ROUNDS" "$DEN" >> "$LOG" 2>&1 || { say "STOP matrix failed"; exit 1; }
 	say "matrix done"
+}
+have lag && {
+	for r in $(seq 1 "${LAG_ROUNDS:-1}"); do
+		for side in http stream; do
+			if [ $side = http ]; then BIN=$H; D=$CH; else BIN=$S; D=$CS; fi
+			say "lag $side $r wait"
+			flock "$LOCK" env TAG=-q$r N="${LAG_N:-10}" SPACING="${LAG_SPACING:-15}" FIRST_MAX=900 IDX_MAX=600 PORT=7910 sh "$SRC/lag.sh" "$BIN" "$D" > "$OUT/geq-lag-$side-$r.txt" 2>&1 || { say "lag $side $r rc!=0"; }
+			say "lag $side $r done"
+		done
+	done
+}
+have strace && {
+	for side in http stream; do
+		if [ $side = http ]; then BIN=$H; D=$CH; else BIN=$S; D=$CS; fi
+		say "strace $side wait"
+		flock "$LOCK" env TAG=-o N=6 SPACING=15 FIRST_MAX=900 IDX_MAX=600 STRACE_OPENAT=1 PORT=7911 sh "$SRC/lag.sh" "$BIN" "$D" > "$OUT/geq-openat-$side.txt" 2>&1 || { say "openat $side rc!=0"; }
+		say "strace $side done"
+	done
+}
+have sweep && {
+	say "sweep wait"
+	flock "$LOCK" env TAG=-sw SWEEP=1 N="${SWEEP_N:-40}" SPACING="${SWEEP_SPACING:-5}" FIRST_MAX=900 IDX_MAX=900 PORT=7912 sh "$SRC/lag.sh" "$SB" "$CS" > "$OUT/geq-sweep.txt" 2>&1 || say "sweep rc!=0"
+	say "sweep done"
+	snap "$BOX/http-1" > "$OUT/geq-snap-http-1.after"; snap "$BOX/stream-1" > "$OUT/geq-snap-stream-1.after"
+	cmp "$OUT/geq-snap-http-1.before" "$OUT/geq-snap-http-1.after" && cmp "$OUT/geq-snap-stream-1.before" "$OUT/geq-snap-stream-1.after" && say "http-1 and stream-1 unchanged" || say "WARNING http-1 or stream-1 CHANGED"
 }
 have fullH && {
 	say "fullH wait"
@@ -46,28 +81,5 @@ have fullS && {
 	sh "$SRC/equiv.sh" "$BOX/http-1" "$FH" > "$OUT/geq-full-http-equiv.txt" 2>&1 || { say "STOP fullH not EQUIVALENT to http-1"; exit 1; }
 	sh "$SRC/equiv.sh" "$BOX/http-1" "$FS" > "$OUT/geq-full-stream-equiv.txt" 2>&1 || { say "STOP fullS not EQUIVALENT to http-1"; exit 1; }
 	say "full pair EQUIVALENT to http-1"
-}
-have lag && {
-	for r in 1 2; do
-		for side in http stream; do
-			if [ $side = http ]; then BIN=$H; D=$FH; else BIN=$S; D=$FS; fi
-			say "lag $side $r wait"
-			flock "$LOCK" env TAG=-q$r N="${LAG_N:-8}" SPACING="${LAG_SPACING:-15}" FIRST_MAX=900 IDX_MAX=600 PORT=7910 sh "$SRC/lag.sh" "$BIN" "$D" > "$OUT/geq-lag-$side-$r.txt" 2>&1 || { say "lag $side $r rc!=0"; }
-			say "lag $side $r done"
-		done
-	done
-}
-have strace && {
-	for side in http stream; do
-		if [ $side = http ]; then BIN=$H; D=$FH; else BIN=$S; D=$FS; fi
-		say "strace $side wait"
-		flock "$LOCK" env TAG=-o N=6 SPACING=15 FIRST_MAX=900 IDX_MAX=600 STRACE_OPENAT=1 PORT=7911 sh "$SRC/lag.sh" "$BIN" "$D" > "$OUT/geq-openat-$side.txt" 2>&1 || { say "openat $side rc!=0"; }
-		say "strace $side done"
-	done
-}
-have sweep && {
-	say "sweep wait"
-	flock "$LOCK" env TAG=-sw SWEEP=1 N="${SWEEP_N:-40}" SPACING="${SWEEP_SPACING:-5}" FIRST_MAX=900 IDX_MAX=900 PORT=7912 sh "$SRC/lag.sh" "$SB" "$FS" > "$OUT/geq-sweep.txt" 2>&1 || say "sweep rc!=0"
-	say "sweep done"
 }
 say "driver end"
