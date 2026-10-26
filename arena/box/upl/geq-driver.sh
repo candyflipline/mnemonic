@@ -23,8 +23,8 @@ OUT=${OUT:-$BOX/out}
 SRC=${SRC:-$BOX/geq-src}
 LOCK=$BOX/box.lock
 H=$BOX/base-bin/mnemonic-83b0042
-S=$BOX/geq-bin/mnemonic-3829b3c
-SB=$BOX/geq-bin/mnemonic-3829b3c-bump
+S=${S:-$BOX/final-bin/mnemonic-t5a03935}
+SB=${SB:-$BOX/geq-bin/mnemonic-5a03935-bump}
 DEN=${DEN:-32}
 ROUNDS=${ROUNDS:-5}
 STEPS=${STEPS:-prep matrix lagS lagH traceS sweep traceH fullH fullS}
@@ -39,7 +39,7 @@ snap() { find "$1" -type f -printf '%p %i %s %T@\n' | LC_ALL=C sort | sha256sum 
 lag() { # name BIN DIR extra-env...
 	nm=$1; bin=$2; dir=$3; shift 3
 	say "$nm wait"
-	L env "$@" FIRST_MAX=900 IDX_MAX=900 sh "$SRC/lag.sh" "$bin" "$dir" > "$OUT/geq-$nm.txt" 2>&1 || say "$nm rc!=0"
+	L env "$@" SERVE_WRAP="systemd-run --scope -q -p MemoryMax=18G -p MemorySwapMax=0" FIRST_MAX=900 IDX_MAX=900 sh "$SRC/lag.sh" "$bin" "$dir" > "$OUT/geq-$nm.txt" 2>&1 || say "$nm rc!=0"
 	say "$nm done"
 }
 
@@ -58,12 +58,12 @@ for step in $STEPS; do
 		say "matrix wait"
 		L sh "$SRC/geq-matrix.sh" "$ROUNDS" "$DEN" >> "$LOG" 2>&1 || { say "STOP matrix failed"; exit 1; }
 		say "matrix done" ;;
-	lagS) lag lag-stream "$S" "$CS" TAG=-q1 N="${LAG_N:-10}" SPACING="${LAG_SPACING:-15}" PORT=7910 ;;
-	lagH) lag lag-http "$H" "$CH" TAG=-q1 N="${LAG_N:-10}" SPACING="${LAG_SPACING:-15}" PORT=7910 ;;
-	traceS) lag openat-stream "$S" "$CS" TAG=-o N=6 SPACING=15 STRACE_OPENAT=1 PORT=7911 ;;
-	traceH) lag openat-http "$H" "$CH" TAG=-o N=6 SPACING=15 STRACE_OPENAT=1 PORT=7911 ;;
+	lagS) lag lag-stream "$S" "$CS" TAG=-q2 N="${LAG_N:-10}" SPACING="${LAG_SPACING:-15}" PORT=7910 PUSH_PORT=7920 ;;
+	lagH) lag lag-http "$H" "$CH" TAG=-q2 N="${LAG_N:-10}" SPACING="${LAG_SPACING:-15}" PORT=7910 ;;
+	traceS) lag openat-stream "$S" "$CS" TAG=-o2 N=5 SPACING=15 STRACE_OPENAT=1 PORT=7911 PUSH_PORT=7921 ;;
+	traceH) lag openat-http "$H" "$CH" TAG=-o2 N=5 SPACING=15 STRACE_OPENAT=1 PORT=7911 ;;
 	sweep)
-		lag sweep "$SB" "$CS" TAG=-sw SWEEP=1 N="${SWEEP_N:-40}" SPACING="${SWEEP_SPACING:-5}" PORT=7912 ;;
+		lag sweep "$SB" "$CS" TAG=-sw2 SWEEP=1 N="${SWEEP_N:-40}" SPACING="${SWEEP_SPACING:-5}" PORT=7912 PUSH_PORT=7922 ;;
 	fullH)
 		say "fullH wait"
 		L env PORT=7900 PROJECTED_GB=28 sh "$SRC/geq-push.sh" "$H" "$FH" >> "$LOG" 2>&1 || { say "STOP fullH failed"; exit 1; }

@@ -41,6 +41,11 @@
 #   FIRST_MAX, IDX_MAX  seconds to wait for the cycle that counts the first push
 #                   (default 120) and for each probe's cycle (default 120); raise
 #                   them on a store whose cycles run long (a sweep).
+#   SERVE_WRAP      words put in front of the serve command, for example
+#                   "systemd-run --scope -q -p MemoryMax=18G -p MemorySwapMax=0" so a
+#                   serve that blows up is killed alone instead of by the OOM killer.
+#   PUSH_PORT       the final tree's gRPC listener (server.toml push_listen, required
+#                   there); the client's server URL then points at it.
 #   TAG             suffix on the home and output names, so one DIR can be probed
 #                   twice (default: none).
 #   ack_ms and index_ms print median, min, max, p95, p99 (nearest rank).
@@ -73,10 +78,11 @@ chmod 600 "$CFG/token"
 {
 	echo "data_dir = \"$DIR\""
 	echo "listen = \"127.0.0.1:$PORT\""
+	[ -z "${PUSH_PORT:-}" ] || echo "push_listen = \"127.0.0.1:$PUSH_PORT\""
 	tail -n +2 "$CFG/token.out"
 } > "$CFG/server.toml"
 cat > "$CFG/client.toml" <<CFGEOF
-server = "http://127.0.0.1:$PORT"
+server = "http://127.0.0.1:${PUSH_PORT:-$PORT}"
 token_file = "$CFG/token"
 machine = "$MACHINE"
 CFGEOF
@@ -95,6 +101,7 @@ lock = threading.Lock()
 cmd = [bin_, "serve", "--config", cfg + "/server.toml"]
 if stropen:
     cmd = ["strace", "-f", "--seccomp-bpf", "-ttt", "-y", "-e", "signal=none", "-e", "trace=openat,open", "-o", pfx + "-openat.txt"] + cmd
+cmd = os.environ.get("SERVE_WRAP", "").split() + cmd
 serve = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          env=dict(os.environ, GOMAXPROCS="4"), text=True, bufsize=1)
 def reader():
@@ -130,7 +137,7 @@ def wait(pred, limit, what):
     sys.exit("timeout waiting for " + what)
 
 t_start = time.time()
-wait(lambda: any("listening on" in l for _, l in list(lines)), 60, "listening")
+wait(lambda: any(("listening on" in l or "mnemonic serve: HTTP" in l) for _, l in list(lines)), float(os.environ.get("LISTEN_MAX", "60")), "listening")
 q0 = time.time()
 def quiet():
     cs = cycles()
