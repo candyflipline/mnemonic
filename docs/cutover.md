@@ -32,8 +32,11 @@ sudo ./ops/install-server.sh ./mnemonic
 The script creates the `mnemonic` user, `/var/lib/mnemonic`,
 `/usr/local/bin/mnemonic`, and the systemd unit, then enables the service.
 
-Caddy fronts it. Put `ops/Caddyfile` in `/etc/caddy/` (or include it), set
-`MNEMONIC_HOST` to the public hostname, and reload Caddy.
+Caddy fronts it from a Docker container (image `caddy:2.10.2-alpine`) that
+reaches serve at `host.docker.internal:8740`. Mount `ops/Caddyfile` as the
+container's Caddyfile, set `MORAINE_HOST` to the public hostname, and reload
+Caddy. The push stream (`/mnemonic.push.v1.Push/*`) goes to serve over h2c;
+everything else goes over HTTP/1.1.
 
 ## Tokens
 
