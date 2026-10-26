@@ -72,6 +72,7 @@ func serve(args []string) error {
 	go func() {
 		select {
 		case <-srv.Booted():
+			log.Printf("mnemonic serve: push serving (index booted)")
 			ended <- srv.ServePush(pushListener)
 		case <-ctx.Done():
 		}
