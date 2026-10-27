@@ -56,14 +56,14 @@ func flatSpans(root string, chatKey func(*borrowedRow) string) func(string, stri
 			seq := uint32(r.TurnIndex)
 			tr := turns[seq]
 			if tr == nil {
-				tr = &spanAgg{id: spanIDHex("turn", sid, strconv.FormatUint(uint64(seq), 10))}
+				tr = &spanAgg{id: schema.SpanIDOf("turn", sid, strconv.FormatUint(uint64(seq), 10))}
 				turns[seq] = tr
 			}
 			tr.b.add(uid, t)
 			if ck := chatKeyOf(chatKey, r); ck != "" {
 				c := chats[ck]
 				if c == nil {
-					c = &chatAgg{spanAgg: spanAgg{id: spanIDHex("chat", sid, ck)}}
+					c = &chatAgg{spanAgg: spanAgg{id: schema.SpanIDOf("chat", sid, ck)}}
 					chats[ck] = c
 				}
 				c.model = maxStr(c.model, r.Model)
@@ -77,7 +77,7 @@ func flatSpans(root string, chatKey func(*borrowedRow) string) func(string, stri
 			if call := r.ToolCallID; call != "" {
 				o := tools[call]
 				if o == nil {
-					o = &toolAgg{spanAgg: spanAgg{id: spanIDHex("tool", sid, call)}}
+					o = &toolAgg{spanAgg: spanAgg{id: schema.SpanIDOf("tool", sid, call)}}
 					tools[call] = o
 				}
 				o.name = maxStr(o.name, r.ToolName)
@@ -90,7 +90,7 @@ func flatSpans(root string, chatKey func(*borrowedRow) string) func(string, stri
 			}
 		}
 
-		rootID := spanIDHex("session", sid)
+		rootID := schema.SpanIDOf("session", sid)
 		var rootTok tokens
 		turnTok := map[string]tokens{}
 		for _, c := range chats {

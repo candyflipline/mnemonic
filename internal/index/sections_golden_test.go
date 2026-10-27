@@ -292,7 +292,7 @@ func TestOtlpSpans(t *testing.T) {
 		row("p", "P", "q", "chat", 0, ""),
 		row("q", "Q", "p", "chat", 0, ""),
 	}
-	id := func(item string) string { return spanIDHex("otlp", "alice", "t", item) }
+	id := func(item string) string { return schema.SpanIDOf("otlp", "alice", "t", item) }
 	got := map[string]schema.Span{}
 	for _, s := range buildSpans("otlp", rows) {
 		got[s.SpanID] = s

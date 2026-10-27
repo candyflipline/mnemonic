@@ -45,7 +45,7 @@ type claudeApAgg struct {
 }
 
 func claudeCodeSpans(_, sid string, rows iter.Seq[*borrowedRow]) []schema.Span {
-	rootID := spanIDHex("session", sid)
+	rootID := schema.SpanIDOf("session", sid)
 	reqOf := func(r *borrowedRow) string {
 		if r.RequestID != "" {
 			return r.RequestID
@@ -72,14 +72,14 @@ func claudeCodeSpans(_, sid string, rows iter.Seq[*borrowedRow]) []schema.Span {
 		if sub == "" {
 			tr := turns[seq]
 			if tr == nil {
-				tr = &claudeAgg{id: spanIDHex("turn", sid, strconv.FormatUint(uint64(seq), 10))}
+				tr = &claudeAgg{id: schema.SpanIDOf("turn", sid, strconv.FormatUint(uint64(seq), 10))}
 				turns[seq] = tr
 			}
 			tr.b.add(uid, t)
 		} else {
 			a := agents[sub]
 			if a == nil {
-				a = &claudeAgentAgg{claudeAgg: claudeAgg{id: spanIDHex("agent", sid, sub)}}
+				a = &claudeAgentAgg{claudeAgg: claudeAgg{id: schema.SpanIDOf("agent", sid, sub)}}
 				agents[sub] = a
 			}
 			a.label = maxStr(a.label, r.AgentLabel)
@@ -88,7 +88,7 @@ func claudeCodeSpans(_, sid string, rows iter.Seq[*borrowedRow]) []schema.Span {
 		if req := reqOf(r); req != "" {
 			c := chats[req]
 			if c == nil {
-				c = &claudeChatAgg{claudeAgg: claudeAgg{id: spanIDHex("chat", sid, req)}}
+				c = &claudeChatAgg{claudeAgg: claudeAgg{id: schema.SpanIDOf("chat", sid, req)}}
 				chats[req] = c
 			}
 			c.model = maxStr(c.model, r.Model)
@@ -103,7 +103,7 @@ func claudeCodeSpans(_, sid string, rows iter.Seq[*borrowedRow]) []schema.Span {
 		if call := r.ToolCallID; call != "" {
 			o := tools[call]
 			if o == nil {
-				o = &claudeToolAgg{claudeAgg: claudeAgg{id: spanIDHex("tool", sid, call)}}
+				o = &claudeToolAgg{claudeAgg: claudeAgg{id: schema.SpanIDOf("tool", sid, call)}}
 				tools[call] = o
 			}
 			o.name = maxStr(o.name, r.ToolName)

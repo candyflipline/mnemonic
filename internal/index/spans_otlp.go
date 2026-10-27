@@ -109,14 +109,14 @@ func otlpSpans(_, sid string, session iter.Seq[*borrowedRow]) []schema.Span {
 		parent := ""
 		if !root[r.UID] {
 			if n := nearest[r.UID]; n != nil {
-				parent = spanIDHex("otlp", n.author, n.traceID, n.itemID)
+				parent = schema.SpanIDOf("otlp", n.author, n.traceID, n.itemID)
 			}
 		}
 		name := r.OpKind
 		if r.Text != "" {
 			name = r.Text
 		}
-		s := spanAcc{sid: sid, id: spanIDHex("otlp", r.Author, r.TraceID, r.ItemID),
+		s := spanAcc{sid: sid, id: schema.SpanIDOf("otlp", r.Author, r.TraceID, r.ItemID),
 			parent: parent, kind: schema.SpanKind(r.OpKind), name: name,
 			b: spanBounds{startUs: eventTimeUs((*Row)(r)), endUs: eventTimeUs((*Row)(r)) + int64(r.LatencyMs)*1000,
 				first: r.UID, last: r.UID},

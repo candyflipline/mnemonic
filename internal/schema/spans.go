@@ -1,6 +1,8 @@
 package schema
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"time"
 )
@@ -15,6 +17,17 @@ const (
 	SpanTurn        SpanKind = "turn"
 )
 
+func SpanIDOf(parts ...string) string {
+	h := sha256.New()
+	for i, p := range parts {
+		if i > 0 {
+			h.Write([]byte{0x1f})
+		}
+		h.Write([]byte(p))
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
 var spanKinds = []SpanKind{SpanInvokeAgent, SpanChat, SpanExecuteTool, SpanTurn}
 
 type SpanStatus string
@@ -26,10 +39,9 @@ const (
 
 var spanStatuses = []SpanStatus{SpanOK, SpanError}
 
-// Span is one row of the cache's spans relation, derived from events. SpanID
-// is the first 16 hex chars of sha256 over the source span key, so it is the
-// same after every re-parse; ParentSpanID is "" at the session root. Cost is
-// nil when the source reports none.
+// Span is one row of the cache's spans relation, derived from events.
+// ParentSpanID is "" at the session root. Cost is nil when the source reports
+// none.
 type Span struct {
 	SessionID        string
 	SpanID           string

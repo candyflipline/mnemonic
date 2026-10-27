@@ -1,8 +1,6 @@
 package index
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"iter"
 	"time"
 
@@ -32,17 +30,6 @@ func (db *DB) sessionSpansSize(sessionID string) int {
 		return 0
 	}
 	return len(st.sessionSpansRaw(sessionID))
-}
-
-func spanIDHex(parts ...string) string {
-	h := sha256.New()
-	for i, p := range parts {
-		if i > 0 {
-			h.Write([]byte{0x1f})
-		}
-		h.Write([]byte(p))
-	}
-	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
 type spanBounds struct {
