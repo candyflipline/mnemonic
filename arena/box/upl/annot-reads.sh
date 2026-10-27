@@ -196,14 +196,14 @@ while IFS= read -r sid; do
 			ls_err=$((ls_err + 1))
 			break
 		fi
-		jq -c --arg sid "$pref" '(.result.structuredContent.data.items // .result.structuredContent.data.Items // [])[]
-			| select((.session_id // .SessionID // "") == $sid)' "$TMP/ls.json" > "$out/list_sessions/$i.json" 2>/dev/null ||
+		jq -c --arg sid "$pref" '(.result.structuredContent.data.sessions // [])[]
+			| select(.session.id == $sid)' "$TMP/ls.json" > "$out/list_sessions/$i.json" 2>/dev/null ||
 			: > "$out/list_sessions/$i.json"
 		if [ -s "$out/list_sessions/$i.json" ]; then
 			found=1
 			break
 		fi
-		cursor=$(jq -r '.result.structuredContent.data.next_cursor // .result.structuredContent.data.NextCursor // ""' "$TMP/ls.json" 2>/dev/null || true)
+		cursor=$(jq -r '.result.structuredContent.data.next_cursor // ""' "$TMP/ls.json" 2>/dev/null || true)
 		[ -z "$cursor" -o "$cursor" = null ] && break
 		pages=$((pages + 1))
 	done
@@ -215,7 +215,7 @@ while IFS= read -r sid; do
 
 	# search: the store-wide result ids for "annot-probe", sorted
 	if mcp search_sessions '{"query":"annot-probe","n_hits":50}' "$TMP/sr.json" && ! iserr "$TMP/sr.json"; then
-		jq -r '[.result.structuredContent.data.results[]?.session_id] | unique | .[]' "$TMP/sr.json" > "$out/search/$i.txt" 2>/dev/null ||
+		jq -r '[.result.structuredContent.data.results[]?.session.id] | unique | .[]' "$TMP/sr.json" > "$out/search/$i.txt" 2>/dev/null ||
 			: > "$out/search/$i.txt"
 	else
 		sr_err=$((sr_err + 1))
