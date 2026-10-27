@@ -53,11 +53,6 @@ func (es ExportSession) EachRow(fn func(*Row) error) error {
 
 // EachSession calls fn for every session the export may read, in session id
 // order; hidden reports sessions the session controls hide from the export.
-//
-// The rows are the winner rows the part holds, minus the annotation harness's:
-// its files land in the annotations relation and never in events (the copy
-// 59796bc:internal/cache/index_annotations.go kept), so no export sees them
-// here.
 func (db *DB) EachSession(hidden map[string]bool, fn func(ExportSession) error) error {
 	type ref struct {
 		id string

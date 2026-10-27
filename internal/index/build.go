@@ -333,6 +333,21 @@ func offerRow(win map[string]winner, b built, m member) {
 	win[b.row.UID] = winner{b: b, member: m}
 }
 
+func collectAnnotations(store string, c ckpt, src uint16, heavy *heavyReader, into map[string][]annRow) error {
+	return walkLog(store, c, 0, func(rec []byte, _ int64, _ int) error {
+		r := new(Row)
+		if err := c.decodeRow(r, rec); err != nil {
+			return err
+		}
+		hrec, err := heavy.record(src, r)
+		if err != nil {
+			return err
+		}
+		into[r.Session] = append(into[r.Session], annRow{payload: heavyPayload(hrec), author: c.Author})
+		return nil
+	})
+}
+
 func mergeAuthors(dst, src map[string][]string) {
 	for sid, as := range src {
 		if len(as) == 0 {
@@ -371,23 +386,7 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 			members[si].hotPos = hotPos{}
 		}
 		if c.Harness == schema.AnnotationHarness {
-			// An annotation row feeds only the annotations section: it is no
-			// doc, so it never competes for a uid, adds no session author, and
-			// reaches no term, turn or rollup. Its target may be a session
-			// this part holds no rows of.
-			err := walkLog(store, c, 0, func(rec []byte, _ int64, _ int) error {
-				r := new(Row)
-				if err := c.decodeRow(r, rec); err != nil {
-					return err
-				}
-				hrec, err := heavy.record(uint16(si), r)
-				if err != nil {
-					return err
-				}
-				annRows[r.Session] = append(annRows[r.Session], annRow{payload: heavyPayload(hrec), author: c.Author})
-				return nil
-			})
-			if err != nil {
+			if err := collectAnnotations(store, c, uint16(si), heavy, annRows); err != nil {
 				return err
 			}
 			continue
