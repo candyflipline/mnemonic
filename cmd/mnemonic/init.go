@@ -37,8 +37,9 @@ const (
 
 func initCmd(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
-	server := fs.String("server", "", "base URL of the mnemonic server (required)")
-	tokenFile := fs.String("token-file", "", "file holding the token minted by `mnemonic token new` (required)")
+	server := fs.String("server", "", "quic://host:port of the mnemonic server (required)")
+	serverKey := fs.String("server-key", "", "the server's key, from `mnemonic key --file` on the server (required)")
+	author := fs.String("author", defaultAuthor(), "author for the printed [[keys]] entry")
 	machine := fs.String("machine", "", "machine name (default: short hostname)")
 	force := fs.Bool("force", false, "overwrite an existing config.toml")
 	label := fs.String("label", launchdLabel, "launchd label (macOS)")
@@ -60,17 +61,16 @@ func initCmd(args []string) error {
 			return err
 		}
 	}
-	tokenPath := filepath.Join(dir, "token")
 
-	if _, err := os.Stat(configPath); err == nil && *server == "" && *tokenFile == "" && !*force {
+	if _, err := os.Stat(configPath); err == nil && *server == "" && *serverKey == "" && !*force {
 		fmt.Println("kept  " + configPath)
 		return installScheduler(home, *label)
 	}
 	if *server == "" {
-		return fmt.Errorf("--server <url> is required")
+		return fmt.Errorf("--server quic://host:port is required")
 	}
-	if *tokenFile == "" {
-		return fmt.Errorf("--token-file <path> is required")
+	if *serverKey == "" {
+		return fmt.Errorf("--server-key <key> is required")
 	}
 
 	if *machine == "" {
@@ -93,44 +93,20 @@ func initCmd(args []string) error {
 		return fmt.Errorf("init: %s: %w", dir, err)
 	}
 
-	src, err := config.ExpandHome(*tokenFile)
-	if err != nil {
-		return err
-	}
-	if src, err = filepath.Abs(src); err != nil {
-		return fmt.Errorf("init: token-file: %w", err)
-	}
-	if filepath.Clean(src) != filepath.Clean(tokenPath) {
-		raw, err := os.ReadFile(src)
-		if err != nil {
-			return fmt.Errorf("init: token-file: %w", err)
-		}
-		if err := writeToken(tokenPath, raw); err != nil {
-			return err
-		}
-		fmt.Println("wrote " + tokenPath)
-	} else {
-		fmt.Println("kept  " + tokenPath)
-	}
-
 	cfg := config.Client{
 		Server:    *server,
-		TokenFile: tokenPath,
+		ServerKey: *serverKey,
+		KeyFile:   config.DefaultKeyFile,
 		Machine:   *machine,
 		Sources:   append([]config.SourceGlob(nil), config.DefaultSources...),
 	}
-	cf, err := os.OpenFile(configPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
-	if err != nil {
-		return fmt.Errorf("init: %s: %w", configPath, err)
-	}
-	err = toml.NewEncoder(cf).Encode(cfg)
-	if cerr := cf.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return fmt.Errorf("init: %s: %w", configPath, err)
+	if err := writeClientConfig(configPath, cfg); err != nil {
+		return err
 	}
 	fmt.Println("wrote " + configPath)
+	if err := printKey(cfg.KeyFile, *author); err != nil {
+		return err
+	}
 
 	return installScheduler(home, *label)
 }
@@ -238,13 +214,26 @@ func runningBinary() (string, error) {
 	return real, nil
 }
 
-// writeToken creates at 0600 and then chmods: the create mode passes through
-// the umask, and the file may already exist with looser modes.
-func writeToken(path string, raw []byte) error {
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		return fmt.Errorf("init: %s: %w", path, err)
+// writeClientConfig writes cfg beside path, loads it back so a config that
+// would not load is never installed, and renames it over path.
+func writeClientConfig(path string, cfg config.Client) error {
+	tmp := path + ".new"
+	cf, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("init: %s: %w", tmp, err)
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
+	err = toml.NewEncoder(cf).Encode(cfg)
+	if cerr := cf.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		_, err = config.LoadClient(tmp)
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		os.Remove(tmp)
 		return fmt.Errorf("init: %s: %w", path, err)
 	}
 	return nil

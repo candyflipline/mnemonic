@@ -4,24 +4,24 @@ package config
 
 import "github.com/candyflipline/mnemonic/internal/auth"
 
-// Client is ~/.mnemonic/config.toml.
+// Client is ~/.mnemonic/config.toml. Server is quic://host:port, the only
+// scheme.
 //
-//	server  = "https://mnemonic.example"   # push dials mnemonic.example:8741 over TLS
-//	push_address = "host:port" # optional; overrides the push target, same scheme as server
-//	token   = "..."            # or token_file = "~/.mnemonic/token"
-//	machine = "chris-mbp"      # defaults to the short hostname
+//	server     = "quic://mnemonic.example:8741"
+//	server_key = "..."                # the server's key: `mnemonic key --file` on the server
+//	key_file   = "~/.mnemonic/key"    # this machine's key; this is the default
+//	machine    = "chris-mbp"          # defaults to the short hostname
 //	[[sources]]
 //	harness = "claude-code"; source_name = "claude"; glob = "~/.claude/projects/**/*.jsonl"
 //	[redaction]
 //	extra_patterns = []
 type Client struct {
-	Server      string          `toml:"server"`
-	PushAddress string          `toml:"push_address"`
-	Token       string          `toml:"token"`
-	TokenFile   string          `toml:"token_file"`
-	Machine     string          `toml:"machine"`
-	Sources     []SourceGlob    `toml:"sources"`
-	Redaction   ClientRedaction `toml:"redaction"`
+	Server    string          `toml:"server"`
+	ServerKey string          `toml:"server_key"`
+	KeyFile   string          `toml:"key_file"`
+	Machine   string          `toml:"machine"`
+	Sources   []SourceGlob    `toml:"sources"`
+	Redaction ClientRedaction `toml:"redaction"`
 }
 
 type SourceGlob struct {
@@ -52,43 +52,40 @@ var DefaultSources = []SourceGlob{
 // Server is the server's config file.
 //
 //	data_dir = "/var/lib/mnemonic"
-//	listen   = ":443"
-//	push_listen = ":8741"
-//	[tls]                    # omit for plaintext listeners
-//	hosts = ["mnemonic.example"]
-//	acme_directory = "https://acme-staging-v02.api.letsencrypt.org/directory"  # optional; default Let's Encrypt production
-//	[[tokens]]
-//	author = "chris"; sha256 = "<auth.Hash(token)>"
+//	[quic]
+//	listen   = ":8741"                  # UDP
+//	key_file = "/var/lib/mnemonic/server.key"  # optional; default data_dir/server.key
+//	[[keys]]
+//	key = "<mnemonic key prints this>"; author = "chris"
 //	tenant = "acme"            # optional, default "default"; an author sits in one tenant
 //	scopes = ["read", "push"]  # optional, the default; "annotate" and "admin" opt in
 //	[otlp]
 //	store_content = false    # keep OTLP message and tool content
 //
-// An author no token entry names is in the "default" tenant, so every
-// default-tenant token reads what such an author's data holds.
+// An author no key entry names is in the "default" tenant, so every
+// default-tenant key reads what such an author's data holds.
 type Server struct {
-	DataDir    string       `toml:"data_dir"`
-	Listen     string       `toml:"listen"`
-	PushListen string       `toml:"push_listen"`
-	TLS        TLS          `toml:"tls"`
-	Tokens     []TokenEntry `toml:"tokens"`
-	OTLP       OTLP         `toml:"otlp"`
+	DataDir string     `toml:"data_dir"`
+	QUIC    QUIC       `toml:"quic"`
+	Keys    []KeyEntry `toml:"keys"`
+	OTLP    OTLP       `toml:"otlp"`
 }
 
-// TLS serves both listeners with Let's Encrypt certificates for Hosts,
-// cached under data_dir/autocert.
-type TLS struct {
-	Hosts         []string `toml:"hosts"`
-	ACMEDirectory string   `toml:"acme_directory"`
+// QUIC is the one UDP endpoint. KeyFile holds the server's ed25519 key and
+// defaults to data_dir/server.key.
+type QUIC struct {
+	Listen  string `toml:"listen"`
+	KeyFile string `toml:"key_file"`
+}
+
+// KeyEntry admits one client key (auth.EncodeKey form) as Author.
+type KeyEntry struct {
+	Key    string       `toml:"key"`
+	Author string       `toml:"author"`
+	Tenant string       `toml:"tenant"`
+	Scopes []auth.Scope `toml:"scopes"`
 }
 
 type OTLP struct {
 	StoreContent bool `toml:"store_content"`
-}
-
-type TokenEntry struct {
-	Author string       `toml:"author"`
-	SHA256 string       `toml:"sha256"`
-	Tenant string       `toml:"tenant"`
-	Scopes []auth.Scope `toml:"scopes"`
 }

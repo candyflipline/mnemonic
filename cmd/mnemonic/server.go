@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,7 +16,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/candyflipline/mnemonic/internal/auth"
 	"github.com/candyflipline/mnemonic/internal/config"
+	"github.com/candyflipline/mnemonic/internal/qnet"
 	"github.com/candyflipline/mnemonic/internal/server"
 )
 
@@ -39,19 +42,22 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
-	srv, err := server.New(cfg.DataDir, cfg.Identities())
+	srv, err := server.New(cfg.DataDir)
 	if err != nil {
 		return err
 	}
 	defer srv.Close()
 	srv.StoreOTLPContent(cfg.OTLP.StoreContent)
 
-	httpListener, pushListener, err := listen(cfg)
+	priv, err := qnet.LoadOrCreateKey(cfg.QUIC.KeyFile)
 	if err != nil {
 		return err
 	}
-	defer httpListener.Close()
-	defer pushListener.Close()
+	qs, err := qnet.Listen(cfg.QUIC.Listen, priv, cfg.Identities().Identify)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", cfg.QUIC.Listen, err)
+	}
+	defer qs.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -61,27 +67,34 @@ func serve(args []string) error {
 		srv.Run(ctx)
 	}()
 
-	tlsLog := newTLSLogWriter(cfg.Listen)
-	defer tlsLog.Stop()
-	hs := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second, ErrorLog: log.New(tlsLog, "", 0)}
+	hs := &http.Server{
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			if id, ok := qnet.IdentityOf(c); ok {
+				return auth.NewContext(ctx, id)
+			}
+			return ctx
+		},
+	}
 	ended := make(chan error, 2)
-	go func() { ended <- hs.Serve(httpListener) }()
+	go func() { ended <- hs.Serve(qs.HTTP) }()
 	go func() {
 		select {
 		case <-srv.Booted():
 			log.Printf("mnemonic serve: push serving (index booted)")
-			ended <- srv.ServePush(pushListener)
+			ended <- srv.ServePush(qs.Push)
 		case <-ctx.Done():
 		}
 	}()
-	log.Printf("mnemonic serve: HTTP %s, push %s (data_dir %s)", cfg.Listen, cfg.PushListen, cfg.DataDir)
+	log.Printf("mnemonic serve: QUIC %s (UDP), server key %s, data_dir %s", qs.Addr(), qnet.PublicKey(priv), cfg.DataDir)
 	var serveErr error
 	select {
 	case <-ctx.Done():
 	case serveErr = <-ended:
 	}
 	stop()
-	pushListener.Close()
+	qs.Push.Close()
 	drainCtx, cancelDrain := context.WithTimeout(context.Background(), pushDrainDeadline)
 	srv.Drain(drainCtx)
 	cancelDrain()
@@ -91,6 +104,7 @@ func serve(args []string) error {
 		hs.Close()
 	}
 	cancelHTTP()
+	qs.Close()
 	<-looped
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		return fmt.Errorf("serve: %w", serveErr)

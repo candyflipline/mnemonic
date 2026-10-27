@@ -18,7 +18,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -83,8 +82,8 @@ const settleSource = 15 * time.Minute
 // The files are config.DefaultSources; there is no config file and no server.
 // The redactor is therefore push's with no extra patterns (redact.New(nil)),
 // the build a config-less client pushes with. MCP is loopback-only
-// (requireLoopback) and answers the bearer token "local" as this machine's
-// user with every scope. Session controls load from dataDir, empty until a
+// (requireLoopback) and every connection is auth.Local: this machine's user
+// with every scope. Session controls load from dataDir, empty until a
 // control tool writes its first record through the store under the same
 // dataDir.
 func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) error {
@@ -141,16 +140,15 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 		return err
 	}
 	sink.drainSettles(ctx, wake, logger) // the boot cycle's deferred settles, as serve sweeps after its own
-	tokens := auth.NewTokens(map[string]auth.Token{
-		auth.Hash("local"): {Author: author, Scopes: slices.Clone(auth.Scopes[:])},
-	})
 	tools := mcp.Handler(ix, index.Lookup)
 	mux := http.NewServeMux()
-	mux.Handle("GET /v1/export/{kind}", tokens.Require(auth.Read)(export.Handler(ix, ctl)))
-	mux.Handle("/mcp", tokens.Require(auth.Read)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /v1/export/{kind}", auth.Require(auth.Read)(export.Handler(ix, ctl)))
+	mux.Handle("/mcp", auth.Require(auth.Read)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tools.ServeHTTP(w, r.WithContext(index.WithControls(store.WithStore(r.Context(), st), ctl)))
 	})))
-	hs := &http.Server{Addr: opts.listen, Handler: mux}
+	hs := &http.Server{Addr: opts.listen, Handler: mux, ConnContext: func(ctx context.Context, _ net.Conn) context.Context {
+		return auth.NewContext(ctx, auth.Local(author))
+	}}
 	go func() {
 		if err := pushrun.WatchSink(ctx, config.Client{Sources: srcs}, sink, out); err != nil {
 			logger.Printf("watch: %v", err)

@@ -1,7 +1,9 @@
 // mnemonic collects agent session traces and serves them over MCP.
 //
 //	mnemonic push [--watch] [--config ~/.mnemonic/config.toml]   one pass, or resident and woken by file writes
-//	mnemonic serve --config server.toml                HTTP /v1 + /mcp, one ingest and serve loop
+//	mnemonic key [--file PATH]                         print the public key and a [[keys]] block
+//	mnemonic mcp [--config PATH]                       stdio MCP shim over the QUIC link
+//	mnemonic serve --config server.toml                push and HTTP /v1 + /mcp on one QUIC UDP endpoint, one ingest and serve loop
 //
 // Both build with CGO_ENABLED=0; serve needs the server build tag:
 // go build -tags server ./cmd/mnemonic
@@ -22,14 +24,13 @@ import (
 )
 
 var commands = map[string]func(args []string) error{
-	"push":  push,
-	"token": token,
-	"init":  initCmd,
+	"push": push,
+	"init": initCmd,
 }
 
 func main() {
 	if len(os.Args) < 2 || commands[os.Args[1]] == nil {
-		fmt.Fprintln(os.Stderr, "usage: mnemonic init|push|serve|token [flags]")
+		fmt.Fprintln(os.Stderr, "usage: mnemonic init|key|mcp|push|serve [flags]")
 		os.Exit(2)
 	}
 	if err := commands[os.Args[1]](os.Args[2:]); err != nil {

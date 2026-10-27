@@ -63,7 +63,7 @@ func NewReceiver(st *store.Committer) *Receiver {
 func (r *Receiver) SetStoreContent(on bool) { r.storeContent.Store(on) }
 
 // Traces serves POST /v1/traces and Logs POST /v1/logs; both expect the
-// caller's author on the request context (auth.Middleware).
+// caller's author on the request context (auth.Require).
 func (r *Receiver) Traces() http.Handler {
 	return r.handler(func() proto.Message { return &colltrace.ExportTraceServiceRequest{} },
 		func(m proto.Message, content bool) (*batch, proto.Message) {

@@ -99,25 +99,21 @@ func traceBoundCalls(t *testing.T, dir, hid, sid, late string, spansBytes int) (
 	if err != nil {
 		t.Fatal(err)
 	}
-	tokens := auth.NewTokens(map[string]auth.Token{
-		auth.Hash("tok-h"): {Author: "h", Scopes: []auth.Scope{auth.Read, auth.Annotate}},
-		auth.Hash("tok-z"): {Tenant: "other", Author: "z", Scopes: []auth.Scope{auth.Read}},
+	keys := auth.NewKeys(map[string]auth.Grant{
+		"k-h": {Author: "h", Scopes: []auth.Scope{auth.Read, auth.Annotate}},
+		"k-z": {Tenant: "other", Author: "z", Scopes: []auth.Scope{auth.Read}},
 	})
 	base := WithControls(context.Background(), ctl)
-	ctxH, ok := tokens.Context(base, "tok-h")
-	if !ok {
-		t.Fatal("token h")
-	}
+	idH, _ := keys.Identify("k-h")
+	ctxH := auth.NewContext(base, idH)
 	stc, err := store.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stc.Close()
 	ctxH = store.WithStore(ctxH, stc)
-	ctxZ, ok := tokens.Context(base, "tok-z")
-	if !ok {
-		t.Fatal("token z")
-	}
+	idZ, _ := keys.Identify("k-z")
+	ctxZ := auth.NewContext(base, idZ)
 	args := func(session string) json.RawMessage {
 		b, _ := json.Marshal(map[string]any{"session_id": formatSessionID(session)})
 		return b

@@ -138,17 +138,15 @@ func TestReceiver(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
-			srv, err := server.New(dir, auth.Authors(map[string]string{auth.Hash("tok"): "chris"}))
+			srv, err := server.New(dir)
 			if err != nil {
 				t.Fatal(err)
 			}
 			srv.StoreOTLPContent(c.storeContent)
-			ts := httptest.NewServer(srv.Handler())
-			defer ts.Close()
+			ts := serveAs(t, srv, "chris")
 
 			post := func(body []byte) (int, string, string) {
 				req, _ := http.NewRequest("POST", ts.URL+"/v1/traces", bytes.NewReader(body))
-				req.Header.Set("Authorization", "Bearer tok")
 				req.Header.Set("Content-Type", c.contentType)
 				if c.encoding != "" {
 					req.Header.Set("Content-Encoding", c.encoding)
@@ -279,27 +277,31 @@ const cycleJSON = `{"resourceSpans":[{
      "attributes":[{"key":"gen_ai.operation.name","value":{"stringValue":"chat"}},{"key":"gen_ai.conversation.id","value":{"stringValue":"conv-loop"}}]}
   ]}]}]}`
 
-func startServer(t *testing.T, tokens map[string]string, storeContent bool) (string, *server.Server, *httptest.Server) {
+func startServer(t *testing.T, author string, storeContent bool) (string, *server.Server, *httptest.Server) {
 	t.Helper()
 	dir := t.TempDir()
-	byHash := map[string]string{}
-	for tok, author := range tokens {
-		byHash[auth.Hash(tok)] = author
-	}
-	srv, err := server.New(dir, auth.Authors(byHash))
+	srv, err := server.New(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	srv.StoreOTLPContent(storeContent)
-	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(ts.Close)
-	return dir, srv, ts
+	return dir, srv, serveAs(t, srv, author)
 }
 
-func postJSON(t *testing.T, ts *httptest.Server, path, token string, body io.Reader) (int, http.Header, string) {
+func serveAs(t *testing.T, srv *server.Server, author string) *httptest.Server {
+	t.Helper()
+	ts := httptest.NewUnstartedServer(srv.Handler())
+	ts.Config.ConnContext = func(ctx context.Context, _ net.Conn) context.Context {
+		return auth.NewContext(ctx, auth.Local(author))
+	}
+	ts.Start()
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func postJSON(t *testing.T, ts *httptest.Server, path string, body io.Reader) (int, http.Header, string) {
 	t.Helper()
 	req, _ := http.NewRequest("POST", ts.URL+path, body)
-	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -398,11 +400,11 @@ func TestReceiverRows(t *testing.T) {
 			name = "gate with content"
 		}
 		t.Run(name, func(t *testing.T) {
-			dir, _, ts := startServer(t, map[string]string{"tok": "chris"}, content)
-			if status, _, out := postJSON(t, ts, "/v1/traces", "tok", strings.NewReader(gateTraceJSON)); status != 200 {
+			dir, _, ts := startServer(t, "chris", content)
+			if status, _, out := postJSON(t, ts, "/v1/traces", strings.NewReader(gateTraceJSON)); status != 200 {
 				t.Fatalf("traces: %d %s", status, out)
 			}
-			if status, _, out := postJSON(t, ts, "/v1/logs", "tok", strings.NewReader(gateLogsJSON)); status != 200 {
+			if status, _, out := postJSON(t, ts, "/v1/logs", strings.NewReader(gateLogsJSON)); status != 200 {
 				t.Fatalf("logs: %d %s", status, out)
 			}
 			key := layout.Key{Author: "chris", Machine: store.ServerMachine, Harness: "otlp", SrcID: wire.SrcID("otlp/gate/" + day)}
@@ -421,10 +423,10 @@ func TestReceiverRows(t *testing.T) {
 	}
 
 	t.Run("two authors, one span", func(t *testing.T) {
-		dir, srv, ts := startServer(t, map[string]string{"tokA": "alice", "tokB": "bob"}, false)
-		for _, tok := range []string{"tokA", "tokB"} {
-			if status, _, out := postJSON(t, ts, "/v1/traces", tok, strings.NewReader(tracesJSON)); status != 200 {
-				t.Fatalf("%s: %d %s", tok, status, out)
+		dir, srv, alice := startServer(t, "alice", false)
+		for _, ts := range []*httptest.Server{alice, serveAs(t, srv, "bob")} {
+			if status, _, out := postJSON(t, ts, "/v1/traces", strings.NewReader(tracesJSON)); status != 200 {
+				t.Fatalf("%d %s", status, out)
 			}
 		}
 		ix := converge(t, dir, srv)
@@ -458,8 +460,8 @@ func TestReceiverRows(t *testing.T) {
 	})
 
 	t.Run("span parent loops", func(t *testing.T) {
-		dir, srv, ts := startServer(t, map[string]string{"tok": "chris"}, false)
-		if status, _, out := postJSON(t, ts, "/v1/traces", "tok", strings.NewReader(cycleJSON)); status != 200 {
+		dir, srv, ts := startServer(t, "chris", false)
+		if status, _, out := postJSON(t, ts, "/v1/traces", strings.NewReader(cycleJSON)); status != 200 {
 			t.Fatalf("%d %s", status, out)
 		}
 		ix := converge(t, dir, srv)
@@ -471,7 +473,7 @@ func TestReceiverRows(t *testing.T) {
 	})
 
 	t.Run("decodes beyond the slots", func(t *testing.T) {
-		_, _, ts := startServer(t, map[string]string{"tok": "chris"}, false)
+		_, _, ts := startServer(t, "chris", false)
 		type held struct {
 			w    *io.PipeWriter
 			done chan int
@@ -482,7 +484,6 @@ func TestReceiverRows(t *testing.T) {
 			h := held{pw, make(chan int, 1)}
 			go func() {
 				req, _ := http.NewRequest("POST", ts.URL+"/v1/traces", pr)
-				req.Header.Set("Authorization", "Bearer tok")
 				req.Header.Set("Content-Type", "application/json")
 				res, err := http.DefaultClient.Do(req)
 				if err != nil {
@@ -500,7 +501,7 @@ func TestReceiverRows(t *testing.T) {
 		var status int
 		var header http.Header
 		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-			if status, header, _ = postJSON(t, ts, "/v1/traces", "tok", strings.NewReader(`{}`)); status == http.StatusTooManyRequests {
+			if status, header, _ = postJSON(t, ts, "/v1/traces", strings.NewReader(`{}`)); status == http.StatusTooManyRequests {
 				break
 			}
 		}
@@ -514,7 +515,7 @@ func TestReceiverRows(t *testing.T) {
 				t.Fatalf("held request: status %d", got)
 			}
 		}
-		if status, _, _ := postJSON(t, ts, "/v1/traces", "tok", strings.NewReader(`{}`)); status != 200 {
+		if status, _, _ := postJSON(t, ts, "/v1/traces", strings.NewReader(`{}`)); status != 200 {
 			t.Fatalf("after release: status %d", status)
 		}
 	})
@@ -523,7 +524,7 @@ func TestReceiverRows(t *testing.T) {
 func TestStalledBodyTimesOutAndFreesSlot(t *testing.T) {
 	otlp.SetReadTimeout(200 * time.Millisecond)
 	t.Cleanup(func() { otlp.SetReadTimeout(30 * time.Second) })
-	_, _, ts := startServer(t, map[string]string{"tok": "chris"}, false)
+	_, _, ts := startServer(t, "chris", false)
 
 	var conns []net.Conn
 	for range otlp.DecodeSlots {
@@ -533,7 +534,7 @@ func TestStalledBodyTimesOutAndFreesSlot(t *testing.T) {
 		}
 		t.Cleanup(func() { conn.Close() })
 		conn.SetDeadline(time.Now().Add(5 * time.Second))
-		io.WriteString(conn, "POST /v1/traces HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer tok\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n{\"resourceSpans\":[")
+		io.WriteString(conn, "POST /v1/traces HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n{\"resourceSpans\":[")
 		conns = append(conns, conn)
 	}
 	for _, conn := range conns {
@@ -546,7 +547,7 @@ func TestStalledBodyTimesOutAndFreesSlot(t *testing.T) {
 			t.Fatalf("stalled upload got status %d, want 408", res.StatusCode)
 		}
 	}
-	status, _, out := postJSON(t, ts, "/v1/traces", "tok", strings.NewReader(tracesJSON))
+	status, _, out := postJSON(t, ts, "/v1/traces", strings.NewReader(tracesJSON))
 	if status != 200 {
 		t.Fatalf("request after the stalls got %d: %s", status, out)
 	}

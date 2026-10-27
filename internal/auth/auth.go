@@ -1,20 +1,16 @@
-// Package auth maps bearer tokens to identities. The server stores only the
-// sha256 of each token; who a request reads and writes as comes from its
-// token, never from the request.
+// Package auth maps client public keys to identities. The transport proves
+// the key and attaches the Identity to the request's context; who a request
+// reads and writes as comes from that key, never from the request.
 package auth
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"errors"
 	"net/http"
 	"slices"
 	"sort"
-	"strings"
 )
 
-// Scope is one thing a token may do.
+// Scope is one thing a key may do.
 type Scope string
 
 const (
@@ -24,20 +20,20 @@ const (
 	Admin    Scope = "admin"
 )
 
-// Scopes is every Scope a token entry may name.
+// Scopes is every Scope a key entry may name.
 var Scopes = [...]Scope{Read, Push, Annotate, Admin}
 
-// DefaultTenant is the tenant of a token entry that names none, and of every
-// author no token entry names.
+// DefaultTenant is the tenant of a key entry that names none, and of every
+// author no key entry names.
 const DefaultTenant = "default"
 
-// DefaultScopes are the scopes of a token entry that names none.
+// DefaultScopes are the scopes of a key entry that names none.
 var DefaultScopes = []Scope{Read, Push}
 
-// Token is one configured token: the tenant and author it acts as and what
-// it may do. An empty Tenant is DefaultTenant and nil Scopes are
+// Grant is one configured key's rights: the tenant and author it acts as and
+// what it may do. An empty Tenant is DefaultTenant and nil Scopes are
 // DefaultScopes.
-type Token struct {
+type Grant struct {
 	Tenant, Author string
 	Scopes         []Scope
 }
@@ -51,7 +47,7 @@ type AuthorSet struct {
 
 func (s AuthorSet) Has(author string) bool { return slices.Contains(s.Names, author) != s.Except }
 
-// Identity is who an authenticated request is; Tokens makes it.
+// Identity is who an authenticated request is; Keys makes it.
 type Identity struct {
 	tenant, author string
 	scopes         []Scope
@@ -62,40 +58,38 @@ func (id Identity) Tenant() string     { return id.tenant }
 func (id Identity) Author() string     { return id.author }
 func (id Identity) Can(s Scope) bool   { return slices.Contains(id.scopes, s) }
 func (id Identity) Members() AuthorSet { return id.members }
-func (id Identity) withContext(ctx context.Context) context.Context {
-	return context.WithValue(ctx, ctxKey{}, id)
-}
 
-// Tokens is the server's token table, keyed by Hash(token).
-type Tokens struct{ byHash map[string]Identity }
+// Keys is the server's key table, keyed by the key text EncodeKey writes.
+type Keys struct{ byKey map[string]Identity }
 
-// NewTokens builds the table from byHash, which maps Hash(token) to its
-// entry.
-func NewTokens(byHash map[string]Token) Tokens {
+// NewKeys builds the table from byKey, which maps key text to its grant.
+// Members are computed over every grant.
+func NewKeys(byKey map[string]Grant) Keys {
 	tenantOf := map[string]string{}
-	for _, t := range byHash {
-		tenantOf[t.Author] = tenantOr(t.Tenant)
+	for _, g := range byKey {
+		tenantOf[g.Author] = tenantOr(g.Tenant)
 	}
-	ids := make(map[string]Identity, len(byHash))
-	for h, t := range byHash {
-		scopes := t.Scopes
+	ids := make(map[string]Identity, len(byKey))
+	for k, g := range byKey {
+		scopes := g.Scopes
 		if scopes == nil {
 			scopes = DefaultScopes
 		}
-		tenant := tenantOr(t.Tenant)
-		ids[h] = Identity{tenant: tenant, author: t.Author, scopes: scopes, members: members(tenantOf, tenant)}
+		tenant := tenantOr(g.Tenant)
+		ids[k] = Identity{tenant: tenant, author: g.Author, scopes: scopes, members: members(tenantOf, tenant)}
 	}
-	return Tokens{byHash: ids}
+	return Keys{byKey: ids}
 }
 
-// Authors is the table where every token in authors (Hash(token) to author)
-// is DefaultTenant with DefaultScopes.
-func Authors(authors map[string]string) Tokens {
-	byHash := make(map[string]Token, len(authors))
-	for h, a := range authors {
-		byHash[h] = Token{Author: a}
-	}
-	return NewTokens(byHash)
+// Identify is the Identity of key, false when key is not in the table.
+func (k Keys) Identify(key string) (Identity, bool) {
+	id, ok := k.byKey[key]
+	return id, ok
+}
+
+// Local is the in-process identity of local mode: DefaultTenant, every scope.
+func Local(author string) Identity {
+	return Identity{tenant: DefaultTenant, author: author, scopes: slices.Clone(Scopes[:]), members: AuthorSet{Except: true}}
 }
 
 func tenantOr(t string) string {
@@ -117,70 +111,36 @@ func members(tenantOf map[string]string, tenant string) AuthorSet {
 	return s
 }
 
-// Hash is the form tokens take in the server config.
-func Hash(token string) string {
-	sum := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(sum[:])
+// NewContext is ctx carrying id. Only a transport that has proven the caller
+// calls it.
+func NewContext(ctx context.Context, id Identity) context.Context {
+	return context.WithValue(ctx, ctxKey{}, id)
 }
 
-// Context is ctx carrying the identity of token, false when token is not in
-// the table.
-func (t Tokens) Context(ctx context.Context, token string) (context.Context, bool) {
-	id, ok := t.byHash[Hash(token)]
-	if !ok {
-		return ctx, false
-	}
-	return id.withContext(ctx), true
-}
-
-// ErrUnauthorized distinguishes an unknown token from a missing scope.
-var ErrUnauthorized = errors.New("unauthorized")
-
-// Check authenticates the authorization header, checks scopes, and attaches
-// the token identity to ctx. Both HTTP and gRPC use this one policy.
-func (t Tokens) Check(ctx context.Context, authorization string, need ...Scope) (context.Context, error) {
-	token, bearer := strings.CutPrefix(authorization, "Bearer ")
-	ctx, known := t.Context(ctx, token)
-	if !bearer || !known {
-		return ctx, ErrUnauthorized
-	}
-	id, _ := From(ctx)
-	for _, s := range need {
-		if !id.Can(s) {
-			return ctx, errors.New("token lacks scope " + string(s))
-		}
-	}
-	return ctx, nil
-}
-
-// Require rejects a request without a known bearer token (401) or whose
-// token lacks one of need (403), and puts the token's Identity on its ctx.
-func (t Tokens) Require(need ...Scope) func(http.Handler) http.Handler {
+// Require rejects a request whose ctx carries no Identity (401) or whose
+// Identity lacks one of need (403).
+func Require(need ...Scope) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ctx, err := t.Check(r.Context(), r.Header.Get("Authorization"), need...)
-			if err != nil {
-				code := http.StatusForbidden
-				if errors.Is(err, ErrUnauthorized) {
-					code = http.StatusUnauthorized
-				}
-				http.Error(w, err.Error(), code)
+			id, ok := From(r.Context())
+			if !ok {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
-			next.ServeHTTP(w, r.WithContext(ctx))
+			for _, s := range need {
+				if !id.Can(s) {
+					http.Error(w, "key lacks scope "+string(s), http.StatusForbidden)
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
 		})
 	}
 }
 
-// Middleware is Authors(authors).Require(): any known token, as its author in
-// DefaultTenant.
-func Middleware(authors map[string]string) func(http.Handler) http.Handler {
-	return Authors(authors).Require()
-}
-
 type ctxKey struct{}
 
-// From is the Identity Require put on ctx, false when there is none.
+// From is the Identity the transport put on ctx, false when there is none.
 func From(ctx context.Context) (Identity, bool) {
 	id, ok := ctx.Value(ctxKey{}).(Identity)
 	return id, ok

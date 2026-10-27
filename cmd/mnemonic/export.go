@@ -19,18 +19,18 @@ func init() { commands["export"] = exportCmd }
 
 const exportUsage = `usage: mnemonic export atif|otlp --session S [--out F] [target]
        mnemonic export dataset --annotation N[=V] [--per-task K] [--include-private] [--out F] [target]
-target: [--config C] [--server URL] [--token-file F] | --local [--server URL]
+target: [--config C] | --local [--listen ADDR]
 
-export asks the server for sessions from the index it serves, with the
-server and token push uses (the client config, or --server and
---token-file), or a running mnemonic local with --local. It sees what the
-token's MCP read tools see: a session they cannot open is "session not
-found", and a deleted session is never exported. --include-private exports
-every private session too, and needs an admin token over every author. A
-session that fails ATIF validation is skipped by dataset with its id and
-error on stderr; dataset fails only when every matching session did.`
+export asks the server for sessions from the index it serves, over QUIC
+with the server, server_key and key_file push uses (the client config), or
+a running mnemonic local with --local. It sees what the key's MCP read
+tools see: a session they cannot open is "session not found", and a deleted
+session is never exported. --include-private exports every private session
+too, and needs a key with the admin scope over every author. A session that
+fails ATIF validation is skipped by dataset with its id and error on
+stderr; dataset fails only when every matching session did.`
 
-const localServer = "http://127.0.0.1:7781"
+const localListen = "127.0.0.1:7781"
 
 // exportCmd streams one ATIF trajectory or OTLP trace, or a JSONL dataset
 // filtered by annotation, from GET /v1/export/{kind} to --out.
@@ -45,14 +45,13 @@ func exportCmd(args []string) error {
 		return fmt.Errorf("export: unknown kind %q; %s", kind, exportUsage)
 	}
 	fs := flag.NewFlagSet("export "+kind, flag.ContinueOnError)
-	configPath := fs.String("config", "~/.mnemonic/config.toml", "client config holding server and token")
-	server := fs.String("server", "", "server URL (default: the config's server, or "+localServer+" with --local)")
-	tokenFile := fs.String("token-file", "", "file holding the bearer token (default: the config's token)")
+	configPath := fs.String("config", "~/.mnemonic/config.toml", "client config holding server, server_key and key_file")
 	local := fs.Bool("local", false, "ask a running mnemonic local")
+	listen := fs.String("listen", localListen, "loopback address of mnemonic local (with --local)")
 	session := fs.String("session", "", "session id (atif, otlp)")
 	annotation := fs.String("annotation", "", "name[=value] to filter sessions by (dataset)")
 	perTask := fs.Int("per-task", 3, "at most this many sessions per task (dataset)")
-	includePrivate := fs.Bool("include-private", false, "also export private sessions (admin token)")
+	includePrivate := fs.Bool("include-private", false, "also export private sessions (admin scope)")
 	out := fs.String("out", "", "output file (default stdout)")
 	if err := fs.Parse(rest); err != nil {
 		return err
@@ -73,16 +72,15 @@ func exportCmd(args []string) error {
 	if *includePrivate {
 		q.Set("include_private", "true")
 	}
-	base, token, err := exportTarget(*configPath, *server, *tokenFile, *local)
+	hc, err := exportClient(*configPath, *local)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(base, "/")+"/v1/export/"+kind+"?"+q.Encode(), nil)
-	if err != nil {
-		return err
+	host := "mnemonic"
+	if *local {
+		host = *listen
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := hc.Get("http://" + host + "/v1/export/" + kind + "?" + q.Encode())
 	if err != nil {
 		return fmt.Errorf("export: %w", err)
 	}
@@ -100,40 +98,17 @@ func exportCmd(args []string) error {
 	return nil
 }
 
-// exportTarget is the server URL and token to ask: --local's, or the flags
-// over the client config's.
-func exportTarget(configPath, server, tokenFile string, local bool) (string, string, error) {
+// exportClient is the plain loopback client for --local, whose connections
+// the local server identifies itself, or the QUIC client of the config.
+func exportClient(configPath string, local bool) (*http.Client, error) {
 	if local {
-		if server == "" {
-			server = localServer
-		}
-		return server, "local", nil
+		return http.DefaultClient, nil
 	}
-	var token string
-	if tokenFile != "" {
-		path, err := config.ExpandHome(tokenFile)
-		if err != nil {
-			return "", "", err
-		}
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			return "", "", fmt.Errorf("export: token file: %w", err)
-		}
-		token = strings.TrimSpace(string(raw))
+	cfg, err := config.LoadClient(configPath)
+	if err != nil {
+		return nil, err
 	}
-	if server == "" || token == "" {
-		cfg, err := config.LoadClient(configPath)
-		if err != nil {
-			return "", "", err
-		}
-		if server == "" {
-			server = cfg.Server
-		}
-		if token == "" {
-			token = cfg.Token
-		}
-	}
-	return server, token, nil
+	return quicClient(cfg)
 }
 
 // writeOut copies body to path, or to stdout ending in a newline.
