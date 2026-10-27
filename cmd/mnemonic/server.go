@@ -89,7 +89,7 @@ func serve(args []string) error {
 		if err != nil {
 			return fmt.Errorf("[share] listen on %s: %w", cfg.Share.Listen, err)
 		}
-		public = &http.Server{Handler: srv.Public(), ReadHeaderTimeout: 10 * time.Second}
+		public = &http.Server{Handler: srv.Public(), ReadHeaderTimeout: 10 * time.Second, WriteTimeout: 5 * time.Minute, IdleTimeout: 2 * time.Minute}
 		go func() { ended <- public.Serve(ln) }()
 		log.Printf("mnemonic serve: links on %s (TCP, loopback) as %s", ln.Addr(), cfg.Share.BaseURL)
 	}
