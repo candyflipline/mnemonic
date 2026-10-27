@@ -1,7 +1,7 @@
 // Command check enforces the repo rules: no commit trailers in a range, no
 // direct go.mod requirement outside scripts/check/approved-deps.txt, one Ack
-// literal in internal/store, and committed pushpb code that matches
-// `go generate`.
+// literal in internal/store and one pushpb.Ack literal in internal/intake, and
+// committed pushpb code that matches `go generate`.
 //
 //	go run ./scripts/check [range [go.mod]]
 //

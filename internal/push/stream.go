@@ -43,28 +43,70 @@ type ack struct {
 	state    wire.Source
 }
 
-// uplink is one open Sync stream. sources starts as what Welcome said, by
-// src_id, and is then the server's state plus what is in flight: send
-// advances a source's entry optimistically, and an APPLIED ack writes the
-// server's state back only when no later append of that source is in flight
-// (unacked[src] reaches 0). A CONFLICT ack always writes the server's state
-// back and records the path in redo. Only the goroutine that owns the uplink
-// touches sources, unacked, queue and redo; the reader goroutine only parses
-// acks and delivers them on acked.
-type uplink struct {
-	stream  pushpb.Push_SyncClient
-	cancel  context.CancelFunc
+type ledger struct {
 	sources map[string]*wire.Source
 	unacked map[string]int
 	queue   []inflight
 	queued  int64
 	redo    []string
 	full    map[string]bool
-	window  window
-	seq     uint64
-	acked   chan ack
-	fin     chan struct{}
-	err     error
+}
+
+func (l *ledger) sent(in inflight, next wire.Source) {
+	l.queue = append(l.queue, in)
+	l.queued += in.bytes
+	l.unacked[in.srcID]++
+	if prev := l.sources[in.srcID]; prev != nil {
+		next.UpdatedMs = prev.UpdatedMs
+	}
+	l.sources[in.srcID] = &next
+}
+
+func (l *ledger) answer(a ack) error {
+	if len(l.queue) == 0 || l.queue[0].seq != a.seq {
+		return fmt.Errorf("sync: ack %d does not answer the oldest append in flight", a.seq)
+	}
+	head := l.queue[0]
+	l.queue = l.queue[1:]
+	l.queued -= head.bytes
+	l.unacked[head.srcID]--
+	if l.unacked[head.srcID] == 0 {
+		delete(l.unacked, head.srcID)
+	}
+	switch {
+	case a.conflict:
+		l.redo = append(l.redo, head.path)
+		l.full[head.srcID] = true
+		if a.state.Size == 0 && a.state.HeadHash == "" {
+			delete(l.sources, head.srcID)
+			return nil
+		}
+	case l.unacked[head.srcID] > 0:
+		return nil
+	}
+	s := a.state
+	s.SrcID = head.srcID
+	l.sources[head.srcID] = &s
+	return nil
+}
+
+func (l *ledger) busy(srcID string) bool { return l.unacked[srcID] > 0 }
+
+func (l *ledger) takeRedo() []string {
+	r := l.redo
+	l.redo = nil
+	return r
+}
+
+type uplink struct {
+	ledger
+	stream pushpb.Push_SyncClient
+	cancel context.CancelFunc
+	window window
+	seq    uint64
+	acked  chan ack
+	fin    chan struct{}
+	err    error
 }
 
 func dial(ctx context.Context, cfg config.Client) (*uplink, error) {
@@ -83,7 +125,7 @@ func dial(ctx context.Context, cfg config.Client) (*uplink, error) {
 		return nil, err
 	}
 	sctx, cancel := context.WithCancel(ctx)
-	u := &uplink{cancel: cancel, sources: make(map[string]*wire.Source), unacked: make(map[string]int), full: make(map[string]bool), fin: make(chan struct{})}
+	u := &uplink{cancel: cancel, ledger: ledger{sources: make(map[string]*wire.Source), unacked: make(map[string]int), full: make(map[string]bool)}, fin: make(chan struct{})}
 	stop := time.AfterFunc(welcomeLimit, cancel)
 	err = u.handshake(sctx, conn, cfg.Machine)
 	if !stop.Stop() && err == nil {
@@ -232,15 +274,7 @@ func (u *uplink) sendOne(ctx context.Context, p put) error {
 		}
 		return err
 	}
-	u.queue = append(u.queue, inflight{seq: u.seq, path: p.path, srcID: p.srcID, bytes: size})
-	u.queued += size
-	u.unacked[p.srcID]++
-	prev := u.sources[p.srcID]
-	next := &wire.Source{SrcID: p.srcID, Harness: p.harness, Size: p.offset + size, HeadHash: p.headHash, RawEnd: p.rawEnd}
-	if prev != nil {
-		next.UpdatedMs = prev.UpdatedMs
-	}
-	u.sources[p.srcID] = next
+	u.sent(inflight{seq: u.seq, path: p.path, srcID: p.srcID, bytes: size}, wire.Source{SrcID: p.srcID, Harness: p.harness, Size: p.offset + size, HeadHash: p.headHash, RawEnd: p.rawEnd})
 	return nil
 }
 
@@ -252,45 +286,11 @@ func (u *uplink) cause() error {
 }
 
 func (u *uplink) consume(a ack) error {
-	if len(u.queue) == 0 || u.queue[0].seq != a.seq {
+	if err := u.answer(a); err != nil {
 		u.cancel()
-		return fmt.Errorf("sync: ack %d does not answer the oldest append in flight", a.seq)
+		return err
 	}
-	if u.applyAck(a) {
-		u.redo = append(u.redo, u.queue[0].path)
-		u.full[u.queue[0].srcID] = true
-	}
-	head := u.queue[0]
-	u.queue = u.queue[1:]
-	u.queued -= head.bytes
 	return nil
-}
-
-func (u *uplink) applyAck(a ack) (redo bool) {
-	src := u.queue[0].srcID
-	u.unacked[src]--
-	if u.unacked[src] == 0 {
-		delete(u.unacked, src)
-	}
-	if !a.conflict && u.unacked[src] > 0 {
-		return false
-	}
-	if a.conflict && a.state.Size == 0 && a.state.HeadHash == "" {
-		delete(u.sources, src)
-	} else {
-		s := a.state
-		s.SrcID = src
-		u.sources[src] = &s
-	}
-	return a.conflict
-}
-
-func (u *uplink) busy(srcID string) bool { return u.unacked[srcID] > 0 }
-
-func (u *uplink) takeRedo() []string {
-	r := u.redo
-	u.redo = nil
-	return r
 }
 
 func (u *uplink) drain(ctx context.Context) error {

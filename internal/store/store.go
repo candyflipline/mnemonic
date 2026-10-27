@@ -36,7 +36,7 @@ type Manifest struct {
 }
 
 // Manifests is every source in the table, in no order. After Open it is what
-// loadTable read; the committer keeps it current as batches commit.
+// loadDurableTable read; the committer keeps it current as batches commit.
 func (c *Committer) Manifests() []Manifest {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

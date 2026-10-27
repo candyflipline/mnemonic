@@ -34,15 +34,15 @@ func TestW1NoSpaceFailsOnlyBatch(t *testing.T) {
 			originalWrite := writeBatchFile
 			defer func() { writeBatchFile = originalWrite }()
 			var inject atomic.Bool
-			writeBatchFile = func(f *os.File, b []byte, off int64) (int, error) {
+			writeBatchFile = func(f *os.File, b []byte) (int, error) {
 				if strings.HasPrefix(filepath.Base(f.Name()), tc.target) && inject.CompareAndSwap(true, false) {
-					n, err := originalWrite(f, b[:len(b)/2], off)
+					n, err := originalWrite(f, b[:len(b)/2])
 					if err != nil {
 						return n, err
 					}
 					return n, &os.PathError{Op: "write", Path: f.Name(), Err: tc.errno}
 				}
-				return originalWrite(f, b, off)
+				return originalWrite(f, b)
 			}
 			b, closeFS, err := openBarrier(dir)
 			if err != nil {
@@ -122,7 +122,7 @@ func TestW1NoSpaceFailsOnlyBatch(t *testing.T) {
 			backfill := Backfill{Offset: 8, HeadHash: "head", RawEnd: 80}
 			server := ServerSource{Author: "test", Harness: "otlp", Stream: "fixture", Day: time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC)}
 			tickets := []*Ticket{submit(c, sources[0], extend), submit(c, sources[1], replace), submit(c, sources[2], backfill)}
-			serverTicket, err := c.submit(ctx, server.key(), serverAppend{src: server, requestKey: "request", linesLen: int64(len(first.b)), firstHash: wire.HeadHash(first.b[:bytes.IndexByte(first.b, '\n')+1])}, encodeFrame(first), int64(len(first.b)))
+			serverTicket, err := c.submit(ctx, server.key(), serverAppend{src: server, requestKey: "request", linesLen: int64(len(first.b)), firstHash: wire.HeadHash(first.b[:bytes.IndexByte(first.b, '\n')+1])}, encodeFrame(first))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -132,8 +132,8 @@ func TestW1NoSpaceFailsOnlyBatch(t *testing.T) {
 			applied(blocker, 8)
 			for _, ticket := range tickets {
 				ack, err := ticket.Wait(ctx)
-				if !errors.Is(err, syscall.ENOSPC) || !errors.Is(err, tc.errno) || ack.Valid() {
-					t.Fatalf("failed ticket: valid=%v err=%v; want ENOSPC and no ack", ack.Valid(), err)
+				if !errors.Is(err, ErrNoSpace) || !errors.Is(err, tc.errno) || ack.Valid() {
+					t.Fatalf("failed ticket: valid=%v err=%v; want ErrNoSpace and no ack", ack.Valid(), err)
 				}
 			}
 			select {

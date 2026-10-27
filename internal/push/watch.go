@@ -104,7 +104,7 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 		return err
 	}
 	defer n.close()
-	defer w.hangup()
+	defer w.abandon()
 	w.note = n
 	dirty := make(map[string]bool)
 	flushAt := time.NewTimer(time.Hour)
@@ -246,9 +246,7 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 	}
 }
 
-// hangup ends the stream without waiting for acks: what was sent and not
-// acked is forgotten, and the next Welcome says what landed.
-func (w *watcher) hangup() {
+func (w *watcher) abandon() {
 	if w.up != nil {
 		w.up.cancel()
 	}

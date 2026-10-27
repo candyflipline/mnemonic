@@ -28,7 +28,7 @@ func TestCommitterDropsCompletedFrame(t *testing.T) {
 		}
 		encoded := encodeFrame(lines)
 		ref := weak.Make(&encoded[0])
-		ticket, err := c.submit(ctx, src.key, Replace{HeadHash: "head", SourceName: "held", Path: "held"}, encoded, int64(len(lines.b)))
+		ticket, err := c.submit(ctx, src.key, replaceMeta{headHash: "head", sourceName: "held", path: "held", linesLen: int64(len(lines.b))}, encoded)
 		if err != nil {
 			t.Fatal(err)
 		}

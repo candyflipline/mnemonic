@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -81,9 +82,22 @@ type Backfill struct {
 	RawEnd   int64
 }
 
-// serverAppend is reduced at Append to what plan reads: how much the source
-// grows by and the first line's hash, never the lines themselves — the bytes
-// stay with the caller.
+func (Replace) isOp()  {}
+func (Extend) isOp()   {}
+func (Backfill) isOp() {}
+
+type queuedOp interface{ queued() }
+
+type replaceMeta struct {
+	headHash, sourceName, path string
+	rawEnd, linesLen           int64
+}
+
+type extendMeta struct {
+	offset, rawEnd, linesLen int64
+	headHash                 string
+}
+
 type serverAppend struct {
 	src        ServerSource
 	requestKey string
@@ -91,10 +105,13 @@ type serverAppend struct {
 	firstHash  string
 }
 
-func (Replace) isOp()      {}
-func (Extend) isOp()       {}
-func (Backfill) isOp()     {}
-func (serverAppend) isOp() {}
+type flush struct{}
+
+func (replaceMeta) queued()  {}
+func (extendMeta) queued()   {}
+func (Backfill) queued()     {}
+func (serverAppend) queued() {}
+func (flush) queued()        {}
 
 func ParseOp(offset int64, headHash, sourceName, path string, rawEnd int64, body []byte) (Op, error) {
 	if offset < 0 {
@@ -191,16 +208,11 @@ type Committer struct {
 	err     error
 }
 
-// request holds a frame and the op reduced to its metadata: linesLen is the
-// length plan adds to the source's Size, carried at Submit so the queue
-// counts true — the budget bounds frames, so a queued body would be memory
-// the count does not see.
 type request struct {
-	key      layout.Key
-	op       Op
-	linesLen int64
-	frame    []byte
-	ticket   *Ticket
+	key    layout.Key
+	op     queuedOp
+	frame  []byte
+	ticket *Ticket
 }
 
 // Open loads the table from every manifest under dataDir, removes the temp
@@ -224,11 +236,8 @@ func Open(dataDir string) (*Committer, error) {
 }
 
 func open(dataDir string, b barrier, exit func(error)) (*Committer, error) {
-	table, loaded, err := loadTable(dataDir)
+	table, err := loadDurableTable(dataDir, b)
 	if err != nil {
-		return nil, err
-	}
-	if err := b.run(loaded); err != nil {
 		return nil, err
 	}
 	c := &Committer{
@@ -247,19 +256,16 @@ func open(dataDir string, b barrier, exit func(error)) (*Committer, error) {
 	return c, nil
 }
 
-// loadTable reads every manifest into the table, removes temp files, and
-// returns what it read as touched: a manifest renamed before a crash may not
-// be durable yet, and Open makes it so before any Welcome reports it.
-func loadTable(dataDir string) (map[layout.Key]*manifestBody, touched, error) {
+func loadDurableTable(dataDir string, b barrier) (map[layout.Key]*manifestBody, error) {
 	table := map[layout.Key]*manifestBody{}
 	var loaded touched
 	root := filepath.Join(dataDir, "raw")
 	authors, err := os.ReadDir(root)
 	if errors.Is(err, os.ErrNotExist) {
-		return table, loaded, nil
+		return table, nil
 	}
 	if err != nil {
-		return nil, loaded, err
+		return nil, err
 	}
 	for _, a := range authors {
 		author, ok := strings.CutPrefix(a.Name(), "author=")
@@ -268,7 +274,7 @@ func loadTable(dataDir string) (map[layout.Key]*manifestBody, touched, error) {
 		}
 		machines, err := os.ReadDir(filepath.Join(root, a.Name()))
 		if err != nil {
-			return nil, loaded, err
+			return nil, err
 		}
 		for _, m := range machines {
 			machine, ok := strings.CutPrefix(m.Name(), "machine=")
@@ -277,7 +283,7 @@ func loadTable(dataDir string) (map[layout.Key]*manifestBody, touched, error) {
 			}
 			harnesses, err := os.ReadDir(filepath.Join(root, a.Name(), m.Name()))
 			if err != nil {
-				return nil, loaded, err
+				return nil, err
 			}
 			for _, h := range harnesses {
 				harness, ok := strings.CutPrefix(h.Name(), "harness=")
@@ -286,12 +292,15 @@ func loadTable(dataDir string) (map[layout.Key]*manifestBody, touched, error) {
 				}
 				dir := filepath.Join(root, a.Name(), m.Name(), h.Name())
 				if err := loadDir(table, &loaded, dir, layout.Key{Author: author, Machine: machine, Harness: harness}); err != nil {
-					return nil, loaded, err
+					return nil, err
 				}
 			}
 		}
 	}
-	return table, loaded, nil
+	if err := b.run(loaded); err != nil {
+		return nil, err
+	}
+	return table, nil
 }
 
 func loadDir(table map[layout.Key]*manifestBody, loaded *touched, dir string, k layout.Key) error {
@@ -347,29 +356,30 @@ func (c *Committer) Close() error {
 var errClosed = errors.New("store: closed")
 
 // Submit queues op for src and returns its ticket. The frame is encoded on the
-// caller's goroutine, and the queued request keeps the op's metadata plus the
-// body's length, not the body; Submit blocks while queueBytes of frames are
-// queued.
+// caller's goroutine; Submit blocks while queueBytes of frames are queued.
 func (c *Committer) Submit(ctx context.Context, src ClientSource, op Op) (*Ticket, error) {
-	var frame []byte
-	var n int64
 	switch o := op.(type) {
 	case Replace:
-		n, frame = int64(len(o.Lines.b)), encodeFrame(o.Lines)
-		o.Lines = Lines{}
-		op = o
+		m := replaceMeta{headHash: o.HeadHash, sourceName: o.SourceName, path: o.Path, rawEnd: o.RawEnd, linesLen: int64(len(o.Lines.b))}
+		return c.submit(ctx, src.key, m, encodeFrame(o.Lines))
 	case Extend:
-		n, frame = int64(len(o.Lines.b)), encodeFrame(o.Lines)
-		o.Lines = Lines{}
-		op = o
+		m := extendMeta{offset: o.Offset, headHash: o.HeadHash, rawEnd: o.RawEnd, linesLen: int64(len(o.Lines.b))}
+		return c.submit(ctx, src.key, m, encodeFrame(o.Lines))
 	case Backfill:
-	default:
-		return nil, fmt.Errorf("store: op %T is not a client op", op)
+		return c.submit(ctx, src.key, o, nil)
 	}
-	return c.submit(ctx, src.key, op, frame, n)
+	return nil, fmt.Errorf("store: op %T is not a client op", op)
 }
 
-func (c *Committer) submit(ctx context.Context, k layout.Key, op Op, frame []byte, linesLen int64) (*Ticket, error) {
+// Flush returns once every request whose Submit returned before the call has
+// its answer, or once the committer stops or ctx ends.
+func (c *Committer) Flush(ctx context.Context) {
+	if t, err := c.submit(ctx, layout.Key{}, flush{}, nil); err == nil {
+		t.Wait(ctx)
+	}
+}
+
+func (c *Committer) submit(ctx context.Context, k layout.Key, op queuedOp, frame []byte) (*Ticket, error) {
 	n := min(int64(len(frame)), queueBytes)
 	if err := c.budget.acquire(ctx, n, c.stopped); err != nil {
 		if c.stoppedErr() != nil {
@@ -377,7 +387,7 @@ func (c *Committer) submit(ctx context.Context, k layout.Key, op Op, frame []byt
 		}
 		return nil, err
 	}
-	r := &request{key: k, op: op, linesLen: linesLen, frame: frame, ticket: newTicket()}
+	r := &request{key: k, op: op, frame: frame, ticket: newTicket()}
 	c.intake.RLock()
 	defer c.intake.RUnlock()
 	if c.closed {
@@ -428,7 +438,7 @@ func (c *Committer) Append(src ServerSource, requestKey string, lines []byte) (_
 		firstHash:  wire.HeadHash(l.b[:len(first)+1]),
 	}
 	ctx := context.Background()
-	t, err := c.submit(ctx, src.key(), op, encodeFrame(l), op.linesLen)
+	t, err := c.submit(ctx, src.key(), op, encodeFrame(l))
 	if err != nil {
 		return wire.Source{}, false, err
 	}
@@ -557,12 +567,12 @@ func batchOf(held []*request) []*request {
 
 func (c *Committer) commit(reqs []*request) (int, error) {
 	p := plan(c.table, reqs, func() int64 { return time.Now().UnixMilli() })
-	w, err := p.write(c.dataDir)
+	s, err := p.write(c.dataDir)
 	if err != nil {
-		if _, ok := err.(*writeSpaceError); !ok {
+		if _, ok := err.(*w1NoSpace); !ok {
 			return 0, err
 		}
-		if cleanupErr := w.rollback(); cleanupErr != nil {
+		if cleanupErr := s.rollback(); cleanupErr != nil {
 			return 0, fmt.Errorf("store: W1 rollback: %w", errors.Join(err, cleanupErr))
 		}
 		for _, req := range p.reqs {
@@ -570,6 +580,10 @@ func (c *Committer) commit(reqs []*request) (int, error) {
 		}
 		c.budget.release(int64(size(p.reqs)))
 		return len(p.reqs), nil
+	}
+	w, err := s.unlinkReplaced()
+	if err != nil {
+		return 0, err
 	}
 	d, err := w.sync(c.barrier)
 	if err != nil {
@@ -618,10 +632,6 @@ func (c *Committer) stop(err error, held []*request) {
 	}
 }
 
-// planned is the batch decided in memory: per request its verdict and the
-// source state it answers with, per touched source its after manifest and
-// frames. A Replace of a source already planned ends the batch before it, so
-// no acked frame is overwritten inside one batch.
 type planned struct {
 	reqs    []*request
 	verdict []Verdict
@@ -629,10 +639,6 @@ type planned struct {
 	srcs    []*sourcePlan
 }
 
-// sourcePlan is one source's change. A rewrite (Replace, or a server
-// source's create) writes a new raw from frames and, once every temp is written, unlinks the
-// old manifest; otherwise the raw is truncated to before.ZstSize and frames
-// appended. Requests on one source fold in queue order.
 type sourcePlan struct {
 	key     layout.Key
 	before  *manifestBody
@@ -664,13 +670,13 @@ func plan(table map[layout.Key]*manifestBody, reqs []*request, now func() int64)
 		return sp
 	}
 	for i, r := range reqs {
+		if overwritesPlanned(bySrc, r) {
+			p.reqs, p.verdict, p.state = reqs[:i], p.verdict[:i], p.state[:i]
+			return p
+		}
 		m := cur(r.key)
 		switch op := r.op.(type) {
-		case Replace:
-			if bySrc[r.key] != nil {
-				p.reqs, p.verdict, p.state = reqs[:i], p.verdict[:i], p.state[:i]
-				return p
-			}
+		case replaceMeta:
 			var prevMs int64
 			if m != nil {
 				prevMs = m.UpdatedMs
@@ -682,25 +688,25 @@ func plan(table map[layout.Key]*manifestBody, reqs []*request, now func() int64)
 				Source: wire.Source{
 					SrcID:      r.key.SrcID,
 					Harness:    r.key.Harness,
-					SourceName: op.SourceName,
-					Path:       op.Path,
-					Size:       r.linesLen,
-					RawEnd:     op.RawEnd,
-					HeadHash:   op.HeadHash,
+					SourceName: op.sourceName,
+					Path:       op.path,
+					Size:       op.linesLen,
+					RawEnd:     op.rawEnd,
+					HeadHash:   op.headHash,
 					UpdatedMs:  max(now(), prevMs+1),
 				},
 				ZstSize: int64(len(r.frame)),
 			}
 			p.verdict[i], p.state[i] = Applied, sp.after.Source
-		case Extend:
-			if m == nil || op.Offset != m.Size || op.HeadHash != m.HeadHash {
+		case extendMeta:
+			if m == nil || op.offset != m.Size || op.headHash != m.HeadHash {
 				p.verdict[i], p.state[i] = Conflict, stateOf(m)
 				continue
 			}
 			sp := touch(r.key)
 			sp.frames = append(sp.frames, r.frame)
-			sp.after.Size += r.linesLen
-			sp.after.RawEnd = op.RawEnd
+			sp.after.Size += op.linesLen
+			sp.after.RawEnd = op.rawEnd
 			sp.after.UpdatedMs = max(now(), sp.after.UpdatedMs+1)
 			sp.after.ZstSize += int64(len(r.frame))
 			p.verdict[i], p.state[i] = Applied, sp.after.Source
@@ -727,7 +733,7 @@ func plan(table map[layout.Key]*manifestBody, reqs []*request, now func() int64)
 				continue
 			}
 			sp := touch(r.key)
-			n := r.linesLen
+			n := op.linesLen
 			if m == nil {
 				sp.rewrite = true
 				sp.frames = [][]byte{r.frame}
@@ -758,6 +764,11 @@ func plan(table map[layout.Key]*manifestBody, reqs []*request, now func() int64)
 	return p
 }
 
+func overwritesPlanned(bySrc map[layout.Key]*sourcePlan, r *request) bool {
+	_, replace := r.op.(replaceMeta)
+	return replace && bySrc[r.key] != nil
+}
+
 func stateOf(m *manifestBody) wire.Source {
 	if m == nil {
 		return wire.Source{}
@@ -775,7 +786,7 @@ type written struct {
 	tails    []*sourcePlan
 }
 
-func (p planned) write(dataDir string) (written, error) {
+func (p planned) write(dataDir string) (staged, error) {
 	w := written{dataDir: dataDir, p: p, tmpRaw: make([]string, len(p.srcs)), tmpMan: make([]string, len(p.srcs))}
 	dirs := map[string]bool{}
 	addDir := func(d string) {
@@ -789,41 +800,44 @@ func (p planned) write(dataDir string) (written, error) {
 		dir := filepath.Dir(man)
 		created, err := mkdirs(dataDir, dir)
 		if err != nil {
-			return w, err
+			return staged{w}, err
 		}
 		w.touched.dirs = append(w.touched.dirs, created...)
 		addDir(dir)
 		switch {
 		case sp.rewrite:
-			tmp, err := writeTemp(raw, sp.frames)
-			w.tmpRaw[i] = tmp
-			if err != nil {
-				return w, err
+			if err := writeTemp(raw, sp.frames, &w.tmpRaw[i]); err != nil {
+				return staged{w}, err
 			}
-			w.touched.files = append(w.touched.files, tmp)
+			w.touched.files = append(w.touched.files, w.tmpRaw[i])
 		case len(sp.frames) > 0:
 			w.tails = append(w.tails, sp)
 			if err := appendFrames(raw, sp.before.ZstSize, sp.frames); err != nil {
-				return w, err
+				return staged{w}, err
 			}
 			w.touched.files = append(w.touched.files, raw)
 		}
 		b, err := json.Marshal(sp.after)
 		if err != nil {
-			return w, err
+			return staged{w}, err
 		}
-		tmp, err := writeTemp(man, [][]byte{b, {'\n'}})
-		w.tmpMan[i] = tmp
-		if err != nil {
-			return w, err
+		if err := writeTemp(man, [][]byte{b, {'\n'}}, &w.tmpMan[i]); err != nil {
+			return staged{w}, err
 		}
-		w.touched.files = append(w.touched.files, tmp)
+		w.touched.files = append(w.touched.files, w.tmpMan[i])
 	}
-	for _, sp := range p.srcs {
+	return staged{w}, nil
+}
+
+type staged struct{ w written }
+
+func (s staged) unlinkReplaced() (written, error) {
+	w := s.w
+	for _, sp := range w.p.srcs {
 		if !sp.rewrite {
 			continue
 		}
-		man := sp.key.Manifest(dataDir)
+		man := sp.key.Manifest(w.dataDir)
 		if err := os.Remove(man); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return w, err
 		}
@@ -832,17 +846,13 @@ func (p planned) write(dataDir string) (written, error) {
 	return w, nil
 }
 
-// rollback undoes W1's raw tails and temps only; no link or barrier has run.
-// Repeating it is safe, including after a partial cleanup. A crash partway
-// through leaves only the tails and temps of rows 2-4.
-// Empty directories are harmless and need not be removed.
-func (w written) rollback() error {
-	for _, sp := range w.tails {
-		if err := os.Truncate(sp.key.Raw(w.dataDir), sp.before.ZstSize); err != nil {
+func (s staged) rollback() error {
+	for _, sp := range s.w.tails {
+		if err := os.Truncate(sp.key.Raw(s.w.dataDir), sp.before.ZstSize); err != nil {
 			return err
 		}
 	}
-	for _, temps := range [][]string{w.tmpRaw, w.tmpMan} {
+	for _, temps := range [][]string{s.w.tmpRaw, s.w.tmpMan} {
 		for _, path := range temps {
 			if path == "" {
 				continue
@@ -855,19 +865,17 @@ func (w written) rollback() error {
 	return nil
 }
 
-// Only allocation/write failures in W1 get this marker. Close, truncate,
-// unlink, barrier, link and cleanup errors remain fatal, even for ENOSPC.
-type writeSpaceError struct{ cause error }
+var ErrNoSpace = errors.New("store: no space")
 
-func (e *writeSpaceError) Error() string { return "store: W1: " + e.cause.Error() }
-func (e *writeSpaceError) Unwrap() error { return e.cause }
+type w1NoSpace struct{ cause error }
 
-// Intake already maps ENOSPC to ResourceExhausted; preserve EDQUOT as well.
-func (e *writeSpaceError) Is(target error) bool { return target == syscall.ENOSPC }
+func (e *w1NoSpace) Error() string        { return "store: W1: " + e.cause.Error() }
+func (e *w1NoSpace) Unwrap() error        { return e.cause }
+func (e *w1NoSpace) Is(target error) bool { return target == ErrNoSpace }
 
 func writeError(err error) error {
 	if errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) {
-		return &writeSpaceError{cause: err}
+		return &w1NoSpace{cause: err}
 	}
 	return err
 }
@@ -890,31 +898,19 @@ func mkdirs(dataDir, dir string) ([]string, error) {
 	return slices.Compact(parents), nil
 }
 
-// writeBatchFile is the W1 file-write seam; a negative offset means sequential IO.
-var writeBatchFile = func(f *os.File, b []byte, off int64) (int, error) {
-	if off < 0 {
-		return f.Write(b)
-	}
-	return f.WriteAt(b, off)
-}
+var writeBatchFile = (*os.File).Write
 
-func writeTemp(path string, parts [][]byte) (string, error) {
+func writeTemp(path string, parts [][]byte, name *string) error {
 	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
 	if err != nil {
-		return "", writeError(err)
+		return writeError(err)
 	}
-	for _, b := range parts {
-		if _, err = writeBatchFile(f, b, -1); err != nil {
-			err = writeError(err)
-			break
-		}
-	}
+	*name = f.Name()
+	err = writeParts(f, parts)
 	if cerr := f.Close(); cerr != nil {
-		return f.Name(), fmt.Errorf("store: close temp: %w", errors.Join(err, cerr))
+		return fmt.Errorf("store: close temp: %w", errors.Join(err, cerr))
 	}
-	// Return even a partial temp: rollback owns its removal, and a removal
-	// error must reach stop rather than hiding behind the original ENOSPC.
-	return f.Name(), err
+	return err
 }
 
 func appendFrames(raw string, zst int64, frames [][]byte) error {
@@ -923,19 +919,23 @@ func appendFrames(raw string, zst int64, frames [][]byte) error {
 		return err
 	}
 	if err = f.Truncate(zst); err == nil {
-		off := zst
-		for _, b := range frames {
-			if _, err = writeBatchFile(f, b, off); err != nil {
-				err = writeError(err)
-				break
-			}
-			off += int64(len(b))
+		if _, err = f.Seek(zst, io.SeekStart); err == nil {
+			err = writeParts(f, frames)
 		}
 	}
 	if cerr := f.Close(); cerr != nil {
 		return fmt.Errorf("store: close raw: %w", errors.Join(err, cerr))
 	}
 	return err
+}
+
+func writeParts(f *os.File, parts [][]byte) error {
+	for _, b := range parts {
+		if _, err := writeBatchFile(f, b); err != nil {
+			return writeError(err)
+		}
+	}
+	return nil
 }
 
 type touched struct {

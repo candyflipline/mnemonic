@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"sync"
-	"syscall"
 	"time"
 
 	"google.golang.org/grpc"
@@ -101,15 +100,12 @@ type service struct {
 	closing bool
 }
 
-// session is one live stream's submit side. The committer resolves tickets in
-// submission order, so the last ticket resolving means every ticket of the
-// session has.
 type session struct {
 	ctx    context.Context
 	cancel context.CancelCauseFunc
 
-	mu   sync.Mutex
-	last *store.Ticket
+	mu        sync.Mutex
+	submitted bool
 }
 
 func (s *session) submit(st *store.Committer, src store.ClientSource, op store.Op) (*store.Ticket, error) {
@@ -119,21 +115,19 @@ func (s *session) submit(st *store.Committer, src store.ClientSource, op store.O
 		return nil, context.Cause(s.ctx)
 	}
 	t, err := st.Submit(s.ctx, src, op)
-	if err == nil {
-		s.last = t
-	}
+	s.submitted = s.submitted || err == nil
 	return t, err
 }
 
-func (s *session) end(ctx context.Context, cause error) error {
+func (s *session) end(ctx context.Context, st *store.Committer, cause error) error {
 	s.cancel(cause)
 	s.mu.Lock()
-	last := s.last
+	submitted := s.submitted
 	s.mu.Unlock()
-	if last == nil {
+	if !submitted {
 		return nil
 	}
-	last.Wait(ctx)
+	st.Flush(ctx)
 	return ctx.Err()
 }
 
@@ -230,7 +224,7 @@ func (s *service) Sync(stream grpc.BidiStreamingServer[pushpb.ClientMsg, pushpb.
 	}
 	defer s.leave(key, sess)
 	if old != nil {
-		if err := old.end(ctx, errReplaced); err != nil {
+		if err := old.end(ctx, s.st, errReplaced); err != nil {
 			return toStatus(context.Cause(ctx))
 		}
 	}
@@ -352,7 +346,7 @@ func toStatus(err error) error {
 		return err
 	}
 	switch {
-	case errors.Is(err, syscall.ENOSPC):
+	case errors.Is(err, store.ErrNoSpace):
 		return status.Error(codes.ResourceExhausted, err.Error())
 	case errors.Is(err, context.Canceled):
 		return status.Error(codes.Canceled, err.Error())
@@ -390,9 +384,8 @@ func checkSegments(segs ...string) error {
 	return nil
 }
 
-// ackOf is the only way to an Ack message, and it takes a store.Ack, which
-// only a durable batch makes. An invalid Ack is a server bug: the stream
-// ends with Internal and nothing is acked.
+// ackOf takes a store.Ack, which only a durable batch makes. An invalid Ack is
+// a server bug: the stream ends with Internal and nothing is acked.
 func ackOf(seq uint64, a store.Ack) (*pushpb.ServerMsg, error) {
 	if !a.Valid() {
 		return nil, errors.New("ack of a batch that is not durable")
