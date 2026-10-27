@@ -15,6 +15,7 @@ MEM=${MEM:-8G}
 mkdir -p "$OUT"
 export MEMCAP_STORE=${MEMCAP_STORE:-/var/lib/mnu/p4-store-a/index}
 export MEMCAP_HEAP=$OUT/heap-$TAG.pprof
+export MEMCAP_SECHASH=${MEMCAP_SECHASH:-}
 cd "$SRC"
 /usr/local/go/bin/go test -c -o "$SRC/memcap.test" ./internal/index
 echo "bin_sha256 $(sha256sum "$SRC/memcap.test" | cut -c1-12) mem $MEM free_avail_gb $(free -g | awk '/^Mem:/{print $7}') serves $(pgrep -c -f ' serve --config ' || true)"

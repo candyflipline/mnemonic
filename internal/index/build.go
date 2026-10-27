@@ -25,10 +25,6 @@ type built struct {
 	src uint16
 	lf  int64
 	li  int
-	// hrec is the row's heavy record, resolved from the holder part it was
-	// read from; nil reads the record from the member's own heavy log at
-	// place time (heavyReader.record).
-	hrec []byte
 }
 
 // partEncoder and partHeavyEncoder compress a part's frames. A part is
@@ -241,7 +237,9 @@ func walkMember(store string, c ckpt, holder *Part, from int64, fn func(rec []by
 }
 
 // memberRows returns one member's rows for a delta image: walkMember's
-// records decoded, the holder's with their heavy records resolved from it.
+// records decoded, located at their holder frame when the holder carries
+// them. Heavy records are not resolved here; the open's heavyReader reads
+// them when a payload is asked for.
 func memberRows(store string, si int, c ckpt, holder *Part, from int64) ([]built, error) {
 	var out []built
 	err := walkMember(store, c, holder, from, func(rec []byte, loc rowLoc) error {
@@ -257,14 +255,7 @@ func memberRows(store string, si int, c ckpt, holder *Part, from int64) ([]built
 		r.Author = c.Author
 		b := built{row: r, src: uint16(si)}
 		if loc.holder {
-			hrecs, err := holder.fc.heavyFrame(holder, r.HeavyFrame)
-			if err != nil {
-				return fmt.Errorf("%s: holder %s: %w", c.Key, holder.meta.Fingerprint, err)
-			}
-			if int(r.HeavyIdx) >= len(hrecs) {
-				return fmt.Errorf("%s: holder %s: heavy index past frame", c.Key, holder.meta.Fingerprint)
-			}
-			b.lf, b.li, b.hrec = loc.lf, int(loc.li), hrecs[r.HeavyIdx]
+			b.lf, b.li = loc.lf, int(loc.li)
 		}
 		out = append(out, b)
 		return nil
@@ -826,9 +817,6 @@ func (h *heavyReader) logAt(src int) (io.ReaderAt, error) {
 // record is the heavy record of b: payload_json then token_usage_json, each a
 // uvarint length and its bytes.
 func (h *heavyReader) record(b built) ([]byte, error) {
-	if b.hrec != nil {
-		return b.hrec, nil
-	}
 	if h.err != nil {
 		return nil, h.err
 	}
