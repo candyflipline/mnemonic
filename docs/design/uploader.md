@@ -19,7 +19,7 @@ Three facts make one durable append expensive and one cycle slow. The client lea
 Constraints the shape honours:
 
 - C1: store files must stay byte-identical to the HTTP path's. Frame bytes depend only on the body and the zstd encoder defaults (`store.go:304-327`), and file bytes depend on how the client chunks. So the client keeps today's chunk cutter (`decide`, `firstChunk`, `rawEndOf`, `push.go:217-250`), and the server writes one frame per append as today.
-- The author comes from the token, never the request (`internal/auth/auth.go:126-133`, `store.go:104`).
+- The author comes from the client key proven in the QUIC handshake, never the request (`internal/qnet`, `[[keys]]` in the server config).
 - Local mode has no transport and stays as it is. It still uses the store for annotations and controls (`cmd/mnemonic/local.go:133`), so it gets the new committer and keeps its behaviour.
 - The client is pure Go, `CGO_ENABLED=0`. grpc is pure Go.
 
@@ -46,8 +46,8 @@ The server, in `server.New`, one line replacing the `/v1/` mount (`internal/serv
 
 ```go
 st, err := store.Open(dataDir)            // loads every manifest once, starts the committer
-push, drain := intake.Mount(st, tokens) // native Push server; shared push-scope check
-// Serve push on its own listener; stop accepting, drain, then close st.
+push, drain := intake.Mount(st)         // native Push server; push-scope check on the transport Identity
+// Serve push on the QUIC push listener; stop accepting, drain, then close st.
 ```
 
 The server-owned writers do not change (`internal/otlp/receiver.go:132`, `internal/index/controls.go:175`, `internal/index/q_annotate.go:202`):
@@ -95,7 +95,7 @@ One bidirectional RPC, `mnemonic.push.v1.Push/Sync` (`internal/wire/pushpb/push.
 - The client sends `Hello{machine}` once, then `Append{seq, harness, src_id, offset, head_hash, source_name, path, raw_end, body}`. These are a PUT's fields one for one (`docs/spec/wire.md:54-99`), so `ParseOp` serves both transports.
 - The server sends `Welcome{sources, more, window}` pages of 4096 `SourceState`s (src_id, harness, size, head_hash, raw_end, updated_ms: exactly what the skip rules read, `push.go:94-106`). Then it sends one `Ack{seq, APPLIED|CONFLICT, state}` per Append, in send order.
 - Rejected requests do not get a per-append error code. A bad segment, reserved name or malformed body ends the stream with a gRPC status (InvalidArgument, PermissionDenied). A correct client never sends one, and today's 400/403 are not retried either.
-- Auth: the bearer token rides as `authorization` metadata. The native gRPC stream interceptor and HTTP `tokens.Require` both call `tokens.Check`; only that function parses the bearer header, checks the token and scopes, and attaches its Identity. Push requires `auth.Push`. Unknown tokens and missing scopes become Unauthenticated and PermissionDenied, respectively. The author still comes only from the token.
+- Auth: identity comes from the transport, not a header. `qnet.Credentials` is the `grpc.Creds` option, and the stream interceptor reads the Identity with `qnet.FromPeer`; HTTP reads it from the request context through `auth.Require`. Push requires `auth.Push`. A missing Identity becomes Unauthenticated and a missing scope PermissionDenied. The author still comes only from the key. The transport is specified in `docs/spec/wire.md`.
 - Resume: the client keeps nothing on disk, as today (`internal/wire/wire.go:1-4`). On any stream end it backs off (`watch.go:201-209`), dials, reads Welcome and runs one full pass with the skip rules. Unacked appends are forgotten; Welcome says what landed. This deletes the manifest GET (`push.go:67-91`), the 6 h reconcile (`watch.go:26, 211-246`), `conflictRetry` and the 409 retry loop (`push.go:166-172`, `syncTail`'s fallback).
 - Pipelining: `streamSource` sends a file's chunks without waiting for acks. The next chunk's offset is the previous one's end, which `syncSource` already assumes (`push.go:176`). `uplink.sources` is the server's state plus what is in flight; an APPLIED ack writes the server's state back only once no later append of that source is in flight. A CONFLICT ack writes it back and marks the path dirty, and every later in-flight append of that source conflicts too, because its offset no longer matches. Only the watcher goroutine touches `sources`; the ack reader goroutine only delivers.
 
@@ -248,21 +248,26 @@ Until the profile lands, which of these limits the 8 s cycle is unknown. The dir
 
 ## Gateway (C8)
 
-- Two listeners in one process: `listen = ":443"` serves MCP and HTTP OTLP, and required `push_listen = ":8741"` serves native `grpc.Server.Serve`. No implicit port default; missing, malformed or identical push addresses fail configuration load.
-- mnemonic terminates TLS itself, with no proxy. `[tls] hosts` wraps both listeners in `tls.NewListener` over one `autocert.Manager` (`cmd/mnemonic/tls.go`): a whitelist host policy, Let's Encrypt via tls-alpn-01 on 443, the cache in `data_dir/autocert`. The grpc.Server keeps its options; the TLS layer sits under it, so push flow control is unchanged. A client with an `https://host` server pushes to `host:8741` with the system roots; `http://` stays plaintext for boxes and tests. Firewall: 22 allowlisted, 443 and 8741 open.
+- One UDP endpoint serves everything: `[quic] listen = ":8741"` binds it, and ALPN picks the protocol. `mnemonic-push/1` streams go to the native `grpc.Server`, and `mnemonic-http/1` streams go to the HTTP server for MCP and OTLP. No port default is implied beyond the config; a malformed address fails configuration load.
+- mnemonic terminates no TLS beyond QUIC's own handshake, with no proxy, domain or CA. The client pins the server key (`server_key`), and the server allowlists client keys (`[[keys]]`). Firewall: UDP 8741 and 22 open, nothing else. See `docs/spec/wire.md` for the transport.
+- Push still runs a `grpc.Server` over a QUIC stream with its own fixed windows, so the native flow control that motivated a separate listener holds. The listener is now a QUIC stream listener, not a TCP port.
 - Shutdown closes the push listener first, cancels live sessions with Unavailable, and runs GracefulStop with a 10 s shutdown deadline and Stop fallback for peers stalled before Hello or on responses. HTTP shutdown and the cycle-loop join finish before the deferred committer Close commits its queued writes and releases the index.
 - OTLP over gRPC: left for later. No known client asks for it. When one does, it is two `Register*ServiceServer` calls on the same `grpc.Server` over the receiver's existing decode path, on the same push listener.
 
 ## Tradeoffs accepted
 
+The decision records below keep the original wording as history. The October 2026 QUIC change replaced the bearer token check, the TCP listeners and `[tls]` autocert with a key proven in the QUIC handshake on one UDP endpoint.
+
 - We accept that a syncfs waits on every dirty page in the filesystem, including the index's writes, in exchange for O(batches) barriers with no new on-disk format. Steady-state index writes are small (logs 120 KB and parts 437 KB per put cycle in the quoted journal line). A parser-bump sweep or a rebuild writes far more, so ack latency rises then.
-- We accept a second listener and required config key to obtain native gRPC flow control. Auth policy remains one shared token check; no HTTP/2 handler transport is used for Push.
+- We accept a second listener and required config key to obtain native gRPC flow control (history; now a QUIC stream listener, and the token check became the transport Identity). Auth policy remains one shared check; no HTTP/2 handler transport is used for Push.
 - We accept that a failed barrier exits the process, in exchange for never acking from a page cache we cannot trust.
 - We accept two boot listings, the store's table and the index's `Boot`, in exchange for keeping the index independent of the store's internals.
 - We accept that the dirty set's premise (only the committer writes raw/) turns hand edits of raw/ into "restart required".
 - We accept a larger client binary (grpc linked; unmeasured) in exchange for flow control, status codes and a spec file.
 
 ## Alternatives considered
+
+History. The October 2026 QUIC change replaced the token check, the TCP listeners and `[tls]` autocert (including `cmd/mnemonic/tls.go`) with a key proven in the QUIC handshake on one UDP endpoint.
 
 - Write-ahead log for group commit. Each batch appends one record (frames plus after-manifests) to a journal, takes one fdatasync and acks; raw files and manifests are applied without fsync and checkpointed later; boot replays. It reaches 1 barrier per batch and is not coupled to index writeback. It lost because it adds an on-disk format, a replay path and a checkpoint cycle, and raw files still need a later fsync. Its interface is the same as ours, but the complexity it hides is larger and new. If syncfs latency under sweeps turns out to matter, this is the fallback, behind the same `Submit` and `Ack`.
 - Per-file fsync with folding. Fsync each touched raw and manifest once per batch and share dir syncs. This is portable and has no syncfs coupling, but the fsync count is 2 × distinct sources per batch. A first push or a catch-up after sleep touches thousands of distinct sources, so it stays O(N) where it matters.
@@ -282,6 +287,8 @@ Until the profile lands, which of these limits the 8 s cycle is unknown. The dir
 
 ## Lane decomposition (C9)
 
+History. The October 2026 QUIC change replaced the token check, the TCP listeners and `[tls]` autocert (including `cmd/mnemonic/tls.go`) with a key proven in the QUIC handshake on one UDP endpoint.
+
 Blocking scaffold, first and alone: merge this sketch (proto, generated code, `go.mod` grpc direct, the panicking signatures). Every lane then builds against it.
 
 | Lane | Owns | Implements (seeded contract) | Gate |
@@ -299,6 +306,8 @@ L4 depends on L1 and L2 at test time, not at build time, because the sketch comp
 L1's `plan` and `planned.write` against the three-sequential-PUTs table test, because every other lane's acks and every C1 byte depend on them.
 
 ## Note: rejected, and least sure
+
+History. The October 2026 QUIC change replaced the token check, the TCP listeners and `[tls]` autocert (including `cmd/mnemonic/tls.go`) with a key proven in the QUIC handshake on one UDP endpoint.
 
 - Rejected: the WAL (new on-disk format and replay for one fewer barrier), per-file fsync (stays O(N) on a first push), a timer window (latency at low load), hand-written protowire (hand-synced with the .proto), a persisted or value-carrying dirty set.
 - Reversed rejection: the second native gRPC listener is now required because ServeHTTP has an unbounded recvBuffer (`handler_server.go:435-453`). Both transports call one token check.
