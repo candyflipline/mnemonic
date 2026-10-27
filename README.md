@@ -109,35 +109,44 @@ Check: call `list_sessions` once and tell the operator whether it worked.
 
 Ask your agent: "Call `list_sessions` for today, limit 1." A result that starts with `mnemonic.mcp.list_sessions.v1` means the key, the address, and the config are right. A session you ran a minute ago appears after the next push cycle.
 
-The tools are `search_sessions`, `open`, `list_sessions`, `get_trace`, `file_attention`, `get_ingest_status`, `query`, `annotate`, `set_visibility`, `delete_session`, and `share_session`. `annotate` needs the `annotate` scope on your key. `set_visibility`, `delete_session` and `share_session` act on your own sessions with any key and need `admin` for another author's.
+The tools are `search_sessions`, `open`, `list_sessions`, `get_trace`, `file_attention`, `get_ingest_status`, `query`, `annotate`, `set_visibility`, `delete_session`, and `share_link`. `annotate` needs the `annotate` scope on your key. `set_visibility`, `delete_session` and `share_link` act on your own sessions with any key and need `admin` for another author's.
 
-## Share a session with a wallet
+## Links
 
-You can let someone read one of your sessions by sharing it with their Solana wallet address. They need no `[[keys]]` entry, and the server config does not change. They read only the sessions shared with their wallet, and they cannot push, annotate or change anything. The design is in [docs/design/wallet-sharing.md](docs/design/wallet-sharing.md).
+A link is one URL that grants one thing. The design is in [docs/design/share-links.md](docs/design/share-links.md).
 
-**Owner.** Ask your agent to call `share_session` with the session id and the wallet address:
-
-```
-share_session {"session_id": "session:…", "wallet": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"}
-share_session {"session_id": "session:…", "wallet": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU", "revoke": true}
-```
-
-A revoke takes effect on the recipient's next request. Send the recipient `HOST` and `SERVER_KEY`.
-
-**Recipient.** Install the client as above, but do not run `init`, because a wallet reader has nothing to push. Write `~/.mnemonic/config.toml` by hand:
+**Read link.** Anyone holding it reads a set of your sessions, as they were when you made the link, in a browser or with an agent. They install nothing. Ask your agent to call `share_link`:
 
 ```
-server     = "quic://HOST:8741"
-server_key = "SERVER_KEY"
+share_link {"session_ids": ["session:…", "session:…"], "title": "QUIC context", "days": 30}
 ```
 
-Then bind this machine's key to your wallet in one of three ways. Each way writes `~/.mnemonic/key.wallet` beside the key and lasts 30 days unless you pass `--days` (at most 365).
+From a terminal, `mnemonic share` takes session ids or Claude Code session uuids, prints the URL and, on macOS, copies it:
 
-- **Solana CLI keypair file.** Run `mnemonic wallet bind --keypair ~/.config/solana/id.json`. The command signs the binding with the keypair and stores nothing else from the file.
-- **Phantom.** Run `mnemonic wallet bind --phantom`, open the printed `http://127.0.0.1:…` link in the browser that has Phantom, connect, and approve the message. Phantom signs only that message, never a transaction.
-- **Paste, including Ledger.** Print the message with `mnemonic wallet message --wallet <your address>`, then sign it with `solana sign-offchain-message --keypair <keypair or usb://ledger> '<the line>'`, then store the result with `mnemonic wallet bind --message '<the line>' --signature <the signature>`.
+```
+mnemonic share 7c666c01-d38e-4658-8650-854ffb5b626e session:… --title "QUIC context"
+```
 
-`mnemonic wallet show` prints the bound wallet and its expiry. Point your agent at the server with `mnemonic mcp` as above. `list_sessions` shows the sessions shared with you. Each machine binds once. A machine whose wallet has no shared session, or whose binding has expired, is refused at the handshake.
+The answer lists each session's harness, project, start, messages and rendered size. Open the link and check it before you send it. `<url>.md` is the whole link as markdown, and `<url>/<n>.md` and `<url>/<n>.json` are session `n` alone. Only a session's sole author, or an admin key, may link it.
+
+**Invite link.** It admits one machine into your tenant. The machine pushes as the author the invite names and reads what your tenant reads. Inviting a machine for your own author takes any key, and for another author an admin key:
+
+```
+share_link {"invite": "vlad", "days": 7}
+```
+
+On the new machine, install the client and run `mnemonic join <url>`. It creates the key, writes `~/.mnemonic/config.toml`, installs the push agent as `init` does, and prints the MCP lines above. Nobody edits `[[keys]]` or copies the server key.
+
+`share_link {}` lists your live links and the key and machine that joined each invite. `share_link {"revoke": "<link id>"}` ends either kind. A revoked read link answers 410, and a revoked invite's machine is refused at its next request.
+
+The server serves links only with a `[share]` section in its config:
+
+```
+[share]
+listen    = "127.0.0.1:8742"            # loopback only
+base_url  = "https://share.example.com" # the public origin in front of it
+quic_addr = "HOST:8741"                 # what a joining machine dials
+```
 
 ## Known gap
 

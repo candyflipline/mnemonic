@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -45,12 +46,12 @@ func Handler(ix *index.Index, ctl *index.Controls) http.Handler {
 			serveDataset(w, db, req, hidden, sessions)
 			return
 		}
-		if !sessions.Opened(req.session) {
+		if !sessions.Readable(req.session) {
 			http.Error(w, notFound(req.session).Error(), http.StatusNotFound)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		out := &startedBody{w: w}
+		out := &Counted{W: w}
 		if req.kind == "atif" {
 			err = WriteATIF(out, db, req.session, hidden)
 		} else {
@@ -59,31 +60,40 @@ func Handler(ix *index.Index, ctl *index.Controls) http.Handler {
 		switch {
 		case err == nil:
 		case errors.Is(err, ErrSessionNotFound):
-			out.fail(err, http.StatusNotFound)
+			out.Fail(w, err, http.StatusNotFound)
 		case errors.Is(err, ErrInvalidATIF):
-			out.fail(err, http.StatusUnprocessableEntity)
+			out.Fail(w, err, http.StatusUnprocessableEntity)
 		default:
-			out.fail(err, http.StatusInternalServerError)
+			out.Fail(w, err, http.StatusInternalServerError)
 		}
 	})
 }
 
-type startedBody struct {
-	w http.ResponseWriter
-	n int64
+// Counted is a response body that counts what has been written, so an error
+// after the first byte aborts the response instead of ending a 200 early. A
+// nil W only counts.
+type Counted struct {
+	W io.Writer
+	N int64
 }
 
-func (b *startedBody) Write(p []byte) (int, error) {
-	n, err := b.w.Write(p)
-	b.n += int64(n)
+func (c *Counted) Write(p []byte) (int, error) {
+	if c.W == nil {
+		c.N += int64(len(p))
+		return len(p), nil
+	}
+	n, err := c.W.Write(p)
+	c.N += int64(n)
 	return n, err
 }
 
-func (b *startedBody) fail(err error, status int) {
-	if b.n > 0 {
+// Fail answers err with status, or aborts the response once a byte of it
+// has gone out, so a broken body never ends as a short 200.
+func (c *Counted) Fail(w http.ResponseWriter, err error, status int) {
+	if c.N > 0 {
 		panic(http.ErrAbortHandler)
 	}
-	http.Error(b.w, err.Error(), status)
+	http.Error(w, err.Error(), status)
 }
 
 func scope(ctx context.Context, db *index.DB, includePrivate bool) (index.SessionFilter, error) {
@@ -101,17 +111,17 @@ func scope(ctx context.Context, db *index.DB, includePrivate bool) (index.Sessio
 func serveDataset(w http.ResponseWriter, db *index.DB, req request, hidden map[string]bool, sessions index.SessionFilter) {
 	w.Header().Set("Trailer", SkippedTrailer)
 	w.Header().Set("Content-Type", "application/x-ndjson")
-	out := &startedBody{w: w}
-	skipped, err := Dataset(out, db, req.annotation, req.perTask, hidden, sessions.Listed)
+	out := &Counted{W: w}
+	skipped, err := Dataset(out, db, req.annotation, req.perTask, hidden, sessions.Readable)
 	for _, s := range skipped {
 		w.Header().Add(SkippedTrailer, s.SessionID+": "+s.Err.Error())
 	}
 	switch {
 	case err == nil:
 	case errors.Is(err, ErrEveryFailed):
-		out.fail(err, http.StatusUnprocessableEntity)
+		out.Fail(w, err, http.StatusUnprocessableEntity)
 	default:
-		out.fail(err, http.StatusInternalServerError)
+		out.Fail(w, err, http.StatusInternalServerError)
 	}
 }
 

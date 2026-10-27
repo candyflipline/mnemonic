@@ -91,7 +91,7 @@ func (getTrace) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, str
 	if err != nil {
 		return nil, "", err
 	}
-	if n := db.sessionSpansSize(id.session); n > traceBudget && f.Opened(id.session) {
+	if n := db.sessionSpansSize(id.session); n > traceBudget && f.Readable(id.session) {
 		return nil, "", argErrorf("trace too large for get_trace: %d MB of spans (limit %d MB); export it with: mnemonic export otlp --data-dir <data dir> --session %s",
 			(n+1<<20-1)>>20, traceBudget>>20, a.SessionID)
 	}
@@ -116,7 +116,7 @@ func (getTrace) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, str
 }
 
 func loadSpans(db *DB, session string, f SessionFilter) []*traceSpan {
-	if !f.Opened(session) {
+	if !f.Readable(session) {
 		return nil
 	}
 	return spansToTrace(db.sessionSpans(session))
@@ -241,7 +241,7 @@ func rootTotals(spans int, roots []*traceSpan) traceTotals {
 }
 
 func loadAnnotations(db *DB, session string, f SessionFilter) []traceAnnotation {
-	if !f.Opened(session) {
+	if !f.Readable(session) {
 		return nil
 	}
 	return notesToTrace(db.sessionAnnotations(session), f)

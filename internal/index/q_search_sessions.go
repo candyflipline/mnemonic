@@ -184,7 +184,7 @@ func searchAnswer(args canonicalSearchSessionsArgs, result *searchResult) (any, 
 func searchHitJSON(hit searchHit) map[string]any {
 	eventID := formatEventID(hit.eventUID)
 	turnID := formatTurnID(hit.sessionID, hit.turnSeq)
-	sessionID := formatSessionID(hit.sessionID)
+	sessionID := FormatSessionID(hit.sessionID)
 	snippet, snippetTruncated := compactSnippet(hit.snippet, hit.snippetTruncated)
 
 	title := firstNonEmpty(hit.sessionTitle, hit.sessionSummary, hit.sessionSlug)

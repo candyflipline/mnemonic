@@ -21,7 +21,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/mcp"
 	"github.com/candyflipline/mnemonic/internal/otlp"
 	"github.com/candyflipline/mnemonic/internal/store"
-	"github.com/candyflipline/mnemonic/internal/wallet"
 )
 
 type Server struct {
@@ -38,15 +37,21 @@ type Server struct {
 	bootOne sync.Once
 	handler http.Handler
 	otlp    *otlp.Receiver
+	share   *Share
 }
+
+// Share is what serving links needs: BaseURL, the public origin of the
+// [share] listener, and QUICAddr and ServerKey, what a join answers.
+type Share struct{ BaseURL, QUICAddr, ServerKey string }
 
 // New opens the index under dataDir, loads the session controls from raw,
 // and mounts the store (push scope) and MCP (read scope) behind auth.Require. MCP
 // tools find the store with store.From and the controls with
 // index.WithControls on their ctx. The server takes the index dir's writer
 // lock for its whole life — it is the dir's one writer — and refuses to start
-// under another one, naming the holder.
-func New(dataDir string) (*Server, error) {
+// under another one, naming the holder. A nil share serves no links, and
+// share_link says so.
+func New(dataDir string, share *Share) (*Server, error) {
 	ctl, err := index.LoadControls(dataDir)
 	if err != nil {
 		return nil, err
@@ -68,6 +73,7 @@ func New(dataDir string) (*Server, error) {
 	}
 	tools := mcp.Handler(ix, index.Lookup)
 	boot := &index.BootStatus{}
+	s := &Server{dataDir: dataDir, ctl: ctl, ix: ix, lock: lock, st: st, booted: make(chan struct{}), boot: boot, share: share}
 	rcv := otlp.NewReceiver(st)
 	mux := http.NewServeMux()
 	push, drain := intake.Mount(st)
@@ -75,31 +81,24 @@ func New(dataDir string) (*Server, error) {
 	mux.Handle("POST /v1/logs", auth.Require(auth.Push)(rcv.Logs()))
 	mux.Handle("GET /v1/export/{kind}", auth.Require(auth.Read)(export.Handler(ix, ctl)))
 	mux.Handle("/mcp", auth.Require(auth.Read)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tools.ServeHTTP(w, r.WithContext(index.WithBootStatus(index.WithControls(store.WithStore(r.Context(), st), ctl), boot)))
+		ctx := index.WithBootStatus(index.WithControls(store.WithStore(r.Context(), st), ctl), boot)
+		if share != nil {
+			ctx = index.WithLinkSite(ctx, index.LinkSite{BaseURL: share.BaseURL, MarkdownSize: s.markdownSize})
+		}
+		tools.ServeHTTP(w, r.WithContext(ctx))
 	})))
-	return &Server{dataDir: dataDir, ctl: ctl, ix: ix, lock: lock, st: st, push: push, drain: drain, booted: make(chan struct{}), boot: boot, handler: mux, otlp: rcv}, nil
+	s.push, s.drain, s.handler, s.otlp = push, drain, mux, rcv
+	return s, nil
 }
 
-// Identify is the handshake's one admission rule over keys, the configured
-// [[keys]] table, and serverKey, this server's public key: a configured key
-// is its Identity, whatever binding it carries; otherwise a binding that
-// wallet.Verify accepts for this device and serverKey now, whose wallet the
-// session controls admit (one share or more), is auth.WalletReader of that
-// wallet; everything else is refused. Shares are read from the controls at
-// each call, never copied.
-func (s *Server) Identify(keys auth.Keys, serverKey ed25519.PublicKey) func(device ed25519.PublicKey, binding []byte) (auth.Identity, bool) {
-	return func(device ed25519.PublicKey, binding []byte) (auth.Identity, bool) {
-		if id, ok := keys.Identify(auth.EncodeKey(device)); ok {
-			return id, true
-		}
-		if binding == nil {
-			return auth.Identity{}, false
-		}
-		b, err := wallet.Verify(binding, device, serverKey, time.Now())
-		if err != nil || !s.ctl.Admits(b.Claim().Wallet) {
-			return auth.Identity{}, false
-		}
-		return auth.WalletReader(b), true
+// Identify is the handshake's one admission rule: a key keys configures is
+// its Identity, else a key a live invite admitted is that member; every
+// other key is refused. Members are read from the controls at each call, so
+// a join counts at the next handshake and a revoke refuses it.
+func (s *Server) Identify(keys auth.Keys) func(device ed25519.PublicKey) (auth.Identity, bool) {
+	keys = keys.WithMembers(s.ctl)
+	return func(device ed25519.PublicKey) (auth.Identity, bool) {
+		return keys.Identify(auth.EncodeKey(device))
 	}
 }
 

@@ -107,7 +107,7 @@ func traceBoundCalls(t *testing.T, dir, hid, sid, late string, spansBytes int) (
 	idZ, _ := keys.Identify("k-z")
 	ctxZ := auth.NewContext(base, idZ)
 	args := func(session string) json.RawMessage {
-		b, _ := json.Marshal(map[string]any{"session_id": formatSessionID(session)})
+		b, _ := json.Marshal(map[string]any{"session_id": FormatSessionID(session)})
 		return b
 	}
 
@@ -122,13 +122,13 @@ func traceBoundCalls(t *testing.T, dir, hid, sid, late string, spansBytes int) (
 		_, _, refusal = Call(ctxH, db, "get_trace", args(hid))
 	})
 	mb := (spansBytes + 1<<20 - 1) >> 20
-	want := fmt.Sprintf("trace too large for get_trace: %d MB of spans (limit 1 MB); export it with: mnemonic export otlp --data-dir <data dir> --session %s", mb, formatSessionID(hid))
+	want := fmt.Sprintf("trace too large for get_trace: %d MB of spans (limit 1 MB); export it with: mnemonic export otlp --data-dir <data dir> --session %s", mb, FormatSessionID(hid))
 	if refusal == nil || refusal.Error() != want {
 		t.Errorf("get_trace on H: %v, want %q", refusal, want)
 	}
 
 	_, text, err := Call(ctxH, db, "get_trace", args(sid))
-	if err != nil || !strings.HasPrefix(text, "Trace "+formatSessionID(sid)+": 6 span(s), tokens in 6 / out 4") {
+	if err != nil || !strings.HasPrefix(text, "Trace "+FormatSessionID(sid)+": 6 span(s), tokens in 6 / out 4") {
 		t.Errorf("get_trace on S: %v %q, want a 6 span trace", err, text)
 	}
 
@@ -144,7 +144,7 @@ func traceBoundCalls(t *testing.T, dir, hid, sid, late string, spansBytes int) (
 	if err := requireTarget(ctxH, db, hid, "no-such-span"); err == nil || err.Error() != "span not found in the session" {
 		t.Errorf("absent span of H: %v, want span not found in the session", err)
 	}
-	annotate, _ := json.Marshal(map[string]any{"session_id": formatSessionID(hid), "span_id": late, "name": "n", "text": "t"})
+	annotate, _ := json.Marshal(map[string]any{"session_id": FormatSessionID(hid), "span_id": late, "name": "n", "text": "t"})
 	if _, _, err := Call(ctxH, db, "annotate", annotate); err != nil {
 		t.Errorf("annotate the late span of H: %v", err)
 	}

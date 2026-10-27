@@ -200,7 +200,7 @@ type scanOpts struct {
 }
 
 func (db *DB) loadSessionScan(sessionID string, opts scanOpts) (*sessionScan, error) {
-	if !opts.opened.Opened(sessionID) {
+	if !opts.opened.Readable(sessionID) {
 		return nil, nil
 	}
 	st, ok := db.part(sessionID)

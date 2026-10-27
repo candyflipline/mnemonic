@@ -75,7 +75,7 @@ func faFilterRow(r *Row, q faQuery) bool {
 	if q.MutationsOnly && slices.Contains(faReadTools, tn) {
 		return false
 	}
-	return q.listed.all() || q.listed.Listed(r.Session)
+	return q.listed.all() || q.listed.Readable(r.Session)
 }
 
 func faTimeOK(ms int64, sourceName string, q faQuery) bool {

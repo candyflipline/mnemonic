@@ -176,6 +176,7 @@ type trajectory struct {
 	agent Agent
 	plan  []rowPlan
 	last  []int32
+	cut   *stepCut
 }
 
 // rowPlan is where one row lands; linked marks a tool result that keeps its
@@ -214,6 +215,10 @@ func WriteATIF(w io.Writer, db *index.DB, sessionID string, hidden map[string]bo
 	if err != nil {
 		return err
 	}
+	return t.writeIndented(w)
+}
+
+func (t *trajectory) writeIndented(w io.Writer) error {
 	v, err := t.validate()
 	if err != nil {
 		return err
@@ -391,6 +396,9 @@ func resultStep(ev eventRow, cur int32, curCalls map[string]bool, latest map[str
 // eachStep builds the planned steps from the rows and hands each to fn, in
 // order, as soon as its last row is read.
 func (t *trajectory) eachStep(fn func(*Step) error) error {
+	if t.cut != nil {
+		fn = t.cut.filter(fn)
+	}
 	return buildSteps(t.plan, t.last, t.rows(), fn)
 }
 

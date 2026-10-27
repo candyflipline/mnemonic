@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -11,7 +12,6 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/candyflipline/mnemonic/internal/auth"
-	"github.com/candyflipline/mnemonic/internal/wallet"
 	"github.com/candyflipline/mnemonic/internal/wire"
 )
 
@@ -47,9 +47,6 @@ func LoadServer(path string) (Server, error) {
 		if k.Author == "" {
 			return Server{}, fmt.Errorf("%s: keys[%d]: author must be set", path, i)
 		}
-		if strings.HasPrefix(k.Author, wallet.AuthorPrefix) {
-			return Server{}, fmt.Errorf("%s: keys[%d]: author %s: the prefix %s is for wallet readers", path, i, k.Author, wallet.AuthorPrefix)
-		}
 		if _, err := auth.ParseKey(k.Key); err != nil {
 			return Server{}, fmt.Errorf("%s: keys[%d] (%s): %w", path, i, k.Author, err)
 		}
@@ -76,7 +73,49 @@ func LoadServer(path string) (Server, error) {
 			}
 		}
 	}
+	if cfg.Share != nil {
+		if err := cfg.Share.check(); err != nil {
+			return Server{}, fmt.Errorf("%s: [share] %w", path, err)
+		}
+	}
 	return cfg, nil
+}
+
+func (s *Share) check() error {
+	if s.Listen == "" {
+		s.Listen = DefaultShareListen
+	}
+	host, port, err := net.SplitHostPort(s.Listen)
+	n, portErr := strconv.Atoi(port)
+	if err != nil || portErr != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("listen must be a host:port with port 1..65535")
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("listen %s is not a loopback address; links reach the world only through the tunnel", s.Listen)
+	}
+	u, err := url.Parse(s.BaseURL)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return fmt.Errorf("base_url %q must be an https origin such as https://share.example.com", s.BaseURL)
+	}
+	if u.Scheme == "http" && !IsLoopbackHost(u.Hostname()) {
+		return fmt.Errorf("base_url %q is plaintext http, allowed only for a loopback host; use https", s.BaseURL)
+	}
+	host, port, err = net.SplitHostPort(s.QUICAddr)
+	n, portErr = strconv.Atoi(port)
+	if err != nil || host == "" || portErr != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("quic_addr %q must be the host:port joining machines dial", s.QUICAddr)
+	}
+	return nil
+}
+
+// IsLoopbackHost is whether host (no port) names this machine: localhost or a
+// loopback address. It is the one place plaintext http is allowed.
+func IsLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func removedKey(k toml.Key) string {

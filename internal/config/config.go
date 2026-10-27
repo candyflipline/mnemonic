@@ -59,6 +59,10 @@ var DefaultSources = []SourceGlob{
 //	scopes = ["read", "push"]  # optional, the default; "annotate" and "admin" opt in
 //	[otlp]
 //	store_content = false    # keep OTLP message and tool content
+//	[share]                  # optional; without it no link is served
+//	listen    = "127.0.0.1:8742"            # loopback only; the tunnel publishes it
+//	base_url  = "https://share.askloyal.com"
+//	quic_addr = "mnemonic.askloyal.com:8741" # what a joining machine dials
 //
 // An author no key entry names is in the "default" tenant, so every
 // default-tenant key reads what such an author's data holds.
@@ -67,7 +71,19 @@ type Server struct {
 	QUIC    QUIC       `toml:"quic"`
 	Keys    []KeyEntry `toml:"keys"`
 	OTLP    OTLP       `toml:"otlp"`
+	Share   *Share     `toml:"share"`
 }
+
+// Share is the listener that serves links (/s/ and /i/), on loopback only.
+// BaseURL is its public origin and QUICAddr the host:port a joining machine
+// dials.
+type Share struct {
+	Listen   string `toml:"listen"`
+	BaseURL  string `toml:"base_url"`
+	QUICAddr string `toml:"quic_addr"`
+}
+
+const DefaultShareListen = "127.0.0.1:8742"
 
 // QUIC is the one UDP endpoint. KeyFile holds the server's ed25519 key and
 // defaults to data_dir/server.key.

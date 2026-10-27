@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
 	"errors"
 	"flag"
 	"fmt"
@@ -43,18 +42,22 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
-	srv, err := server.New(cfg.DataDir)
+	priv, err := qnet.LoadOrCreateKey(cfg.QUIC.KeyFile)
+	if err != nil {
+		return err
+	}
+	var share *server.Share
+	if cfg.Share != nil {
+		share = &server.Share{BaseURL: cfg.Share.BaseURL, QUICAddr: cfg.Share.QUICAddr, ServerKey: qnet.PublicKey(priv)}
+	}
+	srv, err := server.New(cfg.DataDir, share)
 	if err != nil {
 		return err
 	}
 	defer srv.Close()
 	srv.StoreOTLPContent(cfg.OTLP.StoreContent)
 
-	priv, err := qnet.LoadOrCreateKey(cfg.QUIC.KeyFile)
-	if err != nil {
-		return err
-	}
-	qs, err := qnet.Listen(cfg.QUIC.Listen, priv, srv.Identify(cfg.Identities(), priv.Public().(ed25519.PublicKey)))
+	qs, err := qnet.Listen(cfg.QUIC.Listen, priv, srv.Identify(cfg.Identities()))
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", cfg.QUIC.Listen, err)
 	}
@@ -78,8 +81,18 @@ func serve(args []string) error {
 			return ctx
 		},
 	}
-	ended := make(chan error, 2)
+	ended := make(chan error, 3)
 	go func() { ended <- hs.Serve(qs.HTTP) }()
+	var public *http.Server
+	if cfg.Share != nil {
+		ln, err := net.Listen("tcp", cfg.Share.Listen)
+		if err != nil {
+			return fmt.Errorf("[share] listen on %s: %w", cfg.Share.Listen, err)
+		}
+		public = &http.Server{Handler: srv.Public(), ReadHeaderTimeout: 10 * time.Second, WriteTimeout: 5 * time.Minute, IdleTimeout: 2 * time.Minute}
+		go func() { ended <- public.Serve(ln) }()
+		log.Printf("mnemonic serve: links on %s (TCP, loopback) as %s", ln.Addr(), cfg.Share.BaseURL)
+	}
 	go func() {
 		select {
 		case <-srv.Booted():
@@ -103,6 +116,12 @@ func serve(args []string) error {
 	if err := hs.Shutdown(httpCtx); err != nil {
 		log.Printf("shutdown: %v", err)
 		hs.Close()
+	}
+	if public != nil {
+		if err := public.Shutdown(httpCtx); err != nil {
+			log.Printf("shutdown links: %v", err)
+			public.Close()
+		}
 	}
 	cancelHTTP()
 	qs.Close()

@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -24,7 +23,7 @@ import (
 
 	"github.com/candyflipline/mnemonic/internal/auth"
 	"github.com/candyflipline/mnemonic/internal/store"
-	"github.com/candyflipline/mnemonic/internal/wallet"
+	"github.com/candyflipline/mnemonic/internal/wire"
 )
 
 const controlHarness = "control"
@@ -34,7 +33,6 @@ type visibility string
 const (
 	visPrivate visibility = "private"
 	visTeam    visibility = "team"
-	visLink    visibility = "link"
 )
 
 type controlAction string
@@ -42,18 +40,32 @@ type controlAction string
 const (
 	actVisibility controlAction = "visibility"
 	actDelete     controlAction = "delete"
-	actShare      controlAction = "share"
-	actUnshare    controlAction = "unshare"
+	actLink       controlAction = "link"
+	actJoin       controlAction = "join"
+	actRevoke     controlAction = "revoke"
 )
 
 type controlRecord struct {
-	SessionID  string        `json:"session_id"`
-	Action     controlAction `json:"action"`
-	Visibility visibility    `json:"visibility,omitempty"`
-	Wallet     string        `json:"wallet,omitempty"`
-	TS         time.Time     `json:"ts"`
-	RequestKey string        `json:"request_key"`
-	Writer     string        `json:"writer,omitempty"`
+	SessionID      string        `json:"session_id,omitempty"`
+	Action         controlAction `json:"action"`
+	Visibility     visibility    `json:"visibility,omitempty"`
+	LinkID         string        `json:"link_id,omitempty"`
+	Kind           linkKind      `json:"kind,omitempty"`
+	TokenSHA256    string        `json:"token_sha256,omitempty"`
+	SessionIDs     []string      `json:"session_ids,omitempty"`
+	SessionAuthors []string      `json:"session_authors,omitempty"`
+	Title          string        `json:"title,omitempty"`
+	Note           string        `json:"note,omitempty"`
+	Cutoff         time.Time     `json:"cutoff,omitzero"`
+	Expires        time.Time     `json:"expires,omitzero"`
+	InviteAuthor   string        `json:"invite_author,omitempty"`
+	Author         string        `json:"author,omitempty"`
+	Tenant         string        `json:"tenant,omitempty"`
+	Key            string        `json:"key,omitempty"`
+	Machine        string        `json:"machine,omitempty"`
+	TS             time.Time     `json:"ts"`
+	RequestKey     string        `json:"request_key"`
+	Writer         string        `json:"writer,omitempty"`
 }
 
 var writer = func() string {
@@ -69,26 +81,92 @@ var writer = func() string {
 	return bi.Main.Version
 }()
 
+// recordShapes is, per action (and link kind), the fields a record must set
+// and the further ones it may; any other field set refuses the record.
+var recordShapes = map[string]struct{ required, optional []string }{
+	"delete":      {required: []string{"session_id"}},
+	"visibility":  {required: []string{"session_id", "visibility"}},
+	"link/read":   {required: []string{"link_id", "token_sha256", "session_ids", "session_authors", "cutoff", "expires", "author", "tenant"}, optional: []string{"title", "note"}},
+	"link/invite": {required: []string{"link_id", "token_sha256", "invite_author", "expires", "author", "tenant"}},
+	"join":        {required: []string{"link_id", "key", "machine"}},
+	"revoke":      {required: []string{"link_id"}},
+}
+
+func (r controlRecord) set() []string {
+	var out []string
+	for _, f := range []struct {
+		name string
+		set  bool
+	}{
+		{"session_id", r.SessionID != ""}, {"visibility", r.Visibility != ""}, {"link_id", r.LinkID != ""},
+		{"token_sha256", r.TokenSHA256 != ""}, {"session_ids", r.SessionIDs != nil}, {"session_authors", r.SessionAuthors != nil}, {"title", r.Title != ""},
+		{"note", r.Note != ""}, {"cutoff", !r.Cutoff.IsZero()}, {"expires", !r.Expires.IsZero()},
+		{"invite_author", r.InviteAuthor != ""}, {"author", r.Author != ""}, {"tenant", r.Tenant != ""},
+		{"key", r.Key != ""}, {"machine", r.Machine != ""},
+	} {
+		if f.set {
+			out = append(out, f.name)
+		}
+	}
+	return out
+}
+
 func parseControl(line []byte) (controlRecord, error) {
 	var r controlRecord
 	if err := json.Unmarshal(line, &r); err != nil {
 		return r, err
 	}
+	if r.RequestKey == "" || r.TS.IsZero() {
+		return r, fmt.Errorf("control record lacks request_key or ts")
+	}
+	shape := string(r.Action)
+	if r.Action == actLink {
+		shape += "/" + string(r.Kind)
+	} else if r.Kind != "" {
+		shape += "/"
+	}
+	want, ok := recordShapes[shape]
+	if !ok {
+		return r, fmt.Errorf("control record action %q kind %q", r.Action, r.Kind)
+	}
+	set := r.set()
+	for _, f := range want.required {
+		if !slices.Contains(set, f) {
+			return r, fmt.Errorf("control record %s lacks %s", shape, f)
+		}
+	}
+	for _, f := range set {
+		if !slices.Contains(want.required, f) && !slices.Contains(want.optional, f) {
+			return r, fmt.Errorf("control record %s carries %s", shape, f)
+		}
+	}
 	switch {
-	case r.SessionID == "" || r.RequestKey == "" || r.TS.IsZero():
-		return r, fmt.Errorf("control record lacks session_id, request_key or ts")
-	case r.Action == actDelete && r.Visibility == "" && r.Wallet == "":
-	case (r.Action == actShare || r.Action == actUnshare) && r.Visibility == "" && validWallet(r.Wallet):
-	case r.Action == actVisibility && slices.Contains([]visibility{visPrivate, visTeam, visLink}, r.Visibility):
-	default:
-		return r, fmt.Errorf("control record action %q visibility %q", r.Action, r.Visibility)
+	case r.Visibility != "" && !slices.Contains([]visibility{visPrivate, visTeam}, r.Visibility):
+		return r, fmt.Errorf("control record visibility %q", r.Visibility)
+	case r.LinkID != "" && !isHex(r.LinkID, linkIDLen):
+		return r, fmt.Errorf("control record link_id %q is not %d hex digits", r.LinkID, linkIDLen)
+	case r.TokenSHA256 != "" && !isHex(r.TokenSHA256, 2*sha256.Size):
+		return r, fmt.Errorf("control record token_sha256 is not %d hex digits", 2*sha256.Size)
+	case slices.Contains(r.SessionIDs, "") || (r.SessionIDs != nil && len(r.SessionIDs) == 0):
+		return r, fmt.Errorf("control record session_ids holds an empty id or none")
+	case len(r.SessionAuthors) != len(r.SessionIDs) || slices.ContainsFunc(r.SessionAuthors, func(a string) bool { return !wire.ValidSegment(a) }):
+		return r, fmt.Errorf("control record session_authors must name one author per session id")
+	case r.InviteAuthor != "" && !wire.ValidSegment(r.InviteAuthor):
+		return r, fmt.Errorf("control record invite_author %q", r.InviteAuthor)
+	case r.Machine != "" && !wire.ValidSegment(r.Machine):
+		return r, fmt.Errorf("control record machine %q", r.Machine)
+	}
+	if r.Key != "" {
+		if _, err := auth.ParseKey(r.Key); err != nil {
+			return r, fmt.Errorf("control record: %w", err)
+		}
 	}
 	return r, nil
 }
 
-func validWallet(s string) bool {
-	a, err := wallet.ParseAddress(s)
-	return err == nil && a.String() == s
+func isHex(s string, n int) bool {
+	_, err := hex.DecodeString(s)
+	return err == nil && len(s) == n && strings.ToLower(s) == s
 }
 
 type sessionControl struct {
@@ -96,34 +174,27 @@ type sessionControl struct {
 	ts         time.Time
 	key        string
 	deleted    bool
-	shares     map[wallet.Address]stamp
 }
 
-// stamp is the latest share or unshare of one session with one wallet, by the
-// same last-writer-wins order as visibility: later ts, then greater key. An
-// unshare stays as a stamp, so replaying an older share cannot revive it.
-type stamp struct {
-	shared bool
-	ts     time.Time
-	key    string
-}
-
-func (s stamp) before(r controlRecord) bool {
-	return r.TS.After(s.ts) || (r.TS.Equal(s.ts) && r.RequestKey > s.key)
-}
-
-// Controls is every session control record in raw, the copy reads consult:
-// a record counts from the moment record returns, before any converge.
-// byWallet is the sessions each wallet's latest stamp shares, so the
-// handshake asks one map.
+// Controls is every control record in raw, the copy reads consult: a record
+// counts from the moment record returns, before any converge. links holds
+// every link by id; byToken and byKey index it for the public listener and
+// the handshake, and only apply writes the three.
 type Controls struct {
 	write    sync.Mutex
 	mu       sync.RWMutex
 	sessions map[string]sessionControl
-	byWallet map[wallet.Address]map[string]bool
+	links    map[string]*link
+	byToken  map[[sha256.Size]byte]*link
+	byKey    map[string]*link
 }
 
 func (c *Controls) apply(r controlRecord) {
+	switch r.Action {
+	case actLink, actJoin, actRevoke:
+		c.applyLink(r)
+		return
+	}
 	s := c.sessions[r.SessionID]
 	switch r.Action {
 	case actDelete:
@@ -132,85 +203,15 @@ func (c *Controls) apply(r controlRecord) {
 		if r.TS.After(s.ts) || (r.TS.Equal(s.ts) && r.RequestKey > s.key) {
 			s.visibility, s.ts, s.key = r.Visibility, r.TS, r.RequestKey
 		}
-	case actShare, actUnshare:
-		w, _ := wallet.ParseAddress(r.Wallet)
-		if s.shares == nil {
-			s.shares = map[wallet.Address]stamp{}
-		}
-		if !s.shares[w].before(r) {
-			break
-		}
-		shared := r.Action == actShare
-		s.shares[w] = stamp{shared: shared, ts: r.TS, key: r.RequestKey}
-		set := c.byWallet[w]
-		switch {
-		case shared && set == nil:
-			c.byWallet[w] = map[string]bool{r.SessionID: true}
-		case shared:
-			set[r.SessionID] = true
-		default:
-			delete(set, r.SessionID)
-			if len(set) == 0 {
-				delete(c.byWallet, w)
-			}
-		}
 	}
 	c.sessions[r.SessionID] = s
-}
-
-// shareTime is the ts a new share or unshare of r's wallet and session is
-// recorded at: now, or one nanosecond past that pair's latest decision when
-// the clock reads earlier, so a wall-clock step back cannot make a new
-// decision lose to an older one.
-func (c *Controls) shareTime(r controlRecord, now time.Time) time.Time {
-	w, _ := wallet.ParseAddress(r.Wallet)
-	c.mu.RLock()
-	prev := c.sessions[r.SessionID].shares[w].ts
-	c.mu.RUnlock()
-	if now.After(prev) {
-		return now
-	}
-	return prev.Add(time.Nanosecond)
-}
-
-// Admits is whether w may read: some session not deleted is shared with it
-// now. The handshake calls it, through server.Identify, on every new
-// connection, and Sessions on every request.
-func (c *Controls) Admits(w wallet.Address) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	for id := range c.byWallet[w] {
-		if !c.sessions[id].deleted {
-			return true
-		}
-	}
-	return false
-}
-
-func (c *Controls) sharedWith(w wallet.Address) map[string]bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return maps.Clone(c.byWallet[w])
-}
-
-func (c *Controls) walletsOf(session string) []string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	out := []string{}
-	for w, st := range c.sessions[session].shares {
-		if st.shared {
-			out = append(out, w.String())
-		}
-	}
-	slices.Sort(out)
-	return out
 }
 
 // LoadControls reads every control source under dataDir up to the length
 // its manifest covers, so a torn append the manifest never recorded is not
 // read.
 func LoadControls(dataDir string) (*Controls, error) {
-	c := &Controls{sessions: map[string]sessionControl{}, byWallet: map[wallet.Address]map[string]bool{}}
+	c := &Controls{sessions: map[string]sessionControl{}, links: map[string]*link{}, byToken: map[[sha256.Size]byte]*link{}, byKey: map[string]*link{}}
 	manifests, err := filepath.Glob(filepath.Join(dataDir, "raw", "author=*", "machine="+store.ServerMachine, "harness="+controlHarness, "*.json"))
 	if err != nil {
 		return nil, err
@@ -259,10 +260,13 @@ func (c *Controls) loadSource(manifest string) error {
 func (c *Controls) record(st *store.Committer, author string, r controlRecord) (duplicate bool, err error) {
 	c.write.Lock()
 	defer c.write.Unlock()
+	return c.recordLocked(st, author, r)
+}
+
+// recordLocked is record for a caller that holds c.write, so it can decide
+// from the controls and record that decision with no write between.
+func (c *Controls) recordLocked(st *store.Committer, author string, r controlRecord) (duplicate bool, err error) {
 	r.TS, r.Writer = time.Now().UTC(), writer
-	if r.Action == actShare || r.Action == actUnshare {
-		r.TS = c.shareTime(r, r.TS)
-	}
 	line, err := json.Marshal(r)
 	if err != nil {
 		return false, err
@@ -276,7 +280,7 @@ func (c *Controls) record(st *store.Committer, author string, r controlRecord) (
 	return false, nil
 }
 
-type controlSets struct{ deleted, private, link []string }
+type controlSets struct{ deleted, private []string }
 
 func (c *Controls) sets() controlSets {
 	c.mu.RLock()
@@ -288,13 +292,10 @@ func (c *Controls) sets() controlSets {
 			s.deleted = append(s.deleted, id)
 		case sc.visibility == visPrivate:
 			s.private = append(s.private, id)
-		case sc.visibility == visLink:
-			s.link = append(s.link, id)
 		}
 	}
 	slices.Sort(s.deleted)
 	slices.Sort(s.private)
-	slices.Sort(s.link)
 	return s
 }
 

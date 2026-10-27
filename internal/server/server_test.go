@@ -75,7 +75,7 @@ func TestBootFailureKeepsServeUpAndRetries(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.Chmod(harness, 0o700) })
-	srv, err := New(dir)
+	srv, err := New(dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
