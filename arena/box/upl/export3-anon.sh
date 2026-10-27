@@ -79,8 +79,8 @@ echo 5 > "/proc/$SERVE/clear_refs"
 sleep 5
 snap idle | tee "$out/idle.txt"
 stop
-ia=$(awk 'NR==1{print $4}' "$out/idle.txt")
-ifl=$(awk 'NR==1{print $6}' "$out/idle.txt")
+ia=$(awk 'NR==2{print $4}' "$out/idle.txt")
+ifl=$(awk 'NR==2{print $6}' "$out/idle.txt")
 
 sample atif
 echo 5 > "/proc/$SERVE/clear_refs"
