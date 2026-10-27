@@ -26,6 +26,10 @@ The zero `Identity` grants nothing.
 
 ## Binding
 
+### Address
+
+A `wallet.Address` is the 32-byte ed25519 key, printed in base58. Only `wallet.AddressOf` and `wallet.ParseAddress` make one, and both refuse a key of small order in any of its 14 encodings (7 points from libsodium's `ge25519_has_small_order` blocklist, each with either sign bit). Go's `ed25519.Verify` accepts forged signatures under such a key: under `11111111111111111111111111111111`, 64 zero bytes verify. Every path that turns bytes into a wallet goes through `AddressOf`: `share_session`, the control log, the pasted message, the Phantom page, the keypair file and the certificate's DER envelope.
+
 ### Message
 
 The wallet signs one line of printable ASCII with no trailing newline:
@@ -71,14 +75,14 @@ This is a tag, not a URL anyone fetches. Go marks the SAN extension critical, be
 
 ### Lifetime
 
-`mnemonic wallet` defaults to 30 days (`--days`). The server refuses any binding whose expiry is more than 366 days past the moment it checks.
+`mnemonic wallet` defaults to 30 days and takes `--days` from 1 to 365. The server refuses any binding whose expiry is more than 366 days past the moment it checks. The spare day absorbs a server clock that runs behind the client's.
 
 ## Admission
 
 `Server.Identify(keys, serverKey)` runs twice per QUIC connection. The first run is in `VerifyPeerCertificate`, where a refusal is a TLS alert. The second run comes when the connection is served. Both runs read live state.
 
 1. If the device key is in `[[keys]]`, the client gets that configured Identity, and any binding it carries is ignored.
-2. Otherwise, the certificate must carry a binding that `wallet.Verify` accepts for this device key, this server key and the current time, and `Controls.Admits(wallet)` must be true, meaning some session that is not deleted is shared with that wallet now. The client then gets `auth.WalletReader(binding)`.
+2. Otherwise, the certificate must carry a binding that `wallet.Verify` accepts for this device key, this server key and the current time, and `Controls.Admits(wallet)` must be true, meaning some session that is not deleted is shared with that wallet now. The client then gets `auth.WalletReader(binding)`. `index.Sessions` applies the same two rules, expiry and `Admits`, on every request, so a connection that outlives either loses all reads.
 3. Everything else is refused. The client sees `server refused our key <key>: CRYPTO_ERROR 0x12a (remote): tls: bad certificate`.
 
 ## Shares
@@ -106,12 +110,12 @@ Each (session, wallet) pair keeps its latest decision. Decisions compare by `ts`
 
 ### What a wallet reader sees
 
-- `list_sessions`, `search_sessions`, `query` and export list exactly the sessions shared with the wallet that are not deleted.
+- `list_sessions`, `search_sessions`, `query` and export list exactly the sessions shared with the wallet that are not deleted and have a sole author. A share means the sharer's session: once a second author's events land under the id, the share shows nothing, as `link` does.
 - `open` and `get_trace` also open a `link` session by id, as for any admitted caller.
 - A share beats `private`: a private session shared with a wallet is visible to that wallet.
 - Annotations do not show, because no author is in the reader's tenant.
 - `push` fails with `key lacks scope push`, and `annotate` fails with `token lacks scope annotate`. `set_visibility`, `delete_session` and `share_session` answer `session not found`, because the reader's member set is empty.
-- After an unshare, the reader's next request on its open connection no longer sees the session. If the wallet has no shares left, its next connection is refused.
+- After an unshare, the reader's next request on its open connection no longer sees the session. If the wallet has no shares left, every request on the open connection fails with `no session is shared with wallet <wallet> any more; a session author can share one with share_session`, `open` by link included, and its next connection is refused.
 - Once the binding expires, every read on an open connection fails with `the wallet binding of <wallet> expired at <time>; bind again with mnemonic wallet bind`. New connections are refused.
 
 ## Client commands
@@ -124,7 +128,7 @@ mnemonic wallet bind --message '<line>' --signature <base58|base64>
 mnemonic wallet show
 ```
 
-Every form reads `--config` (default `~/.mnemonic/config.toml`) for the key file and `server_key`. `--keypair` signs the raw form and keeps no wallet secret. `--phantom` serves one embedded page on a loopback port under a random path. The page connects `window.phantom.solana` (or `window.solana`), shows the exact message, and calls `signMessage` on the message bytes. It never signs a transaction. The page posts the address and signature back, and the command verifies them, stores the binding and exits. The paste path refuses a line that names another device or server, or that has already expired. Every path verifies the signature before it stores anything.
+Every form reads `--config` (default `~/.mnemonic/config.toml`) for the key file and `server_key`. `--keypair` signs the raw form and keeps no wallet secret. `--phantom` serves one embedded page on a loopback port under a random path. The page connects `window.phantom.solana` (or `window.solana`), shows the exact message, and calls `signMessage` on the message bytes. It never signs a transaction. The page posts the address and signature back, and the command verifies them, stores the binding and exits. With no signature after 10 minutes, it exits with an error. The paste path refuses a line that names another device or server, or that has already expired. Every path verifies the signature before it stores anything.
 
 ## Rollback
 
@@ -132,4 +136,4 @@ A build older than this feature refuses unknown control actions and fails to boo
 
 ## Verification
 
-The end-to-end run started the real `serve` and client binaries over QUIC on loopback. It checked share, list, search and open, invisibility of other sessions, the five handshake refusals, revoke on a live connection, the refused writes, the keypair, CLI-paste and Phantom-page binding paths, and expiry on a live connection. A real Phantom click was not exercised. The page was driven by a script that signed the raw form with a throwaway key.
+The end-to-end run started the real `serve` and client binaries over QUIC on loopback. It checked share, list, search and open, invisibility of other sessions, the five handshake refusals, revoke on a live connection, the refused writes, the keypair, CLI-paste and Phantom-page binding paths, and expiry on a live connection. It also checked that `share_session` refuses the small-order keys `11111111111111111111111111111111` and `4uQeVj5tqViQh7yWWGStvkEG1Zmhx6uasJtWCJziofM`, and that the handshake refuses hand-built bindings for them with forged signatures. The build before the small-order check admitted the second one. It checked that revoking a wallet's last share fails `list_sessions` and link `open` on the open connection, and that a shared session stops listing once a second author pushes under its id. A real Phantom click was not exercised. The page was driven by a script that signed the raw form with a throwaway key.

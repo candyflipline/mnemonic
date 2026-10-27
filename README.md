@@ -131,7 +131,7 @@ server     = "quic://HOST:8741"
 server_key = "SERVER_KEY"
 ```
 
-Then bind this machine's key to your wallet in one of three ways. Each way writes `~/.mnemonic/key.wallet` beside the key and lasts 30 days unless you pass `--days` (at most 366).
+Then bind this machine's key to your wallet in one of three ways. Each way writes `~/.mnemonic/key.wallet` beside the key and lasts 30 days unless you pass `--days` (at most 365).
 
 - **Solana CLI keypair file.** Run `mnemonic wallet bind --keypair ~/.config/solana/id.json`. The command signs the binding with the keypair and stores nothing else from the file.
 - **Phantom.** Run `mnemonic wallet bind --phantom`, open the printed `http://127.0.0.1:…` link in the browser that has Phantom, connect, and approve the message. Phantom signs only that message, never a transaction.
