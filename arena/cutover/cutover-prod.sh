@@ -112,7 +112,7 @@ step_c() {
 step_d() {
 	remote bash -s -- "$PUBLIC" "$ACME_DIRECTORY" <<-'EOF'
 		set -euo pipefail
-		PUBLIC=$1 ACME=$2
+		PUBLIC=$1 ACME=${2:-}
 		f=/etc/mnemonic/server.toml
 		tmp=$(mktemp)
 		trap 'rm -f "$tmp"' EXIT
