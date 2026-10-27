@@ -28,7 +28,7 @@ func newKey(t *testing.T) ed25519.PrivateKey {
 
 func TestQnet(t *testing.T) {
 	serverKey, alice, stranger, other := newKey(t), newKey(t), newKey(t), newKey(t)
-	aliceID, ok := auth.NewKeys(map[string]auth.Grant{PublicKey(alice): {Author: "alice"}}).Identify(PublicKey(alice))
+	aliceID, ok := auth.NewKeys(map[string]auth.Grant{PublicKey(alice): {Tenant: auth.DefaultTenant, Author: "alice", Scopes: []auth.Scope{auth.Read, auth.Push}}}).Identify(PublicKey(alice))
 	if !ok {
 		t.Fatal("alice not in table")
 	}

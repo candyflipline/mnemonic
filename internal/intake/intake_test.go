@@ -69,7 +69,7 @@ func TestSilentStreamsFreeTheirSlots(t *testing.T) {
 	t.Cleanup(func() { helloLimit = 60 * time.Second })
 
 	priv, key := client(t)
-	addr, serverKey := listen(t, nil, map[string]auth.Grant{key: {Author: "chris"}})
+	addr, serverKey := listen(t, nil, map[string]auth.Grant{key: {Tenant: auth.DefaultTenant, Author: "chris", Scopes: []auth.Scope{auth.Read, auth.Push}}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -111,8 +111,8 @@ func TestPushIdentityComesFromTheKey(t *testing.T) {
 	pusherPriv, pusher := client(t)
 	readerPriv, reader := client(t)
 	addr, serverKey := listen(t, st, map[string]auth.Grant{
-		pusher: {Author: "alice"},
-		reader: {Author: "rita", Scopes: []auth.Scope{auth.Read}},
+		pusher: {Tenant: auth.DefaultTenant, Author: "alice", Scopes: []auth.Scope{auth.Read, auth.Push}},
+		reader: {Tenant: auth.DefaultTenant, Author: "rita", Scopes: []auth.Scope{auth.Read}},
 	})
 
 	line := []byte(`{"type":"user"}` + "\n")

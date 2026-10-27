@@ -23,7 +23,7 @@ func TestAdminLinksAnotherAuthorsSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	keys := auth.NewKeys(map[string]auth.Grant{"k-admin": {Author: "root", Scopes: []auth.Scope{auth.Read, auth.Push, auth.Admin}}})
+	keys := auth.NewKeys(map[string]auth.Grant{"k-admin": {Tenant: auth.DefaultTenant, Author: "root", Scopes: []auth.Scope{auth.Read, auth.Push, auth.Admin}}})
 	admin, _ := keys.Identify("k-admin")
 	var sb string
 	for _, p := range db.parts {

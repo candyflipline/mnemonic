@@ -10,10 +10,10 @@ import (
 
 func TestKeys(t *testing.T) {
 	keys := NewKeys(map[string]Grant{
-		"k-chris": {Author: "chris"},
-		"k-sam":   {Author: "sam", Scopes: []Scope{Read}},
+		"k-chris": {Tenant: DefaultTenant, Author: "chris", Scopes: []Scope{Read, Push}},
+		"k-sam":   {Tenant: DefaultTenant, Author: "sam", Scopes: []Scope{Read}},
 		"k-acme":  {Tenant: "acme", Author: "ann", Scopes: []Scope{Read, Annotate}},
-		"k-bob":   {Tenant: "acme", Author: "bob"},
+		"k-bob":   {Tenant: "acme", Author: "bob", Scopes: []Scope{Read, Push}},
 	})
 	for _, tc := range []struct {
 		key             string
@@ -42,7 +42,7 @@ func TestKeys(t *testing.T) {
 }
 
 func TestRequire(t *testing.T) {
-	reader, _ := NewKeys(map[string]Grant{"k": {Author: "a", Scopes: []Scope{Read}}}).Identify("k")
+	reader, _ := NewKeys(map[string]Grant{"k": {Tenant: DefaultTenant, Author: "a", Scopes: []Scope{Read}}}).Identify("k")
 	h := Require(Push)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) }))
 	for name, tc := range map[string]struct {
 		ctx  context.Context

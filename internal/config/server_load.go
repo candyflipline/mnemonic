@@ -15,6 +15,8 @@ import (
 	"github.com/candyflipline/mnemonic/internal/wire"
 )
 
+var defaultScopes = []auth.Scope{auth.Read, auth.Push}
+
 func LoadServer(path string) (Server, error) {
 	var cfg Server
 	md, err := toml.DecodeFile(path, &cfg)
@@ -64,7 +66,11 @@ func LoadServer(path string) (Server, error) {
 			return Server{}, fmt.Errorf("%s: keys[%d]: author %s is in tenant %s and %s; an author sits in one tenant", path, i, k.Author, prev, tenant)
 		}
 		tenantOf[k.Author] = tenant
-		if k.Scopes != nil && len(k.Scopes) == 0 {
+		cfg.Keys[i].Tenant = tenant
+		switch {
+		case k.Scopes == nil:
+			cfg.Keys[i].Scopes = defaultScopes
+		case len(k.Scopes) == 0:
 			return Server{}, fmt.Errorf("%s: keys[%d] (%s): scopes is empty; omit it for the default", path, i, k.Author)
 		}
 		for _, s := range k.Scopes {

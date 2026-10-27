@@ -25,11 +25,6 @@ var Scopes = [...]Scope{Read, Push, Annotate, Admin}
 // author no key entry names.
 const DefaultTenant = "default"
 
-var DefaultScopes = []Scope{Read, Push}
-
-// Grant is one configured key's rights: the tenant and author it acts as and
-// what it may do. An empty Tenant is DefaultTenant and nil Scopes are
-// DefaultScopes.
 type Grant struct {
 	Tenant, Author string
 	Scopes         []Scope
@@ -85,11 +80,7 @@ func (k Keys) member(key string) (Member, bool) {
 // Identify is the Identity of key: its grant, else the live member it is.
 func (k Keys) Identify(key string) (Identity, bool) {
 	if g, ok := k.grants[key]; ok {
-		scopes := g.Scopes
-		if scopes == nil {
-			scopes = DefaultScopes
-		}
-		return Identity{tenant: tenantOr(g.Tenant), author: g.Author, scopes: scopes, keys: &k}, true
+		return Identity{tenant: g.Tenant, author: g.Author, scopes: g.Scopes, keys: &k}, true
 	}
 	if m, ok := k.member(key); ok {
 		return Identity{tenant: m.Tenant, author: m.Author, scopes: MemberScopes, keys: &k, member: key}, true
@@ -105,7 +96,7 @@ func (k Keys) tenantOf() map[string]string {
 		k.roster.EachMember(func(m Member) { out[m.Author] = m.Tenant })
 	}
 	for _, g := range k.grants {
-		out[g.Author] = tenantOr(g.Tenant)
+		out[g.Author] = g.Tenant
 	}
 	return out
 }
@@ -161,13 +152,6 @@ func (id Identity) TenantOf(author string) (string, bool) {
 // Local is the in-process identity of local mode: DefaultTenant, every scope.
 func Local(author string) Identity {
 	return Identity{tenant: DefaultTenant, author: author, scopes: slices.Clone(Scopes[:]), local: true}
-}
-
-func tenantOr(t string) string {
-	if t == "" {
-		return DefaultTenant
-	}
-	return t
 }
 
 func members(tenantOf map[string]string, tenant string) AuthorSet {
