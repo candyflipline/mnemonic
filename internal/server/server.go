@@ -95,11 +95,11 @@ func (s *Server) Identify(keys auth.Keys, serverKey ed25519.PublicKey) func(devi
 		if binding == nil {
 			return auth.Identity{}, false
 		}
-		w, err := wallet.Verify(binding, device, serverKey, time.Now())
-		if err != nil || !s.ctl.Admits(w) {
+		b, err := wallet.Verify(binding, device, serverKey, time.Now())
+		if err != nil || !s.ctl.Admits(b.Claim().Wallet) {
 			return auth.Identity{}, false
 		}
-		return auth.WalletReader(w), true
+		return auth.WalletReader(b.Claim().Wallet), true
 	}
 }
 
