@@ -17,13 +17,11 @@ import (
 )
 
 const (
-	quietFor      = 1 * time.Second
-	flushWithin   = 5 * time.Second
-	errorRetryMin = 5 * time.Second
-	errorRetryMax = time.Minute
-	// reconcileEvery is local mode's (WatchSink) full rescan; the push
-	// stream needs none, because Welcome supplies the server's state.
-	reconcileEvery = 6 * time.Hour
+	quietFor           = 1 * time.Second
+	flushWithin        = 5 * time.Second
+	errorRetryMin      = 5 * time.Second
+	errorRetryMax      = time.Minute
+	sinkReconcileEvery = 6 * time.Hour
 )
 
 type stamp struct{ size, mtimeNs int64 }
@@ -122,7 +120,7 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 	var periodic <-chan time.Time
 	var periodicT *time.Timer
 	if w.sink != nil {
-		periodicT = time.NewTimer(reconcileEvery)
+		periodicT = time.NewTimer(sinkReconcileEvery)
 		periodic = periodicT.C
 		defer periodicT.Stop()
 	}
@@ -200,7 +198,7 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 		case w.stale:
 			st = w.reconcile(ctx)
 			if periodicT != nil {
-				periodicT.Reset(reconcileEvery)
+				periodicT.Reset(sinkReconcileEvery)
 			}
 		default:
 			st = w.flush(ctx, dirty)
