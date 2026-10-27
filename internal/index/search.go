@@ -207,10 +207,8 @@ func mergeHits(q searchQuery, from []scoredHits) *searchResult {
 	return res
 }
 
-// score sums BM25 over this part's postings for the docs q's filters and
-// scope pass, and reports whether q's session or turn scope exists here.
-func (st *Part) score(q searchQuery, terms []string, idf []float64, norm float64) (map[int]float64, bool) {
-	exists := true
+func (st *Part) score(q searchQuery, terms []string, idf []float64, norm float64) (acc map[int]float64, scopeHere bool) {
+	scopeHere = true
 	lo, hi := 0, st.meta.Docs
 	if q.sessionOK {
 		var ok bool
@@ -226,14 +224,14 @@ func (st *Part) score(q searchQuery, terms []string, idf []float64, norm float64
 					break
 				}
 			}
-			exists = found
+			scopeHere = found
 		} else {
-			exists = hi > lo
+			scopeHere = hi > lo
 		}
 	}
 	scoped := !q.listed.all()
 	if scoped && q.sessionOK && !q.listed.Listed(q.sessionID) {
-		lo, hi, exists = 0, 0, false
+		lo, hi, scopeHere = 0, 0, false
 	}
 	mask := uint16(eventTypeMask(q.eventTypes))
 	pass := func(d int) bool {
@@ -258,7 +256,7 @@ func (st *Part) score(q searchQuery, terms []string, idf []float64, norm float64
 		}
 		return true
 	}
-	acc := map[int]float64{}
+	acc = map[int]float64{}
 	for i, t := range terms {
 		p := st.postingsOf(t)
 		if p == nil {
@@ -280,7 +278,7 @@ func (st *Part) score(q searchQuery, terms []string, idf []float64, norm float64
 			acc[d] += idf[i] * ((tff * 1.2) / (tff + 1.2*(0.25+0.75*(dl/norm))))
 		}
 	}
-	return acc, exists
+	return acc, scopeHere
 }
 
 func (st *Part) hitRow(d int, s float64) (*mcpRow, bool, error) {

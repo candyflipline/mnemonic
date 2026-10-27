@@ -18,8 +18,6 @@ type qlSource struct {
 	f        SessionFilter
 	from, to time.Time
 
-	// spansOf and annotationsOf are the part sections; fields so a scratch
-	// test can inject readers while lane U5S is not merged.
 	spansOf       func(sessionID string) []schema.Span
 	annotationsOf func(sessionID string) []schema.Annotation
 }
@@ -188,8 +186,8 @@ var eventColumn = map[string]func(*Part, *Row, int) (ql.Value, error){
 	},
 	"turn_seq":            func(st *Part, _ *Row, d int) (ql.Value, error) { return num(int64(st.turnSeq(d))) },
 	"event_ordinal":       func(st *Part, _ *Row, d int) (ql.Value, error) { return num(int64(st.ordinal(d))) },
-	"payload_json":        heavyColumn(0),
-	"token_usage_json":    heavyColumn(1),
+	"payload_json":        payloadJSONColumn,
+	"token_usage_json":    tokenUsageColumn,
 	"model":               func(_ *Part, r *Row, _ int) (ql.Value, error) { return str(r.Model) },
 	"request_id":          func(_ *Part, r *Row, _ int) (ql.Value, error) { return str(r.RequestID) },
 	"trace_id":            func(_ *Part, r *Row, _ int) (ql.Value, error) { return str(r.TraceID) },
@@ -221,16 +219,20 @@ func memberColumn(get func(member) string) func(*Part, *Row, int) (ql.Value, err
 	return func(st *Part, _ *Row, d int) (ql.Value, error) { return str(get(st.meta.Members[st.member(d)])) }
 }
 
-// heavyColumn is the heavy record's field i: 0 payload_json, 1
-// token_usage_json.
-func heavyColumn(i int) func(*Part, *Row, int) (ql.Value, error) {
-	return func(st *Part, r *Row, _ int) (ql.Value, error) {
-		p, t, err := st.heavyOf(r)
-		if err != nil {
-			return ql.Null(), err
-		}
-		return str([]string{p, t}[i])
+func payloadJSONColumn(st *Part, r *Row, _ int) (ql.Value, error) {
+	p, _, err := st.heavyOf(r)
+	if err != nil {
+		return ql.Null(), err
 	}
+	return str(p)
+}
+
+func tokenUsageColumn(st *Part, r *Row, _ int) (ql.Value, error) {
+	_, t, err := st.heavyOf(r)
+	if err != nil {
+		return ql.Null(), err
+	}
+	return str(t)
 }
 
 func lookupPath(m map[string]json.RawMessage, keys []string) (json.RawMessage, bool) {

@@ -168,12 +168,6 @@ func spanKindRank(kind string) int {
 	return 4
 }
 
-// buildTree nests spans under their parents; a span whose parent is not in
-// the session is a root. A span the roots do not reach sits on a parent cycle
-// (or hangs off one): following parent links from the first such span in order
-// until one repeats finds a cycle member, which becomes an extra root with its
-// parent link cut, and so on until every span is in the tree once. Roots
-// carry the sums of what is beneath them, so the totals are the roots' sums.
 func buildTree(spans []*traceSpan) ([]*traceSpan, traceTotals) {
 	byID := make(map[string]*traceSpan, len(spans))
 	for _, s := range spans {
@@ -207,18 +201,29 @@ func buildTree(spans []*traceSpan) ([]*traceSpan, traceTotals) {
 		if reached[s] {
 			continue
 		}
-		seen := map[*traceSpan]bool{}
-		r := s
-		for !seen[r] {
-			seen[r] = true
-			r = byID[r.parent]
-		}
+		r := cycleMember(s, byID)
 		p := byID[r.parent]
 		kids[p] = slices.DeleteFunc(kids[p], func(c *traceSpan) bool { return c == r })
 		roots = append(roots, r)
 		walk(r)
 	}
-	t := traceTotals{Spans: len(spans)}
+	return roots, rootTotals(len(spans), roots)
+}
+
+func cycleMember(from *traceSpan, byID map[string]*traceSpan) *traceSpan {
+	seen := map[*traceSpan]bool{}
+	r := from
+	for !seen[r] {
+		seen[r] = true
+		r = byID[r.parent]
+	}
+	return r
+}
+
+// rootTotals sums only the roots: each root's tokens and cost already include
+// everything beneath it.
+func rootTotals(spans int, roots []*traceSpan) traceTotals {
+	t := traceTotals{Spans: spans}
 	for _, r := range roots {
 		t.Tokens.Input += r.Tokens.Input
 		t.Tokens.Output += r.Tokens.Output
@@ -232,7 +237,7 @@ func buildTree(spans []*traceSpan) ([]*traceSpan, traceTotals) {
 			t.Cost = &sum
 		}
 	}
-	return roots, t
+	return t
 }
 
 func loadAnnotations(db *DB, session string, f SessionFilter) []traceAnnotation {
