@@ -322,26 +322,23 @@ func (c ckpt) sameInput(want ckpt) bool {
 		c.SourceFile == want.SourceFile && c.Layout == want.Layout
 }
 
-// ingestSource brings one source's logs up to its input, parsing only the
-// bytes past its checkpoint when the input still extends it, and reports what
-// it did, how many log bytes it appended and the checkpoint the source has
-// after. red (local mode) sits between the input and the parser: each line the
-// parser reads has been through red.Line, exactly the bytes push uploads for
-// the same line.
-func ingestSource(root, store string, s source, red *redact.Redactor) (Outcome, int64, *ckpt, error) {
+func (s *source) ingest(root, store string, red *redact.Redactor) (o Outcome, logBytes int64, err error) {
+	if s.kind == KindArchive {
+		return ingestArchive(store, *s)
+	}
 	cur := s.ck
 	key := sourceKey(s.key)
 	parser, ok := normalize.For(s.src.Harness)
 	if !ok {
-		return Unchanged, 0, cur, nil
+		return Unchanged, 0, nil
 	}
-	raw, end, err := s.kind.open(root, s)
+	raw, end, err := s.kind.open(root, *s)
 	if err != nil {
-		return 0, 0, cur, err
+		return 0, 0, err
 	}
 	defer raw.Close()
 	meta := normalize.SourceMeta{SourceName: s.src.SourceName, Harness: s.src.Harness, SourceFile: s.src.Path}
-	want := wantCkpt(s, parser)
+	want := wantCkpt(*s, parser)
 	var prev ckpt
 	has := cur != nil
 	if has {
@@ -349,7 +346,7 @@ func ingestSource(root, store string, s source, red *redact.Redactor) (Outcome, 
 	}
 	resumed := has && extends(raw, end, want, prev)
 	if resumed && prev.Offset == end {
-		return Unchanged, 0, cur, nil
+		return Unchanged, 0, nil
 	}
 	next := want
 	var from ckpt
@@ -362,13 +359,13 @@ func ingestSource(root, store string, s source, red *redact.Redactor) (Outcome, 
 	}
 	logs, err := openFrameLogs(store, key, next.Gen, from.LightLen, from.HeavyLen)
 	if err != nil {
-		return 0, 0, cur, err
+		return 0, 0, err
 	}
 	defer logs.close()
 
 	zr, err := s.kind.reader(raw, from.Offset, end)
 	if err != nil {
-		return 0, 0, cur, err
+		return 0, 0, err
 	}
 	if red != nil {
 		zr = newRedactReader(zr, red)
@@ -391,14 +388,14 @@ func ingestSource(root, store string, s source, red *redact.Redactor) (Outcome, 
 		return nil
 	})
 	if err != nil {
-		return 0, 0, cur, err
+		return 0, 0, err
 	}
 	if next.LightLen, next.HeavyLen, err = logs.sync(); err != nil {
-		return 0, 0, cur, err
+		return 0, 0, err
 	}
 	sum, err := windowSHA(raw, end)
 	if err != nil {
-		return 0, 0, cur, err
+		return 0, 0, err
 	}
 	next.Offset, next.WindowSHA, next.State, next.Rows = end, sum, state, rows
 	for s := range sessions {
@@ -406,16 +403,17 @@ func ingestSource(root, store string, s source, red *redact.Redactor) (Outcome, 
 	}
 	sort.Strings(next.Sessions)
 	if err := writeCkpt(store, next); err != nil {
-		return 0, 0, cur, err
+		return 0, 0, err
 	}
-	written := next.LightLen - from.LightLen + next.HeavyLen - from.HeavyLen
+	s.ck = &next
+	logBytes = next.LightLen - from.LightLen + next.HeavyLen - from.HeavyLen
 	switch {
 	case resumed:
-		return Resumed, written, &next, nil
+		return Resumed, logBytes, nil
 	case has:
-		return Reparsed, written, &next, nil
+		return Reparsed, logBytes, nil
 	}
-	return Fresh, written, &next, nil
+	return Fresh, logBytes, nil
 }
 
 func appendStr(b []byte, s string) []byte {
@@ -681,7 +679,7 @@ func (ss *sourceSet) cycle(w writerLock, root string, work []int, quiet time.Dur
 	return stats, outcomes, opened, perr
 }
 
-// parseSources runs ingestSource over the sources work indexes on GOMAXPROCS workers and
+// parseSources runs ingest over the sources work indexes on GOMAXPROCS workers and
 // returns each outcome by source key, how many log bytes the parses appended,
 // how many version-stale sources the sweep budget left for the next cycle, and
 // the failSweep to carry into it: the version-stale sources whose re-parse
@@ -770,17 +768,6 @@ func versionStale(s source) bool {
 		return false
 	}
 	return s.ck.Parser != parserVersion(s) && s.ck.Offset == s.src.ZstSize
-}
-
-func (s *source) ingest(root, store string, red *redact.Redactor) (Outcome, int64, error) {
-	if s.kind == KindArchive {
-		return ingestArchive(store, *s)
-	}
-	o, written, c, err := ingestSource(root, store, *s, red)
-	if err == nil {
-		s.ck = c
-	}
-	return o, written, err
 }
 
 // publish plans the parts of the sources' checkpoints, builds the missing ones
