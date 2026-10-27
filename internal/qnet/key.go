@@ -5,13 +5,12 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/asn1"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/fs"
 	"math/big"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -75,20 +74,45 @@ const bindingSuffix = ".wallet"
 // LoadCredential is LoadOrCreateKey(keyFile) and the binding stored beside it
 // by SaveBinding, nil when there is none.
 func LoadCredential(keyFile string) (Credential, error) {
-	panic("not implemented")
+	priv, err := LoadOrCreateKey(keyFile)
+	if err != nil {
+		return Credential{}, err
+	}
+	b, err := os.ReadFile(keyFile + bindingSuffix)
+	if errors.Is(err, fs.ErrNotExist) {
+		return Credential{Key: priv}, nil
+	}
+	if err != nil {
+		return Credential{}, err
+	}
+	return Credential{Key: priv, Binding: b}, nil
 }
 
 // SaveBinding stores binding beside keyFile (mode 0600, written to a temp
 // file and renamed), replacing any earlier one.
 func SaveBinding(keyFile string, binding []byte) error {
-	panic("not implemented")
+	f, err := os.CreateTemp(filepath.Dir(keyFile), filepath.Base(keyFile)+bindingSuffix+".*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	_, err = f.Write(binding)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(f.Name(), 0o600)
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), keyFile+bindingSuffix)
 }
 
-// bindingOID is the non-critical extension a client certificate carries its
-// binding in. It is a placeholder under the IANA private enterprise arc until
-// mnemonic has its own enterprise number; only mnemonic reads it, from
-// certificates mnemonic made.
-var bindingOID = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 99999, 1, 1}
+// bindingURI starts the one subjectAltName URI a client certificate carries
+// its binding in, followed by the binding bytes in unpadded base64url. It is
+// a tag, never a URL anyone fetches.
+const bindingURI = "mnemonic:binding-v1:"
 
 func certificate(cred Credential) (tls.Certificate, error) {
 	tmpl := &x509.Certificate{
@@ -97,7 +121,11 @@ func certificate(cred Credential) (tls.Certificate, error) {
 		NotAfter:     time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC),
 	}
 	if cred.Binding != nil {
-		tmpl.ExtraExtensions = []pkix.Extension{{Id: bindingOID, Value: cred.Binding}}
+		u, err := url.Parse(bindingURI + base64.RawURLEncoding.EncodeToString(cred.Binding))
+		if err != nil {
+			return tls.Certificate{}, err
+		}
+		tmpl.URIs = []*url.URL{u}
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, cred.Key.Public(), cred.Key)
 	if err != nil {
@@ -106,8 +134,9 @@ func certificate(cred Credential) (tls.Certificate, error) {
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: cred.Key}, nil
 }
 
-// peerCert is the key a peer's one self-signed certificate proves and the value
-// of its binding extension, nil when it has none.
+// peerCert is the key a peer's one self-signed certificate proves and the
+// binding bytes its one binding URI carries, nil when it has none. Two
+// binding URIs, or one not in canonical unpadded base64url, fail.
 func peerCert(raw [][]byte) (ed25519.PublicKey, []byte, error) {
 	if len(raw) != 1 {
 		return nil, nil, fmt.Errorf("peer sent %d certificates, want 1", len(raw))
@@ -120,10 +149,21 @@ func peerCert(raw [][]byte) (ed25519.PublicKey, []byte, error) {
 	if !ok {
 		return nil, nil, errors.New("peer certificate is not an ed25519 key")
 	}
-	for _, e := range c.Extensions {
-		if e.Id.Equal(bindingOID) {
-			return pub, e.Value, nil
+	var binding []byte
+	n := 0
+	for _, u := range c.URIs {
+		text, ok := strings.CutPrefix(u.String(), bindingURI)
+		if !ok {
+			continue
+		}
+		n++
+		binding, err = base64.RawURLEncoding.Strict().DecodeString(text)
+		if err != nil || base64.RawURLEncoding.EncodeToString(binding) != text {
+			return nil, nil, errors.New("peer certificate binding is not canonical base64url")
 		}
 	}
-	return pub, nil, nil
+	if n > 1 {
+		return nil, nil, fmt.Errorf("peer certificate carries %d bindings, want at most 1", n)
+	}
+	return pub, binding, nil
 }
