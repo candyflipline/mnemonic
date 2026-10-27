@@ -9,8 +9,16 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/bmatcuk/doublestar/v4"
 
+	"github.com/candyflipline/mnemonic/internal/auth"
 	"github.com/candyflipline/mnemonic/internal/wire"
 )
+
+const quicScheme = "quic://"
+
+const DefaultKeyFile = "~/.mnemonic/key"
+
+// Addr is the host:port of Server; LoadClient has checked it.
+func (c Client) Addr() string { return strings.TrimPrefix(c.Server, quicScheme) }
 
 func LoadClient(path string) (Client, error) {
 	path, err := ExpandHome(path)
@@ -18,30 +26,40 @@ func LoadClient(path string) (Client, error) {
 		return Client{}, err
 	}
 	var cfg Client
-	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+	meta, err := toml.DecodeFile(path, &cfg)
+	if err != nil {
 		return Client{}, fmt.Errorf("config: %w", err)
+	}
+	for _, key := range meta.Undecoded() {
+		switch key.String() {
+		case "token", "token_file":
+			return Client{}, fmt.Errorf("config: %s: %s is gone: keys replaced tokens: run `mnemonic key` and set server_key", path, key)
+		case "push_address":
+			return Client{}, fmt.Errorf("config: %s: push_address is gone: set server = \"quic://host:port\"", path)
+		}
+		return Client{}, fmt.Errorf("config: %s: unknown key %q", path, key.String())
 	}
 	if cfg.Server == "" {
 		return Client{}, fmt.Errorf("config: %s: server is required", path)
 	}
-	if cfg.PushAddress != "" {
-		if _, port, err := net.SplitHostPort(cfg.PushAddress); err != nil || port == "" {
-			return Client{}, fmt.Errorf("config: %s: push_address %q must be host:port", path, cfg.PushAddress)
-		}
+	hostport, ok := strings.CutPrefix(cfg.Server, quicScheme)
+	if !ok {
+		return Client{}, fmt.Errorf("config: %s: server %q must be quic://host:port", path, cfg.Server)
 	}
-	if cfg.Token == "" && cfg.TokenFile != "" {
-		tokenFile, err := ExpandHome(cfg.TokenFile)
-		if err != nil {
-			return Client{}, err
-		}
-		raw, err := os.ReadFile(tokenFile)
-		if err != nil {
-			return Client{}, fmt.Errorf("config: token_file: %w", err)
-		}
-		cfg.Token = strings.TrimSpace(string(raw))
+	if host, port, err := net.SplitHostPort(hostport); err != nil || host == "" || port == "" {
+		return Client{}, fmt.Errorf("config: %s: server %q must be quic://host:port", path, cfg.Server)
 	}
-	if cfg.Token == "" {
-		return Client{}, fmt.Errorf("config: %s: token or token_file is required", path)
+	if cfg.ServerKey == "" {
+		return Client{}, fmt.Errorf("config: %s: server_key is required: run `mnemonic key --file <server key file>` on the server", path)
+	}
+	if _, err := auth.ParseKey(cfg.ServerKey); err != nil {
+		return Client{}, fmt.Errorf("config: %s: server_key: %w", path, err)
+	}
+	if cfg.KeyFile == "" {
+		cfg.KeyFile = DefaultKeyFile
+	}
+	if cfg.KeyFile, err = ExpandHome(cfg.KeyFile); err != nil {
+		return Client{}, err
 	}
 	if cfg.Machine == "" {
 		host, err := os.Hostname()
