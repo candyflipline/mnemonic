@@ -60,3 +60,19 @@ func TestRequire(t *testing.T) {
 		}
 	}
 }
+
+func TestParseKey(t *testing.T) {
+	for _, tc := range []struct {
+		in string
+		ok bool
+	}{
+		{"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo", true},
+		{"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURp", false},
+		{"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo=", false},
+		{"short", false},
+	} {
+		if _, err := ParseKey(tc.in); (err == nil) != tc.ok {
+			t.Errorf("ParseKey(%q) error %v, want ok=%v", tc.in, err, tc.ok)
+		}
+	}
+}
