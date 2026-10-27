@@ -68,7 +68,7 @@ blockquote{margin:.5rem 0;padding-left:.8rem;border-left:3px solid var(--line);c
 .user{margin-left:auto;max-width:85%;width:fit-content;background:var(--bub);padding:.6rem .9rem;border-radius:1rem 1rem .25rem 1rem;white-space:pre-wrap;overflow-wrap:anywhere}
 .user.bg{background:none;border:1px dashed var(--line);color:var(--mut);font-size:.9rem;white-space:normal}
 .label{display:block;font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;color:var(--mut)}
-.ask{margin:.6rem 0 .6rem auto;max-width:85%;width:fit-content;border:1px solid var(--line);border-radius:.75rem;padding:.5rem .8rem;font-size:.95rem}
+.ask{margin:.6rem 0 .6rem 15%;border:1px solid var(--line);border-radius:.75rem;padding:.5rem .8rem;font-size:.95rem}
 .ask b{display:block}
 .work{margin:.6rem 0;font-size:.92rem}
 .work>.steps,.sub>.steps{border-left:2px solid var(--line);padding-left:.8rem;margin:.3rem 0 .3rem .3rem}
@@ -125,9 +125,9 @@ blockquote{margin:.5rem 0;padding-left:.8rem;border-left:3px solid var(--line);c
 {{- define "tool" -}}
 <details class="tool"><summary><b>{{if .Sub}}Subagent{{else}}{{.Name}}{{end}}</b> {{.Summary}}{{with .Sub}} · {{stepsSum .Steps}}{{end}}</summary><div class="body">
 {{with .Sub}}{{if .Prompt}}<details><summary>Prompt</summary><pre>{{.Prompt}}</pre></details>
+{{end}}{{if .Report}}<span class="label">Report</span><div class="answer">{{md .Report}}</div>
 {{end}}{{if .Steps}}<details class="sub"><summary>Steps · {{stepsSum .Steps}}</summary><div class="steps">
 {{template "steps" .Steps}}</div></details>
-{{end}}{{if .Report}}<span class="label">Report</span><div class="answer">{{md .Report}}</div>
 {{end}}{{else}}<span class="label">Arguments</span><pre>{{.Args}}{{if .ArgsCut}} [cut]{{end}}</pre>
 <span class="label">Output</span>{{if .Output}}<pre>{{.Output}}</pre>{{else}}<p class="muted">(empty)</p>{{end}}
 {{if .OutCut}}<p class="muted">Output cut at 4 KB of {{.OutSize}} bytes. The full output is at <a href="{{.URL}}">{{.URL}}</a></p>
