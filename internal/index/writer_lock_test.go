@@ -1,6 +1,7 @@
 package index
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -15,17 +16,30 @@ func TestIngestPublishesWhatAnEarlierWriterLeft(t *testing.T) {
 	if _, err := Ingest(root, store, time.Minute, true); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { beforeWriterLock = nil })
-	beforeWriterLock = func() {
-		beforeWriterLock = nil
+	var otherWriter func()
+	otherWriter = func() {
 		writeRawSource(t, root, "a", "m", "claude-code", "s2", "/p/s2.jsonl", line("22222222-2222-4222-8222-222222222222", "second"), 2)
 		if _, err := Ingest(root, store, time.Minute, true); err != nil {
 			t.Fatal(err)
 		}
+		otherWriter = func() {}
 	}
-	if _, err := Ingest(root, store, time.Minute, true); err != nil {
+	list := func() (*sourceSet, error) {
+		sources, err := listSources(root)
+		other, lerr := takeLock(store)
+		switch {
+		case lerr == nil:
+			other.f.Close()
+			otherWriter()
+		case !errors.Is(lerr, ErrLocked):
+			t.Fatal(lerr)
+		}
+		return sources, err
+	}
+	if _, err := ingest(root, store, list, time.Minute, true, nil); err != nil {
 		t.Fatal(err)
 	}
+	otherWriter()
 	if _, ok := readCkpt(store, "a__m__claude-code__s2"); !ok {
 		t.Fatal("s2's checkpoint, published by the ingest that held the lock before this one, is gone: this ingest published a source list read before it took the writer lock")
 	}

@@ -565,14 +565,9 @@ type IngestStats [4]int
 
 const sweepBudget = 5 * time.Second
 
-var beforeWriterLock func()
-
 type writerLock struct{ store string }
 
 func withWriterLock(store string, fn func(writerLock) error) error {
-	if beforeWriterLock != nil {
-		beforeWriterLock()
-	}
 	release, err := IngestLock(store)
 	if err != nil {
 		return err
