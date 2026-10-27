@@ -25,22 +25,12 @@ type Ctx struct {
 	EventTS           string
 }
 
-// EventRow is one event under construction: the schema columns plus the
-// transient folded identity used to compute the canonical uid. Payload holds
-// the same bytes as Event.PayloadJSON, typed so the fast paths can trust them;
-// every payload mutation goes through SetPayload to keep the two in step.
 type EventRow struct {
-	Event   schema.Event
-	Folded  *FoldedIdentity
-	payload CanonicalJSON
+	Event  schema.Event
+	Folded *FoldedIdentity
 }
 
-func (r *EventRow) Payload() CanonicalJSON { return r.payload }
-
-func (r *EventRow) SetPayload(c CanonicalJSON) {
-	r.payload = c
-	r.Event.PayloadJSON = c.s
-}
+func (r *EventRow) Payload() CanonicalJSON { return CanonicalJSON{s: r.Event.PayloadJSON} }
 
 type Partials struct {
 	Events []*EventRow
@@ -131,7 +121,6 @@ func (e *Emitter) Event(eventUID, eventKind, payloadType, actorKind, textContent
 	text := TruncateChars(textContent, textLimit)
 	attention := EventFileAttentionFields(ctx.Cwd)
 	row := &EventRow{
-		payload: payload,
 		Event: schema.Event{
 			EventUID:              eventUID,
 			SessionID:             ctx.SessionID,
