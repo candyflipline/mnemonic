@@ -31,6 +31,7 @@ func TestLoadServer(t *testing.T) {
 		name, toml, err string
 	}{
 		{"valid", validServerToml, ""},
+		{"key entry with no tenant and no scopes", strings.Replace(validServerToml, "tenant = \"acme\"\nscopes = [\"read\"]\n", "", 1), ""},
 		{"missing quic listen", strings.Replace(validServerToml, `listen = "0.0.0.0:8741"`, "", 1), "CFG: [quic] listen must be set"},
 		{"bad quic port", strings.Replace(validServerToml, "0.0.0.0:8741", "0.0.0.0:0", 1), "CFG: [quic] listen must be a host:port with port 1..65535"},
 		{"no keys", "data_dir = \"/tmp\"\n[quic]\nlisten = \":8741\"\n", "CFG: at least one [[keys]] entry is required"},
@@ -45,6 +46,10 @@ func TestLoadServer(t *testing.T) {
 		{"old tokens", validServerToml + "\n[[tokens]]\nauthor = \"sam\"\nsha256 = \"00\"\n", "CFG: [[tokens]] is gone: admit a client key with [[keys]] (key, author, tenant, scopes); mnemonic key prints one"},
 		{"unknown key", "colour = 1\n" + validServerToml, "CFG: unknown key colour"},
 	}
+	granted := map[string]struct {
+		tenant string
+		push   bool
+	}{"valid": {"acme", false}, "key entry with no tenant and no scopes": {"default", true}}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "server.toml")
@@ -65,7 +70,8 @@ func TestLoadServer(t *testing.T) {
 				t.Errorf("key_file = %q", cfg.QUIC.KeyFile)
 			}
 			id, ok := cfg.Identities().Identify(keyA)
-			if !ok || id.Author() != "chris" || id.Tenant() != "acme" || id.Can(auth.Push) || !id.Can(auth.Read) {
+			want := granted[tc.name]
+			if !ok || id.Author() != "chris" || id.Tenant() != want.tenant || id.Can(auth.Push) != want.push || !id.Can(auth.Read) {
 				t.Errorf("Identify = %+v, %v", id, ok)
 			}
 		})
