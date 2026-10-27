@@ -99,7 +99,7 @@ func (s *Server) Identify(keys auth.Keys, serverKey ed25519.PublicKey) func(devi
 		if err != nil || !s.ctl.Admits(b.Claim().Wallet) {
 			return auth.Identity{}, false
 		}
-		return auth.WalletReader(b.Claim().Wallet), true
+		return auth.WalletReader(b), true
 	}
 }
 

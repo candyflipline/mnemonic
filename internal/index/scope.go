@@ -3,6 +3,8 @@ package index
 import (
 	"context"
 	"errors"
+	"fmt"
+	"time"
 
 	"github.com/candyflipline/mnemonic/internal/auth"
 )
@@ -14,7 +16,7 @@ import (
 // sole author and the wallets it is shared with, and link opens a session
 // with a sole author by id to any caller. A wallet reader has no members: it
 // lists exactly the sessions shared with its wallet, read from the controls
-// when the filter is made. The zero SessionFilter, which a ctx without an
+// when the filter is made, and nothing once its binding has expired. The zero SessionFilter, which a ctx without an
 // auth.Identity gets, passes everything.
 type SessionFilter struct {
 	db     *DB
@@ -36,12 +38,16 @@ func Sessions(ctx context.Context, db *DB) (SessionFilter, error) {
 	if c == nil {
 		return SessionFilter{}, errors.New("index: an identity without session controls on its ctx")
 	}
+	w, expires, isWallet := id.Wallet()
+	if isWallet && !time.Now().Before(expires) {
+		return SessionFilter{db: db, scoped: true}, fmt.Errorf("the wallet binding of %s expired at %s; bind again with mnemonic wallet bind", w, expires.Format(time.RFC3339))
+	}
 	sets := c.sets()
 	f := SessionFilter{db: db, scoped: true, author: id.Author(), tenant: id.Members(), hidden: map[string]bool{}, link: map[string]bool{}}
 	for _, s := range sets.deleted {
 		f.hidden[s] = true
 	}
-	if w, ok := id.Wallet(); ok {
+	if isWallet {
 		f.shared = c.sharedWith(w)
 	}
 	for _, s := range sets.private {

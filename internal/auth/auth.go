@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 	"sort"
+	"time"
 
 	"github.com/candyflipline/mnemonic/internal/wallet"
 )
@@ -49,31 +50,77 @@ type AuthorSet struct {
 
 func (s AuthorSet) Has(author string) bool { return slices.Contains(s.Names, author) != s.Except }
 
-// Identity is who an authenticated request is; Keys, Local and WalletReader
-// make it, and no one else can, so a wallet reader's empty member set and
-// read-only scope hold everywhere an Identity travels.
-type Identity struct {
-	tenant, author string
-	scopes         []Scope
-	members        AuthorSet
-	wallet         wallet.Address
-	isWallet       bool
+// Identity is who an authenticated request is: one sealed principal, either
+// a configured key's or a wallet reader's. Keys, Local and WalletReader make
+// it and no one else can, so a wallet reader never carries a tenant, a member
+// set or a scope beyond Read. The zero Identity grants nothing.
+type Identity struct{ p principal }
+
+type principal interface {
+	tenant() string
+	author() string
+	can(Scope) bool
+	members() AuthorSet
 }
 
-func (id Identity) Tenant() string     { return id.tenant }
-func (id Identity) Author() string     { return id.author }
-func (id Identity) Can(s Scope) bool   { return slices.Contains(id.scopes, s) }
-func (id Identity) Members() AuthorSet { return id.members }
+type configured struct {
+	tenantName, authorName string
+	scopes                 []Scope
+	set                    AuthorSet
+}
 
-// Wallet is the wallet a wallet reader reads as, false for a key identity.
-func (id Identity) Wallet() (wallet.Address, bool) { return id.wallet, id.isWallet }
+func (c configured) tenant() string     { return c.tenantName }
+func (c configured) author() string     { return c.authorName }
+func (c configured) can(s Scope) bool   { return slices.Contains(c.scopes, s) }
+func (c configured) members() AuthorSet { return c.set }
 
-// WalletReader is the Identity of a device a wallet bound: scope Read only,
-// no tenant, and an empty member set, so it lists no author's sessions; what
-// it reads is the sessions shared with the wallet, which the session controls
-// answer per request.
-func WalletReader(w wallet.Address) Identity {
-	return Identity{author: w.Author(), scopes: []Scope{Read}, wallet: w, isWallet: true}
+// walletReader is a device a wallet bound: no tenant, an empty inclusive
+// member set and Read alone. What it reads is the sessions shared with its
+// wallet, which the session controls answer per request, until expires.
+type walletReader struct {
+	wallet  wallet.Address
+	expires time.Time
+}
+
+func (walletReader) tenant() string     { return "" }
+func (w walletReader) author() string   { return w.wallet.Author() }
+func (walletReader) can(s Scope) bool   { return s == Read }
+func (walletReader) members() AuthorSet { return AuthorSet{} }
+
+func (id Identity) Tenant() string {
+	if id.p == nil {
+		return ""
+	}
+	return id.p.tenant()
+}
+
+func (id Identity) Author() string {
+	if id.p == nil {
+		return ""
+	}
+	return id.p.author()
+}
+
+func (id Identity) Can(s Scope) bool { return id.p != nil && id.p.can(s) }
+
+func (id Identity) Members() AuthorSet {
+	if id.p == nil {
+		return AuthorSet{}
+	}
+	return id.p.members()
+}
+
+// Wallet is the wallet a wallet reader reads as and the moment its binding
+// expires, false for any other Identity.
+func (id Identity) Wallet() (wallet.Address, time.Time, bool) {
+	w, ok := id.p.(walletReader)
+	return w.wallet, w.expires, ok
+}
+
+// WalletReader is the Identity of a device b binds.
+func WalletReader(b wallet.Binding) Identity {
+	c := b.Claim()
+	return Identity{p: walletReader{wallet: c.Wallet, expires: c.Expires}}
 }
 
 // Keys is the server's key table, keyed by the key text EncodeKey writes.
@@ -93,7 +140,7 @@ func NewKeys(byKey map[string]Grant) Keys {
 			scopes = DefaultScopes
 		}
 		tenant := tenantOr(g.Tenant)
-		ids[k] = Identity{tenant: tenant, author: g.Author, scopes: scopes, members: members(tenantOf, tenant)}
+		ids[k] = Identity{p: configured{tenantName: tenant, authorName: g.Author, scopes: scopes, set: members(tenantOf, tenant)}}
 	}
 	return Keys{byKey: ids}
 }
@@ -106,7 +153,7 @@ func (k Keys) Identify(key string) (Identity, bool) {
 
 // Local is the in-process identity of local mode: DefaultTenant, every scope.
 func Local(author string) Identity {
-	return Identity{tenant: DefaultTenant, author: author, scopes: slices.Clone(Scopes[:]), members: AuthorSet{Except: true}}
+	return Identity{p: configured{tenantName: DefaultTenant, authorName: author, scopes: slices.Clone(Scopes[:]), set: AuthorSet{Except: true}}}
 }
 
 func tenantOr(t string) string {
@@ -166,5 +213,5 @@ func From(ctx context.Context) (Identity, bool) {
 // Author is the authenticated author, "" without one.
 func Author(ctx context.Context) string {
 	id, _ := From(ctx)
-	return id.author
+	return id.Author()
 }
