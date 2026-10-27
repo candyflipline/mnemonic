@@ -244,3 +244,7 @@ func writeToken(path string, raw []byte) error {
 	}
 	return nil
 }
+
+func guardTakeover(label, printOut string, loaded bool, ownPlist string, force bool) error {
+	return nil
+}
