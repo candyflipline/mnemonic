@@ -116,8 +116,8 @@ type rpcResponse struct {
 // Handler serves MCP to requests whose ctx carries an auth.Identity, the one
 // every tool's reads are scoped to; any other request is 401. Each tool call
 // reads the index snapshot ix serves when it starts. Results are not redacted
-// here: both modes redact at ingest, so the index holds no secret for a
-// result to carry.
+// here: push redacts each line on the client before upload and local mode as
+// it parses, so the index holds no secret for a result to carry.
 func Handler(ix *index.Index, lookup func(name string) (index.Tool, bool)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := auth.From(r.Context()); !ok {
