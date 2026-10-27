@@ -170,6 +170,9 @@ func walletBind(args []string) error {
 	if !c.Server.Equal(d.server) {
 		return fmt.Errorf("the message names server %s; this config's server_key is %s", auth.EncodeKey(c.Server), auth.EncodeKey(d.server))
 	}
+	if !time.Now().Before(c.Expires) {
+		return fmt.Errorf("the message expired at %s; run mnemonic wallet message again", c.Expires.Format(time.RFC3339))
+	}
 	sig, err := wallet.ParseSignature(strings.TrimSpace(*signature))
 	if err != nil {
 		return err

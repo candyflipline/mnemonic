@@ -3,7 +3,6 @@ package index
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/candyflipline/mnemonic/internal/auth"
@@ -40,7 +39,7 @@ func Sessions(ctx context.Context, db *DB) (SessionFilter, error) {
 	}
 	w, expires, isWallet := id.Wallet()
 	if isWallet && !time.Now().Before(expires) {
-		return SessionFilter{db: db, scoped: true}, fmt.Errorf("the wallet binding of %s expired at %s; bind again with mnemonic wallet bind", w, expires.Format(time.RFC3339))
+		return SessionFilter{db: db, scoped: true}, argErrorf("the wallet binding of %s expired at %s; bind again with mnemonic wallet bind", w, expires.Format(time.RFC3339))
 	}
 	sets := c.sets()
 	f := SessionFilter{db: db, scoped: true, author: id.Author(), tenant: id.Members(), hidden: map[string]bool{}, link: map[string]bool{}}
