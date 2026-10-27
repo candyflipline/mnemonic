@@ -15,14 +15,10 @@ const (
 	entryEvents = syscall.IN_CREATE | syscall.IN_MOVED_TO | syscall.IN_DELETE | syscall.IN_MOVED_FROM
 )
 
-// notifier holds one inotify watch per directory; events name the file. A
-// file path on changed means it was written, created or removed; a directory
-// path means its entries changed; lostEvents means the queue overflowed.
 type notifier struct {
 	fd      int
 	f       *os.File
-	changed chan string
-	done    chan struct{}
+	changes *changes
 	exited  chan struct{}
 	mu      sync.Mutex
 	wds     map[string]int
@@ -37,8 +33,7 @@ func newNotifier() (*notifier, error) {
 	n := &notifier{
 		fd:      fd,
 		f:       os.NewFile(uintptr(fd), "inotify"),
-		changed: make(chan string, 64),
-		done:    make(chan struct{}),
+		changes: newChanges(),
 		exited:  make(chan struct{}),
 		wds:     make(map[string]int),
 		dirs:    make(map[int]string),
@@ -88,17 +83,16 @@ func (n *notifier) read() {
 			end := off + syscall.SizeofInotifyEvent + int(binary.NativeEndian.Uint32(buf[off+12:]))
 			name := string(bytes.TrimRight(buf[off+syscall.SizeofInotifyEvent:end], "\x00"))
 			off = end
-			if !n.deliver(n.paths(wd, mask, name)...) {
-				return
+			if mask&syscall.IN_Q_OVERFLOW != 0 {
+				n.changes.add(nil, true)
+				continue
 			}
+			n.changes.add(n.paths(wd, mask, name), false)
 		}
 	}
 }
 
 func (n *notifier) paths(wd int, mask uint32, name string) []string {
-	if mask&syscall.IN_Q_OVERFLOW != 0 {
-		return []string{lostEvents}
-	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	dir, ok := n.dirs[wd]
@@ -117,25 +111,9 @@ func (n *notifier) paths(wd int, mask uint32, name string) []string {
 	return []string{filepath.Join(dir, name)}
 }
 
-func (n *notifier) deliver(paths ...string) bool {
-	for _, p := range paths {
-		select {
-		case n.changed <- p:
-		case <-n.done:
-			return false
-		}
-	}
-	return true
-}
-
-// rearm and drain exist for the kqueue notifier, which delivers one batch per
-// rearm; inotify reads park on the netpoller, so every event goes on changed.
-func (n *notifier) rearm() {}
-
-func (n *notifier) drain() []string { return nil }
+func (n *notifier) take() (paths []string, lost bool) { return n.changes.take() }
 
 func (n *notifier) close() {
-	close(n.done)
 	n.f.Close()
 	<-n.exited
 }

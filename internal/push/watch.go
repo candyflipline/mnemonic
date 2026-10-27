@@ -26,8 +26,6 @@ const (
 	reconcileEvery = 6 * time.Hour
 )
 
-const lostEvents = ""
-
 type stamp struct{ size, mtimeNs int64 }
 
 type watched struct {
@@ -110,12 +108,13 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 	flushAt := time.NewTimer(time.Hour)
 	flushAt.Stop()
 	defer flushAt.Stop()
-	mark := func(p string) {
-		if p == lostEvents {
-			w.stale = true
-		} else {
+	mark := func() bool {
+		paths, lost := n.take()
+		w.stale = w.stale || lost
+		for _, p := range paths {
 			dirty[p] = true
 		}
+		return lost || len(paths) > 0
 	}
 	var firstEvent time.Time
 	var window <-chan time.Time
@@ -127,32 +126,28 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 		periodic = periodicT.C
 		defer periodicT.Stop()
 	}
-	var fresh, delivered bool
+	var fresh bool
 	for {
 		var acks <-chan ack
 		var ended <-chan struct{}
 		if w.up != nil {
 			acks, ended = w.up.acked, w.up.ended()
 		}
+		var events <-chan struct{}
+		if window == nil {
+			events = n.changes.ready
+		}
 		select {
 		case <-ctx.Done():
 			return nil
-		case p := <-n.changed:
-			mark(p)
-			delivered = true
-			if window != nil {
-				fresh = true
-				continue
-			}
+		case <-events:
+			mark()
 			firstEvent = time.Now()
 			window = flushAt.C
 			flushAt.Reset(w.quiet)
 			continue
 		case <-window:
-			for _, p := range n.drain() {
-				mark(p)
-				fresh = true
-			}
+			fresh = mark() || fresh
 			if left := w.within - time.Since(firstEvent); fresh && left > 0 {
 				fresh = false
 				flushAt.Reset(min(w.quiet, left))
@@ -216,10 +211,6 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 		}
 		clear(w.deferred)
 		w.takeRedo(dirty)
-		if delivered {
-			n.rearm()
-			delivered = false
-		}
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -288,7 +279,7 @@ func (w *watcher) reconcile(ctx context.Context) Stats {
 		w.files[f.path] = &watched{fileRef: f}
 	}
 	for _, g := range w.globs {
-		w.list(g.base, nil)
+		w.watchAndList(g.base, nil)
 	}
 	for p := range oldFiles {
 		if w.files[p] == nil {
@@ -311,12 +302,12 @@ func (w *watcher) flush(ctx context.Context, dirty map[string]bool) Stats {
 	var paths []string
 	for p := range dirty {
 		if w.dirs[p] {
-			paths = w.list(p, paths)
+			paths = w.watchAndList(p, paths)
 		}
 	}
 	for _, g := range w.globs {
 		if !w.dirs[g.base] {
-			paths = w.list(g.base, paths)
+			paths = w.watchAndList(g.base, paths)
 		}
 	}
 	for p := range dirty {
@@ -327,10 +318,7 @@ func (w *watcher) flush(ctx context.Context, dirty map[string]bool) Stats {
 	return w.sync(ctx, paths)
 }
 
-// list watches dir, then reads it, adding new matching files and listing new
-// subdirectories, and returns added with the new files appended. Watching
-// before reading means an entry added after the read raises an event.
-func (w *watcher) list(dir string, added []string) []string {
+func (w *watcher) watchAndList(dir string, added []string) []string {
 	info, err := os.Stat(dir)
 	if err != nil || !info.IsDir() {
 		delete(w.dirs, dir)
@@ -347,7 +335,7 @@ func (w *watcher) list(dir string, added []string) []string {
 		path := filepath.Join(dir, e.Name())
 		if e.IsDir() {
 			if !w.dirs[path] {
-				added = w.list(path, added)
+				added = w.watchAndList(path, added)
 			}
 			continue
 		}

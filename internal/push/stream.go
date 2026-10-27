@@ -339,10 +339,9 @@ func streamSource(ctx context.Context, red Redactor, u *uplink, f fileRef, st *S
 		st.Unchanged++
 		return nil
 	}
-	// The server stamps UpdatedMs after it received the bytes, so a file whose
-	// last write is older than that stamp (with a 5-minute margin for
-	// client/server clock skew) has nothing new; skip it unread. Entries with
-	// RawEnd 0 — the legacy shape — are saved the read by this skip alone.
+	// The server stamps UpdatedMs after it received the bytes, so a file last
+	// written skewMs before that stamp has nothing new. Entries with RawEnd 0,
+	// the legacy shape, are saved the read by this skip alone.
 	if !full && entry != nil && f.mtimeMs < entry.UpdatedMs-skewMs {
 		st.Unchanged++
 		return nil

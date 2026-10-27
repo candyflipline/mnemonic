@@ -9,14 +9,11 @@ import (
 
 const vnodeEvents = syscall.NOTE_WRITE | syscall.NOTE_EXTEND | syscall.NOTE_DELETE | syscall.NOTE_RENAME
 
-// notifier holds one O_EVTONLY descriptor per watched file and directory on
-// a kqueue. A file path means it was written, removed or renamed; a directory
-// path means its entries changed. changed carries the first batch of events
-// after each rearm; drain returns the events queued since, without waiting, so
-// a burst of writes wakes the process once rather than once per write.
+// notifier parks its reader after each batch until the next take, so a burst
+// of writes wakes the process once rather than once per write.
 type notifier struct {
 	kq      int
-	changed chan string
+	changes *changes
 	armed   chan struct{}
 	done    chan struct{}
 	exited  chan struct{}
@@ -38,7 +35,7 @@ func newNotifier() (*notifier, error) {
 	}
 	n := &notifier{
 		kq:      kq,
-		changed: make(chan string, 64),
+		changes: newChanges(),
 		armed:   make(chan struct{}, 1),
 		done:    make(chan struct{}),
 		exited:  make(chan struct{}),
@@ -82,8 +79,6 @@ func (n *notifier) drop(path string) {
 	}
 }
 
-// read waits for events, delivers their paths, then waits for a rearm before
-// waiting again; events in between stay queued for drain or the next wait.
 func (n *notifier) read() {
 	defer close(n.exited)
 	var buf [64]syscall.Kevent_t
@@ -102,13 +97,7 @@ func (n *notifier) read() {
 		if len(paths) == 0 {
 			continue
 		}
-		for _, p := range paths {
-			select {
-			case n.changed <- p:
-			case <-n.done:
-				return
-			}
-		}
+		n.changes.add(paths, false)
 		select {
 		case <-n.armed:
 		case <-n.done:
@@ -117,14 +106,17 @@ func (n *notifier) read() {
 	}
 }
 
-func (n *notifier) rearm() {
+func (n *notifier) take() (paths []string, lost bool) {
+	n.changes.add(n.poll(), false)
+	paths, lost = n.changes.take()
 	select {
 	case n.armed <- struct{}{}:
 	default:
 	}
+	return paths, lost
 }
 
-func (n *notifier) drain() []string {
+func (n *notifier) poll() []string {
 	var buf [64]syscall.Kevent_t
 	var now syscall.Timespec
 	var all []string
