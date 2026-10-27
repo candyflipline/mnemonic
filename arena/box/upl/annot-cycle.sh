@@ -109,7 +109,7 @@ while [ "$i" -lt "$ncalls" ]; do
 	r=$(curl -sf -H 'MCP-Protocol-Version: 2025-06-18' -H "Authorization: Bearer $(cat "$TMP/admin.tok")" \
 		-H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
 		-d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"annotate\",\"arguments\":{\"session_id\":\"$pref\",\"name\":\"annot-probe-$i\",\"number\":$i}}}" "$url/mcp" || echo '{}')
-	e=$(printf %s "$r" | jq -r '.result.isError // "x"')
+	e=$(printf %s "$r" | jq -r '.result.isError // false')
 	d=$(printf %s "$r" | jq -r '.result.structuredContent.data.duplicate // false')
 	if [ "$e" = false ]; then ok=$((ok + 1)); else fail=$((fail + 1)); fi
 	[ "$d" = true ] && dup=$((dup + 1))
