@@ -10,10 +10,13 @@
 #   PUBLIC_HOST  loyal-agent-memory.5-78-147-233.sslip.io
 #   SERVER_BIN   linux/amd64 server build of this checkout (-tags server)
 # Env:
-#   STEPS            steps to run, default "a b c d e f g"
-#   PRECHECK_CMD     read-only command run on the host that prints
-#                    "hot=<n> heavy_bytes=<n>" (from P4B2G); required for step a
-#   HEAVY_MAX_BYTES  step a fails when heavy_bytes is above this
+#   STEPS            steps to run, default all; they run in the order a b c d f e g
+#                    (8741 opens before Caddy stops, so the firewall call is not downtime)
+#   DATA_DIR         the server's data_dir, default /var/lib/mnemonic
+#   HEAVY_MAX_BYTES  step a (arena/box/upl/hot-shape.sh, read only) stops the run when
+#   LIGHT_MAX_BYTES  the hot set's heavy or light bytes are above these (defaults
+#                    1570000000 and 64000000, the boot-memory gate P4B2G set) or any
+#                    hot part is missing
 #   ACME_DIRECTORY   empty for Let's Encrypt production; the staging URL on a rehearsal
 #   HCLOUD_FIREWALL  hcloud firewall id holding the host's inbound rules; empty: none
 #   CADDY            Caddy container name, default loyal-agent-memory-caddy
@@ -21,19 +24,21 @@
 set -euo pipefail
 
 if [[ $# -ne 3 ]]; then
-	sed -n 2,22p "$0" >&2
+	sed -n '2,/^set -euo/p' "$0" >&2
 	exit 2
 fi
 H=$1 PUBLIC=$2 BIN=$3
 STEPS=${STEPS:-a b c d e f g}
 CADDY=${CADDY:-loyal-agent-memory-caddy}
+DATA_DIR=${DATA_DIR:-/var/lib/mnemonic}
+HEAVY_MAX_BYTES=${HEAVY_MAX_BYTES:-1570000000}
+LIGHT_MAX_BYTES=${LIGHT_MAX_BYTES:-64000000}
 TOKEN_FILE=${TOKEN_FILE:-$HOME/.mnemonic/token}
 ACME_DIRECTORY=${ACME_DIRECTORY:-}
 HCLOUD_FIREWALL=${HCLOUD_FIREWALL:-}
 B=/root/mnemonic-precutover
 SRC=/root/mnemonic-cutover-src
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 ok() { printf '%s ok   %s\n' "$(date +%H:%M:%S)" "$*"; }
 fail() {
@@ -44,14 +49,14 @@ remote() { ssh -o ConnectTimeout=10 -o BatchMode=yes "$H" "$@"; }
 want() { [[ " $STEPS " == *" $1 "* ]]; }
 
 step_a() {
-	[[ -n "${PRECHECK_CMD:-}" ]] || fail "a: PRECHECK_CMD is unset (P4B2G's read-only hot-set command)"
-	[[ -n "${HEAVY_MAX_BYTES:-}" ]] || fail "a: HEAVY_MAX_BYTES is unset"
-	local out heavy
-	out=$(remote "$PRECHECK_CMD") || fail "a: precheck command failed"
-	heavy=$(sed -n 's/.*heavy_bytes=\([0-9][0-9]*\).*/\1/p' <<<"$out" | tail -1)
-	[[ -n "$heavy" ]] || fail "a: precheck printed no heavy_bytes=<n>: $out"
-	((heavy <= HEAVY_MAX_BYTES)) || fail "a: heavy hot bytes $heavy > $HEAVY_MAX_BYTES; do not swap ($out)"
-	ok "a: $out <= $HEAVY_MAX_BYTES"
+	local out heavy light missing
+	out=$(remote sh -s "$DATA_DIR" <"$REPO/arena/box/upl/hot-shape.sh") || fail "a: hot-shape.sh failed on $H"
+	field() { sed -n "s/.* $1 \([0-9][0-9]*\).*/\1/p" <<<" $out"; }
+	heavy=$(field heavy_bytes) light=$(field light_bytes) missing=$(field missing)
+	[[ -n "$heavy" && -n "$light" && -n "$missing" ]] || fail "a: hot-shape.sh printed no heavy_bytes/light_bytes/missing: $out"
+	((heavy <= HEAVY_MAX_BYTES && light <= LIGHT_MAX_BYTES && missing == 0)) ||
+		fail "a: NO GO, nothing changed: heavy $heavy (max $HEAVY_MAX_BYTES), light $light (max $LIGHT_MAX_BYTES), missing $missing (max 0)"
+	ok "a: GO: $out"
 }
 
 step_b() {
@@ -138,8 +143,8 @@ step_e() {
 			docker stop -t 10 "$CADDY" >/dev/null
 		fi
 		[[ $(docker inspect -f '{{.State.Running}}' "$CADDY") == false ]] || { echo "FAIL e: $CADDY still running" >&2; exit 1; }
-		if ss -Htln 'sport = :443' | grep -q .; then echo "FAIL e: something still listens on 443" >&2; ss -Htlnp 'sport = :443' >&2; exit 1; fi
-		echo "ok   e: $CADDY stopped (container kept, restart=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$CADDY")), 443 free"
+		if ss -Htlnp 'sport = :443' | grep -v '(("mnemonic",' | grep -q .; then echo "FAIL e: something other than mnemonic listens on 443" >&2; ss -Htlnp 'sport = :443' >&2; exit 1; fi
+		echo "ok   e: $CADDY stopped (container kept, restart=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$CADDY")), 443 free or mnemonic's"
 	EOF
 }
 
@@ -169,7 +174,7 @@ step_f() {
 	fi
 	local code
 	code=$(nc -z -w 5 "$PUBLIC" 8741 >/dev/null 2>&1 && echo open || echo closed)
-	ok "f: $PUBLIC:8741 from here: $code (closed is expected until step g starts the listener)"
+	ok "f: $PUBLIC:8741 reachable from here: $code (before step g this is the old listener, if any)"
 }
 
 issuer_of() {
@@ -197,7 +202,7 @@ step_g() {
 	for port in 443 8741; do
 		got=''
 		for ((i = 0; i < 20; i++)); do
-			got=$(issuer_of "$port")
+			got=$(issuer_of "$port" || true)
 			[[ "$got" =~ $want_issuer ]] && break
 			sleep 3
 		done
@@ -228,7 +233,10 @@ step_g() {
 	ok "cutover done in $(($(date +%s) - t0)) s from restart; Mac client next: arena/cutover/mac-client.sh upgrade"
 }
 
-for s in a b c d e f g; do
-	want "$s" && "step_$s"
+for s in a b c d f e g; do
+	if want "$s"; then
+		printf '%s step %s\n' "$(date +%H:%M:%S)" "$s"
+		"step_$s"
+	fi
 done
 true

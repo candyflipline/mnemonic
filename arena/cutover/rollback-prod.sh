@@ -14,7 +14,7 @@
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
-	sed -n 2,14p "$0" >&2
+	sed -n '2,/^set -euo/p' "$0" >&2
 	exit 2
 fi
 H=$1 PUBLIC=$2
@@ -34,7 +34,7 @@ t0=$(date +%s)
 since=$(remote 'date -u "+%F %T"')
 remote bash -s -- "$B" "$CADDY" "${FORCE_TOML:-}" <<-'EOF'
 	set -euo pipefail
-	B=$1 CADDY=$2 FORCE=$3
+	B=$1 CADDY=$2 FORCE=${3:-}
 	[[ -f $B/DONE ]] || { echo "FAIL r1: no backups in $B" >&2; exit 1; }
 	(cd "$B" && sha256sum -c --quiet SHA256SUMS) || { echo "FAIL r1: backup sums do not match" >&2; exit 1; }
 	strip() { grep -vE '^(listen|push_listen|hosts|acme_directory)[[:space:]]*=|^\[tls\]|^$' "$1"; }
