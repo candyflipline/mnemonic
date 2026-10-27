@@ -299,23 +299,16 @@ func ingestArchive(store string, s source) (Outcome, int64, error) {
 	if err := streamArchiveRows(pf, set, file, ws.add); err != nil {
 		return 0, 0, err
 	}
-	if err := ws.closeAll(); err != nil {
+	members, err := ws.commit(s.key, s.src, end, sum)
+	if err != nil {
 		return 0, 0, err
 	}
-	// Member checkpoints after their logs are synced (closeAll), members
-	// the file lost deleted, the file checkpoint last: the same
-	// checkpoint-after-logs order the raw path keeps, so the file
-	// checkpoint never names a member whose rows are not durable.
 	written, rows := int64(0), int64(0)
-	sessions := make([]string, 0, len(ws.ws))
-	for sid, w := range ws.ws {
-		mc := w.ckpt(s.key, s.src, end, sum)
-		b, _ := json.Marshal(mc)
-		if err := writeFileAtomic(ckptPath(store, w.key), b); err != nil {
-			return 0, 0, err
-		}
-		written += w.lightLen + w.heavyLen - prevLen[sid]
-		rows += w.rows
+	sessions := make([]string, 0, len(members))
+	for _, c := range members {
+		sid := c.Sessions[0]
+		written += c.LightLen + c.HeavyLen - prevLen[sid]
+		rows += c.Rows
 		sessions = append(sessions, sid)
 	}
 	sort.Strings(sessions)
@@ -327,9 +320,7 @@ func ingestArchive(store string, s source) (Outcome, int64, error) {
 			return 0, 0, err
 		}
 	}
-	want := wantArchiveCkpt(s, end, sum, rows, sessions)
-	b, _ := json.Marshal(want)
-	if err := writeFileAtomic(ckptPath(store, key), b); err != nil {
+	if err := writeCkpt(store, wantArchiveCkpt(s, end, sum, rows, sessions)); err != nil {
 		return 0, 0, err
 	}
 	if has {
@@ -395,8 +386,7 @@ func removeMember(store, key string) error {
 type archiveWriter struct {
 	key      string
 	gen      int
-	lf, hf   *os.File
-	lw, hw   *frameWriter
+	logs     frameLogs
 	isOpen   bool
 	rows     int64
 	lightLen int64
@@ -417,9 +407,7 @@ func (w *archiveWriter) ckpt(k layout.Key, m manifest, size int64, sha string) c
 
 // archiveWriters holds the members a parse has touched, at most limit with
 // open logs. Rows are not sorted by session, so the least recently used
-// member's logs are flushed and closed on open of a new one; reopening at
-// the recorded lengths appends valid frames, since a frame's place is fixed
-// when its records are added and only moves on flush.
+// member's logs are synced and closed on open of a new one.
 type archiveWriters struct {
 	store   string
 	fileKey string
@@ -440,14 +428,7 @@ func (aws *archiveWriters) add(r *chRow) error {
 	if err != nil {
 		return err
 	}
-	heavy := appendStr(nil, r.PayloadJSON)
-	heavy = appendStr(heavy, r.TokenUsageJSON)
-	fo, idx, err := w.hw.add(heavy)
-	if err != nil {
-		return err
-	}
-	row.HeavyFrame, row.HeavyIdx = uint64(fo), uint64(idx)
-	if _, _, err := w.lw.add(row.append(nil)); err != nil {
+	if err := w.logs.add(&row, r.PayloadJSON, r.TokenUsageJSON); err != nil {
 		return err
 	}
 	w.rows++
@@ -476,17 +457,9 @@ func (aws *archiveWriters) writerFor(sid string) (*archiveWriter, error) {
 		aws.opened = aws.opened[1:]
 	}
 	var err error
-	w.lf, err = openLog(logPath(aws.store, w.key, w.gen, "light"), w.lightLen)
-	if err != nil {
+	if w.logs, err = openFrameLogs(aws.store, w.key, w.gen, w.lightLen, w.heavyLen); err != nil {
 		return nil, err
 	}
-	w.hf, err = openLog(logPath(aws.store, w.key, w.gen, "heavy"), w.heavyLen)
-	if err != nil {
-		w.lf.Close()
-		return nil, err
-	}
-	w.lw = &frameWriter{f: w.lf, off: w.lightLen, target: lightFrame, enc: encoder}
-	w.hw = &frameWriter{f: w.hf, off: w.heavyLen, target: heavyFrame, enc: heavyEncoder}
 	w.isOpen = true
 	aws.opened = append(aws.opened, sid)
 	return w, nil
@@ -502,33 +475,34 @@ func (aws *archiveWriters) touch(sid string) {
 	}
 }
 
-// closeWriter flushes and syncs one member's logs and records their
-// lengths; heavy first, the order the raw path keeps.
 func (aws *archiveWriters) closeWriter(w *archiveWriter) error {
 	if !w.isOpen {
 		return nil
 	}
-	if err := w.hw.flush(); err != nil {
+	var err error
+	if w.lightLen, w.heavyLen, err = w.logs.sync(); err != nil {
 		return err
 	}
-	if err := w.lw.flush(); err != nil {
-		return err
-	}
-	if err := w.hf.Sync(); err != nil {
-		return err
-	}
-	if err := w.lf.Sync(); err != nil {
-		return err
-	}
-	w.heavyLen, w.lightLen = w.hw.off, w.lw.off
-	if err := w.hf.Close(); err != nil {
-		return err
-	}
-	if err := w.lf.Close(); err != nil {
+	if err := w.logs.close(); err != nil {
 		return err
 	}
 	w.isOpen = false
 	return nil
+}
+
+func (aws *archiveWriters) commit(k layout.Key, m manifest, size int64, sha string) ([]ckpt, error) {
+	if err := aws.closeAll(); err != nil {
+		return nil, err
+	}
+	members := make([]ckpt, 0, len(aws.ws))
+	for _, w := range aws.ws {
+		c := w.ckpt(k, m, size, sha)
+		if err := writeCkpt(aws.store, c); err != nil {
+			return nil, err
+		}
+		members = append(members, c)
+	}
+	return members, nil
 }
 
 func (aws *archiveWriters) closeAll() error {
@@ -694,8 +668,7 @@ func retireSettled(store string, cks []ckpt, parts [][]ckpt, planned []builtPart
 				continue
 			}
 			c.LightLen, c.HeavyLen = 0, 0
-			b, _ := json.Marshal(c)
-			if err := writeFileAtomic(ckptPath(store, c.Key), b); err != nil {
+			if err := writeCkpt(store, *c); err != nil {
 				return err
 			}
 		}

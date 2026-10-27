@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -55,9 +56,7 @@ type parsed struct {
 	Sessions   []string        `json:"sessions"`
 }
 
-// ckpt is parsed plus where this disk keeps the rows. It is written by rename
-// after both logs are fsynced, so the logs are valid up to LightLen and
-// HeavyLen whatever happened after.
+// ckpt is parsed plus where this disk keeps the rows.
 type ckpt struct {
 	parsed
 	Gen      int   `json:"gen"`
@@ -368,16 +367,11 @@ func ingestSource(root, store string, s source, red *redact.Redactor) (Outcome, 
 	} else if has {
 		next.Gen = prev.Gen + 1
 	}
-	lightF, err := openLog(logPath(store, key, next.Gen, "light"), from.LightLen)
+	logs, err := openFrameLogs(store, key, next.Gen, from.LightLen, from.HeavyLen)
 	if err != nil {
 		return 0, 0, cur, err
 	}
-	defer lightF.Close()
-	heavyF, err := openLog(logPath(store, key, next.Gen, "heavy"), from.HeavyLen)
-	if err != nil {
-		return 0, 0, cur, err
-	}
-	defer heavyF.Close()
+	defer logs.close()
 
 	zr, err := s.kind.reader(raw, from.Offset, end)
 	if err != nil {
@@ -388,8 +382,6 @@ func ingestSource(root, store string, s source, red *redact.Redactor) (Outcome, 
 	}
 	defer zr.Close()
 
-	lw := &frameWriter{f: lightF, off: from.LightLen, target: lightFrame, enc: encoder}
-	hw := &frameWriter{f: heavyF, off: from.HeavyLen, target: heavyFrame, enc: heavyEncoder}
 	rows := from.Rows
 	sessions := map[string]bool{}
 	for _, s := range from.Sessions {
@@ -399,15 +391,7 @@ func ingestSource(root, store string, s source, red *redact.Redactor) (Outcome, 
 		r := rowFrom(ev)
 		r.Version = uint64(rows)
 		sessions[r.Session] = true
-		var heavy []byte
-		heavy = appendStr(heavy, ev.PayloadJSON)
-		heavy = appendStr(heavy, ev.TokenUsageJSON)
-		fo, idx, err := hw.add(heavy)
-		if err != nil {
-			return err
-		}
-		r.HeavyFrame, r.HeavyIdx = uint64(fo), uint64(idx)
-		if _, _, err := lw.add(r.append(nil)); err != nil {
+		if err := logs.add(&r, ev.PayloadJSON, ev.TokenUsageJSON); err != nil {
 			return err
 		}
 		rows++
@@ -416,30 +400,19 @@ func ingestSource(root, store string, s source, red *redact.Redactor) (Outcome, 
 	if err != nil {
 		return 0, 0, cur, err
 	}
-	if err := hw.flush(); err != nil {
-		return 0, 0, cur, err
-	}
-	if err := lw.flush(); err != nil {
-		return 0, 0, cur, err
-	}
-	if err := lightF.Sync(); err != nil {
-		return 0, 0, cur, err
-	}
-	if err := heavyF.Sync(); err != nil {
+	if next.LightLen, next.HeavyLen, err = logs.sync(); err != nil {
 		return 0, 0, cur, err
 	}
 	sum, err := windowSHA(raw, end)
 	if err != nil {
 		return 0, 0, cur, err
 	}
-	next.Offset, next.WindowSHA, next.State = end, sum, state
-	next.LightLen, next.HeavyLen, next.Rows = lw.off, hw.off, rows
+	next.Offset, next.WindowSHA, next.State, next.Rows = end, sum, state, rows
 	for s := range sessions {
 		next.Sessions = append(next.Sessions, s)
 	}
 	sort.Strings(next.Sessions)
-	b, _ := json.Marshal(next)
-	if err := writeFileAtomic(ckptPath(store, key), b); err != nil {
+	if err := writeCkpt(store, next); err != nil {
 		return 0, 0, cur, err
 	}
 	written := next.LightLen - from.LightLen + next.HeavyLen - from.HeavyLen
@@ -472,6 +445,52 @@ func openLog(path string, validLen int64) (*os.File, error) {
 	}
 	return f, nil
 }
+
+type frameLogs struct{ light, heavy *frameWriter }
+
+func openFrameLogs(store, key string, gen int, lightLen, heavyLen int64) (frameLogs, error) {
+	lf, err := openLog(logPath(store, key, gen, "light"), lightLen)
+	if err != nil {
+		return frameLogs{}, err
+	}
+	hf, err := openLog(logPath(store, key, gen, "heavy"), heavyLen)
+	if err != nil {
+		lf.Close()
+		return frameLogs{}, err
+	}
+	return frameLogs{
+		light: &frameWriter{f: lf, off: lightLen, target: lightFrame, enc: encoder},
+		heavy: &frameWriter{f: hf, off: heavyLen, target: heavyFrame, enc: heavyEncoder},
+	}, nil
+}
+
+func (l frameLogs) add(r *Row, payload, tokenUsage string) error {
+	fo, idx, err := l.heavy.add(appendStr(appendStr(nil, payload), tokenUsage))
+	if err != nil {
+		return err
+	}
+	r.HeavyFrame, r.HeavyIdx = uint64(fo), uint64(idx)
+	_, _, err = l.light.add(r.append(nil))
+	return err
+}
+
+// sync makes every added record durable and returns the lengths a
+// checkpoint may then name.
+func (l frameLogs) sync() (lightLen, heavyLen int64, err error) {
+	for _, w := range []*frameWriter{l.heavy, l.light} {
+		if err := w.flush(); err != nil {
+			return 0, 0, err
+		}
+	}
+	for _, w := range []*frameWriter{l.light, l.heavy} {
+		if err := w.f.Sync(); err != nil {
+			return 0, 0, err
+		}
+	}
+	return l.light.off, l.heavy.off, nil
+}
+
+func (l frameLogs) close() error { return errors.Join(l.heavy.f.Close(), l.light.f.Close()) }
 
 type frameWriter struct {
 	f      *os.File
