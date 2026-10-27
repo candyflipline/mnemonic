@@ -87,12 +87,15 @@ func printBound(c wallet.Claim) {
 	fmt.Printf("wallet %s bound to this machine until %s\n", c.Wallet, c.Expires.Local().Format("Jan 2, 2006 3:04 PM MST"))
 }
 
+// maxDays leaves one day under wallet.MaxLifetime for a server clock that
+// runs behind this one.
+var maxDays = int(wallet.MaxLifetime/(24*time.Hour)) - 1
+
 func expiry(days int) (time.Time, error) {
-	life := time.Duration(days) * 24 * time.Hour
-	if days < 1 || life > wallet.MaxLifetime {
-		return time.Time{}, fmt.Errorf("--days must be 1 to %d", wallet.MaxLifetime/(24*time.Hour))
+	if days < 1 || days > maxDays {
+		return time.Time{}, fmt.Errorf("--days must be 1 to %d", maxDays)
 	}
-	return time.Now().Add(life).UTC().Truncate(time.Second), nil
+	return time.Now().Add(time.Duration(days) * 24 * time.Hour).UTC().Truncate(time.Second), nil
 }
 
 var defaultDays = int(wallet.DefaultLifetime / (24 * time.Hour))
@@ -253,7 +256,7 @@ var phantomPage []byte
 // bindInBrowser serves phantomPage on a loopback port under a random path,
 // hands the page the message for the wallet it connects, and takes back the
 // wallet's signature over the raw message. It returns once a signature
-// verifies and the binding is stored.
+// verifies and the binding is stored, or with an error after browserWait.
 func bindInBrowser(d device, expires time.Time) error {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -314,6 +317,13 @@ func bindInBrowser(d device, expires time.Time) error {
 	go hs.Serve(ln)
 	defer hs.Close()
 	fmt.Fprintf(os.Stderr, "open http://%s%s in the browser that has Phantom, connect, and approve the message; nothing else is signed\n", ln.Addr(), base)
-	printBound((<-done).Claim())
-	return nil
+	select {
+	case b := <-done:
+		printBound(b.Claim())
+		return nil
+	case <-time.After(browserWait):
+		return fmt.Errorf("no wallet signed within %s; run mnemonic wallet bind --phantom again", browserWait)
+	}
 }
+
+const browserWait = 10 * time.Minute
