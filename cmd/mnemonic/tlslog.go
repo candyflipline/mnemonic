@@ -47,7 +47,8 @@ func newTLSLogWriter(listen string) *tlsLogWriter {
 	return w
 }
 
-// Stop ends the minute ticker and waits for it, so nothing outlives serve.
+// Stop logs the counts since the last summary, ends the minute ticker and
+// waits for it, so nothing outlives serve.
 func (w *tlsLogWriter) Stop() {
 	select {
 	case <-w.stop:
@@ -66,6 +67,7 @@ func (w *tlsLogWriter) run() {
 		case <-t.C:
 			w.summary()
 		case <-w.stop:
+			w.summary()
 			return
 		}
 	}
