@@ -134,7 +134,7 @@ func rowFrom(ev *schema.Event) Row {
 		r.Bits |= bitTimeOK
 	}
 	if us, ok := parseISOTimestampUs(ev.EventTS); ok {
-		r.TsMs = floorDiv(us, 1000)
+		r.TsMs = tsMsOf(us)
 	}
 	p := ev.PayloadJSON
 	if strings.Contains(p, "moraine_emission_index") {
@@ -153,6 +153,8 @@ func rowFrom(ev *schema.Event) Row {
 	}
 	return r
 }
+
+func tsMsOf(eventUs int64) int64 { return floorDiv(eventUs, 1000) }
 
 func floorDiv(a, b int64) int64 {
 	q := a / b

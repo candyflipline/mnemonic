@@ -421,10 +421,7 @@ type archiveWriters struct {
 func (aws *archiveWriters) add(r *chRow) error {
 	ev := r.event()
 	row := rowFrom(&ev)
-	// The ch file carries event_ts as micros directly, the same value the
-	// raw path derives from the event_ts string (rowFrom's floorDiv(us,
-	// 1000)); record_ts went through rowFrom unchanged.
-	row.TsMs = floorDiv(r.EventTS, 1000)
+	row.TsMs = tsMsOf(r.EventTS)
 	w, err := aws.writerFor(row.Session)
 	if err != nil {
 		return err
