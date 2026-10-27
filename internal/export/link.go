@@ -46,17 +46,14 @@ var pacific = func() *time.Location {
 
 // stepCut keeps the steps stamped at or before until, an isoMillis string, so
 // that string order is time order. The index stamps a row with no parseable
-// time at unstamped, a year no cutoff reaches, so a step with that stamp or
-// none is kept exactly when the step before it was.
+// time at unstamped, a year no cutoff reaches. A step with that stamp or none
+// is dropped, as the owner's count of messages at create drops it.
 type stepCut struct{ until string }
 
 func (c *stepCut) filter(fn func(*Step) error) func(*Step) error {
-	kept, n := false, 0
+	n := 0
 	return func(s *Step) error {
-		if s.Timestamp != "" && s.Timestamp != unstamped {
-			kept = s.Timestamp <= c.until
-		}
-		if !kept {
+		if s.Timestamp == "" || s.Timestamp == unstamped || s.Timestamp > c.until {
 			return nil
 		}
 		n++

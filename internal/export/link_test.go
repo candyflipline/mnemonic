@@ -26,6 +26,7 @@ func linkFixture(t *testing.T) (*index.DB, LinkView) {
 			`[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"text","text":"`+strings.Repeat("x", 5000)+`"}]}]`),
 		line("assistant", "a2", "2026-10-27T10:00:03.000Z", `[{"type":"text","text":"Five thousand x."}]`),
 		line("user", "u3", "2026-10-27T10:05:00.000Z", `"Added after the share."`),
+		fmt.Sprintf(`{"type":"user","sessionId":%q,"cwd":"/work/demo","uuid":"u4","timestamp":"not a time","message":{"role":"user","content":"A line with no time."}}`, linkSessionID),
 	}, "\n") + "\n"
 	root, store := t.TempDir(), t.TempDir()
 	writeRawSource(t, root, "test", "claude-code", "claude-code/link.jsonl", []byte(lines))
@@ -68,5 +69,17 @@ func TestLinkMarkdown(t *testing.T) {
 	}
 	if err := WriteSessionMarkdown(&b, db, v, 2); err == nil {
 		t.Fatal("session 2 of a one-session link was written")
+	}
+}
+
+func TestLinkMarkdownDropsUnstamped(t *testing.T) {
+	db, v := linkFixture(t)
+	v.Cutoff = time.Date(2026, 10, 27, 10, 10, 0, 0, time.UTC)
+	var b bytes.Buffer
+	if err := WriteSessionMarkdown(&b, db, v, 1); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.String(); !strings.Contains(got, "Added after the share.") || strings.Contains(got, "A line with no time.") {
+		t.Fatalf("session markdown:\n%s\nwant the 10:05 line and not the unstamped one", got)
 	}
 }
