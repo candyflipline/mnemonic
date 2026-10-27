@@ -1,26 +1,40 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	_ "embed"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"strings"
 	"time"
+
+	"github.com/candyflipline/mnemonic/internal/auth"
+	"github.com/candyflipline/mnemonic/internal/config"
+	"github.com/candyflipline/mnemonic/internal/qnet"
+	"github.com/candyflipline/mnemonic/internal/wallet"
 )
 
 func init() { commands["wallet"] = walletCmd }
-
-const defaultBindingDays = 90
 
 // walletCmd binds this machine's key to a Solana wallet, so the machine reads
 // the sessions shared with that wallet. Every form reads the client config
 // for the key file and the server key the binding names.
 //
-//	mnemonic wallet bind --keypair ~/.config/solana/id.json [--days 90]
-//	mnemonic wallet message --wallet <address> [--days 90]
+//	mnemonic wallet bind --keypair ~/.config/solana/id.json [--days 30]
+//	mnemonic wallet bind --phantom [--days 30]
+//	mnemonic wallet message --wallet <address> [--days 30]
 //	mnemonic wallet bind --message '<the line message printed>' --signature <base58 or base64>
 //	mnemonic wallet show
 func walletCmd(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: mnemonic wallet bind|message|show")
+		return errors.New("usage: mnemonic wallet bind|message|show [flags]")
 	}
 	switch args[0] {
 	case "bind":
@@ -33,47 +47,268 @@ func walletCmd(args []string) error {
 	return fmt.Errorf("mnemonic wallet: unknown subcommand %q", args[0])
 }
 
-// walletBind stores a binding beside the key file with qnet.SaveBinding.
-// With --keypair it signs the claim itself (wallet.Sign over the raw
-// message). With --message and --signature it parses the pasted line
-// (wallet.ParseMessage), refuses it unless its device and server keys are
-// this machine's and this config's, and checks the signature in both forms
-// (wallet.Bind) before storing, so a bad paste fails here, not at connect.
-// It prints the wallet address and the expiry in local time.
+// device is this machine's key and the server key from the client config at
+// path, the two keys every binding names.
+type device struct {
+	keyFile string
+	key     ed25519.PrivateKey
+	server  ed25519.PublicKey
+}
+
+func loadDevice(path string) (device, error) {
+	cfg, err := config.LoadClient(path)
+	if err != nil {
+		return device{}, err
+	}
+	server, err := auth.ParseKey(cfg.ServerKey)
+	if err != nil {
+		return device{}, err
+	}
+	key, err := qnet.LoadOrCreateKey(cfg.KeyFile)
+	if err != nil {
+		return device{}, err
+	}
+	return device{keyFile: cfg.KeyFile, key: key, server: server}, nil
+}
+
+func (d device) claim(w wallet.Address, expires time.Time) wallet.Claim {
+	return wallet.Claim{Wallet: w, Device: d.key.Public().(ed25519.PublicKey), Server: d.server, Expires: expires}
+}
+
+func (d device) save(b wallet.Binding) error {
+	if err := qnet.SaveBinding(d.keyFile, b.Encode()); err != nil {
+		return err
+	}
+	printBound(b.Claim())
+	return nil
+}
+
+func printBound(c wallet.Claim) {
+	fmt.Printf("wallet %s bound to this machine until %s\n", c.Wallet, c.Expires.Local().Format("Jan 2, 2006 3:04 PM MST"))
+}
+
+func expiry(days int) (time.Time, error) {
+	life := time.Duration(days) * 24 * time.Hour
+	if days < 1 || life > wallet.MaxLifetime {
+		return time.Time{}, fmt.Errorf("--days must be 1 to %d", wallet.MaxLifetime/(24*time.Hour))
+	}
+	return time.Now().Add(life).UTC().Truncate(time.Second), nil
+}
+
+var defaultDays = int(wallet.DefaultLifetime / (24 * time.Hour))
+
+// walletBind stores a binding beside the key file. With --keypair it signs
+// the claim itself over the raw message. With --phantom it serves a local
+// page that asks the browser wallet to sign the message. With --message and
+// --signature it takes a line `wallet message` printed and the signature a
+// wallet made over it, refusing a line that names another device or server.
+// Every path checks the signature before storing, so a bad one fails here,
+// not at connect.
 func walletBind(args []string) error {
 	fs := flag.NewFlagSet("wallet bind", flag.ContinueOnError)
 	configPath := fs.String("config", "~/.mnemonic/config.toml", "path to the client config TOML")
 	keypair := fs.String("keypair", "", "Solana CLI keypair file (id.json) to sign with")
-	days := fs.Int("days", defaultBindingDays, "days until the binding expires (with --keypair)")
+	phantom := fs.Bool("phantom", false, "sign in a browser wallet (Phantom) on a local page")
+	days := fs.Int("days", defaultDays, "days until the binding expires (with --keypair or --phantom)")
 	message := fs.String("message", "", "the line `mnemonic wallet message` printed, as the wallet signed it")
 	signature := fs.String("signature", "", "the wallet's signature over --message, base58 or base64")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	_, _, _, _, _ = configPath, keypair, days, message, signature
-	// TODO: exactly one of --keypair or (--message and --signature).
-	panic("not implemented")
+	if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+	paste := *message != "" || *signature != ""
+	modes := 0
+	for _, on := range []bool{*keypair != "", *phantom, paste} {
+		if on {
+			modes++
+		}
+	}
+	if modes != 1 || (paste && (*message == "" || *signature == "")) {
+		return errors.New("wallet bind takes one of --keypair, --phantom, or --message with --signature")
+	}
+	d, err := loadDevice(*configPath)
+	if err != nil {
+		return err
+	}
+	switch {
+	case *keypair != "":
+		expires, err := expiry(*days)
+		if err != nil {
+			return err
+		}
+		path, err := config.ExpandHome(*keypair)
+		if err != nil {
+			return err
+		}
+		key, err := wallet.LoadKeypair(path)
+		if err != nil {
+			return err
+		}
+		var w wallet.Address
+		copy(w[:], key.Public().(ed25519.PublicKey))
+		b, err := wallet.Sign(d.claim(w, expires), key)
+		if err != nil {
+			return err
+		}
+		return d.save(b)
+	case *phantom:
+		expires, err := expiry(*days)
+		if err != nil {
+			return err
+		}
+		return bindInBrowser(d, expires)
+	}
+	c, err := wallet.ParseMessage(*message)
+	if err != nil {
+		return err
+	}
+	if !c.Device.Equal(d.key.Public()) {
+		return fmt.Errorf("the message names device %s; this machine's key is %s", auth.EncodeKey(c.Device), qnet.PublicKey(d.key))
+	}
+	if !c.Server.Equal(d.server) {
+		return fmt.Errorf("the message names server %s; this config's server_key is %s", auth.EncodeKey(c.Server), auth.EncodeKey(d.server))
+	}
+	sig, err := wallet.ParseSignature(strings.TrimSpace(*signature))
+	if err != nil {
+		return err
+	}
+	b, err := wallet.Bind(c, sig)
+	if err != nil {
+		return err
+	}
+	return d.save(b)
 }
 
 // walletMessage prints the one line a wallet app signs: the claim that
 // --wallet lets this machine's key read on this config's server until now
-// plus --days. Paste it into Phantom's sign-message, or run
-// `solana sign-offchain-message '<line>'`, then pass the line and the
-// signature to `mnemonic wallet bind`.
+// plus --days. Run `solana sign-offchain-message '<line>'` (a Ledger through
+// --keypair usb://ledger), then pass the line and the signature to
+// `mnemonic wallet bind`.
 func walletMessage(args []string) error {
 	fs := flag.NewFlagSet("wallet message", flag.ContinueOnError)
 	configPath := fs.String("config", "~/.mnemonic/config.toml", "path to the client config TOML")
 	address := fs.String("wallet", "", "the wallet's base58 address")
-	days := fs.Int("days", defaultBindingDays, "days until the binding expires")
+	days := fs.Int("days", defaultDays, "days until the binding expires")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	_, _, _ = configPath, address, time.Duration(*days)*24*time.Hour
-	panic("not implemented")
+	w, err := wallet.ParseAddress(*address)
+	if err != nil {
+		return fmt.Errorf("--wallet: %w", err)
+	}
+	expires, err := expiry(*days)
+	if err != nil {
+		return err
+	}
+	d, err := loadDevice(*configPath)
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(d.claim(w, expires).Message()))
+	return nil
 }
 
-// walletShow prints the stored binding's wallet and expiry (wallet.Decode),
-// or that this machine has none.
+// walletShow prints the stored binding's wallet and expiry, or that this
+// machine has none.
 func walletShow(args []string) error {
-	panic("not implemented")
+	fs := flag.NewFlagSet("wallet show", flag.ContinueOnError)
+	configPath := fs.String("config", "~/.mnemonic/config.toml", "path to the client config TOML")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	d, err := loadDevice(*configPath)
+	if err != nil {
+		return err
+	}
+	cred, err := qnet.LoadCredential(d.keyFile)
+	if err != nil {
+		return err
+	}
+	if cred.Binding == nil {
+		fmt.Println("this machine has no wallet binding")
+		return nil
+	}
+	c, err := wallet.Decode(cred.Binding, d.key.Public().(ed25519.PublicKey), d.server)
+	if err != nil {
+		return err
+	}
+	state := "until"
+	if !time.Now().Before(c.Expires) {
+		state = "expired"
+	}
+	fmt.Printf("wallet %s bound to this machine, %s %s\n", c.Wallet, state, c.Expires.Local().Format("Jan 2, 2006 3:04 PM MST"))
+	return nil
+}
+
+//go:embed phantom.html
+var phantomPage []byte
+
+// bindInBrowser serves phantomPage on a loopback port under a random path,
+// hands the page the message for the wallet it connects, and takes back the
+// wallet's signature over the raw message. It returns once a signature
+// verifies and the binding is stored.
+func bindInBrowser(d device, expires time.Time) error {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return err
+	}
+	defer ln.Close()
+	token := make([]byte, 16)
+	rand.Read(token)
+	base := "/" + hex.EncodeToString(token) + "/"
+	done := make(chan wallet.Binding, 1)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET "+base, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'")
+		w.Write(phantomPage)
+	})
+	mux.HandleFunc("GET "+base+"message", func(w http.ResponseWriter, r *http.Request) {
+		a, err := wallet.ParseAddress(r.URL.Query().Get("wallet"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write(d.claim(a, expires).Message())
+	})
+	mux.HandleFunc("POST "+base+"bind", func(w http.ResponseWriter, r *http.Request) {
+		var in struct{ Wallet, Signature string }
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&in); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		a, err := wallet.ParseAddress(in.Wallet)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		sig, err := wallet.ParseSignature(in.Signature)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		b, err := wallet.Bind(d.claim(a, expires), sig)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := qnet.SaveBinding(d.keyFile, b.Encode()); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprintf(w, "wallet %s bound to this machine; you can close this tab", a)
+		select {
+		case done <- b:
+		default:
+		}
+	})
+	hs := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	go hs.Serve(ln)
+	defer hs.Close()
+	fmt.Fprintf(os.Stderr, "open http://%s%s in the browser that has Phantom, connect, and approve the message; nothing else is signed\n", ln.Addr(), base)
+	printBound((<-done).Claim())
+	return nil
 }

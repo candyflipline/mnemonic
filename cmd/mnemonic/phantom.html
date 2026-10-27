@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>mnemonic: bind a wallet</title>
+<style>
+body { font: 16px/1.5 system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; }
+pre { white-space: pre-wrap; word-break: break-all; background: #f4f4f4; padding: 1rem; }
+button { font: inherit; padding: .5rem 1rem; }
+</style>
+</head>
+<body>
+<h1>Bind a wallet to this machine</h1>
+<p>Your wallet signs one message that lets this machine read the mnemonic sessions shared with the wallet. No transaction is signed.</p>
+<button id="go">Connect and sign</button>
+<pre id="message" hidden></pre>
+<p id="status"></p>
+<script>
+const status = (t) => { document.getElementById("status").textContent = t; };
+document.getElementById("go").onclick = async () => {
+  const provider = window.phantom?.solana ?? window.solana;
+  if (!provider) { status("No Solana wallet found in this browser. Install Phantom, then reload."); return; }
+  try {
+    const { publicKey } = await provider.connect();
+    const wallet = publicKey.toString();
+    const res = await fetch("message?wallet=" + encodeURIComponent(wallet));
+    if (!res.ok) throw new Error(await res.text());
+    const message = await res.text();
+    const pre = document.getElementById("message");
+    pre.textContent = message;
+    pre.hidden = false;
+    status("Approve this message in your wallet.");
+    const { signature } = await provider.signMessage(new TextEncoder().encode(message), "utf8");
+    const bind = await fetch("bind", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wallet, signature: btoa(String.fromCharCode(...signature)) }) });
+    status(await bind.text());
+  } catch (e) {
+    status("Not bound: " + (e.message ?? e));
+  }
+};
+</script>
+</body>
+</html>

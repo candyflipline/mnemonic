@@ -30,7 +30,7 @@ var commands = map[string]func(args []string) error{
 
 func main() {
 	if len(os.Args) < 2 || commands[os.Args[1]] == nil {
-		fmt.Fprintln(os.Stderr, "usage: mnemonic init|key|mcp|push|serve [flags]")
+		fmt.Fprintln(os.Stderr, "usage: mnemonic init|key|mcp|push|serve|wallet [flags]")
 		os.Exit(2)
 	}
 	if err := commands[os.Args[1]](os.Args[2:]); err != nil {
