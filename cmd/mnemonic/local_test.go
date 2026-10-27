@@ -64,13 +64,6 @@ func TestRefuseClientDir(t *testing.T) {
 // bytes settles nothing (internal/index's settle budget), so the wake path
 // must keep cycling until the sweep has no work left, the way serve does,
 // instead of leaving a due component hot until a restart.
-//
-// Three sessions, one file each: c goes due first and a no-parse cycle
-// settles it cold, so a held shard exists; then b goes due and an append to
-// a lands. That append's cycle parses bytes, so it must leave b hot (its
-// cycle may settle nothing), and the drain that follows must settle b without
-// a further wake. With no held shard the append cycle would settle b itself
-// and the test would say nothing, which is what c's cold shard forecloses.
 func TestWakeCycleDrainsSettles(t *testing.T) {
 	fixture, err := os.ReadFile(filepath.Join("..", "..", "testdata", "fixtures", "claude-code", "session.jsonl"))
 	if err != nil {
@@ -111,6 +104,9 @@ func TestWakeCycleDrainsSettles(t *testing.T) {
 	backdate(files["c"], 20*time.Minute)
 	if _, err := sink.Sync(context.Background(), nil); err != nil {
 		t.Fatalf("settle sync: %v", err)
+	}
+	if ix.LastCycle().ColdParts == 0 {
+		t.Fatal("the settle sync left no cold shard, so the append cycle would settle b itself and the test would pin nothing")
 	}
 	backdate(files["b"], 25*time.Minute)
 	line := bytes.ReplaceAll(
