@@ -147,10 +147,9 @@ func (s *Server) Cycle(context.Context) error { return s.cycle("settle") }
 var bootFirstDelay, bootMaxDelay = 5 * time.Second, 60 * time.Second
 
 const (
-	settleQuiet  = time.Second
-	settleMax    = 3 * time.Second
-	settleEvery  = 5 * time.Minute
-	settleSource = 15 * time.Minute
+	settleQuiet = time.Second
+	settleMax   = 3 * time.Second
+	settleEvery = 5 * time.Minute
 )
 
 func (s *Server) Run(ctx context.Context) {
@@ -225,7 +224,7 @@ func settle(ctx context.Context, wake <-chan struct{}) {
 
 func (s *Server) cycle(reason string) error {
 	start := time.Now()
-	opts := index.IngestOptions{Quiet: settleSource}
+	opts := index.IngestOptions{Quiet: index.SettleSource}
 	var st index.IngestStats
 	var err error
 	if s.lap == nil {

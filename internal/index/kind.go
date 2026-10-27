@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"time"
 
 	"github.com/candyflipline/mnemonic/internal/config"
 	"github.com/candyflipline/mnemonic/internal/layout"
@@ -13,6 +14,8 @@ import (
 	"github.com/candyflipline/mnemonic/internal/wire"
 	"github.com/klauspost/compress/zstd"
 )
+
+const SettleSource = 15 * time.Minute
 
 // Kind is where a source's bytes live.
 type Kind uint8
