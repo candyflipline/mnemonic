@@ -370,11 +370,19 @@ func TestHotPartKeepsSectionAuthors(t *testing.T) {
 		t.Fatal(err)
 	}
 	cur, err := readManifest(store)
-	if err != nil || len(cur.Hot) != 1 {
+	if err != nil {
 		t.Fatalf("hot parts %v, err %v", cur.Hot, err)
 	}
-	if _, ok, _ := readDelta(partDir(store, cur.Hot[0])); !ok {
-		t.Fatal("the append did not take the delta path")
+	// The session component's append takes the delta path; the annotation
+	// source, a component of its own, holds a hot part beside it.
+	deltas := 0
+	for _, id := range cur.Hot {
+		if _, ok, _ := readDelta(partDir(store, id)); ok {
+			deltas++
+		}
+	}
+	if deltas != 1 {
+		t.Fatalf("%d hot parts carry a delta, want 1 (the session component's append)", deltas)
 	}
 
 	put(coldRoot, raw, more)
@@ -393,7 +401,9 @@ func TestHotPartKeepsSectionAuthors(t *testing.T) {
 	}
 	hotAuthors, hotAnn := read(store)
 	coldAuthors, coldAnn := read(coldStore)
-	if want := []string{"alice", "bob", "carol"}; !reflect.DeepEqual(coldAuthors, want) || !reflect.DeepEqual(hotAuthors, want) {
+	// The annotation row is no longer a session author (it feeds only the
+	// annotations section), so carol is out of both lists.
+	if want := []string{"alice", "bob"}; !reflect.DeepEqual(coldAuthors, want) || !reflect.DeepEqual(hotAuthors, want) {
 		t.Fatalf("authors: hot %v, cold %v, want %v", hotAuthors, coldAuthors, want)
 	}
 	if len(hotAnn) != 1 || hotAnn[0].ID != "n1" || hotAnn[0].Author != "carol" || len(coldAnn) != 1 || coldAnn[0].Author != "carol" {

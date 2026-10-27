@@ -80,9 +80,9 @@ An annotation is one append-only line of JSON (`internal/schema/annotations.go`)
 
 ### The annotations section
 
-The engine holds the annotations of its sessions as a part section, built with the part (`internal/index/annotations.go`, `buildAnnotations`). It has one row per `annotation_id`: the same annotation appended on two days, which the store's one-day look-back does not merge, is indexed once, from the first row the build saw, the way the 59796bc cache qualified `row_number` over filename and file row number. The row is the `schema.Annotation`: `id`, target, `name`, the one key of `value`, `source`, `ts` as UTC, and the source's `author` from its path.
+The engine holds annotations as a part section, built with the part (`internal/index/annotations.go`, `buildAnnotations`). An annotation source joins no other source's component (`internal/index/ingest.go`, `componentsOf`): it is a component of its own, so annotating a session builds only the annotation source's own small part and rewrites no part that holds the session's events. A session's annotations may therefore sit in the sections of several parts; a read merges them (`sessionAnnotations`). Within a part the section has one row per `annotation_id`, from the first row the build saw, the way the 59796bc cache qualified `row_number` over filename and file row number; across parts, the same `annotation_id` (the same annotation appended on two days, which the store's one-day look-back does not merge) is kept once, with the earliest `ts`. The row is the `schema.Annotation`: `id`, target, `name`, the one key of `value`, `source`, `ts` as UTC, and the source's `author` from its path.
 
-Annotations never enter `events`, the search index, `sessions` or `turns`: the export paths skip the annotation harness's rows (`internal/index/export.go`, `exportSession`), and the annotation rows feed only the section.
+Annotations never enter `events`, the search index, `sessions`, `turns` or a session's authors: the annotation rows feed only the section (`internal/index/build.go`, `buildIndex`). An annotator is therefore never a session author, so annotating changes neither who may see a session nor whether a `link` session has exactly one author ([mcp](mcp.md)).
 
 ### How an annotation reaches the server
 

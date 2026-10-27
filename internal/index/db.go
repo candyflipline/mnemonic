@@ -21,12 +21,16 @@ type manifestFile struct {
 // DB is every part of one committed manifest. Parts partition sessions, so a
 // session's events, turns and rollups live in exactly one part; only BM25's
 // corpus statistics are summed across parts. A part is shared by every DB
-// that names it and closes with the last of them.
+// that names it and closes with the last of them. Only the annotations
+// section crosses parts: a part may hold annotation entries for a session
+// whose rows live in another part, so annPart indexes, per target session,
+// every part whose annotations section holds it.
 type DB struct {
 	parts      []*Part
 	ids        []string
 	fc         *frameCache
 	sessPart   map[string]int
+	annPart    map[string][]int
 	scoredDocs uint64
 	totalLen   uint64
 	sources    []stSource
@@ -129,7 +133,7 @@ func OpenParts(parts []*Part) (*DB, error) {
 // newDB holds each of parts once more. A part another DB already holds keeps
 // its frame cache, which is fc: the DB it came from handed fc on.
 func newDB(parts []*Part, fc *frameCache) *DB {
-	db := &DB{parts: parts, fc: fc, sessPart: map[string]int{}}
+	db := &DB{parts: parts, fc: fc, sessPart: map[string]int{}, annPart: map[string][]int{}}
 	for i, st := range parts {
 		if st.refs.Add(1) == 1 {
 			st.fc = fc
@@ -138,6 +142,9 @@ func newDB(parts []*Part, fc *frameCache) *DB {
 		db.totalLen += st.meta.TotalLen
 		for s := 0; s < st.nSessions; s++ {
 			db.sessPart[st.session(s).id] = i
+		}
+		for sid := range st.annAt.of(st.annB) {
+			db.annPart[sid] = append(db.annPart[sid], i)
 		}
 	}
 	return db
