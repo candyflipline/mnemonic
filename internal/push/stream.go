@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -18,6 +19,7 @@ import (
 	"google.golang.org/grpc/metadata"
 
 	"github.com/candyflipline/mnemonic/internal/config"
+	"github.com/candyflipline/mnemonic/internal/qnet"
 	"github.com/candyflipline/mnemonic/internal/wire"
 	"github.com/candyflipline/mnemonic/internal/wire/pushpb"
 )
@@ -86,6 +88,9 @@ func target(server, pushAddress string) (string, credentials.TransportCredential
 	case "https":
 		addr = net.JoinHostPort(u.Hostname(), wire.PushPort)
 		creds = credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12})
+	case "quic":
+		addr = u.Host
+		creds = insecure.NewCredentials()
 	case "http":
 		port := u.Port()
 		if port == "" {
@@ -110,10 +115,20 @@ func dial(ctx context.Context, cfg config.Client) (*uplink, error) {
 	if err != nil {
 		return nil, err
 	}
-	conn, err := grpc.NewClient(tgt,
+	opts := []grpc.DialOption{
 		grpc.WithTransportCredentials(creds),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: pingEvery, Timeout: pingTimeout}),
-	)
+	}
+	if strings.HasPrefix(cfg.Server, "quic://") {
+		priv, err := qnet.LoadOrCreateKey(cfg.KeyFile)
+		if err != nil {
+			return nil, err
+		}
+		opts = append(opts, grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+			return qnet.Dial(ctx, addr, priv, cfg.ServerKey, qnet.ALPNPush)
+		}))
+	}
+	conn, err := grpc.NewClient(tgt, opts...)
 	if err != nil {
 		return nil, err
 	}

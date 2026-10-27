@@ -42,6 +42,9 @@ func LoadServer(path string) (Server, error) {
 	if err := cfg.TLS.check(cfg.Listen, cfg.PushListen); err != nil {
 		return Server{}, fmt.Errorf("%s: %w", path, err)
 	}
+	if cfg.QUIC.Listen != "" && cfg.QUIC.KeyFile == "" {
+		return Server{}, fmt.Errorf("%s: quic.listen needs quic.key_file", path)
+	}
 	if len(cfg.Tokens) == 0 {
 		return Server{}, fmt.Errorf("%s: at least one [[tokens]] entry is required", path)
 	}

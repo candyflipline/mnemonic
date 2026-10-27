@@ -19,6 +19,8 @@ type Client struct {
 	PushAddress string          `toml:"push_address"`
 	Token       string          `toml:"token"`
 	TokenFile   string          `toml:"token_file"`
+	ServerKey   string          `toml:"server_key"` // quic://host:port pins this ed25519 key
+	KeyFile     string          `toml:"key_file"`   // this client's ed25519 seed, default ~/.mnemonic/key
 	Machine     string          `toml:"machine"`
 	Sources     []SourceGlob    `toml:"sources"`
 	Redaction   ClientRedaction `toml:"redaction"`
@@ -71,6 +73,7 @@ type Server struct {
 	Listen     string       `toml:"listen"`
 	PushListen string       `toml:"push_listen"`
 	TLS        TLS          `toml:"tls"`
+	QUIC       QUIC         `toml:"quic"`
 	Tokens     []TokenEntry `toml:"tokens"`
 	OTLP       OTLP         `toml:"otlp"`
 }
@@ -80,6 +83,13 @@ type Server struct {
 type TLS struct {
 	Hosts         []string `toml:"hosts"`
 	ACMEDirectory string   `toml:"acme_directory"`
+}
+
+// QUIC serves push and MCP on one UDP port; a [[tokens]] sha256 of
+// auth.Hash(client public key) lets that key in as its author.
+type QUIC struct {
+	Listen  string `toml:"listen"`
+	KeyFile string `toml:"key_file"`
 }
 
 type OTLP struct {

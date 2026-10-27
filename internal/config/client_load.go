@@ -40,7 +40,17 @@ func LoadClient(path string) (Client, error) {
 		}
 		cfg.Token = strings.TrimSpace(string(raw))
 	}
-	if cfg.Token == "" {
+	quic := strings.HasPrefix(cfg.Server, "quic://")
+	if quic && cfg.ServerKey == "" {
+		return Client{}, fmt.Errorf("config: %s: a quic:// server needs server_key", path)
+	}
+	if cfg.KeyFile == "" {
+		cfg.KeyFile = "~/.mnemonic/key"
+	}
+	if cfg.KeyFile, err = ExpandHome(cfg.KeyFile); err != nil {
+		return Client{}, err
+	}
+	if cfg.Token == "" && !quic {
 		return Client{}, fmt.Errorf("config: %s: token or token_file is required", path)
 	}
 	if cfg.Machine == "" {

@@ -25,6 +25,8 @@ var commands = map[string]func(args []string) error{
 	"push":  push,
 	"token": token,
 	"init":  initCmd,
+	"mcp":   mcpCmd,
+	"key":   keyCmd,
 }
 
 func main() {

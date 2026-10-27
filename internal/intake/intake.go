@@ -17,9 +17,11 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
 	"github.com/candyflipline/mnemonic/internal/auth"
+	"github.com/candyflipline/mnemonic/internal/qnet"
 	"github.com/candyflipline/mnemonic/internal/store"
 	"github.com/candyflipline/mnemonic/internal/wire"
 	"github.com/candyflipline/mnemonic/internal/wire/pushpb"
@@ -71,6 +73,11 @@ func Mount(st *store.Committer, tokens auth.Tokens) (*grpc.Server, func()) {
 			authorization := ""
 			if values := md.Get("authorization"); len(values) > 0 {
 				authorization = values[0]
+			}
+			if p, ok := peer.FromContext(stream.Context()); ok {
+				if a, ok := p.Addr.(qnet.KeyAddr); ok {
+					authorization = "Bearer " + a.Key
+				}
 			}
 			ctx, err := tokens.Check(stream.Context(), authorization, auth.Push)
 			if err != nil {

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/candyflipline/mnemonic/internal/config"
+	"github.com/candyflipline/mnemonic/internal/qnet"
 	"github.com/candyflipline/mnemonic/internal/server"
 )
 
@@ -62,12 +63,34 @@ func serve(args []string) error {
 	}()
 
 	hs := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
-	ended := make(chan error, 2)
+	ended := make(chan error, 4)
 	go func() { ended <- hs.Serve(httpListener) }()
+	var qs *qnet.Server
+	qhs := &http.Server{Handler: qnet.AsBearer(srv.Handler()), ReadHeaderTimeout: 10 * time.Second}
+	if cfg.QUIC.Listen != "" {
+		priv, err := qnet.LoadOrCreateKey(cfg.QUIC.KeyFile)
+		if err != nil {
+			return err
+		}
+		tokens := cfg.Identities()
+		qs, err = qnet.Listen(cfg.QUIC.Listen, priv, func(key string) bool {
+			_, ok := tokens.Context(context.Background(), key)
+			return ok
+		})
+		if err != nil {
+			return fmt.Errorf("quic listen %s: %w", cfg.QUIC.Listen, err)
+		}
+		defer qs.Close()
+		log.Printf("mnemonic serve: QUIC %s, server key %s", cfg.QUIC.Listen, qnet.PublicKey(priv))
+		go func() { ended <- qhs.Serve(qs.MCP) }()
+	}
 	go func() {
 		select {
 		case <-srv.Booted():
 			log.Printf("mnemonic serve: push serving (index booted)")
+			if qs != nil {
+				go func() { ended <- srv.ServePush(qs.Push) }()
+			}
 			ended <- srv.ServePush(pushListener)
 		case <-ctx.Done():
 		}
@@ -80,6 +103,9 @@ func serve(args []string) error {
 	}
 	stop()
 	pushListener.Close()
+	if qs != nil {
+		qs.Push.Close()
+	}
 	drainCtx, cancelDrain := context.WithTimeout(context.Background(), pushDrainDeadline)
 	srv.Drain(drainCtx)
 	cancelDrain()
@@ -88,6 +114,7 @@ func serve(args []string) error {
 		log.Printf("shutdown: %v", err)
 		hs.Close()
 	}
+	qhs.Shutdown(httpCtx)
 	cancelHTTP()
 	<-looped
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
