@@ -171,9 +171,17 @@ func isHex(s string, n int) bool {
 
 type sessionControl struct {
 	visibility visibility
-	ts         time.Time
-	key        string
-	deleted    bool
+	lww
+	deleted bool
+}
+
+type lww struct {
+	ts  time.Time
+	key string
+}
+
+func (l lww) losesTo(r controlRecord) bool {
+	return r.TS.After(l.ts) || (r.TS.Equal(l.ts) && r.RequestKey > l.key)
 }
 
 // Controls is every control record in raw, the copy reads consult: a record
@@ -200,8 +208,8 @@ func (c *Controls) apply(r controlRecord) {
 	case actDelete:
 		s.deleted = true
 	case actVisibility:
-		if r.TS.After(s.ts) || (r.TS.Equal(s.ts) && r.RequestKey > s.key) {
-			s.visibility, s.ts, s.key = r.Visibility, r.TS, r.RequestKey
+		if s.losesTo(r) {
+			s.visibility, s.lww = r.Visibility, lww{r.TS, r.RequestKey}
 		}
 	}
 	c.sessions[r.SessionID] = s

@@ -1,7 +1,9 @@
 package index
 
 import (
+	"bytes"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"slices"
 	"sort"
@@ -19,13 +21,12 @@ type turnRec struct {
 	terminal            int64
 }
 
-// partAcc accumulates the files of one part from its docs, fed one doc at a
-// time in the part's order: session by session, each session's docs in event
-// order. The four files that grow by a record per doc (hot, hot.off, docs and
-// the file-attention blob) go to their writers as the docs arrive; everything
-// else is held until finish writes it.
+// partAcc accumulates the files of one part from its docs, fed through one
+// sessionFeed per session, each session's docs in event order. The four files
+// that grow by a record per doc go to their writers as the docs arrive;
+// everything else is held until finish writes it.
 type partAcc struct {
-	hot, hotOffW, docs, blob io.Writer
+	hot, hotOffW, docs, blob flushWriter
 
 	harnesses, sourceNames dict
 	sessionIDs             []string
@@ -43,52 +44,83 @@ type partAcc struct {
 	hotLen                 int
 	hotBuf, offBuf         []byte
 	rec                    [docWidth]byte
+	open                   *sessionFeed
+}
 
+type flushWriter interface {
+	io.Writer
+	Flush() error
+}
+
+type memFile struct {
+	bytes.Buffer
+	name  string
+	write func(name string, b []byte) error
+}
+
+func (m *memFile) Flush() error { return m.write(m.name, m.Bytes()) }
+
+type sessionFeed struct {
+	p       *partAcc
+	si      int
 	users   uint32
 	perTurn map[uint32]*turnRec
 }
 
-func newPartAcc(docs int, hot, hotOff, docRecs, blob io.Writer) *partAcc {
+func newPartAcc(docs int, hot, hotOff, docRecs, blob flushWriter) *partAcc {
 	return &partAcc{hot: hot, hotOffW: hotOff, docs: docRecs, blob: blob, pairs: make([][2]uint64, 0, docs),
 		postings: map[string][]uint64{}, tfs: map[string]uint32{}, tri: newTriBuilder()}
 }
 
-// beginSession opens the next session; the previous one must be ended.
-func (p *partAcc) beginSession(sid string) {
+func (p *partAcc) session(sid string) *sessionFeed {
+	p.endOpen()
 	p.sessionIDs = append(p.sessionIDs, sid)
 	p.sessions = append(p.sessions, sessRec{start: uint32(p.nDocs)})
-	p.users = 0
-	p.perTurn = map[uint32]*turnRec{}
+	p.open = &sessionFeed{p: p, si: len(p.sessions) - 1, perTurn: map[uint32]*turnRec{}}
+	return p.open
 }
 
-func (p *partAcc) endSession() {
-	p.sessions[len(p.sessions)-1].end = uint32(p.nDocs)
-	seqs := make([]uint32, 0, len(p.perTurn))
-	for q := range p.perTurn {
+func (p *partAcc) endOpen() {
+	f := p.open
+	if f == nil {
+		return
+	}
+	p.open = nil
+	p.sessions[f.si].end = uint32(p.nDocs)
+	seqs := make([]uint32, 0, len(f.perTurn))
+	for q := range f.perTurn {
 		seqs = append(seqs, q)
 	}
 	slices.Sort(seqs)
 	for _, q := range seqs {
-		p.turns = append(p.turns, *p.perTurn[q])
+		p.turns = append(p.turns, *f.perTurn[q])
 	}
-	p.perTurn = nil
 }
 
-func (p *partAcc) add(r *Row, src uint16, lf int64, li int) (uint32, error) {
+func (p *partAcc) sealDocs() error {
+	p.endOpen()
+	return p.docs.Flush()
+}
+
+func (f *sessionFeed) add(r *Row, src uint16, lf int64, li int) (uint32, error) {
+	p := f.p
+	if p.open != f {
+		return 0, fmt.Errorf("index: doc added to session %d after it ended", f.si)
+	}
 	d := p.nDocs
-	si := len(p.sessions) - 1
+	si := f.si
 	s := &p.sessions[si]
 	if r.ActorKind == "user" && r.EventKind == "message" {
-		p.users++
+		f.users++
 	}
 	seq := uint32(r.TurnIndex)
 	if seq == 0 {
-		seq = max(1, p.users)
+		seq = max(1, f.users)
 	}
-	t := p.perTurn[seq]
+	t := f.perTurn[seq]
 	if t == nil {
 		t = &turnRec{session: uint32(si), seq: seq, terminal: -1}
-		p.perTurn[seq] = t
+		f.perTurn[seq] = t
 	}
 	t.count++
 	if r.PayloadType == "task_complete" {
@@ -160,9 +192,15 @@ func (p *partAcc) add(r *Row, src uint16, lf int64, li int) (uint32, error) {
 }
 
 func (p *partAcc) finish(write func(name string, b []byte) error) (indexMeta, error) {
+	p.endOpen()
 	p.faOffs = append(p.faOffs, uint32(p.blobLen))
 	if _, err := p.hotOffW.Write(binary.LittleEndian.AppendUint64(nil, uint64(p.hotLen))); err != nil {
 		return indexMeta{}, err
+	}
+	for _, w := range []flushWriter{p.hot, p.hotOffW, p.docs, p.blob} {
+		if err := w.Flush(); err != nil {
+			return indexMeta{}, err
+		}
 	}
 
 	var sb []byte

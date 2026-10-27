@@ -10,7 +10,7 @@ func TestDeltaImageHotReadsItsLastDoc(t *testing.T) {
 	files := map[string][]byte{}
 	write := func(name string, b []byte) error { files[name] = b; return nil }
 	place := func(b built) (*Row, int64, int, error) { return b.row, 0, 0, nil }
-	meta, _, err := indexRows(map[string][]built{"s1": {{row: row}}}, place, func(built) string { return "" }, write)
+	meta, _, err := indexRows(map[string][]built{"s1": {{row: row}}}, nil, place, func(built) string { return "" }, write)
 	if err != nil {
 		t.Fatal(err)
 	}

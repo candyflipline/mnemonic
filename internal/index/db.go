@@ -4,7 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 )
@@ -33,9 +35,16 @@ type DB struct {
 	sources    []stSource
 }
 
+type noCurrentError struct{ error }
+
+func (e noCurrentError) Unwrap() error { return e.error }
+
 func readManifest(store string) (manifestFile, error) {
 	var m manifestFile
 	b, err := os.ReadFile(filepath.Join(store, "CURRENT"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return m, noCurrentError{err}
+	}
 	if err != nil {
 		return m, err
 	}
@@ -44,11 +53,17 @@ func readManifest(store string) (manifestFile, error) {
 
 func partDir(store, id string) string { return filepath.Join(store, "parts", id) }
 
+func reusable(p *Part, dir string) bool {
+	if p == nil {
+		return false
+	}
+	at, err := dirStampOf(dir)
+	return err == nil && at == p.at
+}
+
 // PartOpenError is a CURRENT naming a part that no longer opens: the writer's
 // GC removed the part after publishing a newer CURRENT, or the store is
-// damaged. It is deliberately not fs.ErrNotExist — a missing CURRENT is
-// "nothing published yet", this is a stale or broken CURRENT — and Open and
-// Refresh re-read CURRENT and retry before surfacing it.
+// damaged. Open and Refresh re-read CURRENT and retry before surfacing it.
 type PartOpenError struct {
 	Part string
 	Err  error
@@ -60,15 +75,17 @@ func (e *PartOpenError) Error() string {
 
 func OpenDB(store string) (*DB, error) { return openDB(store, nil, nil) }
 
-// openDB opens the parts CURRENT names, taking from prev each one it opened
-// from the same dir. A committed part dir is never written again, and the
-// delta logs a delta part reads are truncated only to the length the delta
-// in CURRENT names, so a part taken from prev reads what a fresh open would, and a hot delta is indexed once, not once per Refresh.
-// The caller keeps prev pinned until openDB returns. opened is parts the
-// caller opened, by id, and hands over: each one CURRENT names joins the DB
-// when its stamp matches the dir's, and every other one closes.
-func openDB(store string, prev *DB, opened map[string]*Part) (*DB, error) {
+// openDB opens the parts CURRENT names, taking each one whose dir stamp still
+// matches from the DB pin returns, held until openDB returns, or from opened:
+// parts the caller opened, by id, and hands over; every other one closes.
+func openDB(store string, pin func() (*DB, func()), opened map[string]*Part) (*DB, error) {
 	defer func() { closeParts(opened) }()
+	var prev *DB
+	if pin != nil {
+		var release func()
+		prev, release = pin()
+		defer release()
+	}
 	m, err := readManifest(store)
 	if err != nil {
 		return nil, err
@@ -86,17 +103,13 @@ func openDB(store string, prev *DB, opened map[string]*Part) (*DB, error) {
 	errs := make([]error, len(m.Parts))
 	eachIndex(len(m.Parts), func(i int) {
 		dir := partDir(store, m.Parts[i])
-		if p := had[m.Parts[i]]; p != nil {
-			if at, err := dirStampOf(dir); err == nil && at == p.at {
-				parts[i], taken[i] = p, true
-				return
-			}
+		if p := had[m.Parts[i]]; reusable(p, dir) {
+			parts[i], taken[i] = p, true
+			return
 		}
-		if p := opened[m.Parts[i]]; p != nil {
-			if at, err := dirStampOf(dir); err == nil && at == p.at {
-				parts[i] = p
-				return
-			}
+		if p := opened[m.Parts[i]]; reusable(p, dir) {
+			parts[i] = p
+			return
 		}
 		parts[i], errs[i] = OpenPartDir(dir)
 	})

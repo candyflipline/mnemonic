@@ -75,9 +75,6 @@ func newKeyPass(members []member, rows int) *keyPass {
 		seen: map[authKey]bool{}, last: authKey{session: ^uint32(0)}}
 }
 
-// offer folds one light record of member src, by the winner rule offerRow
-// holds: within a member the higher version wins, last on a tie; across
-// members memberBeats.
 func (p *keyPass) offer(src uint16, author string, rec []byte, loc rowLoc) error {
 	f, err := p.pos.scan(rec)
 	if err != nil {
@@ -98,7 +95,7 @@ func (p *keyPass) offer(src uint16, author string, rec []byte, loc rowLoc) error
 	if at, ok := p.win[string(f.uid)]; ok {
 		w := &p.keys[at]
 		if w.src == src {
-			if k.version < w.version {
+			if k.version < w.version || k.version == w.version && !k.loc.after(w.loc) {
 				return nil
 			}
 		} else if !memberBeats(k.version, p.members[src], w.version, p.members[w.src]) {
@@ -133,20 +130,26 @@ func (p *keyPass) authorsBySession(cks []ckpt) map[string][]string {
 type docLoc struct {
 	lf      int64
 	session uint32
-	li      uint16 // the record's index in its frame, holderBit set for a holder part's frame
+	li      frameIdx
 	src     uint16
 }
 
-const holderBit = 1 << 15
+type frameIdx uint16
 
-func (d docLoc) rowLoc() rowLoc {
-	return rowLoc{lf: d.lf, li: d.li &^ holderBit, holder: d.li&holderBit != 0}
+const holderBit frameIdx = 1 << 15
+
+func frameIdxOf(l rowLoc) frameIdx {
+	if l.holder {
+		return frameIdx(l.li) | holderBit
+	}
+	return frameIdx(l.li)
 }
 
-// sorted returns the winners in the part's order, session by session (the
-// session ids' byte order), each session's rows by orderLess, and frees the
-// keys and the uid map.
-func (p *keyPass) sorted() []docLoc {
+func (d docLoc) rowLoc() rowLoc {
+	return rowLoc{lf: d.lf, li: uint16(d.li &^ holderBit), holder: d.li&holderBit != 0}
+}
+
+func (p *keyPass) takeWinners() []docLoc {
 	p.win = nil
 	sess, files := p.sessions.ranks(), p.files.ranks()
 	keys := p.keys
@@ -155,10 +158,7 @@ func (p *keyPass) sorted() []docLoc {
 	locs := make([]docLoc, len(keys))
 	for i := range keys {
 		k := &keys[i]
-		locs[i] = docLoc{lf: k.loc.lf, session: k.session, li: k.loc.li, src: k.src}
-		if k.loc.holder {
-			locs[i].li |= holderBit
-		}
+		locs[i] = docLoc{lf: k.loc.lf, session: k.session, li: frameIdxOf(k.loc), src: k.src}
 	}
 	return locs
 }
@@ -421,13 +421,12 @@ func (v *partView) load(d int, r *Row) (uint32, bool) {
 	}
 	if err == nil {
 		*r = Row{}
-		_, err = r.decode(recs[li])
+		err = v.cks[src].decodeRow(r, recs[li])
 	}
 	if err != nil {
 		v.err = err
 		return 0, false
 	}
-	r.Author = v.cks[src].Author
 	return seq, true
 }
 
@@ -459,4 +458,4 @@ func (v *partView) rows() iter.Seq[*Row] {
 	}
 }
 
-func (v *partView) payload(r *Row) string { return v.heavy.payload(built{row: r}) }
+func (v *partView) payload(r *Row) string { return v.heavy.partPayload(r) }
