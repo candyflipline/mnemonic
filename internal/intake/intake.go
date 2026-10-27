@@ -295,10 +295,14 @@ func recvHello(stream grpc.BidiStreamingServer[pushpb.ClientMsg, pushpb.ServerMs
 }
 
 func (s *service) receive(sess *session, stream grpc.BidiStreamingServer[pushpb.ClientMsg, pushpb.ServerMsg], author, machine string, tickets chan<- pending) error {
+	id, _ := auth.From(stream.Context())
 	for seq := uint64(1); ; seq++ {
 		m, err := stream.Recv()
 		if err != nil {
 			return err
+		}
+		if !id.Admitted() {
+			return status.Error(codes.Unauthenticated, "this machine's invite was revoked")
 		}
 		a := m.GetAppend()
 		if a == nil {

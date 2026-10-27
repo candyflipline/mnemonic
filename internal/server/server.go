@@ -79,9 +79,12 @@ func New(dataDir string) (*Server, error) {
 	return &Server{dataDir: dataDir, ctl: ctl, ix: ix, lock: lock, st: st, push: push, drain: drain, booted: make(chan struct{}), boot: boot, handler: mux, otlp: rcv}, nil
 }
 
-// Identify is the handshake's one admission rule: a key in keys, the
-// configured [[keys]] table, is its Identity; every other key is refused.
+// Identify is the handshake's one admission rule: a key keys configures is
+// its Identity, else a key a live invite admitted is that member; every
+// other key is refused. Members are read from the controls at each call, so
+// a join counts at the next handshake and a revoke refuses it.
 func (s *Server) Identify(keys auth.Keys) func(device ed25519.PublicKey) (auth.Identity, bool) {
+	keys = keys.WithMembers(s.ctl.Members)
 	return func(device ed25519.PublicKey) (auth.Identity, bool) {
 		return keys.Identify(auth.EncodeKey(device))
 	}

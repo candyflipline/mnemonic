@@ -186,7 +186,8 @@ func NewContext(ctx context.Context, id Identity) context.Context {
 	return context.WithValue(ctx, ctxKey{}, id)
 }
 
-// Require rejects a request whose ctx carries no Identity (401) or whose
+// Require rejects a request whose ctx carries no Identity, or a member's
+// whose invite was revoked since its connection opened (401), or whose
 // Identity lacks one of need (403).
 func Require(need ...Scope) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
@@ -194,6 +195,10 @@ func Require(need ...Scope) func(http.Handler) http.Handler {
 			id, ok := From(r.Context())
 			if !ok {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			if !id.Admitted() {
+				http.Error(w, "unauthorized: this machine's invite was revoked", http.StatusUnauthorized)
 				return
 			}
 			for _, s := range need {
