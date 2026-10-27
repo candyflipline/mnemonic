@@ -82,7 +82,7 @@ func lsAggregate(rows iter.Seq2[*Row, uint32], payload func(*Row) string) lsRec 
 			(r.PayloadType == "tool_use" && (r.ToolName == "WebSearch" || r.ToolName == "WebFetch")) {
 			web = true
 		}
-		if r.SourceName == "codex-mcp" || sqlInternalTool(r.ToolName) {
+		if r.SourceName == "codex-mcp" || internalToolSpaceTrimmed(r.ToolName) {
 			mcp = true
 		}
 		if r.EventKind == "tool_call" || r.EventKind == "tool_result" || r.PayloadType == "tool_use" {

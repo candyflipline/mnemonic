@@ -30,22 +30,14 @@ func searchFlags(r *Row) int {
 			f |= 1 << i
 		}
 	}
-	if r.SourceName != "codex-mcp" && !sqlInternalTool(r.ToolName) {
+	if r.SourceName != "codex-mcp" && !internalToolSpaceTrimmed(r.ToolName) {
 		f |= flagSearchable
 	}
 	return f
 }
 
-// sqlInternalTool is mcpInternalToolPredicate: the 59796bc oracle's trim
-// strips spaces only.
-func sqlInternalTool(name string) bool {
-	n := strings.ToLower(strings.Trim(name, " "))
-	if slices.Contains(mcpInternalToolNames, n) {
-		return true
-	}
-	parts := strings.Split(n, "__")
-	return len(parts) == 3 && parts[0] == "mcp" && (parts[1] == legacyMcpServerName || parts[1] == mcpServerName) &&
-		slices.Contains(mcpInternalToolNames, parts[2])
+func internalToolSpaceTrimmed(name string) bool {
+	return isMcpInternalToolKey(strings.ToLower(strings.Trim(name, " ")))
 }
 
 func textHash(s string) uint64 {

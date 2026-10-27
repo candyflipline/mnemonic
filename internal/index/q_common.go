@@ -370,7 +370,6 @@ func isMcpCompactionEvent(class, payloadType string) bool {
 	return false
 }
 
-// eventTypeFor: the classification order is the observable contract.
 func eventTypeFor(class, payloadType, actor string) string {
 	systemActor := strings.EqualFold(actor, "system")
 	switch {
@@ -395,74 +394,6 @@ func eventTypeFor(class, payloadType, actor string) string {
 	}
 }
 
-func mcpMessageEventClause(class, payload string) string {
-	return "(" + class + " = 'message' OR (" + class + " = 'event_msg' AND " + payload + " IN ('user_message', 'agent_message', 'message', 'text', 'event_msg')))"
-}
-
-func mcpReasoningEventClause(class, payload string) string {
-	return "(" + class + " = 'reasoning' OR " + payload + " IN ('agent_reasoning', 'reasoning', 'thinking'))"
-}
-
-func mcpToolCallEventClause(class, payload string) string {
-	return "(" + class + " = 'tool_call' OR " + payload + " IN ('tool_use', 'function_call', 'custom_tool_call', 'web_search_call'))"
-}
-
-func mcpToolResponseEventClause(class, payload string) string {
-	return "(" + class + " = 'tool_result' OR " + payload + " IN ('tool_result', 'function_call_output', 'custom_tool_call_output', 'search_results_received'))"
-}
-
-func mcpCompactionEventClause(class, payload string) string {
-	return "(" + class + " IN ('compacted_raw', 'summary') OR " + payload + " IN ('compacted', 'summary'))"
-}
-
-func mcpRuntimeEventClause(class, payload string) string {
-	return "(" + class + " = 'queue_operation' OR " + payload + " IN ('task_started', 'task_complete', 'turn_aborted', 'item_completed', 'queue-operation'))"
-}
-
-func mcpSystemEventClause(class, payload, actor string) string {
-	return "(lower(" + actor + ") = 'system' OR " + class + " IN ('system', 'progress', 'file_history_snapshot') OR " + payload + " IN ('system', 'progress', 'file-history-snapshot', 'file_history_snapshot'))"
-}
-
-func singleMcpEventTypeClause(class, payload, actor, eventType string) string {
-	nonSystemActor := "lower(" + actor + ") != 'system'"
-	switch eventType {
-	case "user_input":
-		return "(lower(" + actor + ") = 'user' AND " + mcpMessageEventClause(class, payload) + ")"
-	case "assistant_response":
-		return "(lower(" + actor + ") = 'assistant' AND " + mcpMessageEventClause(class, payload) + ")"
-	case "reasoning":
-		return "(" + nonSystemActor + " AND " + mcpReasoningEventClause(class, payload) + ")"
-	case "tool_call":
-		return "(" + nonSystemActor + " AND " + mcpToolCallEventClause(class, payload) + ")"
-	case "tool_response":
-		return "(" + nonSystemActor + " AND " + mcpToolResponseEventClause(class, payload) + ")"
-	case "compaction":
-		return mcpCompactionEventClause(class, payload)
-	case "system":
-		return mcpSystemEventClause(class, payload, actor)
-	case "runtime":
-		return mcpRuntimeEventClause(class, payload)
-	default:
-		known := make([]string, 0, 8)
-		for _, t := range searchableEventTypes {
-			known = append(known, singleMcpEventTypeClause(class, payload, actor, t))
-		}
-		return "NOT (" + strings.Join(known, " OR ") + ")"
-	}
-}
-
-func mcpEventTypeFilterClause(eventsAlias string, eventTypes []string) string {
-	class, payload, actor := eventsAlias+".event_kind", eventsAlias+".payload_type", eventsAlias+".actor_kind"
-	clauses := make([]string, 0, len(eventTypes))
-	for _, t := range eventTypes {
-		clauses = append(clauses, singleMcpEventTypeClause(class, payload, actor, t))
-	}
-	if len(clauses) == 1 {
-		return clauses[0]
-	}
-	return "(" + strings.Join(clauses, " OR ") + ")"
-}
-
 var mcpInternalToolNames = []string{"search", "search_sessions", "open", "list_sessions", "file_attention"}
 
 const (
@@ -471,7 +402,10 @@ const (
 )
 
 func isMcpInternalToolName(name string) bool {
-	n := strings.ToLower(strings.TrimSpace(name))
+	return isMcpInternalToolKey(strings.ToLower(strings.TrimSpace(name)))
+}
+
+func isMcpInternalToolKey(n string) bool {
 	if slices.Contains(mcpInternalToolNames, n) {
 		return true
 	}
@@ -479,19 +413,6 @@ func isMcpInternalToolName(name string) bool {
 	return len(parts) == 3 && parts[0] == "mcp" &&
 		(parts[1] == legacyMcpServerName || parts[1] == mcpServerName) &&
 		slices.Contains(mcpInternalToolNames, parts[2])
-}
-
-func mcpInternalToolPredicate(column string) string {
-	quoted := make([]string, len(mcpInternalToolNames))
-	for i, n := range mcpInternalToolNames {
-		quoted[i] = sqlQuote(n)
-	}
-	names := strings.Join(quoted, ", ")
-	norm := "lower(trim(" + column + "))"
-	parts := "str_split(" + norm + ", '__')"
-	return "(" + norm + " IN (" + names + ") OR (len(" + parts + ") = 3 AND " +
-		"list_extract(" + parts + ", 1) = 'mcp' AND list_extract(" + parts + ", 2) IN (" + sqlQuote(legacyMcpServerName) + ", " + sqlQuote(mcpServerName) + ") AND " +
-		"list_extract(" + parts + ", 3) IN (" + names + ")))"
 }
 
 func jsonAsString(v any) string {
