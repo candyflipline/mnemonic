@@ -85,12 +85,17 @@ Codex, in ~/.codex/config.toml:
 	return nil
 }
 
-// inviteURL is raw as the URL a join posts to: an http(s) URL whose path is
-// /i/<token>, with any .md suffix dropped.
+// inviteURL is raw as the URL a join posts to: an https URL (http only for a
+// loopback host) whose path is /i/<token>, with any .md suffix dropped. The
+// answer carries the server key this machine will trust, so plaintext would
+// let anyone on the path substitute their own.
 func inviteURL(raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
 		return "", fmt.Errorf("%q is not an invite URL (https://host/i/<token>)", raw)
+	}
+	if u.Scheme == "http" && !config.IsLoopbackHost(u.Hostname()) {
+		return "", fmt.Errorf("%q is plaintext http, and the answer carries the key this machine will trust; use the https:// invite URL", raw)
 	}
 	token, ok := strings.CutPrefix(strings.TrimSuffix(u.Path, ".md"), "/i/")
 	if !ok || token == "" || strings.Contains(token, "/") {

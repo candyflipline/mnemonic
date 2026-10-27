@@ -95,7 +95,10 @@ func (s *Share) check() error {
 	}
 	u, err := url.Parse(s.BaseURL)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
-		return fmt.Errorf("base_url %q must be an http(s) origin such as https://share.example.com", s.BaseURL)
+		return fmt.Errorf("base_url %q must be an https origin such as https://share.example.com", s.BaseURL)
+	}
+	if u.Scheme == "http" && !IsLoopbackHost(u.Hostname()) {
+		return fmt.Errorf("base_url %q is plaintext http, allowed only for a loopback host; use https", s.BaseURL)
 	}
 	host, port, err = net.SplitHostPort(s.QUICAddr)
 	n, portErr = strconv.Atoi(port)
@@ -103,6 +106,16 @@ func (s *Share) check() error {
 		return fmt.Errorf("quic_addr %q must be the host:port joining machines dial", s.QUICAddr)
 	}
 	return nil
+}
+
+// IsLoopbackHost is whether host (no port) names this machine: localhost or a
+// loopback address. It is the one place plaintext http is allowed.
+func IsLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func removedKey(k toml.Key) string {
