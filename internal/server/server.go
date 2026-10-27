@@ -21,7 +21,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/mcp"
 	"github.com/candyflipline/mnemonic/internal/otlp"
 	"github.com/candyflipline/mnemonic/internal/store"
-	"github.com/candyflipline/mnemonic/internal/wallet"
 )
 
 type Server struct {
@@ -80,26 +79,11 @@ func New(dataDir string) (*Server, error) {
 	return &Server{dataDir: dataDir, ctl: ctl, ix: ix, lock: lock, st: st, push: push, drain: drain, booted: make(chan struct{}), boot: boot, handler: mux, otlp: rcv}, nil
 }
 
-// Identify is the handshake's one admission rule over keys, the configured
-// [[keys]] table, and serverKey, this server's public key: a configured key
-// is its Identity, whatever binding it carries; otherwise a binding that
-// wallet.Verify accepts for this device and serverKey now, whose wallet the
-// session controls admit (one share or more), is auth.WalletReader of that
-// wallet; everything else is refused. Shares are read from the controls at
-// each call, never copied.
-func (s *Server) Identify(keys auth.Keys, serverKey ed25519.PublicKey) func(device ed25519.PublicKey, binding []byte) (auth.Identity, bool) {
-	return func(device ed25519.PublicKey, binding []byte) (auth.Identity, bool) {
-		if id, ok := keys.Identify(auth.EncodeKey(device)); ok {
-			return id, true
-		}
-		if binding == nil {
-			return auth.Identity{}, false
-		}
-		b, err := wallet.Verify(binding, device, serverKey, time.Now())
-		if err != nil || !s.ctl.Admits(b.Claim().Wallet) {
-			return auth.Identity{}, false
-		}
-		return auth.WalletReader(b), true
+// Identify is the handshake's one admission rule: a key in keys, the
+// configured [[keys]] table, is its Identity; every other key is refused.
+func (s *Server) Identify(keys auth.Keys) func(device ed25519.PublicKey) (auth.Identity, bool) {
+	return func(device ed25519.PublicKey) (auth.Identity, bool) {
+		return keys.Identify(auth.EncodeKey(device))
 	}
 }
 

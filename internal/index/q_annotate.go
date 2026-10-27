@@ -216,7 +216,7 @@ func requireTarget(ctx context.Context, db *DB, session, spanID string) error {
 	if err != nil {
 		return err
 	}
-	if !has || !f.Opened(session) {
+	if !has || !f.Readable(session) {
 		return argErrorf("session not found")
 	}
 	if spanID == "" {

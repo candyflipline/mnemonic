@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -24,7 +23,6 @@ import (
 
 	"github.com/candyflipline/mnemonic/internal/auth"
 	"github.com/candyflipline/mnemonic/internal/store"
-	"github.com/candyflipline/mnemonic/internal/wallet"
 )
 
 const controlHarness = "control"
@@ -34,7 +32,6 @@ type visibility string
 const (
 	visPrivate visibility = "private"
 	visTeam    visibility = "team"
-	visLink    visibility = "link"
 )
 
 type controlAction string
@@ -42,15 +39,12 @@ type controlAction string
 const (
 	actVisibility controlAction = "visibility"
 	actDelete     controlAction = "delete"
-	actShare      controlAction = "share"
-	actUnshare    controlAction = "unshare"
 )
 
 type controlRecord struct {
 	SessionID  string        `json:"session_id"`
 	Action     controlAction `json:"action"`
 	Visibility visibility    `json:"visibility,omitempty"`
-	Wallet     string        `json:"wallet,omitempty"`
 	TS         time.Time     `json:"ts"`
 	RequestKey string        `json:"request_key"`
 	Writer     string        `json:"writer,omitempty"`
@@ -77,18 +71,12 @@ func parseControl(line []byte) (controlRecord, error) {
 	switch {
 	case r.SessionID == "" || r.RequestKey == "" || r.TS.IsZero():
 		return r, fmt.Errorf("control record lacks session_id, request_key or ts")
-	case r.Action == actDelete && r.Visibility == "" && r.Wallet == "":
-	case (r.Action == actShare || r.Action == actUnshare) && r.Visibility == "" && validWallet(r.Wallet):
-	case r.Action == actVisibility && slices.Contains([]visibility{visPrivate, visTeam, visLink}, r.Visibility):
+	case r.Action == actDelete && r.Visibility == "":
+	case r.Action == actVisibility && slices.Contains([]visibility{visPrivate, visTeam}, r.Visibility):
 	default:
 		return r, fmt.Errorf("control record action %q visibility %q", r.Action, r.Visibility)
 	}
 	return r, nil
-}
-
-func validWallet(s string) bool {
-	a, err := wallet.ParseAddress(s)
-	return err == nil && a.String() == s
 }
 
 type sessionControl struct {
@@ -96,31 +84,14 @@ type sessionControl struct {
 	ts         time.Time
 	key        string
 	deleted    bool
-	shares     map[wallet.Address]stamp
-}
-
-// stamp is the latest share or unshare of one session with one wallet, by the
-// same last-writer-wins order as visibility: later ts, then greater key. An
-// unshare stays as a stamp, so replaying an older share cannot revive it.
-type stamp struct {
-	shared bool
-	ts     time.Time
-	key    string
-}
-
-func (s stamp) before(r controlRecord) bool {
-	return r.TS.After(s.ts) || (r.TS.Equal(s.ts) && r.RequestKey > s.key)
 }
 
 // Controls is every session control record in raw, the copy reads consult:
 // a record counts from the moment record returns, before any converge.
-// byWallet is the sessions each wallet's latest stamp shares, so the
-// handshake asks one map.
 type Controls struct {
 	write    sync.Mutex
 	mu       sync.RWMutex
 	sessions map[string]sessionControl
-	byWallet map[wallet.Address]map[string]bool
 }
 
 func (c *Controls) apply(r controlRecord) {
@@ -132,85 +103,15 @@ func (c *Controls) apply(r controlRecord) {
 		if r.TS.After(s.ts) || (r.TS.Equal(s.ts) && r.RequestKey > s.key) {
 			s.visibility, s.ts, s.key = r.Visibility, r.TS, r.RequestKey
 		}
-	case actShare, actUnshare:
-		w, _ := wallet.ParseAddress(r.Wallet)
-		if s.shares == nil {
-			s.shares = map[wallet.Address]stamp{}
-		}
-		if !s.shares[w].before(r) {
-			break
-		}
-		shared := r.Action == actShare
-		s.shares[w] = stamp{shared: shared, ts: r.TS, key: r.RequestKey}
-		set := c.byWallet[w]
-		switch {
-		case shared && set == nil:
-			c.byWallet[w] = map[string]bool{r.SessionID: true}
-		case shared:
-			set[r.SessionID] = true
-		default:
-			delete(set, r.SessionID)
-			if len(set) == 0 {
-				delete(c.byWallet, w)
-			}
-		}
 	}
 	c.sessions[r.SessionID] = s
-}
-
-// shareTime is the ts a new share or unshare of r's wallet and session is
-// recorded at: now, or one nanosecond past that pair's latest decision when
-// the clock reads earlier, so a wall-clock step back cannot make a new
-// decision lose to an older one.
-func (c *Controls) shareTime(r controlRecord, now time.Time) time.Time {
-	w, _ := wallet.ParseAddress(r.Wallet)
-	c.mu.RLock()
-	prev := c.sessions[r.SessionID].shares[w].ts
-	c.mu.RUnlock()
-	if now.After(prev) {
-		return now
-	}
-	return prev.Add(time.Nanosecond)
-}
-
-// Admits is whether w may read: some session not deleted is shared with it
-// now. The handshake calls it, through server.Identify, on every new
-// connection, and Sessions on every request.
-func (c *Controls) Admits(w wallet.Address) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	for id := range c.byWallet[w] {
-		if !c.sessions[id].deleted {
-			return true
-		}
-	}
-	return false
-}
-
-func (c *Controls) sharedWith(w wallet.Address) map[string]bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return maps.Clone(c.byWallet[w])
-}
-
-func (c *Controls) walletsOf(session string) []string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	out := []string{}
-	for w, st := range c.sessions[session].shares {
-		if st.shared {
-			out = append(out, w.String())
-		}
-	}
-	slices.Sort(out)
-	return out
 }
 
 // LoadControls reads every control source under dataDir up to the length
 // its manifest covers, so a torn append the manifest never recorded is not
 // read.
 func LoadControls(dataDir string) (*Controls, error) {
-	c := &Controls{sessions: map[string]sessionControl{}, byWallet: map[wallet.Address]map[string]bool{}}
+	c := &Controls{sessions: map[string]sessionControl{}}
 	manifests, err := filepath.Glob(filepath.Join(dataDir, "raw", "author=*", "machine="+store.ServerMachine, "harness="+controlHarness, "*.json"))
 	if err != nil {
 		return nil, err
@@ -260,9 +161,6 @@ func (c *Controls) record(st *store.Committer, author string, r controlRecord) (
 	c.write.Lock()
 	defer c.write.Unlock()
 	r.TS, r.Writer = time.Now().UTC(), writer
-	if r.Action == actShare || r.Action == actUnshare {
-		r.TS = c.shareTime(r, r.TS)
-	}
 	line, err := json.Marshal(r)
 	if err != nil {
 		return false, err
@@ -276,7 +174,7 @@ func (c *Controls) record(st *store.Committer, author string, r controlRecord) (
 	return false, nil
 }
 
-type controlSets struct{ deleted, private, link []string }
+type controlSets struct{ deleted, private []string }
 
 func (c *Controls) sets() controlSets {
 	c.mu.RLock()
@@ -288,13 +186,10 @@ func (c *Controls) sets() controlSets {
 			s.deleted = append(s.deleted, id)
 		case sc.visibility == visPrivate:
 			s.private = append(s.private, id)
-		case sc.visibility == visLink:
-			s.link = append(s.link, id)
 		}
 	}
 	slices.Sort(s.deleted)
 	slices.Sort(s.private)
-	slices.Sort(s.link)
 	return s
 }
 
@@ -343,8 +238,7 @@ func parseControlArgs(raw json.RawMessage) (controlArgs, string, error) {
 
 // actor is the caller on ctx when it may act on session: every author of
 // the session is in the caller's tenant, and the caller is its sole author or
-// holds an admin token. Any other session is not found. A wallet reader has
-// no members, so to it every session is not found.
+// holds an admin token. Any other session is not found.
 func actor(ctx context.Context, db *DB, c *Controls, session string) (auth.Identity, error) {
 	id, ok := auth.From(ctx)
 	if !ok || c == nil || store.From(ctx) == nil {

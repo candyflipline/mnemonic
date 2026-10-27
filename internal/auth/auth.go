@@ -8,9 +8,6 @@ import (
 	"net/http"
 	"slices"
 	"sort"
-	"time"
-
-	"github.com/candyflipline/mnemonic/internal/wallet"
 )
 
 type Scope string
@@ -47,10 +44,8 @@ type AuthorSet struct {
 
 func (s AuthorSet) Has(author string) bool { return slices.Contains(s.Names, author) != s.Except }
 
-// Identity is who an authenticated request is: one sealed principal, either
-// a configured key's or a wallet reader's. Keys, Local and WalletReader make
-// it and no one else can, so a wallet reader never carries a tenant, a member
-// set or a scope beyond Read. The zero Identity grants nothing.
+// Identity is who an authenticated request is: one sealed principal. Keys and
+// Local make it and no one else can. The zero Identity grants nothing.
 type Identity struct{ p principal }
 
 type principal interface {
@@ -70,19 +65,6 @@ func (c configured) tenant() string     { return c.tenantName }
 func (c configured) author() string     { return c.authorName }
 func (c configured) can(s Scope) bool   { return slices.Contains(c.scopes, s) }
 func (c configured) members() AuthorSet { return c.set }
-
-// walletReader is a device a wallet bound: no tenant, an empty inclusive
-// member set and Read alone. What it reads is the sessions shared with its
-// wallet, which the session controls answer per request, until expires.
-type walletReader struct {
-	wallet  wallet.Address
-	expires time.Time
-}
-
-func (walletReader) tenant() string     { return "" }
-func (w walletReader) author() string   { return w.wallet.Author() }
-func (walletReader) can(s Scope) bool   { return s == Read }
-func (walletReader) members() AuthorSet { return AuthorSet{} }
 
 func (id Identity) Tenant() string {
 	if id.p == nil {
@@ -105,18 +87,6 @@ func (id Identity) Members() AuthorSet {
 		return AuthorSet{}
 	}
 	return id.p.members()
-}
-
-// Wallet is the wallet a wallet reader reads as and the moment its binding
-// expires, false for any other Identity.
-func (id Identity) Wallet() (wallet.Address, time.Time, bool) {
-	w, ok := id.p.(walletReader)
-	return w.wallet, w.expires, ok
-}
-
-func WalletReader(b wallet.Binding) Identity {
-	c := b.Claim()
-	return Identity{p: walletReader{wallet: c.Wallet, expires: c.Expires}}
 }
 
 type Keys struct{ byKey map[string]Identity }

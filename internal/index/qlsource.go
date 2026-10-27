@@ -108,7 +108,7 @@ func (s *qlSource) scanEvents(ctx context.Context, req ql.ScanRequest, fn func(q
 			if narrowed && !cand[d] {
 				continue
 			}
-			if !s.f.Listed(st.session(st.sessionOf(d)).id) {
+			if !s.f.Readable(st.session(st.sessionOf(d)).id) {
 				continue
 			}
 			r, err := st.row(d)
@@ -423,7 +423,7 @@ func (s *qlSource) eachSession(ctx context.Context, overlap bool, fn func(st *Pa
 				return err
 			}
 			info := st.session(i)
-			if !s.f.Listed(info.id) {
+			if !s.f.Readable(info.id) {
 				continue
 			}
 			if overlap && !(info.first < hi && info.last >= lo) {

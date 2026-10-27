@@ -239,7 +239,7 @@ func (db *DB) lsCandidates(a *lsArgs, cursor *lsCursor, listed SessionFilter) ([
 		if a.Source != nil && r.Source != *a.Source {
 			continue
 		}
-		if !listed.all() && !listed.Listed(s.id) {
+		if !listed.all() && !listed.Readable(s.id) {
 			continue
 		}
 		if cursor != nil {

@@ -95,13 +95,13 @@ func mcpCmd(args []string) error {
 }
 
 func quicClient(cfg config.Client) (*http.Client, error) {
-	cred, err := qnet.LoadCredential(cfg.KeyFile)
+	priv, err := qnet.LoadOrCreateKey(cfg.KeyFile)
 	if err != nil {
 		return nil, err
 	}
 	return &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return qnet.Dial(ctx, cfg.Addr(), cred, cfg.ServerKey, qnet.ALPNHTTP)
+			return qnet.Dial(ctx, cfg.Addr(), priv, cfg.ServerKey, qnet.ALPNHTTP)
 		},
 	}}, nil
 }

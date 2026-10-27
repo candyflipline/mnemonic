@@ -46,7 +46,7 @@ func Handler(ix *index.Index, ctl *index.Controls) http.Handler {
 			serveDataset(w, db, req, hidden, sessions)
 			return
 		}
-		if !sessions.Opened(req.session) {
+		if !sessions.Readable(req.session) {
 			http.Error(w, notFound(req.session).Error(), http.StatusNotFound)
 			return
 		}
@@ -100,7 +100,7 @@ func serveDataset(w http.ResponseWriter, db *index.DB, req request, hidden map[s
 	w.Header().Set("Trailer", SkippedTrailer)
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	out := &counted{w: w}
-	skipped, err := Dataset(out, db, req.annotation, req.perTask, hidden, sessions.Listed)
+	skipped, err := Dataset(out, db, req.annotation, req.perTask, hidden, sessions.Readable)
 	for _, s := range skipped {
 		w.Header().Add(SkippedTrailer, s.SessionID+": "+s.Err.Error())
 	}

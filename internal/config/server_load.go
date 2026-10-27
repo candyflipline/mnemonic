@@ -11,7 +11,6 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/candyflipline/mnemonic/internal/auth"
-	"github.com/candyflipline/mnemonic/internal/wallet"
 	"github.com/candyflipline/mnemonic/internal/wire"
 )
 
@@ -46,9 +45,6 @@ func LoadServer(path string) (Server, error) {
 	for i, k := range cfg.Keys {
 		if k.Author == "" {
 			return Server{}, fmt.Errorf("%s: keys[%d]: author must be set", path, i)
-		}
-		if strings.HasPrefix(k.Author, wallet.AuthorPrefix) {
-			return Server{}, fmt.Errorf("%s: keys[%d]: author %s: the prefix %s is for wallet readers", path, i, k.Author, wallet.AuthorPrefix)
 		}
 		if _, err := auth.ParseKey(k.Key); err != nil {
 			return Server{}, fmt.Errorf("%s: keys[%d] (%s): %w", path, i, k.Author, err)

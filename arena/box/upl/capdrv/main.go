@@ -215,7 +215,7 @@ func main() {
 		os.Exit(1)
 	}
 	dial := grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
-		return qnet.Dial(ctx, addr, qnet.Credential{Key: priv}, *serverKey, qnet.ALPNPush)
+		return qnet.Dial(ctx, addr, priv, *serverKey, qnet.ALPNPush)
 	})
 	if *quiet {
 		if !runSilent(*server, dial, *capN, *prefix) {

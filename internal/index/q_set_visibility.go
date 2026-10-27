@@ -19,8 +19,8 @@ func (setVisibility) Call(ctx context.Context, db *DB, raw json.RawMessage) (any
 	if err != nil {
 		return nil, "", err
 	}
-	if !slices.Contains([]visibility{visPrivate, visTeam, visLink}, a.Visibility) {
-		return nil, "", argErrorf("visibility must be private, team or link")
+	if !slices.Contains([]visibility{visPrivate, visTeam}, a.Visibility) {
+		return nil, "", argErrorf("visibility must be private or team")
 	}
 	c := controlsFrom(ctx)
 	id, err := actor(ctx, db, c, session)
