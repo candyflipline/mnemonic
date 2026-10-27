@@ -1,6 +1,6 @@
 package redact
 
-func m25(text []byte, out [][2]int) [][2]int {
+func genericAPIKey(text []byte, out [][2]int) [][2]int {
 	n := len(text)
 	i := 0
 	for i < n {

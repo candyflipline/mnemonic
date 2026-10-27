@@ -1,57 +1,20 @@
 package redact
 
-// Hand-written scanning primitives for builtin rules 13-24: literal
-// prefixes, greedy {n,} class runs and ASCII \b, with the exact
-// leftmost-first, non-overlapping semantics of the rule regexes reported
-// through FindAllSubmatchIndex (see matchers.go). No regex engine.
-//
-// Helpers carry the b prefix; the sibling matchers_*.go lanes pick their
-// own, and the package must still build once the lanes merge.
-
 import "bytes"
 
-type bClass uint8
+func classDigit(c byte) bool { return '0' <= c && c <= '9' }
 
-const (
-	bClsWordDash bClass = iota
-	bClsAlnum
-	bClsDigit
-)
-
-func bInClass(c byte, k bClass) bool {
-	switch c {
-	case '_', '-':
-		return k == bClsWordDash
-	}
-	if k == bClsDigit {
-		return '0' <= c && c <= '9'
-	}
-	return '0' <= c && c <= '9' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
+func wordStart(text []byte, s int) bool {
+	return s == 0 || !isWordByte(text[s-1])
 }
 
-func bIsWord(c byte) bool {
-	return c == '_' || '0' <= c && c <= '9' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
-}
-
-func bStartB(text []byte, s int) bool {
-	return s == 0 || !bIsWord(text[s-1])
-}
-
-func bRunEnd(text []byte, i int, k bClass) int {
-	e := i
-	for e < len(text) && bInClass(text[e], k) {
-		e++
-	}
-	return e
-}
-
-func bTailEnd(text []byte, i, min int, k bClass) int {
-	e := bRunEnd(text, i, k)
+func tailEnd(text []byte, i, min int, class classFn) int {
+	e := classRunEnd(text, i, class)
 	if e-i < min {
 		return -1
 	}
 	for p := e; ; p-- {
-		if bIsWord(text[p-1]) != (p < len(text) && bIsWord(text[p])) {
+		if wordBoundary(text, p) {
 			return p
 		}
 		if p == i+min {
@@ -60,7 +23,7 @@ func bTailEnd(text []byte, i, min int, k bClass) int {
 	}
 }
 
-func bTailRule(pat string, min int, k bClass) matcher {
+func tailRule(pat string, min int, class classFn) matcher {
 	p := []byte(pat)
 	return func(text []byte, out [][2]int) [][2]int {
 		for i := 0; i < len(text); {
@@ -69,8 +32,8 @@ func bTailRule(pat string, min int, k bClass) matcher {
 				return out
 			}
 			s += i
-			if bStartB(text, s) {
-				if e := bTailEnd(text, s+len(p), min, k); e >= 0 {
+			if wordStart(text, s) {
+				if e := tailEnd(text, s+len(p), min, class); e >= 0 {
 					out = append(out, [2]int{s, e})
 					i = e
 					continue
@@ -82,7 +45,7 @@ func bTailRule(pat string, min int, k bClass) matcher {
 	}
 }
 
-func bHexRule(pat string, n int) matcher {
+func hexRule(pat string, n int) matcher {
 	p := []byte(pat)
 	return func(text []byte, out [][2]int) [][2]int {
 		for i := 0; i < len(text); {
@@ -92,7 +55,7 @@ func bHexRule(pat string, n int) matcher {
 			}
 			s += i
 			e := s + len(p) + n
-			if e <= len(text) && bStartB(text, s) && bLowerHex(text[s+len(p):e]) && (e == len(text) || !bIsWord(text[e])) {
+			if e <= len(text) && wordStart(text, s) && lowerHex(text[s+len(p):e]) && (e == len(text) || !isWordByte(text[e])) {
 				out = append(out, [2]int{s, e})
 				i = e
 				continue
@@ -103,7 +66,7 @@ func bHexRule(pat string, n int) matcher {
 	}
 }
 
-func bLowerHex(v []byte) bool {
+func lowerHex(v []byte) bool {
 	for _, c := range v {
 		if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f') {
 			return false
@@ -112,7 +75,7 @@ func bLowerHex(v []byte) bool {
 	return true
 }
 
-var bOpenAI = func(text []byte, out [][2]int) [][2]int {
+var openAIKey = func(text []byte, out [][2]int) [][2]int {
 	const proj = "proj-"
 	p := []byte("sk-")
 	for i := 0; i < len(text); {
@@ -121,13 +84,13 @@ var bOpenAI = func(text []byte, out [][2]int) [][2]int {
 			return out
 		}
 		s += i
-		if bStartB(text, s) {
+		if wordStart(text, s) {
 			e := -1
 			if bytes.HasPrefix(text[s+3:], []byte(proj)) {
-				e = bTailEnd(text, s+3+len(proj), 20, bClsWordDash)
+				e = tailEnd(text, s+3+len(proj), 20, classWordDash)
 			}
 			if e < 0 {
-				e = bTailEnd(text, s+len(p), 20, bClsWordDash)
+				e = tailEnd(text, s+len(p), 20, classWordDash)
 			}
 			if e >= 0 {
 				out = append(out, [2]int{s, e})
@@ -140,7 +103,7 @@ var bOpenAI = func(text []byte, out [][2]int) [][2]int {
 	return out
 }
 
-var bSendGrid = func(text []byte, out [][2]int) [][2]int {
+var sendGridKey = func(text []byte, out [][2]int) [][2]int {
 	p := []byte("SG.")
 	for i := 0; i < len(text); {
 		s := bytes.Index(text[i:], p)
@@ -148,10 +111,10 @@ var bSendGrid = func(text []byte, out [][2]int) [][2]int {
 			return out
 		}
 		s += i
-		if bStartB(text, s) {
-			e1 := bRunEnd(text, s+len(p), bClsWordDash)
+		if wordStart(text, s) {
+			e1 := classRunEnd(text, s+len(p), classWordDash)
 			if e1-(s+len(p)) >= 20 && e1 < len(text) && text[e1] == '.' {
-				if e := bTailEnd(text, e1+1, 20, bClsWordDash); e >= 0 {
+				if e := tailEnd(text, e1+1, 20, classWordDash); e >= 0 {
 					out = append(out, [2]int{s, e})
 					i = e
 					continue
@@ -163,7 +126,7 @@ var bSendGrid = func(text []byte, out [][2]int) [][2]int {
 	return out
 }
 
-var bDiscordHook = func(text []byte, out [][2]int) [][2]int {
+var discordWebhook = func(text []byte, out [][2]int) [][2]int {
 	const app, mid = "app", ".com/api/webhooks/"
 	p := []byte("https://discord")
 	for i := 0; i < len(text); {
@@ -175,10 +138,10 @@ var bDiscordHook = func(text []byte, out [][2]int) [][2]int {
 		h := s + len(p)
 		e, ok := 0, false
 		if bytes.HasPrefix(text[h:], []byte(app)) {
-			e, ok = bHookTail(text, h+len(app), mid)
+			e, ok = hookTail(text, h+len(app), mid)
 		}
 		if !ok {
-			e, ok = bHookTail(text, h, mid)
+			e, ok = hookTail(text, h, mid)
 		}
 		if ok {
 			out = append(out, [2]int{s, e})
@@ -190,15 +153,15 @@ var bDiscordHook = func(text []byte, out [][2]int) [][2]int {
 	return out
 }
 
-func bHookTail(text []byte, h int, mid string) (int, bool) {
+func hookTail(text []byte, h int, mid string) (int, bool) {
 	if !bytes.HasPrefix(text[h:], []byte(mid)) {
 		return 0, false
 	}
-	d := bRunEnd(text, h+len(mid), bClsDigit)
+	d := classRunEnd(text, h+len(mid), classDigit)
 	if d-(h+len(mid)) < 6 || d >= len(text) || text[d] != '/' {
 		return 0, false
 	}
-	e := bRunEnd(text, d+1, bClsWordDash)
+	e := classRunEnd(text, d+1, classWordDash)
 	if e-(d+1) < 20 {
 		return 0, false
 	}

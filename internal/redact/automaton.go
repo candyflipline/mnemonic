@@ -1,9 +1,9 @@
 package redact
 
 type keywordAutomaton struct {
-	next []int32   // next[state*256+byte] -> next state, fail transitions baked in
-	out  []int32   // nearest state on the suffix chain that ends a keyword, -1 if none
-	kr   [][]int32 // kr[state] -> rule indices whose keyword ends at that state
+	transition    [][256]int32
+	nearestOutput []int32
+	rulesEndingAt [][]int32
 }
 
 func buildKeywordAutomaton(rules []rule) *keywordAutomaton {
@@ -33,8 +33,8 @@ func buildKeywordAutomaton(rules []rule) *keywordAutomaton {
 	}
 	n := len(nodes)
 	fail := make([]int32, n)
-	out := make([]int32, n)
-	out[0] = -1
+	nearestOutput := make([]int32, n)
+	nearestOutput[0] = -1
 	order := []int32{0}
 	for qi := 0; qi < len(order); qi++ {
 		s := order[qi]
@@ -58,33 +58,33 @@ func buildKeywordAutomaton(rules []rule) *keywordAutomaton {
 				fail[nx] = f
 			}
 			if len(ends[fail[nx]]) > 0 {
-				out[nx] = fail[nx]
+				nearestOutput[nx] = fail[nx]
 			} else {
-				out[nx] = out[fail[nx]]
+				nearestOutput[nx] = nearestOutput[fail[nx]]
 			}
 			order = append(order, nx)
 		}
 	}
-	next := make([]int32, n*256)
+	transition := make([][256]int32, n)
 	for _, s := range order {
-		row := next[int(s)*256 : int(s)*256+256]
+		row := &transition[s]
 		for b := 0; b < 256; b++ {
 			if nx, ok := nodes[s].kids[byte(b)]; ok {
 				row[b] = nx
 			} else if s == 0 {
 				row[b] = 0
 			} else {
-				row[b] = next[int(fail[s])*256+b]
+				row[b] = transition[fail[s]][b]
 			}
 		}
 	}
-	kr := make([][]int32, n)
+	rulesEndingAt := make([][]int32, n)
 	for s := range ends {
 		if len(ends[s]) > 0 {
-			kr[s] = ends[s]
+			rulesEndingAt[s] = ends[s]
 		}
 	}
-	return &keywordAutomaton{next: next, out: out, kr: kr}
+	return &keywordAutomaton{transition: transition, nearestOutput: nearestOutput, rulesEndingAt: rulesEndingAt}
 }
 
 func (a *keywordAutomaton) scan(text []byte, c []bool) {
@@ -93,9 +93,9 @@ func (a *keywordAutomaton) scan(text []byte, c []bool) {
 		if b >= 'A' && b <= 'Z' {
 			b += 'a' - 'A'
 		}
-		s = a.next[int(s)*256+int(b)]
-		for o := s; o >= 0; o = a.out[o] {
-			for _, ri := range a.kr[o] {
+		s = a.transition[s][b]
+		for o := s; o >= 0; o = a.nearestOutput[o] {
+			for _, ri := range a.rulesEndingAt[o] {
 				c[ri] = true
 			}
 		}

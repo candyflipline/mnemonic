@@ -1,6 +1,6 @@
 package redact
 
-// Byte-level scanners for the hand-written generic-api-key matcher (m25).
+// Byte-level scanners for the hand-written generic-api-key matcher.
 // Everything here copies Go regexp semantics for genericPattern under
 // (?i), which the frozen oracle runs: ASCII \b (word = [0-9A-Za-z_]),
 // leftmost-first alternation, and Unicode simple-case folding — so the

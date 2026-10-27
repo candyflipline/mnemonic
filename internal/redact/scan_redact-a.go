@@ -150,31 +150,31 @@ type (
 	prefixFn func([]byte, int) int
 )
 
-func scanToken(text []byte, out [][2]int, lead bool, prefix prefixFn, class classFn, minRun, maxRun int, trail bool) [][2]int {
+func scanToken(text []byte, out [][2]int, r tokenRule) [][2]int {
 next:
 	for i := 0; i < len(text); {
-		pl := prefix(text, i)
-		if pl == 0 || lead && !wordBoundary(text, i) {
+		pl := r.head(text, i)
+		if pl == 0 || r.boundaryBefore && !wordBoundary(text, i) {
 			i++
 			continue
 		}
 		t := i + pl
 		run := 0
-		for t+run < len(text) && (maxRun == 0 || run < maxRun) && class(text[t+run]) {
+		for t+run < len(text) && (r.maxRun == 0 || run < r.maxRun) && r.class(text[t+run]) {
 			run++
 		}
-		if run < minRun {
+		if run < r.minRun {
 			i++
 			continue
 		}
 		e := t + run
 		for {
-			if !trail || wordBoundary(text, e) {
+			if !r.boundaryAfter || wordBoundary(text, e) {
 				out = append(out, [2]int{i, e})
 				i = e
 				continue next
 			}
-			if e == t+minRun {
+			if e == t+r.minRun {
 				i++
 				continue next
 			}
@@ -200,20 +200,10 @@ func pemTail(text []byte, p int, tail []byte) int {
 	return -1
 }
 
-// scanPEM is the shape of rules 8 and 9: (?s)begin .*? end, where the lazy
-// dot matches every byte, so laziness is a scan for the next end
-// occurrence. For rule 8 begin is "-----BEGIN " and end is "-----END ",
-// each followed by the kind word and "PRIVATE KEY-----" via pemTail; for
-// rule 9 begin and end are the full literals and there is no kind.
-//
-// Which end occurrence a begin takes depends only on where the begin's own
-// tail ends, so the occurrences that carry their tail are collected once
-// and each begin takes the first at or after it — rescanning the tail ends
-// per begin is quadratic on lines that repeat a begin over end-less or
-// tail-less ends. The begins walk b strictly forward (an occurrence cannot
-// start inside a begin literal or kind word, so the next one is far enough
-// right), which lets one moving pointer serve them all. When no valid end
-// remains at or after a begin, none can remain for any later begin either.
+// The lazy dot of (?s)begin.*?end is a scan for the next end carrying its
+// tail. Those ends are collected once and the begins, which only move
+// forward, share one cursor over them: rescanning per begin is quadratic on
+// lines that repeat a begin over end-less ends.
 func scanPEM(text []byte, out [][2]int, begin, end []byte, kind bool, tail []byte) [][2]int {
 	var ends [][2]int
 	collected := false
@@ -262,18 +252,9 @@ func pemEnds(text []byte, end []byte, kind bool, tail []byte) [][2]int {
 	}
 }
 
-// scanJWT is rule 10: \beyJ run{5,} \. eyJ run{5,} \. run* \b. A dot is
-// not in the run class, so the maximal run before each dot cannot give
-// characters back and the dots are where greediness leaves them; only the
-// final unbounded run retreats for its \b.
-//
-// A failed attempt jumps to the attempt's first out-of-class byte p1
-// instead of one byte on: every eyJ starting before p1 has its run end at
-// the same p1 and, if it gets past the run checks at all, shares this
-// attempt's tail from the dot on, so it fails with this one — and none
-// starts at p1-2..p1, where "eyJ" would need the out-of-class byte. A
-// run of class characters can otherwise carry each attempt to the end of
-// the line, which made each of many eyJ prefixes pay for the whole line.
+// A failed attempt resumes at p1, the first out-of-class byte, not one byte
+// on: every eyJ before p1 shares this attempt's failing tail, and a long
+// class run would otherwise cost each eyJ prefix the whole line.
 func scanJWT(text []byte, out [][2]int) [][2]int {
 next:
 	for i := 0; i+3 <= len(text); {

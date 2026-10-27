@@ -32,7 +32,7 @@ const (
 
 type rule struct {
 	id          string
-	m           matcher // extra patterns: regex-backed; builtins use matchers[i]
+	m           matcher
 	keywords    [][]byte
 	secretGroup int
 	gate        entropyGate
@@ -66,61 +66,60 @@ type ruleSpec struct {
 	priority    int
 	id          string
 	pattern     string
+	m           matcher
 	keywords    []string
 	secretGroup int
 	gate        entropyGate
 	minLen      int
 }
 
-func literal(priority int, id, pattern string, keywords ...string) ruleSpec {
-	return ruleSpec{priority: priority, id: id, pattern: pattern, keywords: keywords, minLen: 1}
+func literal(priority int, id, pattern string, m matcher, keywords ...string) ruleSpec {
+	return ruleSpec{priority: priority, id: id, pattern: pattern, m: m, keywords: keywords, minLen: 1}
 }
 
-func generic(priority int, id, pattern string, keywords ...string) ruleSpec {
-	return ruleSpec{priority: priority, id: id, pattern: pattern, keywords: keywords, secretGroup: 1, gate: gateGenericCredential, minLen: 20}
+func generic(priority int, id, pattern string, m matcher, keywords ...string) ruleSpec {
+	return ruleSpec{priority: priority, id: id, pattern: pattern, m: m, keywords: keywords, secretGroup: 1, gate: gateGenericCredential, minLen: 20}
 }
 
 var builtinRules = []ruleSpec{
-	literal(0, "aws-access-token", `\b((?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16})\b`, "a3t", "akia", "asia", "abia", "acca"),
-	literal(1, "github-token", `\bgh[pousr]_[0-9A-Za-z_]{36,255}\b`, "ghp_", "gho_", "ghu_", "ghs_", "ghr_"),
-	literal(2, "github-fine-grained-token", `\bgithub_pat_[0-9A-Za-z_]{82,255}\b`, "github_pat_"),
-	literal(3, "gitlab-token", `\b(?:glpat|glft|glcbt|glsoat|gldt)-[0-9A-Za-z_-]{20,}\b`, "glpat-", "glft-", "glcbt-", "glsoat-", "gldt-"),
-	literal(4, "slack-token", `\bxox[pbarose]-[0-9A-Za-z-]{10,}\b`, "xoxp-", "xoxb-", "xoxa-", "xoxr-", "xoxo-", "xoxe-", "xoxs-"),
-	literal(5, "slack-webhook", `https://hooks\.slack\.com/services/[0-9A-Za-z/_+-]{20,}`, "hooks.slack.com/services"),
-	literal(6, "google-api-key", `\bAIza[0-9A-Za-z_-]{35}\b`, "aiza"),
-	literal(7, "google-oauth-token", `\bya29\.[0-9A-Za-z_-]{20,}\b`, "ya29."),
-	literal(8, "pem-private-key", `(?s)-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----.*?-----END (?:[A-Z0-9]+ )?PRIVATE KEY-----`, "private key"),
-	literal(9, "openssh-private-key", `(?s)-----BEGIN OPENSSH PRIVATE KEY-----.*?-----END OPENSSH PRIVATE KEY-----`, "openssh private key"),
-	literal(10, "jwt", `\beyJ[0-9A-Za-z_-]{5,}\.eyJ[0-9A-Za-z_-]{5,}\.[0-9A-Za-z_-]*\b`, "eyj"),
-	literal(11, "stripe-token", `\b(?:sk|rk|pk)_(?:test|live)_[0-9A-Za-z]{10,}\b`, "sk_test_", "sk_live_", "rk_test_", "rk_live_", "pk_test_", "pk_live_"),
-	literal(12, "stripe-webhook-secret", `\bwhsec_[0-9A-Za-z]{20,}\b`, "whsec_"),
-	literal(13, "anthropic-api-key", `\bsk-ant-[0-9A-Za-z_-]{20,}\b`, "sk-ant-"),
-	literal(14, "openai-api-key", `\bsk-(?:proj-)?[0-9A-Za-z_-]{20,}\b`, "sk-", "sk-proj-"),
-	literal(15, "huggingface-token", `\bhf_[0-9A-Za-z]{30,}\b`, "hf_"),
-	literal(16, "sendgrid-api-key", `\bSG\.[0-9A-Za-z_-]{20,}\.[0-9A-Za-z_-]{20,}\b`, "sg."),
-	literal(17, "discord-webhook", `https://discord(?:app)?\.com/api/webhooks/[0-9]{6,}/[0-9A-Za-z_-]{20,}`, "discord.com/api/webhooks", "discordapp.com/api/webhooks"),
-	literal(18, "npm-token", `\bnpm_[0-9A-Za-z]{30,}\b`, "npm_"),
-	literal(19, "pypi-token", `\bpypi-[0-9A-Za-z_-]{30,}\b`, "pypi-"),
-	literal(20, "digitalocean-token", `\bdop_v1_[0-9a-f]{64}\b`, "dop_v1_"),
-	literal(21, "databricks-token", `\bdapi[0-9a-f]{32}\b`, "dapi"),
-	literal(22, "dockerhub-token", `\bdckr_pat_[0-9A-Za-z_-]{20,}\b`, "dckr_pat_"),
-	literal(23, "linear-api-key", `\blin_api_[0-9A-Za-z]{30,}\b`, "lin_api_"),
-	literal(24, "notion-token", `\bsecret_[0-9A-Za-z]{30,}\b`, "secret_"),
-	generic(25, "generic-api-key", genericPattern, "api", "access", "auth", "bearer", "client", "credential", "passwd", "password", "private", "secret", "token"),
+	literal(0, "aws-access-token", `\b((?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16})\b`, tokenRule{boundaryBefore: true, head: prefixAWS, class: classAWS, minRun: 16, maxRun: 16, boundaryAfter: true}.match, "a3t", "akia", "asia", "abia", "acca"),
+	literal(1, "github-token", `\bgh[pousr]_[0-9A-Za-z_]{36,255}\b`, tokenRule{boundaryBefore: true, head: prefixGitHub, class: classWord, minRun: 36, maxRun: 255, boundaryAfter: true}.match, "ghp_", "gho_", "ghu_", "ghs_", "ghr_"),
+	literal(2, "github-fine-grained-token", `\bgithub_pat_[0-9A-Za-z_]{82,255}\b`, tokenRule{boundaryBefore: true, head: litPrefix("github_pat_"), class: classWord, minRun: 82, maxRun: 255, boundaryAfter: true}.match, "github_pat_"),
+	literal(3, "gitlab-token", `\b(?:glpat|glft|glcbt|glsoat|gldt)-[0-9A-Za-z_-]{20,}\b`, tokenRule{boundaryBefore: true, head: prefixGitlab, class: classWordDash, minRun: 20, maxRun: 0, boundaryAfter: true}.match, "glpat-", "glft-", "glcbt-", "glsoat-", "gldt-"),
+	literal(4, "slack-token", `\bxox[pbarose]-[0-9A-Za-z-]{10,}\b`, tokenRule{boundaryBefore: true, head: prefixSlack, class: classAlnumDash, minRun: 10, maxRun: 0, boundaryAfter: true}.match, "xoxp-", "xoxb-", "xoxa-", "xoxr-", "xoxo-", "xoxe-", "xoxs-"),
+	literal(5, "slack-webhook", `https://hooks\.slack\.com/services/[0-9A-Za-z/_+-]{20,}`, tokenRule{boundaryBefore: false, head: litPrefix("https://hooks.slack.com/services/"), class: classHook, minRun: 20, maxRun: 0, boundaryAfter: false}.match, "hooks.slack.com/services"),
+	literal(6, "google-api-key", `\bAIza[0-9A-Za-z_-]{35}\b`, tokenRule{boundaryBefore: true, head: litPrefix("AIza"), class: classWordDash, minRun: 35, maxRun: 35, boundaryAfter: true}.match, "aiza"),
+	literal(7, "google-oauth-token", `\bya29\.[0-9A-Za-z_-]{20,}\b`, tokenRule{boundaryBefore: true, head: litPrefix("ya29."), class: classWordDash, minRun: 20, maxRun: 0, boundaryAfter: true}.match, "ya29."),
+	literal(8, "pem-private-key", `(?s)-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----.*?-----END (?:[A-Z0-9]+ )?PRIVATE KEY-----`, pemWithKind("-----BEGIN ", "-----END ", "PRIVATE KEY-----"), "private key"),
+	literal(9, "openssh-private-key", `(?s)-----BEGIN OPENSSH PRIVATE KEY-----.*?-----END OPENSSH PRIVATE KEY-----`, pemLiteral("-----BEGIN OPENSSH PRIVATE KEY-----", "-----END OPENSSH PRIVATE KEY-----"), "openssh private key"),
+	literal(10, "jwt", `\beyJ[0-9A-Za-z_-]{5,}\.eyJ[0-9A-Za-z_-]{5,}\.[0-9A-Za-z_-]*\b`, scanJWT, "eyj"),
+	literal(11, "stripe-token", `\b(?:sk|rk|pk)_(?:test|live)_[0-9A-Za-z]{10,}\b`, tokenRule{boundaryBefore: true, head: prefixStripe, class: classAlnum, minRun: 10, maxRun: 0, boundaryAfter: true}.match, "sk_test_", "sk_live_", "rk_test_", "rk_live_", "pk_test_", "pk_live_"),
+	literal(12, "stripe-webhook-secret", `\bwhsec_[0-9A-Za-z]{20,}\b`, tokenRule{boundaryBefore: true, head: litPrefix("whsec_"), class: classAlnum, minRun: 20, maxRun: 0, boundaryAfter: true}.match, "whsec_"),
+	literal(13, "anthropic-api-key", `\bsk-ant-[0-9A-Za-z_-]{20,}\b`, tailRule("sk-ant-", 20, classWordDash), "sk-ant-"),
+	literal(14, "openai-api-key", `\bsk-(?:proj-)?[0-9A-Za-z_-]{20,}\b`, openAIKey, "sk-", "sk-proj-"),
+	literal(15, "huggingface-token", `\bhf_[0-9A-Za-z]{30,}\b`, tailRule("hf_", 30, classAlnum), "hf_"),
+	literal(16, "sendgrid-api-key", `\bSG\.[0-9A-Za-z_-]{20,}\.[0-9A-Za-z_-]{20,}\b`, sendGridKey, "sg."),
+	literal(17, "discord-webhook", `https://discord(?:app)?\.com/api/webhooks/[0-9]{6,}/[0-9A-Za-z_-]{20,}`, discordWebhook, "discord.com/api/webhooks", "discordapp.com/api/webhooks"),
+	literal(18, "npm-token", `\bnpm_[0-9A-Za-z]{30,}\b`, tailRule("npm_", 30, classAlnum), "npm_"),
+	literal(19, "pypi-token", `\bpypi-[0-9A-Za-z_-]{30,}\b`, tailRule("pypi-", 30, classWordDash), "pypi-"),
+	literal(20, "digitalocean-token", `\bdop_v1_[0-9a-f]{64}\b`, hexRule("dop_v1_", 64), "dop_v1_"),
+	literal(21, "databricks-token", `\bdapi[0-9a-f]{32}\b`, hexRule("dapi", 32), "dapi"),
+	literal(22, "dockerhub-token", `\bdckr_pat_[0-9A-Za-z_-]{20,}\b`, tailRule("dckr_pat_", 20, classWordDash), "dckr_pat_"),
+	literal(23, "linear-api-key", `\blin_api_[0-9A-Za-z]{30,}\b`, tailRule("lin_api_", 30, classAlnum), "lin_api_"),
+	literal(24, "notion-token", `\bsecret_[0-9A-Za-z]{30,}\b`, tailRule("secret_", 30, classAlnum), "secret_"),
+	generic(25, "generic-api-key", genericPattern, genericAPIKey, "api", "access", "auth", "bearer", "client", "credential", "passwd", "password", "private", "secret", "token"),
 }
 
 // New compiles the built-in rules plus extra regex patterns from config.
 // Extra patterns get the ids upstream would give them (extra-pattern-1, ...)
 // and, having no keywords, are always scanned rather than prefiltered.
 func New(extraPatterns []string) (*Redactor, error) {
-	if len(matchers) != len(builtinRules) {
-		panic(fmt.Sprintf("redact: %d matchers for %d builtin rules", len(matchers), len(builtinRules)))
-	}
 	r := &Redactor{}
 	for i := range builtinRules {
 		spec := &builtinRules[i]
 		r.rules = append(r.rules, rule{
 			id:          spec.id,
+			m:           spec.m,
 			keywords:    lowerKeywords(spec.keywords),
 			secretGroup: spec.secretGroup,
 			gate:        spec.gate,
@@ -388,11 +387,7 @@ func (r *Redactor) nonOverlappingSpans(text []byte) []redactionSpan {
 			continue
 		}
 		ru := &r.rules[i]
-		m := ru.m
-		if i < len(matchers) {
-			m = matchers[i]
-		}
-		for _, sp := range m(text, raw[:0]) {
+		for _, sp := range ru.m(text, raw[:0]) {
 			g0, g1 := sp[0], sp[1]
 			if overlapsAny(ph, g0, g1) || !utf8.Valid(text[g0:g1]) {
 				continue
