@@ -17,8 +17,11 @@ import (
 type linkKind string
 
 const (
-	linkRead   linkKind = "read"
-	linkInvite linkKind = "invite"
+	// linkUnrecorded is a link a revoke or join named before its link record
+	// arrived; records live in each writer's own files.
+	linkUnrecorded linkKind = ""
+	linkRead       linkKind = "read"
+	linkInvite     linkKind = "invite"
 )
 
 const (
@@ -49,9 +52,6 @@ var (
 	ErrKeyMember   = errors.New("this key has already joined through another invite")
 )
 
-// link is one link as its records left it. A revoke or join may be applied
-// before the link record it names (records live in each writer's own
-// files), so a link with an empty kind is a placeholder only those set.
 type link struct {
 	id               string
 	kind             linkKind
@@ -68,7 +68,7 @@ type link struct {
 }
 
 func (l *link) live(now time.Time) bool {
-	return l.kind != "" && !l.revoked && (now.Before(l.expires) || l.joinKey != "")
+	return l.kind != linkUnrecorded && !l.revoked && (now.Before(l.expires) || l.joinKey != "")
 }
 
 func (c *Controls) applyLink(r controlRecord) {
@@ -79,7 +79,7 @@ func (c *Controls) applyLink(r controlRecord) {
 	}
 	switch r.Action {
 	case actLink:
-		if l.kind != "" {
+		if l.kind != linkUnrecorded {
 			return
 		}
 		l.kind, l.sessions, l.sessionAuthors, l.title, l.note = r.Kind, r.SessionIDs, r.SessionAuthors, r.Title, r.Note
@@ -205,7 +205,7 @@ func (c *Controls) newLink(st *store.Committer, r controlRecord) (controlRecord,
 }
 
 func owns(id auth.Identity, l *link) bool {
-	return l.kind != "" && l.tenant == id.Tenant() && (l.author == id.Author() || id.Can(auth.Admin))
+	return l.kind != linkUnrecorded && l.tenant == id.Tenant() && (l.author == id.Author() || id.Can(auth.Admin))
 }
 
 func (c *Controls) revoke(st *store.Committer, id auth.Identity, linkID string) error {
