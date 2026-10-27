@@ -24,8 +24,12 @@ const launchdLabel = "com.mnemonic.push"
 // bootstrapping over the still-loaded job fails with "5: Input/output
 // error", leaving the agent booted out and nothing running. These bound how
 // long init waits for launchd to drop the job before it bootstraps.
+// waitGoneWithin outlasts launchd's own kill: the plist init writes
+// (ops/launchd) sets no ExitTimeOut, so a watcher slow to drain — its send
+// stuck in flow control on a stalled server — is not SIGKILLed until the
+// default 20 s; + 5 s and bootstrap always lands on a dropped job.
 const (
-	waitGoneWithin  = 15 * time.Second
+	waitGoneWithin  = 25 * time.Second
 	waitGonePolling = 200 * time.Millisecond
 )
 
