@@ -55,6 +55,11 @@ func initCmd(args []string) error {
 	}
 	dir := filepath.Join(home, ".mnemonic")
 	configPath := filepath.Join(dir, "config.toml")
+	if runtime.GOOS == "darwin" {
+		if err := checkLaunchdTakeover(home, *label, *force); err != nil {
+			return err
+		}
+	}
 	tokenPath := filepath.Join(dir, "token")
 
 	if _, err := os.Stat(configPath); err == nil && *server == "" && *tokenFile == "" && !*force {
@@ -148,8 +153,8 @@ func installScheduler(home, label string) error {
 }
 
 func initLaunchd(home, exe, label string) error {
-	agents := filepath.Join(home, "Library", "LaunchAgents")
-	plistPath := filepath.Join(agents, label+".plist")
+	plistPath := launchdPlistPath(home, label)
+	agents := filepath.Dir(plistPath)
 	plist, err := ops.RenderLaunchd(label, exe, home)
 	if err != nil {
 		return fmt.Errorf("init: plist: %w", err)
@@ -161,7 +166,7 @@ func initLaunchd(home, exe, label string) error {
 		return fmt.Errorf("init: %s: %w", plistPath, err)
 	}
 	fmt.Println("wrote " + plistPath)
-	domain := "gui/" + strconv.Itoa(os.Getuid())
+	domain := launchdDomain()
 	if out, err := exec.Command("launchctl", "bootout", domain+"/"+label).CombinedOutput(); err != nil {
 		fmt.Printf("bootout %s/%s: not loaded (%s)\n", domain, label, trimOut(out, err))
 	} else {
@@ -187,7 +192,7 @@ func waitGone(domain, label string, within time.Duration) error {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("init: %s/%s did not exit within %s", domain, label, within)
+			return fmt.Errorf("init: %s/%s did not exit within %s; the agent is booted out and not running, rerun `mnemonic init`", domain, label, within)
 		}
 		time.Sleep(waitGonePolling)
 	}
@@ -243,4 +248,51 @@ func writeToken(path string, raw []byte) error {
 		return fmt.Errorf("init: %s: %w", path, err)
 	}
 	return nil
+}
+
+func launchdPlistPath(home, label string) string {
+	return filepath.Join(home, "Library", "LaunchAgents", label+".plist")
+}
+
+func launchdDomain() string { return "gui/" + strconv.Itoa(os.Getuid()) }
+
+// guardTakeover refuses to replace a launchd job that a different plist
+// loaded: the gui domain is per user, not per HOME, so a label shared by two
+// HOMEs names one job. printOut is `launchctl print` of the label, loaded
+// whether it exited zero.
+func guardTakeover(label, printOut string, loaded bool, ownPlist string, force bool) error {
+	if !loaded || force {
+		return nil
+	}
+	var path string
+	for _, line := range strings.Split(printOut, "\n") {
+		if p, ok := strings.CutPrefix(strings.TrimSpace(line), "path = "); ok {
+			path = p
+			break
+		}
+	}
+	if path != "" && filepath.Clean(path) == filepath.Clean(ownPlist) {
+		return nil
+	}
+	if path == "" {
+		path = "(path not reported)"
+	}
+	return fmt.Errorf("init: %s is loaded from %s, not from %s; init would replace that job. Nothing was changed. Pass --force to replace it", label, path, ownPlist)
+}
+
+func checkLaunchdTakeover(home, label string, force bool) error {
+	out, err := exec.Command("launchctl", "print", launchdDomain()+"/"+label).Output()
+	return guardTakeover(label, string(out), err == nil, resolvedPath(launchdPlistPath(home, label)), force)
+}
+
+// resolvedPath follows symlinks in p, or in its directory when p is not
+// written yet; launchd prints the resolved path (/private/var, not /var).
+func resolvedPath(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	if r, err := filepath.EvalSymlinks(filepath.Dir(p)); err == nil {
+		return filepath.Join(r, filepath.Base(p))
+	}
+	return p
 }
