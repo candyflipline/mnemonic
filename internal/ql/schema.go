@@ -82,15 +82,8 @@ var clickHouseTypes = map[string]Type{
 	"Map(String, Float64)": TFloatMap,
 }
 
-// heavyEventColumns are events columns the engine's light row does not hold:
-// the binding reads them from the part's heavy record, last and only when a
-// predicate or an output needs them.
 var heavyEventColumns = []string{"payload_json", "token_usage_json"}
 
-// droppedEventColumns are ClickHouse contract columns neither the engine's
-// light row nor its heavy record holds: the parsers filled them at parse time
-// and the engine does not keep them, so the binding cannot answer them
-// without faking. A query naming one fails like any unknown column.
 var droppedEventColumns = map[string]bool{
 	"session_date": true, "record_ts": true, "origin_tool_call_id": true,
 	"coord_group_id": true, "coord_group_label": true, "retry_count": true,

@@ -28,11 +28,6 @@ type built struct {
 	li  int
 }
 
-// partEncoder and partHeavyEncoder compress a part's frames. A part is
-// rewritten whole each time its member set changes (a settle, an append to a
-// settled component), so its frames are on the cycle's path where a source
-// log's are written once: they take the default level, not the source logs'
-// better one.
 var partEncoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(runtime.GOMAXPROCS(0)), zstd.WithLowerEncoderMem(true))
 var partHeavyEncoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(runtime.GOMAXPROCS(0)), zstd.WithLowerEncoderMem(true))
 
@@ -80,16 +75,12 @@ func memberOf(c ckpt) member {
 	return member{parsed: c.parsed, Gen: c.Gen, LightLen: c.LightLen, HeavyLen: c.HeavyLen}
 }
 
-// rowLoc says where a row's light record is: the member's light log at frame
-// lf, or, for a row its holder part supplies, the holder part's light log.
 type rowLoc struct {
 	lf     int64
 	li     uint16
 	holder bool
 }
 
-// walkLog calls fn with every light record of c's log from the frame at from,
-// with the record's frame offset and index in the frame.
 func walkLog(store string, c ckpt, from int64, fn func(rec []byte, off int64, i int) error) error {
 	if from >= c.LightLen {
 		return nil
@@ -129,8 +120,6 @@ func loadSourceRows(store string, si int, c ckpt, from int64) ([]built, error) {
 	return out, err
 }
 
-// holderIndexOf is the index of c's member entry in holder's members, -1 when
-// holder does not hold it.
 func holderIndexOf(holder *Part, key string) int {
 	for i := range holder.meta.Members {
 		if holder.meta.Members[i].Key == key {
@@ -174,10 +163,6 @@ func memberFrom(c ckpt, holder *Part) (from int64, ok bool) {
 	return 0, false
 }
 
-// sameParsed reports whether two checkpoints parsed the same bytes with the
-// same parser and stopped in the same place, everything but the session list
-// compared: a resume that adds rows changes ZstSize, State or Rows, and a
-// re-parse changes one of those or the parser version.
 func sameParsed(a, b parsed) bool {
 	return a.Key == b.Key && a.Kind == b.Kind && a.Parser == b.Parser && a.Layout == b.Layout &&
 		a.Harness == b.Harness && a.SourceName == b.SourceName && a.SourceFile == b.SourceFile &&
@@ -202,9 +187,6 @@ func walkMember(store string, c ckpt, holder *Part, from int64, fn func(rec []by
 		if hs < 0 {
 			return fmt.Errorf("%s: holder does not hold the member", c.Key)
 		}
-		// The light frame the previous doc read: a frame's docs are
-		// contiguous in the part's docs, so one member read decodes each
-		// of its frames once, not once per row.
 		var frameLF int64 = -1
 		var frameRows [][]byte
 		for d := 0; d < holder.meta.Docs; d++ {
@@ -237,10 +219,6 @@ func walkMember(store string, c ckpt, holder *Part, from int64, fn func(rec []by
 	return nil
 }
 
-// memberRows returns one member's rows for a delta image: walkMember's
-// records decoded, located at their holder frame when the holder carries
-// them. Heavy records are not resolved here; the open's heavyReader reads
-// them when a payload is asked for.
 func memberRows(store string, si int, c ckpt, holder *Part, from int64) ([]built, error) {
 	var out []built
 	err := walkMember(store, c, holder, from, func(rec []byte, loc rowLoc) error {
@@ -264,10 +242,6 @@ func memberRows(store string, si int, c ckpt, holder *Part, from int64) ([]built
 	return out, err
 }
 
-// prevPartsMap is the previous manifest's key -> part id map, the one scan of
-// prev a cycle pays: hot parts first, then cold, first id wins per key. It is
-// built once per cycle, after readManifest, and handed to rematerialize and
-// down the build path, so the manifest is not re-scanned per part built.
 func prevPartsMap(store string, prev manifestFile) map[string]string {
 	byPrev := map[string]string{}
 	scan := func(ids []string) {
@@ -288,12 +262,6 @@ func prevPartsMap(store string, prev manifestFile) map[string]string {
 	return byPrev
 }
 
-// openHolders opens, per member of the part being built, the part of the
-// previous manifest that holds it: the one prev part naming the member's key,
-// a delta opened as its image plus delta. byPrev is the cycle's precomputed
-// prevPartsMap. A member no prev part names — a first build, or a member a
-// regrouped plan moved — and one whose holder did not survive on disk gets
-// nil: its rows come from its logs whole.
 func openHolders(store string, cks []ckpt, byPrev map[string]string) (holders []*Part, close func(), err error) {
 	var opened []*Part
 	byID := map[string]*Part{}
@@ -325,8 +293,6 @@ func openHolders(store string, cks []ckpt, byPrev map[string]string) (holders []
 	}, nil
 }
 
-// winner is a uid's winning row and the member it came from, kept per uid
-// while a part's rows are offered: the row a full build picks for the uid.
 type winner struct {
 	b      built
 	member member
@@ -350,10 +316,6 @@ func offerRow(win map[string]winner, b built, m member) {
 	win[b.row.UID] = winner{b: b, member: m}
 }
 
-// mergeAuthors unions src's per-session authors into dst, each list sorted
-// and distinct. A part's section is the union of its holders' sections and
-// its tail rows': every row a holder covered, winner or not, is already in
-// the holder's section, and unions do not double-count.
 func mergeAuthors(dst, src map[string][]string) {
 	for sid, as := range src {
 		if len(as) == 0 {
@@ -471,7 +433,6 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 	lw := &frameWriter{f: lightF, target: lightFrame, enc: partEncoder}
 	hw := &frameWriter{f: heavyF, target: heavyFrame, enc: partHeavyEncoder}
 
-	// Doc pass: each winner's light record is decoded once, in doc order.
 	acc := newPartAcc(len(locs), hot, hotOff, docs, blob)
 	lights := &lightSource{store: store, cks: cks, holders: plan.holder, frames: newFrameLRU(lightFrames)}
 	var r Row
@@ -541,8 +502,6 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 		return err
 	}
 
-	// Section pass: the derived sections read each session's winners back
-	// from the part's own logs.
 	secs := newSections()
 	var lsRecs []lsRec
 	view := &partView{acc: acc, cks: cks, docs: docsF, light: lightF,
@@ -558,9 +517,6 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 	if view.heavy.err != nil {
 		return view.heavy.err
 	}
-	// The annotations section: one entry per annotation_id over the
-	// annotation rows, in (source key, row) order, for sessions this part may
-	// hold no docs of.
 	for sid, rows := range annRows {
 		secs.ann[sid] = buildAnnotations(rows)
 	}
@@ -603,10 +559,6 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 	return commitPart(dir, partDir)
 }
 
-// indexRows writes the index files of the winning rows of one part held in
-// memory, the delta image's, through write. place puts a doc's row in the
-// part's light log and returns the row as the part holds it; payload reads a
-// row's payload_json for the ls rollups.
 func indexRows(bySession map[string][]built, place func(built) (*Row, int64, int, error),
 	payload func(built) string, write func(name string, b []byte) error) (indexMeta, []lsRec, error) {
 	sessionIDs := make([]string, 0, len(bySession))
@@ -668,8 +620,6 @@ type faEntry struct {
 
 const docWidth = 40
 
-// commitPart fsyncs every file of the part built in tmp, then renames it to
-// dir. A part dir that exists is complete; the manifest names it after.
 func commitPart(tmp, dir string) error {
 	ents, err := os.ReadDir(tmp)
 	if err != nil {
@@ -715,7 +665,6 @@ func uidHash(s string) uint64 {
 	return h.Sum64()
 }
 
-// timeMs is epoch_ms(event_time).
 func timeMs(r *Row) int64 { return floorDiv(eventTimeUs(r), 1000) }
 
 func eventTimeUs(r *Row) int64 {
@@ -731,7 +680,6 @@ func eventTimeUs(r *Row) int64 {
 // source was parsed (CONTRACT-NOTES 4).
 const ingestedAtUs int64 = 4102444800000000
 
-// orderLess is the converge's session window order.
 func orderLess(a, b *Row) bool {
 	ta, tb := eventTimeUs(a), eventTimeUs(b)
 	if ta != tb {
@@ -755,8 +703,6 @@ func orderLess(a, b *Row) bool {
 	return a.UID < b.UID
 }
 
-// tokenize calls emit for every 2..64 char [a-z0-9_] run of lower(text) and
-// returns the count.
 func tokenize(text string, emit func(string)) int {
 	ascii := true
 	for i := 0; i < len(text); i++ {
@@ -827,7 +773,6 @@ func newHeavyReader(store string, cks []ckpt) *heavyReader {
 	return &heavyReader{store: store, cks: cks, recs: map[heavyKey][][]byte{}}
 }
 
-// logAt is the heavy log of member src, opened on first use.
 func (h *heavyReader) logAt(src int) (io.ReaderAt, error) {
 	for len(h.logs) <= src {
 		h.logs = append(h.logs, nil)
@@ -845,8 +790,6 @@ func (h *heavyReader) logAt(src int) (io.ReaderAt, error) {
 	return f, nil
 }
 
-// record is the heavy record of b: payload_json then token_usage_json, each a
-// uvarint length and its bytes.
 func (h *heavyReader) record(b built) ([]byte, error) {
 	if h.err != nil {
 		return nil, h.err
@@ -877,7 +820,6 @@ func (h *heavyReader) record(b built) ([]byte, error) {
 	return recs[b.row.HeavyIdx], nil
 }
 
-// heavyPayload is a heavy record's payload_json.
 func heavyPayload(rec []byte) string {
 	l, n := binary.Uvarint(rec)
 	return string(rec[n : n+int(l)])
@@ -899,10 +841,6 @@ func (h *heavyReader) close() {
 	}
 }
 
-// hotRow is the part of r search and file_attention hydrate, kept
-// uncompressed in the index so a hit reads one record and no log frame:
-// everything but text_content for tool requests, and only the hit fields
-// for every other row.
 func hotRow(r Row) *Row {
 	r.Text = ""
 	if r.ToolPhase != "request" {

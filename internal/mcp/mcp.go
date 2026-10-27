@@ -26,8 +26,6 @@ var toolsExtJSON []byte
 
 var toolsList = appendTools(toolsJSON, toolsExtJSON)
 
-// appendTools is the tools array base followed by the entries of ext, each
-// entry's bytes unchanged.
 func appendTools(base, ext []byte) json.RawMessage {
 	var entries []json.RawMessage
 	if err := json.Unmarshal(ext, &entries); err != nil {

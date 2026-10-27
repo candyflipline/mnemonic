@@ -202,8 +202,6 @@ func stripRoot(path, root string) string {
 	return strings.TrimPrefix(path, root+"/")
 }
 
-// Git repositories key on their common dir, non-git directories on their
-// canonical path.
 func ProjectIDForRoot(root string) (string, bool) {
 	if commonDir, ok := gitCommonDir(root); ok {
 		return "git:" + hashPathDomain("moraine-git-common-dir\x00", commonDir), true

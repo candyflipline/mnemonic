@@ -9,9 +9,6 @@ import (
 	"path/filepath"
 )
 
-// manifestFile is CURRENT: the parts that make up the index and the source
-// rows get_ingest_status reads. It is written by tmp+fsync+rename and is the
-// index's only commit point.
 type manifestFile struct {
 	Parts   []string   `json:"parts"`
 	Hot     []string   `json:"hot,omitempty"`
@@ -53,8 +50,8 @@ func partDir(store, id string) string { return filepath.Join(store, "parts", id)
 // "nothing published yet", this is a stale or broken CURRENT — and Open and
 // Refresh re-read CURRENT and retry before surfacing it.
 type PartOpenError struct {
-	Part string // the part id CURRENT names
-	Err  error  // the part's own open failure, message only
+	Part string
+	Err  error
 }
 
 func (e *PartOpenError) Error() string {
@@ -130,8 +127,6 @@ func OpenParts(parts []*Part) (*DB, error) {
 	return newDB(parts, newFrameCache()), nil
 }
 
-// newDB holds each of parts once more. A part another DB already holds keeps
-// its frame cache, which is fc: the DB it came from handed fc on.
 func newDB(parts []*Part, fc *frameCache) *DB {
 	db := &DB{parts: parts, fc: fc, sessPart: map[string]int{}, annPart: map[string][]int{}}
 	for i, st := range parts {

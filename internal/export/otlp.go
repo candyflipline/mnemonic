@@ -17,12 +17,8 @@ import (
 // (otlp.txt:1048-1073).
 
 const (
-	// otlpScopeName names the exporter scope in every ScopeSpans.
 	otlpScopeName = "mnemonic"
 
-	// tracePrefix keeps exported trace ids disjoint from any other digest; a
-	// session's trace id is stable across exports because it hashes only the
-	// session id.
 	tracePrefix = "mnemonic-trace:"
 )
 

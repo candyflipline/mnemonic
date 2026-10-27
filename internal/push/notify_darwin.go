@@ -117,7 +117,6 @@ func (n *notifier) read() {
 	}
 }
 
-// rearm lets read wait for the next batch.
 func (n *notifier) rearm() {
 	select {
 	case n.armed <- struct{}{}:
@@ -125,7 +124,6 @@ func (n *notifier) rearm() {
 	}
 }
 
-// drain returns the paths of the events queued now.
 func (n *notifier) drain() []string {
 	var buf [64]syscall.Kevent_t
 	var now syscall.Timespec

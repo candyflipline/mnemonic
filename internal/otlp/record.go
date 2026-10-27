@@ -57,7 +57,6 @@ type Scope struct {
 	Version string `json:"version,omitempty"`
 }
 
-// Decode reads one stored line.
 func Decode(line []byte) (*Record, error) {
 	var r Record
 	dec := json.NewDecoder(bytes.NewReader(line))

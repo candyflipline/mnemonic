@@ -115,9 +115,6 @@ var semanticPayloadExcludedFields = []string{
 	"worktree_root",
 }
 
-// FoldedIdentity carries the pre-fold semantic payload of an event whose
-// payload_json grew a moraine_tool_io object, plus the tool identity fields
-// hashed alongside it.
 type FoldedIdentity struct {
 	SemanticPayload CanonicalJSON
 	ToolFields      []string
@@ -293,18 +290,11 @@ func appendIdentityComponent(dst []byte, value string) []byte {
 	return append(dst, value...)
 }
 
-// semanticPayloadParts strips derived payload fields and recovers the folded
-// tool identity from canonical payload bytes, like semantic_payload_parts.
-// The bytes are CanonicalJSON, so they are valid UTF-8, the keys are sorted,
-// and a moraine_tool_io member re-decodes; the decode-and-recompact fallback
-// the untyped version needed is gone.
 func semanticPayloadParts(payload CanonicalJSON) (CanonicalJSON, []string, uint32) {
 	emptyFields := make([]string, len(toolIdentityFields))
 	s := payload.s
 	members, ok := objectMembers(s)
 	if !ok {
-		// A non-object payload (Compact of a scalar or array) hashes as
-		// itself, which is what the fallback's re-Compact produced.
 		return payload, emptyFields, 0
 	}
 	toolFields := make([]string, len(toolIdentityFields))
@@ -335,7 +325,6 @@ func semanticPayloadParts(payload CanonicalJSON) (CanonicalJSON, []string, uint3
 	return CanonicalJSON{s: joinMembers(s, members, semanticPayloadDropped, "", "")}, toolFields, occurrence
 }
 
-// SanitizeSemanticPayload drops the derived fields the canonical uid ignores.
 func SanitizeSemanticPayload(obj map[string]any) {
 	for _, field := range semanticPayloadExcludedFields {
 		delete(obj, field)
@@ -354,7 +343,6 @@ func AsNumber(v JSON) (uint64, bool) {
 	return u, true
 }
 
-// Strings raw, everything else compact JSON, absent empty.
 func encodeIdentityValue(v JSON) string {
 	switch t := v.(type) {
 	case nil:

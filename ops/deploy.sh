@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# Ship HEAD to the mnemonic server: copy the source, build there (pure Go, so
-# a cross-compiled binary works too), install with install-server.sh, restart.
-#
-# Usage: ops/deploy.sh [root@host]
 set -euo pipefail
 HOST=${1:-root@5.78.147.233}
 tgz=$(mktemp -t mnemonic-src).tgz

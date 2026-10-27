@@ -18,12 +18,6 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// The expectations are main 59796bc's own (the export package's golden test
-// over the converged cache), ported to the engine: each harness's raw fixture
-// lays into a store, one ingest builds the parts, and the exports read those.
-
-// engineDB ingests the named harness fixtures into a fresh store and returns
-// the DB of the committed index.
 func engineDB(t *testing.T, srcs ...[2]string) *index.DB {
 	t.Helper()
 	root, store := t.TempDir(), t.TempDir()
@@ -47,8 +41,6 @@ func engineDB(t *testing.T, srcs ...[2]string) *index.DB {
 	return db
 }
 
-// writeRawSource lays one raw source the way push does: zstd lines and a
-// manifest, under author/machine/harness.
 func writeRawSource(t *testing.T, root, author, harness, name string, lines []byte) {
 	t.Helper()
 	zst := (&zstd.Encoder{}).EncodeAll(lines, nil)
@@ -67,10 +59,6 @@ func writeRawSource(t *testing.T, root, author, harness, name string, lines []by
 	}
 }
 
-// TestFixtureExports pins, per fixture harness, the exported ATIF's step
-// count and first two steps, that the trajectory passes the ported validator,
-// and that hand-broken trajectories fail with the rule's literal text; it
-// also pins the OTLP export of the claude-code session.
 func TestFixtureExports(t *testing.T) {
 	type stepWant struct{ source, message, calls string }
 	cases := []struct {
@@ -206,9 +194,6 @@ func TestFixtureExports(t *testing.T) {
 	})
 }
 
-// TestRequestsSplitAgentSteps pins that an agent loop becomes one agent step
-// per model request, each with its own request's usage, and that the tool
-// result lands on the step whose call it answers.
 func TestRequestsSplitAgentSteps(t *testing.T) {
 	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	evs := []eventRow{
@@ -247,8 +232,6 @@ func TestRequestsSplitAgentSteps(t *testing.T) {
 	}
 }
 
-// TestDeletedSessionRefused pins that a session in the hidden set is not
-// found by either single-session export, though the index holds it.
 func TestDeletedSessionRefused(t *testing.T) {
 	const session = "7c666c01-d38e-4658-8650-854ffb5b626e"
 	db := engineDB(t, [2]string{"claude-code", "session.jsonl"})

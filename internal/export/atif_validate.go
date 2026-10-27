@@ -22,7 +22,6 @@ import (
 // not. An int field rejects 1.0, true and "1" here where Pydantic accepts
 // them, and a bool field rejects 0 and 1. The export never emits those shapes.
 
-// ValidateJSON validates one ATIF document, given as JSON bytes.
 func ValidateJSON(b []byte) []string {
 	doc, err := decodeNumbers(b)
 	if err != nil {
@@ -31,7 +30,6 @@ func ValidateJSON(b []byte) []string {
 	return Validate(doc)
 }
 
-// Validate validates one decoded ATIF document against the ported models.
 func Validate(doc any) []string {
 	v := &validator{}
 	if _, ok := doc.(map[string]any); !ok {
@@ -88,8 +86,6 @@ func (v *validator) wantArray(loc string, val any) ([]any, bool) {
 	return a, ok
 }
 
-// wantInt checks a JSON integer field (json.Number without fraction or
-// exponent), the shape pydantic's int accepts.
 func (v *validator) wantInt(loc string, val any) (int64, bool) {
 	n, ok := val.(json.Number)
 	if !ok || strings.ContainsAny(n.String(), ".eE") {
@@ -225,7 +221,6 @@ func (v *validator) trajectory(doc any) {
 	v.trajectoryTail(obj)
 }
 
-// trajectoryHead validates the root's fields up to steps.
 func (v *validator) trajectoryHead(obj map[string]any) {
 	v.extraForbid("", obj, trajectoryKeys)
 
@@ -262,7 +257,6 @@ func (v *validator) trajectoryHead(obj map[string]any) {
 	}
 }
 
-// trajectoryTail validates the root's fields after steps.
 func (v *validator) trajectoryTail(obj map[string]any) {
 	if fm, ok := obj["final_metrics"]; ok && fm != nil {
 		v.finalMetrics("final_metrics", fm)
@@ -273,9 +267,6 @@ func (v *validator) trajectoryTail(obj map[string]any) {
 	}
 }
 
-// stepsCheck validates a steps array one element at a time and reports in
-// the whole array's order: every step's own rules, then step-id sequencing,
-// then tool-call references.
 type stepsCheck struct {
 	own, seq, refs validator
 	n              int

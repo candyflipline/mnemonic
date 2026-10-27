@@ -1,16 +1,4 @@
 #!/usr/bin/env bash
-# Proof for the launchd takeover guard in `mnemonic init` (lane INITGUARD).
-#
-# Two throwaway HOMEs (A, B) share one throwaway label, as one real user does
-# across HOMEs. Expected: B without --force refuses, exits non-zero, names A's
-# plist and leaves A's job loaded with the same pid; B with --force replaces
-# it; A twice in a row is a normal re-init. The owner's live
-# com.mnemonic.push job is printed before and after each step and the script
-# aborts if its program or pid changes. Every init passes --label; the agent
-# dials http://127.0.0.1:1 (nothing listens), so it reads no file. No temp
-# path is deleted.
-#
-# Usage: arena/fuinit/initguard.sh [BIN]
 set -euo pipefail
 
 LABEL=com.mnemonic.initguard-test
@@ -41,7 +29,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-init() { # home extra-args...
+init() {
   local h=$1
   shift
   HOME=$h "$BIN" init --server http://127.0.0.1:1 --token-file "$WORK/token" --label "$LABEL" "$@"

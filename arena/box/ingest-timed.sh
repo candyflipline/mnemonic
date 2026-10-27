@@ -1,27 +1,4 @@
 #!/bin/sh
-# ingest-timed.sh — the cold full-corpus ingest numbers for one binary.
-#
-## Inputs
-##   $1  BIN  the binary under test speaking the arena contract's
-##            `ingest -root RAWROOT -store STORE` (oracle or engine).
-## Env: BOX (default /var/lib/mnemonic-e3) — the dataroot whose raw/ is the
-##      frozen corpus, and where stores and logs land. RUNS (default 3) —
-##      number of runs, FIRST (default 1) — index of the first run, so a
-##      second store is FIRST=2 RUNS=1 without touching the earlier one.
-#
-# RUNS timed cold ingests, sequential, each into a FRESH empty store
-# $BOX/cold-N with the page cache dropped first
-# (sync; echo 3 > /proc/sys/vm/drop_caches), GOMAXPROCS=16 and no GOMEMLIMIT,
-# under /usr/bin/time -v, with 1 s vmstat (and pidstat when installed)
-# sampling alongside into the run's log. One log per run:
-# $BOX/out/ingest-cold-N.log (time -v output, the binary's own ingest counts,
-# the samplers). Summary lines (tab separated: run wall_s rss_mib user_s
-# sys_s cpu_pct sources rewrote failed events conv_files inserted sessions)
-# to stdout and $BOX/out/ingest-cold-summary.tsv; the last lines name the
-# median wall and RSS and the range.
-#
-# Stores are left in place on purpose: the first store (cold-1) is the gen
-# root and the second (cold-2) the masks diff store gen-masks.sh needs.
 set -eu
 
 BOX=${BOX:-/var/lib/mnemonic-e3}
@@ -90,8 +67,6 @@ done
 
 python3 -I - "$OUT/ingest-cold-summary.tsv" "$FIRST" "$RUNS" <<'PYEOF'
 import sys
-# Only this invocation's runs: the tsv accumulates rows across binaries
-# (oracle FIRST=1..., engine FIRST=11...), and a median over mixed rows lies.
 first, runs = int(sys.argv[2]), int(sys.argv[3])
 rows = [l.split("\t") for l in open(sys.argv[1]).read().splitlines() if l.strip()]
 rows = [r for r in rows if first <= int(r[0]) < first + runs]

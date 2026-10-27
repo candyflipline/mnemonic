@@ -20,8 +20,6 @@ import (
 
 const noService = "unknown_service"
 
-// batch is what one request leaves: the records to store per service, and how
-// many items the request carried that were refused.
 type batch struct {
 	byService map[string][]Record
 	rejected  int64
@@ -162,8 +160,6 @@ func resourceOf(res *resourcepb.Resource, storeContent bool) (map[string]any, st
 	return attrs, streamName(service)
 }
 
-// streamName is service.name as a source-name segment: lowercase letters,
-// digits, dot, dash and underscore, at most 64 of them.
 func streamName(service string) string {
 	var sb strings.Builder
 	for _, c := range strings.ToLower(service) {

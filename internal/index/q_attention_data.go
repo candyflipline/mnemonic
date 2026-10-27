@@ -7,7 +7,6 @@ import (
 
 const faUnknownRoot = "(unknown)"
 
-// faBuildData: warnings are appended in the upstream order.
 func faBuildData(a *faArgs, tail *faTail, touches []faTouch, warnings *[]string) map[string]any {
 	scanTruncated := len(touches) > faScanCap
 	if scanTruncated {
@@ -334,8 +333,6 @@ func faUint32Ptr(v *uint32) any {
 	return *v
 }
 
-// faActionPreview draws a bounded preview from the canonical event's tool
-// input/output previews; the cap is chars, not bytes.
 func faActionPreview(touch *faTouch) any {
 	raw := touch.InputPreview
 	if raw == "" {

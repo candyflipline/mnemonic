@@ -7,31 +7,17 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-// claudeCodeSpans: the session is the root invoke_agent; main-thread events
-// form one turn span per turn_seq; a sidechain's agent_run_id is an
-// invoke_agent under the tool call its rows name in parent_tool_call_id, else
-// under the root; each request_id is a chat span under its subagent or turn;
-// each tool_call_id is an execute_tool span under the chat of its tool_call
-// row, else under the tool call named by parent_tool_call_id. Every row of a
-// request carries the request's usage, so a chat's tokens are the max over
-// its rows; the root, a turn and a subagent carry the sum over the chats
-// below them.
-// claudeAgg is one span group's bounds and its span id.
 type claudeAgg struct {
 	b  spanBounds
 	id string
 }
 
-// claudeAgentAgg is one sidechain's invoke_agent: every row whose is_substream
-// names its agent_run_id.
 type claudeAgentAgg struct {
 	claudeAgg
 	label string
 	tok   tokens
 }
 
-// claudeChatAgg is one request's chat: every row whose request_id (else
-// trace_id) names it. turnID is the turn of the min main-thread turn_seq.
 type claudeChatAgg struct {
 	claudeAgg
 	model   string
@@ -42,7 +28,6 @@ type claudeChatAgg struct {
 	tok     tokens
 }
 
-// claudeToolAgg is one tool_call_id's execute_tool.
 type claudeToolAgg struct {
 	claudeAgg
 	name    string
@@ -54,9 +39,6 @@ type claudeToolAgg struct {
 	hasTurn bool
 }
 
-// claudeApAgg is agent_parent: the parent tool span of a sidechain, the
-// tool_call its rows name in parent_tool_call_id when that tool belongs to
-// another thread or to none.
 type claudeApAgg struct {
 	id, turnID string
 	hasTurn    bool
@@ -140,9 +122,6 @@ func claudeCodeSpans(_, sid string, rows iter.Seq[*Row]) []schema.Span {
 		}
 	}
 
-	// agent_parent: for each subagent, the tool span of the parent_tool_call
-	// its rows name, when that tool belongs to another thread or to none;
-	// first row in event order wins each field, the way arg_min does.
 	ap := map[string]*claudeApAgg{}
 	for r := range rows {
 		sub := subOf(r)
@@ -231,10 +210,6 @@ func claudeCodeSpans(_, sid string, rows iter.Seq[*Row]) []schema.Span {
 	return out
 }
 
-// claudeChatParent is coalesce(a.span_id, t.span_id, r.span_id) of
-// chat_parent: the chat's subagent, else its turn (a sidechain chat with no
-// main-thread row takes the turn of the tool its subagent hangs under), else
-// the root.
 func claudeChatParent(sub, turnID string, hasTurn bool,
 	agents map[string]*claudeAgentAgg, ap map[string]*claudeApAgg, rootID string) string {
 	if sub != "" {
@@ -253,10 +228,6 @@ func claudeChatParent(sub, turnID string, hasTurn bool,
 	return rootID
 }
 
-// claudeToolParent is coalesce(c.span_id, p.span_id, a.span_id, t.span_id,
-// r.span_id) of the execute_tool rows: the chat of the request its first
-// tool_call row carries, else the tool span parent_tool_call_id names, else
-// the subagent, else the turn, else the root.
 func claudeToolParent(req, pcall, sub string, hasTurn bool, turnSeq uint32,
 	chats map[string]*claudeChatAgg, tools map[string]*claudeToolAgg,
 	agents map[string]*claudeAgentAgg, turns map[uint32]*claudeAgg, rootID string) string {

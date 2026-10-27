@@ -50,7 +50,7 @@ until grep -q 'cycle boot' "$out/serve.log"; do
 done
 echo "boot: $(grep 'cycle boot' "$out/serve.log" | sed 's/.* in /in /')"
 
-sample() { # name: sample status every 0.5 s until killed
+sample() {
 	(while kill -0 "$SERVE" 2>/dev/null; do
 		awk '/^(RssAnon|RssFile|RssShmem)/{printf "%s ", $2} END{print ""}' "/proc/$SERVE/status" 2>/dev/null
 		sleep 0.5
@@ -58,14 +58,14 @@ sample() { # name: sample status every 0.5 s until killed
 	SAMPLER=$!
 }
 stop() { [ -n "$SAMPLER" ] && kill "$SAMPLER" 2>/dev/null; wait "$SAMPLER" 2>/dev/null || true; SAMPLER=; }
-snap() { # name: point values + cgroup counters
+snap() {
 	echo "== $1"
 	awk '/^(VmHWM|RssAnon|RssFile|RssShmem)/{printf "%s %s ", $1, $2}' "/proc/$SERVE/status" 2>/dev/null; echo
 	echo "cgroup.peak $(cat "$cg/memory.peak" 2>/dev/null || echo -)"
 	awk '/^(anon|file) /{printf "%s %s ", $1, $2}' "$cg/memory.stat" 2>/dev/null; echo
 	echo "oom_kill $(awk '{for(i=1;i<NF;i++) if($i=="oom_kill") print $(i+1)}' "$cg/memory.events" 2>/dev/null)"
 }
-peaks() { # name idleanon idlefile: per-column peaks and deltas over idle
+peaks() {
 	f=$out/$1.samples
 	a=$(awk 'NF==3{if($1+0>m)m=$1+0}END{print m+0}' "$f")
 	fl=$(awk 'NF==3{if($2+0>m)m=$2+0}END{print m+0}' "$f")

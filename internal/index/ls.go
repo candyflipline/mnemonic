@@ -11,8 +11,6 @@ import (
 	"unicode/utf8"
 )
 
-// lsRec is one session's list_sessions rollup, computed at build over the
-// session's winners (59796bc:internal/query/list_sql.go lsSummarizePage).
 type lsRec struct {
 	LastUs        int64  `json:"last_us"`
 	TotalTurns    int    `json:"turns"`
@@ -32,7 +30,6 @@ type lsRec struct {
 	Slug          string `json:"slug"`
 }
 
-// argMax keeps the value of the row latest by (event_ts, event_uid).
 type argMax struct {
 	ts  int64
 	uid string
@@ -169,8 +166,6 @@ func lsMinKeyOf(r *Row) lsMinKey {
 	return lsMinKey{ts: r.TsMs, name: r.SourceName, file: r.SourceFile, uid: r.UID, gen: r.Gen, offset: r.Offset, lineNo: r.LineNo}
 }
 
-// less is the arg_min order (event_ts, source_name, source_file,
-// source_generation, source_offset, source_line_no, event_uid).
 func (a lsMinKey) less(b lsMinKey) bool {
 	switch {
 	case a.ts != b.ts:
@@ -197,8 +192,6 @@ func writeLs(dir string, recs []lsRec) error {
 	return os.WriteFile(filepath.Join(dir, "ls.json"), b, 0o644)
 }
 
-// lsRecs decodes the part's rollups once: like sections, the part's bytes are
-// immutable, so the first decode decides, under lsOnce.
 func (st *Part) lsRecs() ([]lsRec, error) {
 	st.lsOnce.Do(func() {
 		var recs []lsRec

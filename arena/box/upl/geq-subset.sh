@@ -1,14 +1,4 @@
 #!/bin/sh
-# geq-subset.sh DEN NAME — hard-linked sub-homes of the plain HOME, no copy.
-#
-# Sorts the files under $PH by size (largest first), keeps every DEN-th (from DEN/2, so the single largest file is not always in), and
-# links them (same relative path) into $BOX/geqhome/NAME-all, then deals the
-# kept files, largest first, each to the lightest of NAME-q1..q4. NAME-all is the union of q1..q4, so a
-# one-client push of -all and a four-client push of q1..q4 carry the same bytes.
-# Hard links: no disk is used; the client only reads them. The ids of a source
-# come from its absolute path, so a store pushed from -all and one from q1..q4
-# differ in file names; compare HTTP with stream on the SAME home only.
-# Prints counts and bytes only. Idempotent: refuses when NAME-all exists.
 set -eu
 DEN=${1:?usage: geq-subset.sh DEN NAME}
 NAME=${2:?usage: geq-subset.sh DEN NAME}

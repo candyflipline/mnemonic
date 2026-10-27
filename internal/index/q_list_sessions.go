@@ -60,7 +60,6 @@ func lsAnswer(a *lsArgs, page *lsPage) (any, string, error) {
 	return payload["data"], lsText(payload), nil
 }
 
-// lsParseArgs: every serde-level failure carries the same upstream message.
 func lsParseArgs(raw json.RawMessage) (*lsArgs, error) {
 	fields, err := lsObjectFields(raw,
 		"start_datetime", "end_datetime", "limit", "cursor", "mode", "harness", "source", "sort")
@@ -388,8 +387,6 @@ func lsText(payload map[string]any) string {
 	return strings.Join(lines, "\n")
 }
 
-// stringOr reads m[outer][inner] with a fallback. Presence, not emptiness,
-// decides: an empty string is still a value (Rust's unwrap_or fires on None).
 func stringOr(m map[string]any, outer, inner, fallback string) string {
 	if m == nil {
 		return fallback

@@ -32,8 +32,6 @@ stderr; dataset fails only when every matching session did.`
 
 const localListen = "127.0.0.1:7781"
 
-// exportCmd streams one ATIF trajectory or OTLP trace, or a JSONL dataset
-// filtered by annotation, from GET /v1/export/{kind} to --out.
 func exportCmd(args []string) error {
 	if len(args) == 0 {
 		return errors.New(exportUsage)
@@ -98,8 +96,6 @@ func exportCmd(args []string) error {
 	return nil
 }
 
-// exportClient is the plain loopback client for --local, whose connections
-// the local server identifies itself, or the QUIC client of the config.
 func exportClient(configPath string, local bool) (*http.Client, error) {
 	if local {
 		return http.DefaultClient, nil
@@ -111,7 +107,6 @@ func exportClient(configPath string, local bool) (*http.Client, error) {
 	return quicClient(cfg)
 }
 
-// writeOut copies body to path, or to stdout ending in a newline.
 func writeOut(path string, body io.Reader) error {
 	if path != "" && path != "-" {
 		f, err := os.Create(path)

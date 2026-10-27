@@ -68,8 +68,6 @@ const openTries = 3
 // write out.
 func (ix *Index) Refresh() error { return ix.refresh(nil) }
 
-// refresh is Refresh taking also the parts a cycle opened, by id, which it
-// owns: each one CURRENT names joins the DB, the rest close.
 func (ix *Index) refresh(opened map[string]*Part) error {
 	stamp, ok := CurrentStamp(ix.store)
 	ix.mu.Lock()

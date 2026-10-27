@@ -18,8 +18,6 @@ func qOptQuote(s *string) string {
 	return sqlQuote(*s)
 }
 
-// qFormatDateTime renders a cached TIMESTAMP the way ClickHouse
-// toString(DateTime64(3)) does; the display label and prose tests pin it.
 func qFormatDateTime(t time.Time) string {
 	return t.UTC().Format("2006-01-02 15:04:05.000")
 }
@@ -115,7 +113,6 @@ func qNonEmptyFilter(field, raw string, present bool) (*string, *ArgError) {
 	return &trimmed, nil
 }
 
-// qDecodeB64URL keeps upstream's padding-rejected strictness.
 func qDecodeB64URL(s string) ([]byte, error) {
 	if s == "" || len(s)%4 == 1 || strings.Contains(s, "=") {
 		return nil, errors.New("bad base64")

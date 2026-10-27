@@ -1,9 +1,4 @@
 #!/bin/sh
-# p4b-drive.sh DIR BIN:TAG...: one p4-cycle.sh run per pair, in order, each
-# under flock -x box.lock, on the prod-shaped hot set of HOME_KEEP
-# (hot-prep.sh): HOT_ACTIVE appended every HOT_EVERY s, HOT_IDLE_SET kept hot.
-# Alternate the pairs (A1 B1 A2 B2 ...). Defaults are prod's Oct 26 shape on
-# p4-store-a: hot-05 and hot-18 active, five more real and 13 synthetic idle.
 set -eu
 DIR=${1:?usage: p4b-drive.sh DIR BIN:TAG...}
 shift

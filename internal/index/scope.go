@@ -30,7 +30,6 @@ type SessionFilter struct {
 	shared map[string]bool
 }
 
-// Sessions is the SessionFilter of the caller on ctx over db.
 func Sessions(ctx context.Context, db *DB) (SessionFilter, error) {
 	id, ok := auth.From(ctx)
 	if !ok {
@@ -67,14 +66,12 @@ func Sessions(ctx context.Context, db *DB) (SessionFilter, error) {
 	return f, nil
 }
 
-// all reports that the filter passes every session, so callers skip it.
 func (f SessionFilter) all() bool {
 	return !f.scoped || (f.allTenants() && len(f.hidden) == 0)
 }
 
 func (f SessionFilter) allTenants() bool { return f.tenant.Except && len(f.tenant.Names) == 0 }
 
-// Author is the tenant predicate over one author.
 func (f SessionFilter) Author(author string) bool {
 	return !f.scoped || f.allTenants() || f.tenant.Has(author)
 }

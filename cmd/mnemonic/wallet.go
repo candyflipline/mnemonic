@@ -23,15 +23,6 @@ import (
 
 func init() { commands["wallet"] = walletCmd }
 
-// walletCmd binds this machine's key to a Solana wallet, so the machine reads
-// the sessions shared with that wallet. Every form reads the client config
-// for the key file and the server key the binding names.
-//
-//	mnemonic wallet bind --keypair ~/.config/solana/id.json [--days 30]
-//	mnemonic wallet bind --phantom [--days 30]
-//	mnemonic wallet message --wallet <address> [--days 30]
-//	mnemonic wallet bind --message '<the line message printed>' --signature <base58 or base64>
-//	mnemonic wallet show
 func walletCmd(args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: mnemonic wallet bind|message|show [flags]")
@@ -47,8 +38,6 @@ func walletCmd(args []string) error {
 	return fmt.Errorf("mnemonic wallet: unknown subcommand %q", args[0])
 }
 
-// device is this machine's key and the server key from the client config at
-// path, the two keys every binding names.
 type device struct {
 	keyFile string
 	key     ed25519.PrivateKey
@@ -100,13 +89,6 @@ func expiry(days int) (time.Time, error) {
 
 var defaultDays = int(wallet.DefaultLifetime / (24 * time.Hour))
 
-// walletBind stores a binding beside the key file. With --keypair it signs
-// the claim itself over the raw message. With --phantom it serves a local
-// page that asks the browser wallet to sign the message. With --message and
-// --signature it takes a line `wallet message` printed and the signature a
-// wallet made over it, refusing a line that names another device or server.
-// Every path checks the signature before storing, so a bad one fails here,
-// not at connect.
 func walletBind(args []string) error {
 	fs := flag.NewFlagSet("wallet bind", flag.ContinueOnError)
 	configPath := fs.String("config", "~/.mnemonic/config.toml", "path to the client config TOML")
@@ -189,11 +171,6 @@ func walletBind(args []string) error {
 	return d.save(b)
 }
 
-// walletMessage prints the one line a wallet app signs: the claim that
-// --wallet lets this machine's key read on this config's server until now
-// plus --days. Run `solana sign-offchain-message '<line>'` (a Ledger through
-// --keypair usb://ledger), then pass the line and the signature to
-// `mnemonic wallet bind`.
 func walletMessage(args []string) error {
 	fs := flag.NewFlagSet("wallet message", flag.ContinueOnError)
 	configPath := fs.String("config", "~/.mnemonic/config.toml", "path to the client config TOML")
@@ -218,8 +195,6 @@ func walletMessage(args []string) error {
 	return nil
 }
 
-// walletShow prints the stored binding's wallet and expiry, or that this
-// machine has none.
 func walletShow(args []string) error {
 	fs := flag.NewFlagSet("wallet show", flag.ContinueOnError)
 	configPath := fs.String("config", "~/.mnemonic/config.toml", "path to the client config TOML")
@@ -253,10 +228,6 @@ func walletShow(args []string) error {
 //go:embed phantom.html
 var phantomPage []byte
 
-// bindInBrowser serves phantomPage on a loopback port under a random path,
-// hands the page the message for the wallet it connects, and takes back the
-// wallet's signature over the raw message. It returns once a signature
-// verifies and the binding is stored, or with an error after browserWait.
 func bindInBrowser(d device, expires time.Time) error {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

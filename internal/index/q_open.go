@@ -44,7 +44,6 @@ type openCursorAfter struct {
 	EventOrdinal uint32 `json:"event_ordinal,omitempty"`
 }
 
-// parseOpenArgs: every message is upstream text.
 func parseOpenArgs(raw json.RawMessage) (canonicalOpenArgs, error) {
 	var args struct {
 		ID     *string `json:"id"`
@@ -631,7 +630,6 @@ func extractExitCode(payload any) (int64, bool) {
 		return 0, false
 	}
 	for _, key := range []string{"exit_code", "exitCode", "status_code", "code"} {
-		// serde's as_i64: only integer numbers convert.
 		if n, ok := object[key].(json.Number); ok {
 			if v, err := n.Int64(); err == nil {
 				return v, true
@@ -725,7 +723,6 @@ func openEventText(data map[string]any) []string {
 			encoded, _ := json.Marshal(arguments)
 			lines = append(lines, "arguments: "+string(encoded))
 		}
-		// serde as_i64: only integer numbers render a line.
 		if n, ok := content["exit_code"].(int64); ok {
 			lines = append(lines, fmt.Sprintf("exit_code: %d", n))
 		}

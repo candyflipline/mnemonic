@@ -10,9 +10,6 @@ import (
 
 const pushpbDir = "internal/wire/pushpb"
 
-// pushpbDrift regenerates the committed pushpb code and fails when a file
-// changed. protoc is not on every developer machine, so a missing protoc
-// skips the check with one line; CI installs it, so the check runs there.
 func pushpbDrift() ([]string, error) {
 	if _, err := exec.LookPath("protoc"); err != nil {
 		fmt.Fprintln(os.Stderr, "check: skipped pushpb drift (protoc not on PATH; CI runs it)")

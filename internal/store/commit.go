@@ -40,13 +40,10 @@ func ParseLines(b []byte) (Lines, error) {
 	return Lines{b}, nil
 }
 
-// ErrReserved is NewClientSource's answer to a machine or harness only the
-// server writes (HTTP 403, gRPC PermissionDenied).
 var ErrReserved = errors.New("machine or harness is reserved for server-owned sources")
 
 var errSegment = errors.New("bad path segment")
 
-// ClientSource is the key of a client-owned source.
 type ClientSource struct{ key layout.Key }
 
 func NewClientSource(author, machine, harness, srcID string) (ClientSource, error) {
@@ -61,8 +58,6 @@ func NewClientSource(author, machine, harness, srcID string) (ClientSource, erro
 	return ClientSource{layout.Key{Author: author, Machine: machine, Harness: harness, SrcID: srcID}}, nil
 }
 
-// Op is one change to a source: Replace, Extend, Backfill, or the server's
-// own append.
 type Op interface{ isOp() }
 
 type Replace struct {
@@ -101,8 +96,6 @@ func (Extend) isOp()       {}
 func (Backfill) isOp()     {}
 func (serverAppend) isOp() {}
 
-// ParseOp maps a PUT's or an Append's fields onto an Op. Its errors read as
-// the HTTP 400 bodies the PUT answered with.
 func ParseOp(offset int64, headHash, sourceName, path string, rawEnd int64, body []byte) (Op, error) {
 	if offset < 0 {
 		return nil, errors.New("bad offset")
@@ -533,8 +526,6 @@ func (c *Committer) run() {
 	}
 }
 
-// fill takes every request already queued, without waiting, until the batch
-// caps are reached.
 func (c *Committer) fill(held []*request) []*request {
 	size := 0
 	for _, r := range held {
@@ -564,7 +555,6 @@ func batchOf(held []*request) []*request {
 	return held[:n]
 }
 
-// commit commits the prefix of reqs plan admits and returns its length.
 func (c *Committer) commit(reqs []*request) (int, error) {
 	p := plan(c.table, reqs, func() int64 { return time.Now().UnixMilli() })
 	w, err := p.write(c.dataDir)
@@ -775,7 +765,6 @@ func stateOf(m *manifestBody) wire.Source {
 	return m.Source
 }
 
-// written: W1 done, nothing synced.
 type written struct {
 	dataDir  string
 	p        planned
@@ -883,8 +872,6 @@ func writeError(err error) error {
 	return err
 }
 
-// mkdirs makes dir and returns the dirs whose entries it changed, so the
-// barrier can make the new entries durable.
 func mkdirs(dataDir, dir string) ([]string, error) {
 	if _, err := os.Stat(dir); err == nil {
 		return nil, nil
@@ -951,8 +938,6 @@ func appendFrames(raw string, zst int64, frames [][]byte) error {
 	return err
 }
 
-// touched is what a barrier makes durable: written files, then dirs whose
-// entries changed.
 type touched struct {
 	files []string
 	dirs  []string
@@ -974,15 +959,12 @@ func (b barrier) run(t touched) error {
 	return nil
 }
 
-// durableData: B1 passed; no rename yet.
 type durableData struct{ w written }
 
 func (w written) sync(b barrier) (durableData, error) {
 	return durableData{w}, b.run(w.touched)
 }
 
-// rawsLinked: every rewrite's raw renamed into place and durable; no
-// manifest renamed yet.
 type rawsLinked struct{ d durableData }
 
 func (d durableData) linkRaws(b barrier) (rawsLinked, error) {
@@ -999,7 +981,6 @@ func (d durableData) linkRaws(b barrier) (rawsLinked, error) {
 	return rawsLinked{d}, b.run(t)
 }
 
-// committed: every manifest renamed and durable.
 type committed struct {
 	r       rawsLinked
 	batch   uint64
@@ -1042,7 +1023,6 @@ func encodeFrame(l Lines) []byte {
 	return buf.Bytes()
 }
 
-// budget is a byte semaphore over queued frames.
 type budget struct {
 	mu    sync.Mutex
 	avail int64

@@ -15,9 +15,6 @@ import (
 // file says one.
 var ErrLocked = errors.New("index dir locked by another writer")
 
-// writerLockName is the lock file inside the index dir. Its flock is the
-// write exclusion — frames, checkpoints, CURRENT.tmp and GC never interleave
-// — and its content is the holder's "pid N, cmd", for the refusal's error.
 const writerLockName = "writer.lock"
 
 // IndexLock is this process's exclusive writer lock on one index dir, held
@@ -117,8 +114,6 @@ func (l *IndexLock) dropIfIdle() error {
 	return err
 }
 
-// takeLock takes the dir's writer lock without waiting: it refuses, with the
-// holder named, when the lock is taken now.
 func takeLock(store string) (*IndexLock, error) {
 	path := filepath.Join(store, writerLockName)
 	if err := os.MkdirAll(store, 0o755); err != nil {
@@ -148,7 +143,6 @@ func takeLock(store string) (*IndexLock, error) {
 	return &IndexLock{f: f, key: filepath.Clean(store)}, nil
 }
 
-// readHolder reads the pid line the dir's holder left in the lock file.
 func readHolder(path string) string {
 	b, err := os.ReadFile(path)
 	if err != nil {

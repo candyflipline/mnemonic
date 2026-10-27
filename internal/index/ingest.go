@@ -36,8 +36,6 @@ type manifest struct {
 	ZstSize int64 `json:"zst_size"`
 }
 
-// parsed is where one source's parse stopped, independent of where its rows
-// are kept: a checkpoint resumes from it and a cold part records it per member.
 type parsed struct {
 	Key        string          `json:"key"`
 	Kind       Kind            `json:"kind"`
@@ -75,7 +73,6 @@ type ckpt struct {
 // version by its place in its source, where the parser stamped the wall clock.
 const logLayout = 1
 
-// hot reports whether the source grew since it last settled into a cold part.
 func (c ckpt) hot() bool { return c.ZstSize != c.ColdZst }
 
 const window = 64 << 10
@@ -162,8 +159,6 @@ func readCkpt(store, key string) (ckpt, bool) {
 	return c, true
 }
 
-// readCkpts reads the checkpoint of each source, nil where it has none; an
-// archive file's is left nil, its kind reads its own (archive.go).
 func readCkpts(store string, sources []source) []*ckpt {
 	out := make([]*ckpt, len(sources))
 	eachIndex(len(sources), func(i int) {
@@ -177,7 +172,6 @@ func readCkpts(store string, sources []source) []*ckpt {
 	return out
 }
 
-// eachIndex calls fn with 0..n-1 on GOMAXPROCS workers.
 func eachIndex(n int, fn func(int)) {
 	var next atomic.Int64
 	var wg sync.WaitGroup
@@ -267,7 +261,7 @@ func openRaw(root string, s source) (*os.File, int64, error) {
 func wantCkpt(s source, parser normalize.Parser) ckpt {
 	return ckpt{parsed: parsed{Key: sourceKey(s.key), Kind: s.kind, Parser: parser.Version(), Harness: s.src.Harness, SourceName: s.src.SourceName,
 		SourceFile: s.src.Path, Author: s.key.Author, Machine: s.key.Machine, Layout: logLayout,
-		Path: filepath.ToSlash(s.key.Events("")) /* lake path order */}}
+		Path: filepath.ToSlash(s.key.Events(""))}}
 }
 
 // extends reports whether the input up to end still holds the bytes prev was
@@ -283,8 +277,6 @@ func extends(raw *os.File, end int64, want, prev ckpt) bool {
 	return want.Kind.extends(raw, end, prev)
 }
 
-// storeExtends is KindStore's byte test: the 64 KB of raw before the
-// checkpoint hash the same, and a zstd frame starts at it unless raw ends there.
 func storeExtends(raw *os.File, end int64, prev ckpt) bool {
 	if sum, err := windowSHA(raw, prev.ZstSize); err != nil || sum != prev.WindowSHA {
 		return false
@@ -360,11 +352,6 @@ func ingestSource(root, store string, s source, cur *ckpt, red *redact.Redactor)
 	}
 	defer zr.Close()
 	if red != nil {
-		// Local mode: redact at ingest (redact.Line per line before parse,
-		// exactly what push uploads), whichever kind carried the line in —
-		// the harness files and the write tools' records alike. The
-		// checkpoint stays in the input's own bytes, so resume still works
-		// on the unredacted file.
 		zr = newRedactReader(zr, red)
 	}
 
@@ -453,8 +440,6 @@ func openLog(path string, validLen int64) (*os.File, error) {
 	return f, nil
 }
 
-// frameWriter appends frames: u32 compressed length, u32 record count, then
-// the zstd-compressed records, each a uvarint length and its bytes.
 type frameWriter struct {
 	f      *os.File
 	target int
@@ -496,7 +481,6 @@ func (w *frameWriter) flush() error {
 
 var decoder, _ = zstd.NewReader(nil, zstd.WithDecoderConcurrency(runtime.GOMAXPROCS(0)), zstd.WithDecoderLowmem(true))
 
-// readFrame returns the records of the frame at off in r and the next offset.
 func readFrame(r io.ReaderAt, off int64, scratch []byte) ([][]byte, int64, error) {
 	var hdr [8]byte
 	if _, err := r.ReadAt(hdr[:], off); err != nil {
@@ -525,27 +509,19 @@ func readFrame(r io.ReaderAt, off int64, scratch []byte) ([][]byte, int64, error
 	return recs, off + 8 + clen, nil
 }
 
-// Outcome is what one Ingest did to one source.
 type Outcome uint8
 
 const (
-	Unchanged Outcome = iota // the checkpoint matches raw: nothing parsed
-	Resumed                  // the checkpoint extends: only the new bytes parsed
-	Fresh                    // no checkpoint: parsed from byte 0, the first time on this store
-	Reparsed                 // the checkpoint did not match the input or parser: parsed from byte 0 into gen+1
+	Unchanged Outcome = iota
+	Resumed
+	Fresh
+	Reparsed
 )
 
-// IngestStats counts sources by Outcome, indexed by Outcome.
 type IngestStats [4]int
 
-// sweepBudget bounds the wall time one Ingest spends handing out version-stale
-// sources, checked before each after the first, so a parser version bump
-// re-parses over consecutive cycles instead of one. The caller starts the next
-// cycle at once while any are left (server.Run); each source's own checkpoint
-// is the lap's marker, so no sweep state is kept on disk.
 const sweepBudget = 5 * time.Second
 
-// Ingest brings store up to root's raw and reports what it did per source.
 func Ingest(root, store string, quiet time.Duration, settleAll bool) (IngestStats, error) {
 	sources, err := listSources(root)
 	if err != nil {
@@ -682,7 +658,7 @@ func parseSources(root, store string, sources []source, cks []*ckpt, work []int,
 	for k, v := range skip {
 		failSweep[k] = v
 	}
-	var now []int // pushed, fresh or appended: parsed whatever the sweep is doing
+	var now []int
 	var sweep []int
 	for _, i := range work {
 		s := sources[i]
@@ -745,8 +721,6 @@ func parseSources(root, store string, sources []source, cks []*ckpt, work []int,
 	return outcomes, logBytes, stale, failSweep
 }
 
-// parserVersion is the Version of s's parser, zero for a harness without one
-// (such a source is never version-stale).
 func parserVersion(s source) int {
 	p, ok := normalize.For(s.src.Harness)
 	if !ok {
@@ -957,9 +931,6 @@ func buildParts(store string, parts [][]ckpt, prev manifestFile, byPrev map[stri
 func buildPart(store string, members []ckpt, prev manifestFile, byPrev map[string]string) (builtPart, error) {
 	id := fingerprint(members)
 	if annotationOnly(members) {
-		// An annotation component's part is the annotations section alone: no
-		// docs to delta, and tiny next to any session part, so it is rebuilt
-		// whole each cycle it grows and takes no image or delta.
 		if _, err := os.Stat(partDir(store, id)); err == nil {
 			return builtPart{id: id, hot: slices.ContainsFunc(members, ckpt.hot)}, nil
 		}
@@ -1007,8 +978,6 @@ func retiredJoinsBase(store string, members []ckpt, prev manifestFile) bool {
 	})
 }
 
-// buildHotImage builds the hot component members as a full part, hotPart
-// without the delta path.
 func buildHotImage(store string, members []ckpt, byPrev map[string]string) (builtPart, error) {
 	id := fingerprint(members)
 	for _, have := range []string{id, deltaID(members)} {
@@ -1022,8 +991,6 @@ func buildHotImage(store string, members []ckpt, byPrev map[string]string) (buil
 	return builtPart{id: id, hot: true, built: true, written: dirSize(partDir(store, id))}, nil
 }
 
-// dirSize is the bytes of the files directly in dir, what a part build or a
-// delta commit wrote there.
 func dirSize(dir string) int64 {
 	var n int64
 	ents, err := os.ReadDir(dir)
@@ -1038,8 +1005,6 @@ func dirSize(dir string) int64 {
 	return n
 }
 
-// components returns, per item, a representative of its component: items that
-// share a token are joined.
 func components(tokens [][]string) []int {
 	parent := make([]int, len(tokens))
 	for i := range parent {
@@ -1145,9 +1110,6 @@ func shardOf(least string) uint32 {
 	return h.Sum32() % partShards
 }
 
-// annotationOnly reports whether every member parses the annotation harness,
-// so the part build holds annotation rows alone: they feed only the
-// annotations section and the part holds no docs.
 func annotationOnly(members []ckpt) bool {
 	return len(members) > 0 && !slices.ContainsFunc(members, func(c ckpt) bool { return c.Harness != schema.AnnotationHarness })
 }
@@ -1222,8 +1184,6 @@ func settleSet(cks []ckpt, due, touched []bool, budget int) (settle []bool, defe
 	return settle, deferred
 }
 
-// gcParts removes part dirs neither the manifest nor its deltas name, and any
-// half-built part a killed build left behind.
 func gcParts(store string, want map[string]bool) {
 	ents, _ := os.ReadDir(filepath.Join(store, "parts"))
 	for _, e := range ents {
@@ -1233,9 +1193,6 @@ func gcParts(store string, want map[string]bool) {
 	}
 }
 
-// gcLogs removes log generations no checkpoint names, plus any file in
-// keepExtra: the archive files' checkpoints, which name member checkpoints
-// rather than logs.
 func gcLogs(store string, cks []ckpt, keepExtra []string) error {
 	keep := map[string]bool{}
 	for _, c := range cks {

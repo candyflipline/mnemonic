@@ -14,14 +14,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/store"
 )
 
-// TestTraceBudgetHoldsNoSpansDecode puts a huge session H and a small session
-// S in one settled part, at two sizes of H (5k and 20k tool pairs, about 4 and
-// 17 MiB of spans JSON), with the get_trace budget lowered to 1 MiB so H is
-// over it. It checks that get_trace refuses H before any spans decode, that
-// the heap the refusal adds does not grow with H, that S answers as before,
-// that a caller who cannot open H gets "session not found" and not the size,
-// and that annotate's span check on H finds a late span, misses an absent
-// one, and holds a heap that does not grow with H.
 func TestTraceBudgetHoldsNoSpansDecode(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds 40k rows")

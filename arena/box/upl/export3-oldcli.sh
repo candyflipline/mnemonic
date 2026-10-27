@@ -1,10 +1,4 @@
 #!/bin/sh
-# export3-oldcli.sh STORE SERVEBIN OLDBIN OUT
-# 3d: the whole-store dataset of the old CLI (19c8a0e, no-ingest branch: SERVE
-# holds the store's writer lock) against the new route's empty result
-# (annotation export3-none, per-task 1: no session matches). One run, old CLI
-# under MemoryMax=26G, only when available >= 24. Prints rc, bytes, sha, old
-# CLI peak RSS, skipped lines. Never prints content. flock -s box.lock.
 set -eu
 store=$1 servebin=$2 oldbin=$3 out=$4
 port=${PORT:-18874}

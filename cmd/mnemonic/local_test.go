@@ -109,7 +109,7 @@ func TestWakeCycleDrainsSettles(t *testing.T) {
 		t.Fatalf("first ingest: %v", err)
 	}
 	backdate(files["c"], 20*time.Minute)
-	if _, err := sink.Sync(context.Background(), nil); err != nil { // parses nothing, settles c
+	if _, err := sink.Sync(context.Background(), nil); err != nil {
 		t.Fatalf("settle sync: %v", err)
 	}
 	backdate(files["b"], 25*time.Minute)
@@ -127,7 +127,7 @@ func TestWakeCycleDrainsSettles(t *testing.T) {
 		t.Fatal(err)
 	}
 	wake := make(chan struct{}, 1)
-	sink.wakeCycle(context.Background(), wake, logger) // parses a's append, then must drain b
+	sink.wakeCycle(context.Background(), wake, logger)
 	if got := ix.SweepStale(); got != 0 {
 		t.Fatalf("after the wake cycle SweepStale() = %d, want 0: the cycle that parsed a's append settles nothing, and the wake path left b hot", got)
 	}

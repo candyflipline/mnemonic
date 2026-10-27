@@ -19,34 +19,16 @@ import (
 	"github.com/parquet-go/parquet-go"
 )
 
-// KindArchive is a ch-* parquet file the retired 59796bc import-ch wrote
-// (lake shape, machine partition archive-ch), read in place. The kind and
-// its three functions live here; kind.go is not touched — nothing above
-// ingest looks at the kind. The source granularity is (file, session): one
-// pass over a changed file streams its rows into per-session members, so
-// components stay session-sized exactly as for raw and an unchanged file is
-// skipped after reading only its size and last window (DESIGN.md, Archive
-// kind).
 const KindArchive Kind = 2
 
 // archiveMemberSep joins a file's source key and a session id into a
 // member's source key. Session ids are uuids, which never carry it.
 const archiveMemberSep = "~"
 
-// archiveOpenLogs bounds the open frame-log pairs while rows stream: a
-// ch-* file holds up to ~2,800 sessions and its rows are not sorted by
-// session, so the least recently used member is flushed and closed and
-// reopens at its recorded lengths if a later row needs it.
 const archiveOpenLogs = 64
 
-// archiveReadRows is the row slice one row group decodes into at a time.
 const archiveReadRows = 512
 
-// listArchiveSources is every ch-* file under root's events tree, one file
-// source of KindArchive per path (import-ch writes nowhere else than
-// machine=archive-ch). The manifest carries the file's own size and mtime;
-// the per-session members are discovered from the file's checkpoint, not by
-// reading the parquet.
 func listArchiveSources(root string) ([]source, error) {
 	paths, err := filepath.Glob(filepath.Join(root, "events", "author=*",
 		"machine="+layout.ArchiveMachine, "harness=*", "ch-*.parquet"))
@@ -91,7 +73,6 @@ func listArchiveSources(root string) ([]source, error) {
 	return out, nil
 }
 
-// archiveMemberKey is a member's source key: one session of one file.
 func archiveMemberKey(fileKey, sessionID string) string {
 	return fileKey + archiveMemberSep + sessionID
 }
@@ -133,7 +114,6 @@ type archiveClaim struct {
 	row     uint32
 }
 
-// chKey is the three columns the claim scan reads of a ch file.
 type chKey struct {
 	EventUID     string `parquet:"event_uid"`
 	EventVersion uint64 `parquet:"event_version"`
@@ -166,10 +146,6 @@ type archiveWindow struct {
 	sum         string
 }
 
-// archiveSetFor returns the verdict for the ch files under events, scanning
-// them once per change of the file list: the digest covers each file's path,
-// size and last window, the identity ingestArchive already trusts for one
-// file. Only the verdict is kept between calls, never the uid map.
 func archiveSetFor(events string) (*archiveSet, error) {
 	c := &archiveSetCache
 	c.Lock()
@@ -263,14 +239,6 @@ func archiveSetFor(events string) (*archiveSet, error) {
 	return set, nil
 }
 
-// ingestArchive brings one ch-* file's per-session members up to the file.
-// The identity is the file's size and last window (a parquet file is never
-// appended, so the kind's byte test is same size AND same window): an
-// unchanged file is skipped without opening the parquet, a changed one is
-// re-parsed in one pass whose rows route to per-session members, and the
-// file's checkpoint — which names the member sessions publish expands — is
-// written last. A member's checkpoint carries the parent file's identity,
-// so parts fingerprint exactly as one member per session.
 func ingestArchive(store string, s source) (Outcome, int64, error) {
 	key := sourceKey(s.key)
 	f, err := os.Open(s.mpath)
@@ -356,9 +324,6 @@ func ingestArchive(store string, s source) (Outcome, int64, error) {
 	return Fresh, written, nil
 }
 
-// streamArchiveRows reads every row group into a bounded slice and hands each
-// row that is its uid's winner to fn: the file is never held whole, one row
-// group's columns plus the slice is the peak.
 func streamArchiveRows(pf *parquet.File, set *archiveSet, file int, fn func(*chRow) error) error {
 	buf := make([]chRow, archiveReadRows)
 	row := uint32(0)
@@ -388,9 +353,6 @@ func streamArchiveRows(pf *parquet.File, set *archiveSet, file int, fn func(*chR
 	return nil
 }
 
-// wantArchiveCkpt is the file-level checkpoint: it names the member
-// sessions, carries the file identity for the unchanged test, and never
-// joins planning itself (publish expands it into the members).
 func wantArchiveCkpt(s source, size int64, sum string, rows int64, sessions []string) ckpt {
 	return ckpt{parsed: parsed{
 		Key: sourceKey(s.key), Kind: KindArchive, Layout: logLayout,
@@ -402,9 +364,6 @@ func wantArchiveCkpt(s source, size int64, sum string, rows int64, sessions []st
 	}, ColdZst: size}
 }
 
-// removeMember drops a session's member the file no longer holds: its
-// checkpoint and the log generation that checkpoint named. Anything left
-// half-written by a killed run goes with gcLogs.
 func removeMember(store, key string) error {
 	if c, ok := readCkpt(store, key); ok {
 		for _, kind := range []string{"light", "heavy"} {
@@ -419,7 +378,6 @@ func removeMember(store, key string) error {
 	return nil
 }
 
-// archiveWriter is one session's frame logs while a file parses.
 type archiveWriter struct {
 	key      string
 	gen      int
@@ -431,17 +389,12 @@ type archiveWriter struct {
 	heavyLen int64
 }
 
-// ckpt is the member checkpoint: the parent file's identity (size and
-// window) and the member's own rows, so parts fingerprint per session and
-// an unchanged file rewrites nothing.
 func (w *archiveWriter) ckpt(k layout.Key, m manifest, size int64, sha string) ckpt {
 	return ckpt{parsed: parsed{
 		Key: w.key, Kind: KindArchive, Layout: logLayout,
 		Harness: m.Harness, SourceFile: m.Path,
 		Author: k.Author, Machine: k.Machine,
-		Path: filepath.ToSlash(k.Events("")),
-		// Only the member's own session: the component bound the parts
-		// planner joins on.
+		Path:     filepath.ToSlash(k.Events("")),
 		Sessions: []string{strings.TrimPrefix(w.key, sourceKey(k)+archiveMemberSep)},
 		ZstSize:  size, WindowSHA: sha,
 		Rows: w.rows,
@@ -494,9 +447,6 @@ func (aws *archiveWriters) writerFor(sid string) (*archiveWriter, error) {
 			aws.touch(sid)
 			return w, nil
 		}
-		// Reopened after an eviction: the same generation's logs, appended
-		// at the recorded lengths. The gen bump is per parse run, not per
-		// open.
 	} else {
 		gen, seen := aws.prevGen[sid]
 		if !seen {
@@ -528,7 +478,6 @@ func (aws *archiveWriters) writerFor(sid string) (*archiveWriter, error) {
 	return w, nil
 }
 
-// touch moves sid to the most recent end of the LRU list.
 func (aws *archiveWriters) touch(sid string) {
 	for i, s := range aws.opened {
 		if s == sid {
@@ -650,8 +599,6 @@ type chRow struct {
 	IngestedAt            int64              `parquet:"ingested_at,timestamp(microsecond)"`
 }
 
-// event is the schema.Event rowFrom derives the row from: only the columns
-// the engine's rows carry are copied, the same set the raw path fills.
 func (r *chRow) event() schema.Event {
 	return schema.Event{
 		EventUID:              r.EventUID,
@@ -799,8 +746,6 @@ func planMembers(cks []ckpt, holders []*Part) memberPlan {
 	return p
 }
 
-// holderAuthors is holder's per-session author section without the stale
-// sessions, whose authors the members read whole contribute afresh.
 func (p memberPlan) holderAuthors(h *Part) map[string][]string {
 	out := map[string][]string{}
 	h.authEach(func(sid string) bool { return !p.stale[sid] }, func(sid string, as []string) { out[sid] = as })
@@ -855,8 +800,6 @@ func rematerialize(store string, cks []ckpt, parts [][]ckpt, byPrev map[string]s
 	return len(need), nil
 }
 
-// partExists reports whether the part the cycle publishes for members is
-// already on disk, so no build reads its members.
 func partExists(store string, members []ckpt) bool {
 	for _, id := range []string{fingerprint(members), deltaID(members)} {
 		if _, err := os.Stat(partDir(store, id)); err == nil {
@@ -866,11 +809,6 @@ func partExists(store string, members []ckpt) bool {
 	return false
 }
 
-// restreamMembers streams the sessions of the members cks[idx] out of their ch
-// file into frame logs one generation up and rewrites their checkpoints to
-// name them. The file must be the one the members were streamed from (size,
-// last window and the file list's digest); otherwise this cycle fails and the
-// next one's ingest re-streams the file whole.
 func restreamMembers(store, path string, idx []int, cks []ckpt) error {
 	set, err := archiveSetFor(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(path)))))
 	if err != nil {

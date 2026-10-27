@@ -23,7 +23,6 @@ var spanBuilders = map[string]func(harness, sid string, rows iter.Seq[*Row]) []s
 	"prime-agent":     primeAgentSpans,
 }
 
-// sessionSpans is sessionID's spans, ordered by start then span_id.
 func (db *DB) sessionSpans(sessionID string) []schema.Span {
 	st, ok := db.part(sessionID)
 	if !ok {
@@ -32,8 +31,6 @@ func (db *DB) sessionSpans(sessionID string) []schema.Span {
 	return st.spansOf(sessionID)
 }
 
-// sessionSpansSize is the stored size of sessionID's spans value, 0 for a
-// session db does not hold.
 func (db *DB) sessionSpansSize(sessionID string) int {
 	st, ok := db.part(sessionID)
 	if !ok {
@@ -42,8 +39,6 @@ func (db *DB) sessionSpansSize(sessionID string) int {
 	return len(st.sessionSpansRaw(sessionID))
 }
 
-// spanIDHex is the cache's spanID: the first 16 hex chars of sha256 over the
-// span's source key parts joined by U+001F.
 func spanIDHex(parts ...string) string {
 	h := sha256.New()
 	for i, p := range parts {
@@ -55,10 +50,6 @@ func spanIDHex(parts ...string) string {
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
-// spanBounds is the aggregate list min(event_time), max(event_time),
-// arg_min(event_uid, event_order), arg_max(event_uid, event_order) over the
-// rows grouped into a span. Rows arrive in event order, so the first row
-// carries the start and the last the end.
 type spanBounds struct {
 	startUs, endUs int64
 	first, last    string
@@ -71,7 +62,6 @@ func (b *spanBounds) add(uid string, timeUs int64) {
 	b.last, b.endUs = uid, timeUs
 }
 
-// spanAcc is one spans row under construction.
 type spanAcc struct {
 	sid          string
 	id, parent   string
@@ -106,13 +96,8 @@ func (a *spanAcc) span() schema.Span {
 	}
 }
 
-// spanTime is epoch_ms-of-event_time as a UTC time, the cache's event_time at
-// the precision its rows carry.
 func spanTime(us int64) time.Time { return time.Unix(us/1e6, (us%1e6)*1e3).UTC() }
 
-// maxStr is SQL max over a string column: empty strings take part, only SQL
-// NULL (a field the parser never wrote) is out, and engine rows carry those
-// as "" too.
 func maxStr(a, b string) string {
 	if b > a {
 		return b
@@ -120,7 +105,6 @@ func maxStr(a, b string) string {
 	return a
 }
 
-// maxNN is SQL max over a nullif column: "" stands for NULL and is skipped.
 func maxNN(a, b string) string {
 	if b != "" && b > a {
 		return b
@@ -135,15 +119,12 @@ func maxU64(a, b uint64) uint64 {
 	return a
 }
 
-// tokens is a span's four usage counters.
 type tokens struct{ in, out, cr, cw uint64 }
 
 func (t *tokens) add(o tokens) { t.in += o.in; t.out += o.out; t.cr += o.cr; t.cw += o.cw }
 
 func (t tokens) set(a *spanAcc) { a.in, a.out, a.cr, a.cw = t.in, t.out, t.cr, t.cw }
 
-// setSpan is set for a span already built: the root, whose bounds are the
-// session's.
 func (t tokens) setSpan(s *schema.Span) {
 	s.InputTokens, s.OutputTokens, s.CacheReadTokens, s.CacheWriteTokens = t.in, t.out, t.cr, t.cw
 }

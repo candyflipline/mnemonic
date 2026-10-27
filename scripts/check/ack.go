@@ -13,7 +13,6 @@ const (
 	storeDir = "internal/store"
 )
 
-// acks fails unless internal/store builds an Ack in exactly one place.
 func acks() ([]string, error) {
 	files, err := filepath.Glob(filepath.Join(storeDir, "*.go"))
 	if err != nil {

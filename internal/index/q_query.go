@@ -14,9 +14,6 @@ import (
 
 func init() { register(queryTool{}) }
 
-// The limits are the SQL tool's (internal/query/sqltool.go at 59796bc), kept
-// under the clause language: the argument named sql became query, the
-// refusals became parse errors by construction, everything else is unchanged.
 const (
 	queryDefaultLimit = 100
 	queryMaxLimit     = 10000
@@ -26,7 +23,6 @@ const (
 	queryTextRows     = 50
 	querySlots        = 2
 
-	// queryMaxHeld bounds what a grouped query holds in memory (ql.Limits).
 	queryMaxHeld = 1_000_000
 )
 
@@ -110,8 +106,6 @@ func (queryTool) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, st
 	return data, text, nil
 }
 
-// runQuery parses the query once at the tool boundary, checks it against
-// ql.Relations, and runs the plan over the engine rows the caller may read.
 func runQuery(ctx context.Context, db *DB, q string, from, to time.Time, limit int) (any, string, error) {
 	parsed, err := ql.Parse(q)
 	if err != nil {
@@ -146,7 +140,6 @@ type truncated struct {
 	limit     int
 }
 
-// queryText is the old sqlText prose with ql's columns and rows.
 func queryText(res ql.Result, tr truncated, from, to time.Time) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "query returned %d row(s) for %s to %s", len(res.Rows), from.Format(time.RFC3339), to.Format(time.RFC3339))

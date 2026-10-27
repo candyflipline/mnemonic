@@ -5,8 +5,6 @@ import (
 	"time"
 )
 
-// An unchanged source whose parse saw no record timestamp yet is unchanged
-// on the next cycle: nothing re-parses, and its logs stay at generation 0.
 func TestProvisionalSourceUnchanged(t *testing.T) {
 	root, store := t.TempDir(), t.TempDir()
 	line := []byte(`{"type":"user","sessionId":"44444444-4444-4444-8444-444444444444","cwd":"/w","uuid":"u-0","message":{"role":"user","content":"no timestamp"}}` + "\n")

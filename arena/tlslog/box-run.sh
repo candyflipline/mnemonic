@@ -1,10 +1,4 @@
 #!/bin/sh
-# tlslog box proof: one run on the before binary (c1d2588) and one on the
-# after binary (this lane, 8de6ff6). Each serve gets its own network
-# namespace, so its config can carry [tls] on 443/8741 while nothing on the
-# host's ports is touched; the serve runs under the memory guard (MemoryMax
-# 8G, GOMAXPROCS 4) exactly as prod. Kills are by exact pid only (in-ns.sh's
-# pid file and trap). Usage: box-run.sh
 set -u
 BIN=/var/lib/mnu/tlslog-bin
 RUN=/var/lib/mnu/tlslog-run
@@ -13,8 +7,6 @@ RESULTS=$OUT/tlslog-results.txt
 
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
 
-# Room guard (STANDING: available >= 10G, fewer than 3 serves box-wide); wait
-# for it rather than failing, other lanes' serves come and go.
 i=0
 while :; do
 	avail=$(free -g | awk '/^Mem:/{print $7}')

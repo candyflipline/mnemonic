@@ -1,23 +1,4 @@
 #!/bin/sh
-# build-engine.sh — build the engine binary on the box from a source tarball.
-#
-## Inputs
-##   $1  TARBALL  git archive tar of the engine tree, made on the Mac with
-##                `git archive --format=tar <commit>` and shipped over.
-##   $2  TREE     the commit sha that tarball was made from; names the install
-##                dir, like build.sh.
-## Env: BOX (default /var/lib/mnemonic-e3) — install root.
-##      GOFLAGS (default -p=2) — keep the build light while another run holds
-##      the box; set GOFLAGS= to build full width.
-#
-# Builds cmd/mnemonic with CGO_ENABLED=0 and NO build tags: the engine's
-# `index` subcommand is in the default build, and a plain untagged build is
-# all the timed scripts and check need. (Since the DuckDB removal the
-# `server` tag also builds under CGO_ENABLED=0 — verified on the box at
-# 5b0c6f7 2026-10-25 — but build-engine.sh still builds untagged.) Writes
-# $BOX/bin-$TREE/mnemonic, a wrapper-engine that
-# execs `mnemonic index "$@"` with GOMAXPROCS=16 (check and the timed scripts
-# call `ingest`/`batch` on it, the arena contract), and sha256.txt.
 set -eu
 
 BOX=${BOX:-/var/lib/mnemonic-e3}

@@ -1,69 +1,10 @@
 #!/bin/sh
-# append-latency.sh — append-to-searchable latency for a 10-row append.
-#
-## Inputs
-##   $1  BIN  the binary under test (`ingest`/`batch`, arena contract).
-## Requires: ingest-timed.sh ran first for this BIN — BASE_STORE (default
-##           $BOX/cold-1) is the pre-built store the append lands on.
-## Env: BOX (default /var/lib/mnemonic-e3). RUNS (default 5). SETUP=1 forces
-##      the deterministic target/donor/term choice to be redone; setup also
-##      redoes itself whenever BIN differs from the one recorded in the state.
-#
-# Scratch state lives on the box under $BOX/append/ and $BOX/out/append-* (the
-# copied lines, the chosen term and session — identifiers only, never printed):
-# - target and donor are two different sources of the FIRST author=* dir (the
-#   author the contract's batch acts as), same harness= dir, both >= 1 MiB;
-#   picked deterministically from the sorted manifest list.
-# - the target session id is the target source's own sessionId (its first
-#   user/assistant line). 10 whole user/assistant lines are decompressed from
-#   the donor with the zstd CLI and their sessionId REWRITTEN to the target's:
-#   appended as-is they would only land on the donor session (already
-#   searchable — EventUID hashes the source file, so the copies are new rows
-#   of whatever session their sessionId names). A fixed nonce marker
-#   (qz9u9cappendprobe) is appended to the first message-text item of the
-#   copied lines: mined terms cannot guarantee rarity, and a broad term's
-#   posted docs crowd the appended copy out of the search's top n+1
-#   candidate docs no matter how correctly it is indexed (two real rounds
-#   proved both halves). The marker matches nothing pre-append — proven by
-#   one batch against the base store — so post-append ONLY the appended rows
-#   can match, which is exactly the packet's correctness predicate: the
-#   post-append reply contains the target session, which the pre-append
-#   reply lacked.
-# - the pre-append reply of the timed call is saved against the base store.
-#
-# Each of RUNS rounds then does, timed only where marked:
-#   1. fresh overlay dataroot: cp -al of the frozen raw; the target's
-#      .jsonl.zst and .json hardlinks are replaced by real writable copies —
-#      the frozen corpus itself is never written;
-#   2. the 10 rewritten lines are re-compressed as ONE NEW zstd frame (zstd
-#      CLI) and appended to the target's .jsonl.zst; its manifest is updated:
-#      zst_size = new file size, size += appended plain bytes, raw_end = size,
-#      updated_ms = now ms (head_hash untouched: first line unchanged);
-#   3. fresh run store: a real cp -a of the base store (a hardlink clone would
-#      let the converge write through into the base store);
-#   4. timed: `BIN ingest -root overlay -store runstore` under /usr/bin/time
-#      -v with 1 s vmstat (and pidstat when installed) alongside;
-#   5. timed: `BIN batch` with ONE search_sessions call (query = term,
-#      n_hits = 10); correctness = the pre-append top-hit session is still in
-#      the reply (session_found), the TARGET session is in the reply but was
-#      NOT in the pre-append one (target_new — the 10 rows landed and became
-#      searchable under their rewritten session), and the ingest's own
-#      summary line reports at least one parsed source (oracle rewrote,
-#      engine resumed+reparsed). A round failing any of the three writes its
-#      row, then exits nonzero: the round's numbers time a no-op, not an
-#      append.
-#   6. overlay and run store deleted; one TSV line appended.
-# Summary: $BOX/out/append-summary.tsv (run ingest_wall_s ingest_rss_mib
-# batch_wall_s call_us session_found hits new_hit new_count parsed events
-# differs target_new) plus a median/range footer.
 set -eu
 
 BOX=${BOX:-/var/lib/mnemonic-e3}
 RUNS=${RUNS:-5}
 BIN=${1:?usage: append-latency.sh BIN}
 [ -x "$BIN" ] || { echo "not executable: $BIN" >&2; exit 2; }
-# OUT overridable so two lanes' runs (oracle and engine) never share the
-# summary/state files; each lane passes its own dir.
 OUT=${OUT:-$BOX/out}
 APP=$BOX/append
 BASE_STORE=${BASE_STORE:-$BOX/cold-1}
@@ -78,7 +19,6 @@ state_fresh() {
 	return 0
 }
 
-# ---- setup: pick target, donor, term, session; save the pre-append reply ----
 if [ "${SETUP:-0}" = "1" ] || ! state_fresh; then
 	rm -rf "$APP"
 	mkdir -p "$APP"
@@ -111,7 +51,6 @@ PYEOF
 	TGT_MAN=$(echo "$PICK" | sed -n 1p)
 	TGT_ZST=$(echo "$PICK" | sed -n 2p)
 	DON_ZST=$(echo "$PICK" | sed -n 3p)
-	# helpers: piped decompressed lines on stdin, so the python lives in files
 	cat > "$APP/first_sid.py" <<'PYEOF'
 import json, sys
 for line in sys.stdin:
@@ -168,8 +107,6 @@ PYEOF
 	MARKER=qz9u9cappendprobe
 	zstd -q -dc "$DON_ZST" | python3 -I "$APP/donor10.py" "$TARGET_SID" "$MARKER" > "$APP/lines.jsonl"
 	[ "$(wc -l < "$APP/lines.jsonl")" -eq 10 ] || { echo "donor gave fewer than 10 lines" >&2; exit 1; }
-	# the marker must match nothing pre-append: prove it once against the
-	# base store, and that reply is the pre-append reply of the timed call
 	printf '{"id":1,"tool":"search_sessions","args":{"query":"%s","n_hits":10}}\n' "$MARKER" \
 		| "$BIN" batch -root "$BOX" -store "$BASE_STORE" > "$OUT/append-prereply.jsonl" 2>/dev/null
 	NRES=$(python3 -I - "$OUT/append-prereply.jsonl" <<'PYEOF'
@@ -213,7 +150,6 @@ for i in $(seq 1 "$RUNS"); do
 	cp -al "$BOX/raw" "$OVL/raw"
 	OTGT=$OVL/raw/${target_rel%.json}.jsonl.zst
 	OMAN=$OVL/raw/$target_rel
-	# break the hardlinks of the two files this round rewrites
 	cp --remove-destination "$TGT_ZST" "$OTGT"
 	chmod u+w "$OTGT"
 	cp --remove-destination "$TGT_MAN" "$OMAN"
@@ -267,8 +203,6 @@ m = re.search(r"Maximum resident set size \(kbytes\): (\d+)", t)
 rss = int(m.group(1)) / 1024 if m else 0.0
 m = re.search(r"batch_stats ([\d.]+) (\d+)", t)
 bwall = float(m.group(1)) if m else 0.0
-# the append must have reached the index: the oracle counts rewritten
-# sources, the engine resumed+reparsed ones; only the oracle prints events
 m = re.search(r"ingest: sources=(\d+) rewrote=(\d+) failed=(\d+) events=(\d+)", t)
 if m:
     parsed, events = int(m.group(2)), int(m.group(4))

@@ -22,18 +22,12 @@ import (
 	"github.com/parquet-go/parquet-go"
 )
 
-// The archive kind's one committed test. A ch-* parquet with three sessions
-// ingests as per-session members beside a raw source of one of them; the raw
-// copy wins the uid the two share; an unchanged file rewrites nothing; a
-// changed file re-parses all of its members in one pass; an append to the raw
-// source rebuilds only the shared session's component, not the file's; and a
-// 70-session file exercises the bounded open-log LRU, including a reopen.
 func TestArchiveKind(t *testing.T) {
 	ctx := context.Background()
 	const (
-		archS1   = "11111111-1111-4111-8111-111111111111" // shared with the raw source
-		archS2   = "22222222-2222-4222-8222-222222222222" // archive-only
-		archS3   = "33333333-3333-4333-8333-333333333333" // archive-only
+		archS1   = "11111111-1111-4111-8111-111111111111"
+		archS2   = "22222222-2222-4222-8222-222222222222"
+		archS3   = "33333333-3333-4333-8333-333333333333"
 		chKey    = "a__archive-ch__claude-code__ch-export"
 		rawSrcID = "a__m__claude-code__s1"
 	)
@@ -50,17 +44,13 @@ func TestArchiveKind(t *testing.T) {
 			EventUID: uid, SessionID: sid, RecordTS: recordTS, EventTS: eventUS,
 			SourceName: "claude-code", Harness: "claude-code",
 			SourceFile: "/orig/" + sid + ".jsonl",
-			// The columns search's default event-type mask reads; the real
-			// files carry them filled, as the raw parse stamps them.
-			EventKind: "message", ActorKind: "user", PayloadType: "message",
+			EventKind:  "message", ActorKind: "user", PayloadType: "message",
 			TextContent: text, TextPreview: text,
 			EventVersion: ver, Author: "a", MachineID: "archive-ch",
 		}
 	}
 
 	root, store := t.TempDir(), t.TempDir()
-	// The raw source: two user lines of the shared session, the second's uid
-	// the archive file copies.
 	ts0, _ := at(0)
 	ts1, _ := at(1)
 	raw := append(claudeLine("raw-1", ts0, "rawonly alpha question"), claudeLine("raw-2", ts1, "shared beta question")...)
@@ -85,7 +75,6 @@ func TestArchiveKind(t *testing.T) {
 	rows = append(rows, archRow("arch-uid-s3", archS3, ts9, us9, "archthree zebra", 104))
 	writeChParquet(t, chPath, rows)
 
-	// First ingest: raw and the archive file are both Fresh.
 	stats, err := Ingest(root, store, time.Minute, true)
 	if err != nil {
 		t.Fatal(err)
@@ -93,7 +82,6 @@ func TestArchiveKind(t *testing.T) {
 	if stats != (IngestStats{0, 0, 2, 0}) {
 		t.Fatalf("first ingest: %v, want [0 0 2 0]", stats)
 	}
-	// The file checkpoint names its three member sessions.
 	fc, ok := readCkpt(store, chKey)
 	if !ok {
 		t.Fatal("no archive file checkpoint")
@@ -101,7 +89,6 @@ func TestArchiveKind(t *testing.T) {
 	if fc.Kind != KindArchive || !slices.Equal(fc.Sessions, []string{archS1, archS2, archS3}) || fc.Rows != 5 {
 		t.Fatalf("file checkpoint: kind %v sessions %v rows %d", fc.Kind, fc.Sessions, fc.Rows)
 	}
-	// Per-session members carry the parent file's identity.
 	mc, ok := readCkpt(store, chKey+"~"+archS1)
 	if !ok {
 		t.Fatal("no member checkpoint for the shared session")
@@ -127,8 +114,6 @@ func TestArchiveKind(t *testing.T) {
 	if docs := docsTotal(db); docs != 6 {
 		t.Fatalf("docs %d, want 6 (3+2+1 winners)", docs)
 	}
-	// The raw copy wins the shared uid at equal event_version even though the
-	// archive copy carries a later record_ts.
 	w := findRow(t, db, overlapUID)
 	if w.Text != "shared beta question" || w.SourceFile != "/p/s1.jsonl" {
 		t.Fatalf("shared uid winner: text %q source %q", w.Text, w.SourceFile)
@@ -136,11 +121,9 @@ func TestArchiveKind(t *testing.T) {
 	if a := findRow(t, db, "arch-uid-s1"); a.Text != "archshared gamma" || a.SourceFile != "/orig/"+archS1+".jsonl" {
 		t.Fatalf("archive-only uid of the shared session: %+v", a)
 	}
-	// The MAP columns decode into the row's JSON the way rowFrom marshals them.
 	if b := findRow(t, db, "arch-uid-s2a"); b.Buckets != `{"input":7}` || b.Native != `{"tokens":1.5}` {
 		t.Fatalf("map columns: buckets %q native %q", b.Buckets, b.Native)
 	}
-	// Archive-only sessions are listable.
 	data, _, err := Call(ctx, db, "list_sessions",
 		json.RawMessage(`{"start_datetime":"2026-03-01T00:00:00Z","end_datetime":"2026-03-02T00:00:00Z"}`))
 	if err != nil {
@@ -158,13 +141,11 @@ func TestArchiveKind(t *testing.T) {
 	if ls.ResultCount != 3 {
 		t.Fatalf("list_sessions count %d, want 3", ls.ResultCount)
 	}
-	// Tool ids encode the session id: the three raw ids appear base64-encoded.
 	for _, sid := range []string{archS1, archS2, archS3} {
 		if !strings.Contains(string(data), base64.StdEncoding.EncodeToString([]byte(sid))) {
 			t.Fatalf("list_sessions misses %s: %s", sid, data)
 		}
 	}
-	// and searchable.
 	data, _, err = Call(ctx, db, "search_sessions", json.RawMessage(`{"query":"archthree"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -184,13 +165,11 @@ func TestArchiveKind(t *testing.T) {
 		base64.StdEncoding.EncodeToString([]byte(archS3))) {
 		t.Fatalf("search archthree: %s", data)
 	}
-	// Session authors are the path author, archive rows included.
 	for _, sid := range []string{archS1, archS2, archS3} {
 		if got := db.sessionAuthors(sid); !slices.Equal(got, []string{"a"}) {
 			t.Fatalf("authors of %s: %v, want [a]", sid, got)
 		}
 	}
-	// CURRENT's sources rows exclude the archive file and its members.
 	data, _, err = Call(ctx, db, "get_ingest_status", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -211,7 +190,6 @@ func TestArchiveKind(t *testing.T) {
 	}
 	db.Close()
 
-	// Re-ingest with nothing changed rewrites nothing.
 	before := hashTree(t, store)
 	if stats, err = Ingest(root, store, time.Minute, true); err != nil {
 		t.Fatal(err)
@@ -223,7 +201,6 @@ func TestArchiveKind(t *testing.T) {
 		t.Fatal("unchanged re-ingest rewrote the store")
 	}
 
-	// A changed file re-parses all of its members in one pass.
 	ts10, us10 := at(10)
 	rows = append(rows, archRow("arch-uid-s3b", archS3, ts10, us10, "archthree crane", 105))
 	writeChParquet(t, chPath, rows)
@@ -251,9 +228,6 @@ func TestArchiveKind(t *testing.T) {
 	}
 	db.Close()
 
-	// An append to the raw source rebuilds only the shared session's
-	// component: the hot part holds that session's winners (12 raw uids plus
-	// the archive member's own), not the archive file's rows.
 	ten := make([]byte, 0, 10*200)
 	for i := 3; i <= 12; i++ {
 		tsi, _ := at(20 + i)
@@ -310,8 +284,6 @@ func TestArchiveKind(t *testing.T) {
 	}
 	db.Close()
 
-	// A 70-row file over 69 sessions drives the open-log LRU past its limit
-	// and reopens the first session's logs for its second row.
 	root2, store2 := t.TempDir(), t.TempDir()
 	bigPath := filepath.Join(root2, "events", "author=a", "machine=archive-ch", "harness=other", "ch-big.parquet")
 	const chBigKey = "a__archive-ch__other__ch-big"
@@ -370,7 +342,6 @@ func TestArchiveKind(t *testing.T) {
 	}
 }
 
-// claudeRaw writes one raw source's zst and manifest the way push would.
 func writeRawSource(t *testing.T, root, author, machine, harness, srcID, path string, plain []byte, updatedMs int64) {
 	t.Helper()
 	enc, _ := zstd.NewWriter(nil)
@@ -386,8 +357,6 @@ func writeRawSource(t *testing.T, root, author, machine, harness, srcID, path st
 	}
 }
 
-// writeRawManifest (re)writes the manifest: an append rewrites it in place
-// with the new sizes, as push does.
 func writeRawManifest(t *testing.T, root, author, machine, harness, srcID, path string, size, zstSize, updatedMs int64) {
 	t.Helper()
 	dir := filepath.Join(root, "raw", "author="+author, "machine="+machine, "harness="+harness)
@@ -401,8 +370,6 @@ func writeRawManifest(t *testing.T, root, author, machine, harness, srcID, path 
 	}
 }
 
-// writeChParquet writes the ch file the test rows through parquet-go's
-// writer; no writer exists outside tests.
 func writeChParquet(t *testing.T, path string, rows []chRow) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -421,8 +388,6 @@ func writeChParquet(t *testing.T, path string, rows []chRow) {
 	}
 }
 
-// rawUIDs parses plain lines the way ingest will, so the test can plant a
-// raw row's uid in the archive file.
 func rawUIDs(t *testing.T, plain []byte) []string {
 	t.Helper()
 	parser, ok := normalize.For("claude-code")
@@ -445,8 +410,6 @@ func rawUIDs(t *testing.T, plain []byte) []string {
 	return uids
 }
 
-// findRow is the one row of db whose uid is uid, failing when there is none
-// or more than one.
 func findRow(t *testing.T, db *DB, uid string) Row {
 	t.Helper()
 	var found []Row
@@ -475,8 +438,6 @@ func docsTotal(db *DB) int {
 	return n
 }
 
-// hashTree is a digest of every path and file body under dir, so a test can
-// prove an ingest wrote nothing.
 func hashTree(t *testing.T, dir string) string {
 	t.Helper()
 	h := sha256.New()

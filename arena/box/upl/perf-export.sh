@@ -1,20 +1,4 @@
 #!/bin/sh
-# perf-export.sh STORE OLD NEW [ANNOTATION]
-#
-# Old `mnemonic export --data-dir` against the export route of a running
-# serve, on one store. STORE is a COPY of a serve store; NEW serves it (under
-# MemoryMax=8G, GOMAXPROCS=4, as prod) and so holds its writer lock, which
-# makes OLD take its no-ingest branch and export the published index, as it
-# would beside a live server. Picks 32 sessions from list_sessions by event
-# count (the largest, every third of the top 40, 18 spread over the rest; env
-# SKIP=n drops the first n of those), then
-# per session and kind (atif, otlp) runs OLD and NEW alternately, OLD first on
-# odd sessions, and compares sha256. With ANNOTATION it annotates the 32
-# sessions with it through the annotate tool and compares one dataset run. Prints counts, sha agreement, wall and peak RSS (median, range,
-# n) per side, serve VmHWM over an idle settle cycle and over the export
-# window, and the serve cgroup's oom_kill. Never prints output content.
-# Its numbers are timed: run under the exclusive box lock,
-# flock -x /var/lib/mnu/box.lock sh perf-export.sh ...
 set -eu
 
 store=${1:?usage: perf-export.sh STORE OLD NEW [ANNOTATION]}
@@ -113,7 +97,7 @@ SAMPLER=$!
 pidstat -u -p "$SERVE" 5 > "$TMP/serve-pidstat.log" 2>&1 &
 PIDSTAT=$!
 
-timed() { # side out cmd...: run cmd timed, append wall, RSS MiB, rc
+timed() {
 	side=$1 outf=$2
 	shift 2
 	rc=0

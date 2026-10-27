@@ -10,16 +10,14 @@ package redact
 
 import "bytes"
 
-// bClass is the one-character class of a {n,} run in a builtin pattern.
 type bClass uint8
 
 const (
-	bClsWordDash bClass = iota // [0-9A-Za-z_-]
-	bClsAlnum                  // [0-9A-Za-z]
-	bClsDigit                  // [0-9]
+	bClsWordDash bClass = iota
+	bClsAlnum
+	bClsDigit
 )
 
-// bInClass reports whether c is in class k.
 func bInClass(c byte, k bClass) bool {
 	switch c {
 	case '_', '-':
@@ -31,19 +29,14 @@ func bInClass(c byte, k bClass) bool {
 	return '0' <= c && c <= '9' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
 }
 
-// bIsWord reports whether c is an ASCII word character, the alphabet of \b
-// in the builtin patterns.
 func bIsWord(c byte) bool {
 	return c == '_' || '0' <= c && c <= '9' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
 }
 
-// bStartB reports whether the ASCII \b before the word character at s
-// holds; every b-prefixed pattern starts on a word character.
 func bStartB(text []byte, s int) bool {
 	return s == 0 || !bIsWord(text[s-1])
 }
 
-// bRunEnd returns the end of the maximal run of class k starting at i.
 func bRunEnd(text []byte, i int, k bClass) int {
 	e := i
 	for e < len(text) && bInClass(text[e], k) {
@@ -52,11 +45,6 @@ func bRunEnd(text []byte, i int, k bClass) int {
 	return e
 }
 
-// bTailEnd returns where the regex cls{min,}\b starting its run at i ends:
-// greedy, so the largest p in [i+min, runEnd] where \b holds, which is
-// word-ness differing across p (end of text counts as non-word). -1 when
-// no allowed end has a boundary, which fails the whole match attempt —
-// backtracking into the literal prefix cannot help.
 func bTailEnd(text []byte, i, min int, k bClass) int {
 	e := bRunEnd(text, i, k)
 	if e-i < min {
@@ -72,9 +60,6 @@ func bTailEnd(text []byte, i, min int, k bClass) int {
 	}
 }
 
-// bTailRule is the matcher for \bpat cls{min,}\b: each occurrence of the
-// literal pat at a start boundary takes a greedy bounded class run; a
-// failed attempt resumes one byte on, a match resumes at its end.
 func bTailRule(pat string, min int, k bClass) matcher {
 	p := []byte(pat)
 	return func(text []byte, out [][2]int) [][2]int {
@@ -97,9 +82,6 @@ func bTailRule(pat string, min int, k bClass) matcher {
 	}
 }
 
-// bHexRule is the matcher for \bpat[0-9a-f]{n}\b: literal prefix, an exact
-// run of lowercase hex, and the end boundary. {n} is exact, so no
-// backtracking: the attempt fails unless all n are hex and \b holds.
 func bHexRule(pat string, n int) matcher {
 	p := []byte(pat)
 	return func(text []byte, out [][2]int) [][2]int {
@@ -110,8 +92,6 @@ func bHexRule(pat string, n int) matcher {
 			}
 			s += i
 			e := s + len(p) + n
-			// The last hex is a word character, so \b holds iff what
-			// follows is not a word character (end of text counts).
 			if e <= len(text) && bStartB(text, s) && bLowerHex(text[s+len(p):e]) && (e == len(text) || !bIsWord(text[e])) {
 				out = append(out, [2]int{s, e})
 				i = e
@@ -123,7 +103,6 @@ func bHexRule(pat string, n int) matcher {
 	}
 }
 
-// bLowerHex reports whether v is all [0-9a-f].
 func bLowerHex(v []byte) bool {
 	for _, c := range v {
 		if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f') {
@@ -133,9 +112,6 @@ func bLowerHex(v []byte) bool {
 	return true
 }
 
-// bOpenAI is \bsk-(?:proj-)?[0-9A-Za-z_-]{20,}\b. Leftmost-first: the
-// sk-proj- branch is tried before the bare sk- branch, whose run may then
-// consume the proj- itself; a failed occurrence resumes one byte on.
 var bOpenAI = func(text []byte, out [][2]int) [][2]int {
 	const proj = "proj-"
 	p := []byte("sk-")
@@ -164,9 +140,6 @@ var bOpenAI = func(text []byte, out [][2]int) [][2]int {
 	return out
 }
 
-// bSendGrid is \bSG\.[0-9A-Za-z_-]{20,}\.[0-9A-Za-z_-]{20,}\b. Greedy run
-// one cannot backtrack past the '.' — no run character is '.' — so the
-// maximal run must be followed by the dot, then the bounded run.
 var bSendGrid = func(text []byte, out [][2]int) [][2]int {
 	p := []byte("SG.")
 	for i := 0; i < len(text); {
@@ -190,11 +163,6 @@ var bSendGrid = func(text []byte, out [][2]int) [][2]int {
 	return out
 }
 
-// bDiscordHook is
-// https://discord(?:app)?\.com/api/webhooks/[0-9]{6,}/[0-9A-Za-z_-]{20,}.
-// No \b anywhere. The host alternation prefers the app form; a greedy
-// digit run cannot backtrack onto the '/', so the maximal run must be
-// followed by it; the final run is greedy with nothing after it.
 var bDiscordHook = func(text []byte, out [][2]int) [][2]int {
 	const app, mid = "app", ".com/api/webhooks/"
 	p := []byte("https://discord")
@@ -222,8 +190,6 @@ var bDiscordHook = func(text []byte, out [][2]int) [][2]int {
 	return out
 }
 
-// bHookTail matches mid[0-9]{6,}/[0-9A-Za-z_-]{20,} from after the host
-// and reports the match end.
 func bHookTail(text []byte, h int, mid string) (int, bool) {
 	if !bytes.HasPrefix(text[h:], []byte(mid)) {
 		return 0, false

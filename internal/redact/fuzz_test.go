@@ -1,16 +1,5 @@
 package redact
 
-// TestFuzzAgainstOracle proves the live redactor byte-identical to the
-// frozen 59796bc oracle: a seeded generator biased at every builtin rule
-// emits bare strings and JSON lines, and every output and every candidate
-// set must match. The generator plants U+212A and U+017F, the non-ASCII
-// case-fold partners of K/k and S/s, inside keywords, prefixes and secret
-// runs: the oracle's (?i) folds both and counts {n,} in runes, so without
-// them the differential is blind to fold semantics. Same eight seeds as
-// the first proof; the stream changed when the partners landed, so the
-// 1M pass this file backs is on this stream. Default 20,000 strings per
-// go test run; set REDACT_FUZZ_N for more (the proof run is 1,000,000).
-
 import (
 	"bytes"
 	"fmt"
@@ -23,8 +12,6 @@ import (
 	"unicode/utf8"
 )
 
-// Explicit seed list; recorded in the lane report. Each seed drives one
-// deterministic PCG stream over an equal slice of the run count.
 var fuzzSeeds = []uint64{1, 42, 1337, 90210, 314159, 2718281828, 1618033988, 5772156649}
 
 const (
@@ -44,17 +31,12 @@ const (
 // also matches U+017F (2 bytes), and {n,} counts runes, so run charsets
 // behind a (?i) class gain both partners.
 const (
-	fuzzKelvin = "\u212a" // U+212A KELVIN SIGN, folds with K and k
-	fuzzLongS  = "\u017f" // U+017F LATIN SMALL LETTER LONG S, folds with S and s
+	fuzzKelvin = "\u212a"
+	fuzzLongS  = "\u017f"
 
-	// fuzzGenericFold: the generic-api-key class [0-9A-Za-z_./+=-] sits
-	// under (?i), so the oracle folds both partners into it.
 	fuzzGenericFold = fuzzGeneric + fuzzKelvin + fuzzLongS
 )
 
-// One entry per builtin rule family: the prefilter keywords (canonical
-// case), the secret-run charset, and interesting lengths around the
-// pattern's thresholds (min-1/min/min+1, then mid and 255/256 bounds).
 var fuzzRules = []fuzzRule{
 	{[]string{"A3T", "AKIA", "ASIA", "ABIA", "ACCA"}, fuzzUpper + "234567", []int{15, 16, 17}},
 	{[]string{"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "ghp"}, fuzzB64URL, []int{35, 36, 37, 254, 255, 256}},
@@ -106,8 +88,6 @@ var fuzzNeighbours = []byte{'a', 'Z', '0', '9', '_', '-', '.', '"', '\'', ' '}
 
 var fuzzSpace = []string{" ", "  ", "\t", "\n", "\v", "\f", "\r", "", " ", "　"}
 
-// Values aimed at the generic-api-key entropy gate: repeats, digits-only,
-// hex-only, alphabets, structural stopwords, pass and fail cases.
 var fuzzGateValues = []string{
 	"", "short", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 	"1234567890123456789012345678901234", "99999999999999999999",
@@ -146,12 +126,7 @@ func TestFuzzAgainstOracle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newOracle extras: %v", err)
 	}
-	// Hand-picked fold edges, checked before the seeded stream. The seeded
-	// stream only reaches a fold partner into rule 25 by chance
-	// combinations; these pin the semantics deterministically. Each pairs
-	// an ASCII keyword (so the prefilter scans rule 25 on both sides) with
-	// a partner the oracle's (?i) folds, or pins the {20,} rune count.
-	const g25v = "Ab3dEf6_hIj0Lm2nOp4Qr5Tu8Vw9Xy" // 30 class runes, no K/k/S/s of its own
+	const g25v = "Ab3dEf6_hIj0Lm2nOp4Qr5Tu8Vw9Xy"
 	for _, e := range []struct{ label, in string }{
 		{"U+017F mid-keyword, word char before it so \\b holds", "token=" + g25v + " xs\u017fEcrEt=" + g25v},
 		{"U+212A as the k of the keyword tail", " api_" + fuzzKelvin + "ey=" + g25v},
@@ -201,8 +176,6 @@ func TestFuzzAgainstOracle(t *testing.T) {
 	}
 }
 
-// fuzzShrink halves away prefix or suffix while the mismatch persists, so
-// the failure prints a small reproducer next to the full input.
 func fuzzShrink(live *Redactor, orc *oracleRedactor, in []byte) []byte {
 	fails := func(c []byte) bool {
 		return !slices.Equal(live.candidates(c), orc.candidates(c)) ||
@@ -225,7 +198,7 @@ func fuzzShrink(live *Redactor, orc *oracleRedactor, in []byte) []byte {
 
 func fuzzString(rng *rand.Rand) string {
 	var sb strings.Builder
-	if rng.IntN(1000) == 0 { // rare large input
+	if rng.IntN(1000) == 0 {
 		sb.WriteString(strings.Repeat(fuzzSegment(rng), 1+rng.IntN(50)))
 	}
 	segments := 1 + rng.IntN(4)
@@ -240,12 +213,12 @@ func fuzzString(rng *rand.Rand) string {
 	}
 	s := sb.String()
 	switch rng.IntN(100) {
-	case 0, 1, 2, 3, 4: // deliberately broken JSON
+	case 0, 1, 2, 3, 4:
 		w := fuzzWrapJSON(rng, s)
 		return w[:max(1, len(w)-rng.IntN(3))]
-	case 5, 6, 7, 8, 9, 10, 11, 12, 13, 14: // nested: literal containing escaped JSON
+	case 5, 6, 7, 8, 9, 10, 11, 12, 13, 14:
 		return `{"input":"` + fuzzJSONEscape(rng, fuzzJSONEscape(rng, s)) + `","n":1}`
-	case 15, 16, 17: // key from the noise vocabulary, not "text"
+	case 15, 16, 17:
 		return `{"` + fuzzNoise(rng) + `":"` + fuzzJSONEscape(rng, s) + `"}`
 	default:
 		if rng.IntN(100) < 45 {
@@ -289,8 +262,6 @@ func fuzzJSONEscape(rng *rand.Rand, s string) string {
 			case r < 0x20:
 				sb.WriteString(fmt.Sprintf("\\u%04x", r))
 			case (r == 'é' || r == '\u212a' || r == '\u017f') && rng.IntN(2) == 0:
-				// half as \uXXXX, so the JSON-decoded line still
-				// carries the fold partner to the matchers
 				sb.WriteString(fmt.Sprintf("\\u%04x", r))
 			default:
 				sb.WriteRune(r)
@@ -363,7 +334,7 @@ func fuzzGenericExpr(rng *rand.Rand) string {
 		}
 	}
 	var sb strings.Builder
-	if rng.IntN(3) == 0 { // glue the keyword into a longer word: \b fails
+	if rng.IntN(3) == 0 {
 		sb.WriteString(fuzzCase(rng, fuzzRun(rng, fuzzLower, 1+rng.IntN(4))))
 	}
 	sb.WriteString(word)
@@ -385,9 +356,9 @@ func fuzzPEM(rng *rand.Rand) string {
 	endKind := kind
 	switch rng.IntN(10) {
 	case 0:
-		endKind = kinds[rng.IntN(len(kinds))] // maybe mismatched
+		endKind = kinds[rng.IntN(len(kinds))]
 	case 1:
-		return "-----BEGIN " + kind + "-----" // no body, no END
+		return "-----BEGIN " + kind + "-----"
 	}
 	nl := []string{"\n", "\n", "\n", "\r\n"}[rng.IntN(4)]
 	var sb strings.Builder
@@ -403,7 +374,6 @@ func fuzzPEM(rng *rand.Rand) string {
 	}
 	switch rng.IntN(10) {
 	case 0, 1, 2:
-		// no END line
 	default:
 		sb.WriteString(nl + "-----END " + endKind + "-----")
 	}
@@ -417,15 +387,15 @@ func fuzzPEM(rng *rand.Rand) string {
 func fuzzJWT(rng *rand.Rand) string {
 	var sb strings.Builder
 	switch rng.IntN(4) {
-	case 0: // full three-segment shape
+	case 0:
 		sb.WriteString("eyJ" + fuzzRun(rng, fuzzB64URL, 5+rng.IntN(40)))
 		sb.WriteString(".eyJ" + fuzzRun(rng, fuzzB64URL, 5+rng.IntN(40)))
 		sb.WriteString("." + fuzzRun(rng, fuzzB64URL, rng.IntN(44)))
-	case 1: // two segments
+	case 1:
 		sb.WriteString("eyJ" + fuzzRun(rng, fuzzB64URL, 5+rng.IntN(40)) + "." + fuzzRun(rng, fuzzB64URL, 5+rng.IntN(40)))
-	case 2: // almost: one segment
+	case 2:
 		sb.WriteString("eyJ" + fuzzRun(rng, fuzzB64URL, 5+rng.IntN(40)) + "." + fuzzRun(rng, fuzzGeneric, 25))
-	default: // prefix glued to a word: \b fails
+	default:
 		sb.WriteString(fuzzCase(rng, "xeyJ"+fuzzRun(rng, fuzzB64URL, 20)))
 	}
 	s := sb.String()
@@ -443,7 +413,7 @@ func fuzzHook(rng *rand.Rand) string {
 		host := []string{"discord.com", "discordapp.com"}[rng.IntN(2)]
 		idCharset := fuzzDigits
 		if rng.IntN(2) == 0 {
-			idCharset = fuzzAlphaNum // letters where the rule's [0-9]{6,} demands digits
+			idCharset = fuzzAlphaNum
 		}
 		return "https://" + host + "/api/webhooks/" + fuzzRun(rng, idCharset, 6+rng.IntN(12)) + "/" + fuzzRun(rng, fuzzB64URL, 20+rng.IntN(40))
 	default:
@@ -455,7 +425,7 @@ func fuzzMarker(rng *rand.Rand) string {
 	id := builtinRules[rng.IntN(len(builtinRules))].id
 	switch rng.IntN(6) {
 	case 0:
-		return "[REDACTED:" + id // unclosed: placeholderRanges gives up
+		return "[REDACTED:" + id
 	case 1:
 		return "[REDACTED:[" + fuzzRun(rng, fuzzAlphaNum, 25) + "]"
 	case 2:
@@ -486,12 +456,6 @@ func fuzzNoise(rng *rand.Rand) string {
 	return sb.String()
 }
 
-// fuzzCase flips the case of ~30% of ASCII letters and swaps a case-fold
-// partner in for ~10% of the K/k and S/s: enough canonical forms to match,
-// enough mangled ones to exercise the case-insensitive prefilter against
-// case-sensitive patterns, and enough partners that keywords and runs
-// spelled U+212A/U+017F reach the matchers, where the oracle's (?i) folds
-// them but byte-wise matching may not.
 func fuzzCase(rng *rand.Rand, s string) string {
 	var sb strings.Builder
 	sb.Grow(len(s) + 4)
@@ -524,9 +488,6 @@ func fuzzCase(rng *rand.Rand, s string) string {
 	return sb.String()
 }
 
-// fuzzRun draws n runes from charset — n runes, not bytes, so a run fed to
-// a {n,} class exercises the oracle's rune counting; for the ASCII
-// charsets the draws and output are unchanged.
 func fuzzRun(rng *rand.Rand, charset string, n int) string {
 	rs := []rune(charset)
 	var sb strings.Builder

@@ -1,27 +1,4 @@
 #!/usr/bin/env bash
-# Held-watcher proof for init's 25 s wait (lane FUINIT3).
-#
-# launchd's bootout sends SIGTERM and SIGKILLs the job at ExitTimeOut (default
-# 20 s; the plist init writes sets none). A watcher that does not act on
-# SIGTERM is therefore gone only after ~20 s. This script makes the throwaway
-# agent such a watcher by SIGSTOPping its pid right before the upgrade `init`
-# (a stopped process cannot act on SIGTERM; SIGKILL ends it), then times:
-#   dead  start of init -> the agent pid is gone (launchd's SIGKILL)
-#   gone  start of init -> `launchctl print` of the throwaway label fails
-#         (may be unseen: bootstrap follows within one poll of init's wait)
-#   init  start of init -> init exits, with its rc and last line
-# A 15 s init fails "did not exit within 15s"; a 25 s init returns rc 0 with
-# the agent running again under a new pid.
-#
-# Everything runs under the throwaway label com.mnemonic.fuinit-test and a
-# throwaway HOME. LIVE-AGENT GUARD: before the first step and after every
-# init the script reads `launchctl print gui/<uid>/com.mnemonic.push` (read
-# only) and aborts, rc 3 "live agent changed", unless its program is
-# /Users/user/.local/bin/mnemonic and its pid equals the pid at script start.
-# init is only ever run through run_init, which carries --label; no temp path
-# is deleted.
-#
-# Usage: arena/fuinit/repro-held.sh BIN [N]   (BIN: -tags server build; N default 1)
 set -euo pipefail
 
 BIN=${1:?usage: repro-held.sh BIN [N]}
@@ -33,7 +10,7 @@ DOMAIN=gui/$(id -u)
 [ "$LABEL" = com.mnemonic.fuinit-test ] || exit 4
 [ -x "$BIN" ] || { echo "no binary $BIN"; exit 1; }
 
-live_field() { # $1 = program | pid
+live_field() {
   launchctl print "$DOMAIN/$LIVE" 2>/dev/null | grep -m1 -E "^[[:space:]]+$1 = " | sed -E "s/^[[:space:]]+$1 = //"
 }
 LIVE_PID0=$(live_field pid)
@@ -69,13 +46,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-run_init() { # label always carried; prints output to $1, sets RC
+run_init() {
   local out=$1
   shift
   "$BIN" init "$@" --label "$LABEL" >"$out" 2>&1
 }
 
-wait_running() { # up to 60 s; echoes pid; rc 1 if never running
+wait_running() {
   local s
   for _ in $(seq 1 120); do
     s=$(field state)
@@ -96,9 +73,6 @@ sed -n '1p' "$WORK/token.out" >"$WORK/token.raw"
   sed -n '2,$p' "$WORK/token.out"
 } >"$WORK/server.toml"
 
-# Fresh install while no server exists (the watcher scans nothing before its
-# first dial), booted out at once; globs repointed at the temp home before the
-# serve starts, so the real corpus is never scanned.
 run_init "$WORK/fresh.out" --server "http://127.0.0.1:$PPORT" --token-file "$WORK/token.raw"
 guard
 launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true

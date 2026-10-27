@@ -18,15 +18,6 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// The sections' expectations are main 59796bc's own: the spans goldens and
-// the claude-code literal tree are 59796bc:internal/cache/index_spans_test.go's,
-// the two-day annotation is 59796bc:internal/cache/index_annotations_test.go's,
-// the two-author session is 59796bc:internal/cache/index_session_authors_
-// test.go's, ported to rows the engine builds parts from.
-
-// goldenRows reads one parser golden, the input main's cache derives its
-// spans from, into rows grouped by session, in event order with turn_seq
-// current, the way buildIndex prepares a session before addSession.
 func goldenRows(t *testing.T, name string) (string, map[string][]*Row) {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "goldens", name+".json"))
@@ -70,7 +61,6 @@ func goldenRows(t *testing.T, name string) (string, map[string][]*Row) {
 	return g.Harness, bySession
 }
 
-// spanRow is one row of testdata/spans/<golden>.json, main's expectations.
 type spanRow struct {
 	SpanID           string `json:"span_id"`
 	ParentSpanID     string `json:"parent_span_id"`
@@ -100,7 +90,6 @@ func spanRowsOf(spans []schema.Span) []spanRow {
 	return out
 }
 
-// buildSpans is the part build's spans for one session of one harness.
 func buildSpans(harness string, rows []*Row) []schema.Span {
 	f, ok := spanBuilders[harness]
 	if !ok || len(rows) == 0 {
@@ -116,9 +105,6 @@ func firstUID(uid string) string {
 	return uid
 }
 
-// TestSpansGoldens derives each golden's spans the way the part build does
-// and compares them with main's goldens, in the cache's order (start, kind,
-// span_id).
 func TestSpansGoldens(t *testing.T) {
 	for _, golden := range []string{"codex", "cursor", "cursor_sqlite", "pi_coding_agent", "prime_agent"} {
 		t.Run(golden, func(t *testing.T) {
@@ -156,8 +142,6 @@ func TestSpansGoldens(t *testing.T) {
 	}
 }
 
-// TestClaudeCodeSpanTree is 59796bc:internal/cache/index_spans_test.go's
-// literal tree for the claude_code golden's session.
 func TestClaudeCodeSpanTree(t *testing.T) {
 	harness, bySession := goldenRows(t, "claude_code")
 	const session = "7c666c01-d38e-4658-8650-854ffb5b626e"
@@ -200,8 +184,6 @@ func orDash(s string) string {
 	return s
 }
 
-// writeSource lays one raw source the way push does: zstd lines and a
-// manifest, under author/machine/harness.
 func writeSource(t *testing.T, root, author, harness, srcID, sourceName string, frames ...[]byte) {
 	t.Helper()
 	var zst, lines []byte
@@ -223,9 +205,6 @@ func writeSource(t *testing.T, root, author, harness, srcID, sourceName string, 
 	}
 }
 
-// TestAnnotationSentOnTwoDaysIsOneRow is
-// 59796bc:internal/cache/index_annotations_test.go's case: the same
-// annotation line in two sources is one annotation row carrying its author.
 func TestAnnotationSentOnTwoDaysIsOneRow(t *testing.T) {
 	line := `{"id":"a1","target":{"session_id":"s1"},"name":"quality","value":{"number":4},"source":"human","ts":"2026-10-21T10:00:00Z"}` + "\n"
 	root, store := t.TempDir(), t.TempDir()
@@ -250,9 +229,6 @@ func TestAnnotationSentOnTwoDaysIsOneRow(t *testing.T) {
 	}
 }
 
-// TestSessionAuthorsEverySource is
-// 59796bc:internal/cache/index_session_authors_test.go's case: a session two
-// authors hold copies of keeps both authors, winner or not.
 func TestSessionAuthorsEverySource(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "fixtures", "claude-code", "session.jsonl"))
 	if err != nil {
@@ -292,11 +268,6 @@ func TestSessionAuthorsEverySource(t *testing.T) {
 	}
 }
 
-// TestOtlpSpans is index_spans_otlp.go's contract on synthesized rows (the
-// fixture holds no otlp): a bare span row passes its children up to the
-// nearest emitted ancestor, an invoke_agent carries the sum over the chats
-// beneath it and falls back to its own cost when none carries one, and of two
-// emitted spans on a parent cycle the smaller item_id is the root.
 func TestOtlpSpans(t *testing.T) {
 	row := func(uid, item, origin, kind string, in uint64, cost string) *Row {
 		r := &Row{UID: uid, Session: "s", Harness: "otlp", Author: "alice", PayloadType: "span",
@@ -342,10 +313,6 @@ func TestOtlpSpans(t *testing.T) {
 	}
 }
 
-// TestHotPartKeepsSectionAuthors: a part built by appending to a hot
-// component's image (delta.json) answers sessionAuthors and the annotation
-// author as the part built whole does. Tenancy reads sessionAuthors, so an
-// empty answer on a hot part would hide the session from its owners.
 func TestHotPartKeepsSectionAuthors(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "fixtures", "claude-code", "session.jsonl"))
 	if err != nil {
@@ -373,8 +340,6 @@ func TestHotPartKeepsSectionAuthors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hot parts %v, err %v", cur.Hot, err)
 	}
-	// The session component's append takes the delta path; the annotation
-	// source, a component of its own, holds a hot part beside it.
 	deltas := 0
 	for _, id := range cur.Hot {
 		if _, ok, _ := readDelta(partDir(store, id)); ok {
@@ -401,8 +366,6 @@ func TestHotPartKeepsSectionAuthors(t *testing.T) {
 	}
 	hotAuthors, hotAnn := read(store)
 	coldAuthors, coldAnn := read(coldStore)
-	// The annotation row is no longer a session author (it feeds only the
-	// annotations section), so carol is out of both lists.
 	if want := []string{"alice", "bob"}; !reflect.DeepEqual(coldAuthors, want) || !reflect.DeepEqual(hotAuthors, want) {
 		t.Fatalf("authors: hot %v, cold %v, want %v", hotAuthors, coldAuthors, want)
 	}

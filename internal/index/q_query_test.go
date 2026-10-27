@@ -18,9 +18,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/store"
 )
 
-// The store holds two sessions by two authors: a's claude-code session
-// (6 events, 2026-01-19T15:58:40Z..15:58:43Z, one turn) and b's codex session
-// (15 events, 2026-02-15T03:50:40Z..03:50:51Z, one turn).
 func newQueryDB(t *testing.T) (*DB, string) {
 	t.Helper()
 	root := t.TempDir()
@@ -174,8 +171,6 @@ func TestQueryRowCapOnTheEngine(t *testing.T) {
 	}
 }
 
-// TestQueryRefusalsOnTheEngine ports the refusal answers that survive the
-// language change: SQL input, an unknown relation, and the argument errors.
 func TestQueryRefusalsOnTheEngine(t *testing.T) {
 	db, _ := newQueryDB(t)
 	ctx := context.Background()
@@ -212,9 +207,6 @@ func TestQueryRefusalsOnTheEngine(t *testing.T) {
 	}
 }
 
-// TestQueryBoundedScanAndPatternCap: a query whose context is already
-// cancelled returns before the scan walks any part of the store, and a like
-// pattern over the length cap is refused before any scan.
 func TestQueryBoundedScanAndPatternCap(t *testing.T) {
 	db, _ := newQueryDB(t)
 	if len(db.parts) < 2 {
@@ -243,8 +235,6 @@ func TestQueryBoundedScanAndPatternCap(t *testing.T) {
 	}
 }
 
-// plantControl writes one control record as the control tools' store append
-// would: a zstd control source under the server machine, with its manifest.
 func plantControl(t *testing.T, dir, author, line string) {
 	t.Helper()
 	src := []byte(line + "\n")
@@ -264,8 +254,6 @@ func plantControl(t *testing.T, dir, author, line string) {
 	}
 }
 
-// TestQueryHidesAControlledSession: a session a control record removes never
-// reaches the evaluator, for any caller, which no clause can change.
 func TestQueryHidesAControlledSession(t *testing.T) {
 	db, dir := newQueryDB(t)
 	const sid = "7c666c01-d38e-4658-8650-854ffb5b626e"
@@ -288,8 +276,6 @@ func TestQueryHidesAControlledSession(t *testing.T) {
 	}
 }
 
-// TestQueryHidesAPrivateSession: private hides a session from every author
-// but its sole one, through the same scope the other tools use.
 func TestQueryHidesAPrivateSession(t *testing.T) {
 	db, dir := newQueryDB(t)
 	const sid = "7c666c01-d38e-4658-8650-854ffb5b626e"
@@ -312,8 +298,6 @@ func TestQueryHidesAPrivateSession(t *testing.T) {
 	}
 }
 
-// TestQuerySpanAndAnnotationRows pins the two relations whose part sections
-// lane U5S builds, against readers injected the way the sections will be.
 func TestQuerySpanAndAnnotationRows(t *testing.T) {
 	db, _ := newQueryDB(t)
 	const sid = "7c666c01-d38e-4658-8650-854ffb5b626e"

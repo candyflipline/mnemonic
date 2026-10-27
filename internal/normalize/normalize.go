@@ -32,9 +32,6 @@ type State struct {
 // not read yet: a resumed parse cannot yield a whole-file parse's rows.
 func (s State) Provisional() bool { return s.LineNo > 0 && s.RecordTSHint == "" }
 
-// Version is the lake epoch at which a parser's output last changed: a lake
-// file recorded at Version or later holds its current output, and one recorded
-// earlier is parsed again.
 type Parser interface {
 	Harness() string
 	Version() int
@@ -55,7 +52,6 @@ func For(harness string) (Parser, bool) {
 	return p, ok
 }
 
-// Versions is every registered parser's Version by harness.
 func Versions() map[string]int {
 	vs := make(map[string]int, len(parsers))
 	for h, p := range parsers {

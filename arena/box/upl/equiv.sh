@@ -1,24 +1,4 @@
 #!/bin/sh
-# equiv.sh DIR_A DIR_B — are two stores equivalent? Exit 0 iff yes.
-#
-# Compares DIR_A/raw with DIR_B/raw:
-#   1. the same set of relative paths (no extra, missing or stray temp file);
-#   2. every frame (*.jsonl.zst) byte-identical (sha256);
-#   3. every manifest (*.json) identical after deleting MASKED fields from both.
-# MASKED = updated_ms (manifest field): the server stamps it from its own clock
-# at the write (internal/store/store.go:200 replace, append at the same file),
-# so it is run-to-run time. Each masked field must be an integer in both
-# manifests; the value is then ignored, so a field that goes missing or changes
-# type still shows as a difference.
-# Evidence: http-1 vs http-2, the same plain HOME pushed twice by the 83b0042
-# binary (push-run.sh): 17714 files each; 8857 frames, 0 differ by sha256; 8857
-# manifests, every one differs, in updated_ms and in no other field (size,
-# raw_end, head_hash, zst_size, path, src_id, harness, source_name equal). Both
-# per-file sha lists (storesha.sh) are in packets/uploader/out/box/base/.
-# A masked field is only ever one proved to differ between two runs of the same
-# binary on the same input; add to it only with the same kind of evidence.
-# Prints the counts and, on difference, the first 5 differing paths per kind
-# (paths and field names only; no corpus content). Read only, no lock.
 set -eu
 A=${1:?usage: equiv.sh DIR_A DIR_B}
 B=${2:?usage: equiv.sh DIR_A DIR_B}

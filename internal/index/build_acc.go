@@ -48,7 +48,6 @@ type partAcc struct {
 	perTurn map[uint32]*turnRec
 }
 
-// newPartAcc starts a part of docs docs.
 func newPartAcc(docs int, hot, hotOff, docRecs, blob io.Writer) *partAcc {
 	return &partAcc{hot: hot, hotOffW: hotOff, docs: docRecs, blob: blob, pairs: make([][2]uint64, 0, docs),
 		postings: map[string][]uint64{}, tfs: map[string]uint32{}, tri: newTriBuilder()}
@@ -75,8 +74,6 @@ func (p *partAcc) endSession() {
 	p.perTurn = nil
 }
 
-// add appends r, the part's next doc, as stored at light frame lf index li of
-// the part, and returns its turn seq.
 func (p *partAcc) add(r *Row, src uint16, lf int64, li int) (uint32, error) {
 	d := p.nDocs
 	si := len(p.sessions) - 1
@@ -162,9 +159,6 @@ func (p *partAcc) add(r *Row, src uint16, lf int64, li int) (uint32, error) {
 	return seq, nil
 }
 
-// finish writes every file the docs fed to add make, but for the four add
-// streamed, through write, and returns the
-// part's meta without its fingerprint and members.
 func (p *partAcc) finish(write func(name string, b []byte) error) (indexMeta, error) {
 	p.faOffs = append(p.faOffs, uint32(p.blobLen))
 	if _, err := p.hotOffW.Write(binary.LittleEndian.AppendUint64(nil, uint64(p.hotLen))); err != nil {
@@ -275,9 +269,6 @@ func (p *partAcc) finish(write func(name string, b []byte) error) (indexMeta, er
 		SourceNames: p.sourceNames.list, Sessions: len(p.sessions), Turns: len(p.turns), Terms: len(terms)}, nil
 }
 
-// triBuilder maps every 3-byte sequence of each fa.blob entry to the ascending
-// entries holding it: finish returns fa.tri, sorted (trigram u32, postings
-// offset u32) pairs, and fa.trip, the uvarint count and entry gaps.
 type triBuilder struct{ post map[uint32][]uint32 }
 
 func newTriBuilder() triBuilder { return triBuilder{post: map[uint32][]uint32{}} }

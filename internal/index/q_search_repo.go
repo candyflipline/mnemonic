@@ -140,9 +140,6 @@ func dedupeMcpRows(rows []*mcpRow, limit int) []*mcpRow {
 	return out
 }
 
-// mcpRowsAreEquivalent: same session, turn, event type and content. The
-// codex-mirror extension (adjacent agent_message/message rows within 10 ms)
-// rides on top, as upstream.
 func mcpRowsAreEquivalent(a, b *mcpRow) bool {
 	sameContent := a.textHash == b.textHash && a.textContent == b.textContent
 	sameCoords := a.sessionID == b.sessionID && a.turnSeq == b.turnSeq &&

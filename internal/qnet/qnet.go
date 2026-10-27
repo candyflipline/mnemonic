@@ -45,7 +45,6 @@ func quicConfig() *quic.Config {
 	}
 }
 
-// Server is one UDP endpoint with a net.Listener per protocol.
 type Server struct {
 	Push, HTTP net.Listener
 
@@ -112,11 +111,8 @@ func Listen(addr string, priv ed25519.PrivateKey, identify Identify) (*Server, e
 	return s, nil
 }
 
-// Addr is the bound UDP address.
 func (s *Server) Addr() net.Addr { return s.ln.Addr() }
 
-// Close closes both listeners and the UDP endpoint, which drops every
-// connection.
 func (s *Server) Close() error {
 	s.once.Do(func() {
 		s.cancel()

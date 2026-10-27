@@ -55,7 +55,6 @@ func LoadOrCreateKey(path string) (ed25519.PrivateKey, error) {
 	return priv, nil
 }
 
-// PublicKey is the auth.EncodeKey form of priv's public key.
 func PublicKey(priv ed25519.PrivateKey) string {
 	return auth.EncodeKey(priv.Public().(ed25519.PublicKey))
 }
@@ -71,8 +70,6 @@ type Credential struct {
 // ~/.mnemonic/key.wallet, so a binding never outlives or crosses its key.
 const bindingSuffix = ".wallet"
 
-// LoadCredential is LoadOrCreateKey(keyFile) and the binding stored beside it
-// by SaveBinding, nil when there is none.
 func LoadCredential(keyFile string) (Credential, error) {
 	priv, err := LoadOrCreateKey(keyFile)
 	if err != nil {

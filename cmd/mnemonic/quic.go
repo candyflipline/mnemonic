@@ -22,8 +22,6 @@ func init() {
 	commands["mcp"] = mcpCmd
 }
 
-// keyCmd prints the public key of a key file (made if missing) and the
-// [[keys]] entry that lets it in.
 func keyCmd(args []string) error {
 	fs := flag.NewFlagSet("key", flag.ContinueOnError)
 	file := fs.String("file", config.DefaultKeyFile, "ed25519 key file")
@@ -59,8 +57,6 @@ func defaultAuthor() string {
 	return "AUTHOR"
 }
 
-// mcpCmd is a stdio MCP server that forwards each JSON-RPC line to the
-// server's /mcp over QUIC and writes each reply as one line.
 func mcpCmd(args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	configPath := fs.String("config", "~/.mnemonic/config.toml", "path to the client config TOML")
@@ -98,9 +94,6 @@ func mcpCmd(args []string) error {
 	return in.Err()
 }
 
-// quicClient is an http.Client that reaches the server's HTTP endpoint over
-// QUIC, pinned to cfg.ServerKey, signed by cfg.KeyFile and carrying the
-// wallet binding stored beside it. Its requests go to http://mnemonic/.
 func quicClient(cfg config.Client) (*http.Client, error) {
 	cred, err := qnet.LoadCredential(cfg.KeyFile)
 	if err != nil {

@@ -27,8 +27,6 @@ type Stats struct {
 	Bytes                                          int64
 }
 
-// skewMs is the mtime-vs-UpdatedMs margin the skip needs, because the client
-// and server clocks need not agree.
 const skewMs = 5 * 60 * 1000
 
 type fileRef struct {
@@ -76,7 +74,6 @@ func Run(ctx context.Context, cfg config.Client, red Redactor) (Stats, error) {
 	return st, u.close(ctx)
 }
 
-// refsOf is the files whose path is in paths, in files' order.
 func refsOf(files []fileRef, paths []string) []fileRef {
 	want := make(map[string]bool, len(paths))
 	for _, p := range paths {
@@ -96,8 +93,6 @@ func (s Stats) String() string {
 		s.Scanned, s.Appended, s.Replaced, s.Unchanged, s.Failed, s.Bytes)
 }
 
-// maxChunk bounds one PUT body, so a first push of a huge transcript lands in
-// pieces that each fit the HTTP timeout and the proxy's body limit.
 var maxChunk = 32 << 20
 
 func firstChunk(body []byte, max int) []byte {
@@ -119,8 +114,6 @@ func decide(entry *wire.Source, head string, redacted []byte) (body []byte, offs
 	}
 	cut, onBoundary := cutAtSize(redacted, entry.Size)
 	if !onBoundary {
-		// The server's Size falls inside a line our redaction re-encoded;
-		// there is no safe seam, so replace.
 		return redacted, 0, false
 	}
 	return redacted[cut:], entry.Size, false
@@ -156,8 +149,6 @@ func scan(sources []config.SourceGlob) []fileRef {
 	return files
 }
 
-// File is one file a scan matched: the part of a fileRef a local index needs
-// to name its plain sources.
 type File struct {
 	Path       string
 	Harness    string

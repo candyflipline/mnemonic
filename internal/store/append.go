@@ -12,12 +12,8 @@ import (
 	"github.com/candyflipline/mnemonic/internal/wire"
 )
 
-// ServerMachine is the machine segment of every source the server writes
-// itself. A client PUT naming it is refused, so no client can write there.
 const ServerMachine = "server.mnemonic"
 
-// ServerHarnesses are the harnesses only the server writes: a client PUT
-// naming one is refused, and Append takes no other.
 var ServerHarnesses = [...]string{schema.AnnotationHarness, "otlp", "control"}
 
 func isServerHarness(h string) bool { return slices.Contains(ServerHarnesses[:], h) }
@@ -32,8 +28,6 @@ type ServerSource struct {
 	Day                     time.Time
 }
 
-// Today is the ServerSource of author, harness and stream for the current
-// UTC day.
 func Today(author, harness, stream string) ServerSource {
 	return ServerSource{Author: author, Harness: harness, Stream: stream, Day: utcDay(time.Now())}
 }
@@ -75,7 +69,6 @@ func WithStore(ctx context.Context, st *Committer) context.Context {
 	return context.WithValue(ctx, ctxKey{}, st)
 }
 
-// From is the Committer WithStore put on ctx, nil when there is none.
 func From(ctx context.Context) *Committer {
 	st, _ := ctx.Value(ctxKey{}).(*Committer)
 	return st

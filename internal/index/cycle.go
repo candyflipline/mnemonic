@@ -32,7 +32,7 @@ type cycleRecord struct {
 
 var (
 	cycleMu    sync.Mutex
-	lastCycles = map[string]cycleRecord{} // index store dir -> its last Ingest
+	lastCycles = map[string]cycleRecord{}
 )
 
 func recordCycle(store string, r cycleRecord) {
@@ -47,7 +47,6 @@ func takeCycle(store string) cycleRecord {
 	return lastCycles[store]
 }
 
-// LastCycle is the CycleStats of the last Ingest through ix.
 func (ix *Index) LastCycle() CycleStats { return takeCycle(ix.store).stats }
 
 // SweepStale is the work the last Ingest left for the next cycle: sources for

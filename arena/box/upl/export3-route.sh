@@ -63,7 +63,7 @@ hashlen='import hashlib,sys
 h=hashlib.sha256();n=0
 for b in iter(lambda: sys.stdin.buffer.read(1<<20), b""): h.update(b); n+=len(b)
 print(h.hexdigest(), n)'
-refsum() { # kind i: the ref sum file, if any
+refsum() {
 	for d in $refdirs; do
 		[ -f "$d/old.$1.$2.sum" ] && { echo "$d/old.$1.$2.sum"; return; }
 	done

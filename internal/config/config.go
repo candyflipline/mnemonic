@@ -1,5 +1,3 @@
-// Package config reads the two TOML files: ~/.mnemonic/config.toml on each
-// client and the server's config. Validation happens here, once.
 package config
 
 import "github.com/candyflipline/mnemonic/internal/auth"
@@ -78,7 +76,6 @@ type QUIC struct {
 	KeyFile string `toml:"key_file"`
 }
 
-// KeyEntry admits one client key (auth.EncodeKey form) as Author.
 type KeyEntry struct {
 	Key    string       `toml:"key"`
 	Author string       `toml:"author"`

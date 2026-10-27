@@ -65,11 +65,6 @@ func KindOf(r *Record) schema.SpanKind {
 	return spanNameKinds[r.Name]
 }
 
-// allowed is every attribute key kept when the server does not set
-// otlp.store_content: the keys the parser and the span derivation read, which
-// are the key lists above, and the few resource, scope and error-type keys
-// below. Any other key, whatever its name suggests, is dropped from the
-// resource, the span, its events and the log record before anything is stored.
 var allowed = keySet(
 	[]string{
 		ServiceName, EventNameKey, OperationName, OpenInferenceSpanKind, "duration_ms", "exception.type",
@@ -89,8 +84,6 @@ func keySet(lists ...[]string) map[string]bool {
 	return m
 }
 
-// gate keeps the scalar values of the allowed keys of attrs and deletes the
-// rest, so an array or a key-value list never survives under any key.
 func gate(attrs map[string]any) {
 	for k, v := range attrs {
 		switch v.(type) {

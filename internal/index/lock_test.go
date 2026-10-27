@@ -11,11 +11,6 @@ import (
 	"time"
 )
 
-// TestIndexLock pins the one exclusion every index writer passes through: the
-// index dir's writer.lock. A writer holding it — what another process is,
-// its own open file description — refuses HoldIndexLock and Ingest with the
-// holder's pid named; an ingest of a process that holds the lock borrows it;
-// Unlock frees the dir.
 func TestIndexLock(t *testing.T) {
 	store := filepath.Join(t.TempDir(), "index")
 	root := t.TempDir()
@@ -23,8 +18,6 @@ func TestIndexLock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Another process holds the dir: its own open file description flocks the
-	// lock file and leaves its pid in it, the way takeLock does.
 	holder, err := os.OpenFile(filepath.Join(store, writerLockName), os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		t.Fatal(err)
@@ -35,7 +28,6 @@ func TestIndexLock(t *testing.T) {
 	}
 	fmt.Fprintf(holder, "pid %d, another-mnemonic\n", os.Getpid())
 
-	// A second writer is refused, naming the holder's pid.
 	_, err = HoldIndexLock(store)
 	if !errors.Is(err, ErrLocked) {
 		t.Fatalf("HoldIndexLock under a holder = %v, want ErrLocked", err)
@@ -44,8 +36,6 @@ func TestIndexLock(t *testing.T) {
 		t.Errorf("HoldIndexLock under a holder = %q, want it to name the holder (%s)", err, want)
 	}
 
-	// So is an Ingest, before it lists or parses anything: no second writer
-	// enters the log appends, the checkpoint renames, CURRENT.tmp or GC.
 	if _, err := Ingest(root, store, time.Minute, true); !errors.Is(err, ErrLocked) {
 		t.Fatalf("Ingest under a holder = %v, want ErrLocked", err)
 	}
@@ -53,9 +43,6 @@ func TestIndexLock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// With the dir free the first writer takes it, and its own ingests borrow
-	// the lock instead of refusing themselves — serve and local hold the dir
-	// for their whole life and still ingest.
 	first, err := HoldIndexLock(store)
 	if err != nil {
 		t.Fatalf("HoldIndexLock on a free dir: %v", err)
@@ -67,7 +54,6 @@ func TestIndexLock(t *testing.T) {
 		t.Error("ingest under the held lock wrote no CURRENT")
 	}
 
-	// Unlock frees the dir for the next writer.
 	if err := first.Unlock(); err != nil {
 		t.Fatalf("Unlock: %v", err)
 	}

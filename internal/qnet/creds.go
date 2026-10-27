@@ -24,7 +24,6 @@ type creds struct{}
 // insecure credentials, since QUIC already encrypts.
 func Credentials() credentials.TransportCredentials { return creds{} }
 
-// FromPeer is the Identity Credentials attached to ctx's gRPC peer.
 func FromPeer(ctx context.Context) (auth.Identity, bool) {
 	p, ok := peer.FromContext(ctx)
 	if !ok {

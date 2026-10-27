@@ -319,7 +319,6 @@ func (db *DB) loadSessionScan(sessionID string, opts scanOpts) (*sessionScan, er
 	}
 	seqs := sc.turnSeqs()
 
-	// Session time bounds come from the turn accumulators, as upstream.
 	var minStart, maxEnd int64
 	for i, seq := range seqs {
 		m := sc.turns[seq].metadata

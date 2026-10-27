@@ -13,7 +13,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/wallet"
 )
 
-// Scope is one thing a key may do.
 type Scope string
 
 const (
@@ -23,14 +22,12 @@ const (
 	Admin    Scope = "admin"
 )
 
-// Scopes is every Scope a key entry may name.
 var Scopes = [...]Scope{Read, Push, Annotate, Admin}
 
 // DefaultTenant is the tenant of a key entry that names none, and of every
 // author no key entry names.
 const DefaultTenant = "default"
 
-// DefaultScopes are the scopes of a key entry that names none.
 var DefaultScopes = []Scope{Read, Push}
 
 // Grant is one configured key's rights: the tenant and author it acts as and
@@ -117,13 +114,11 @@ func (id Identity) Wallet() (wallet.Address, time.Time, bool) {
 	return w.wallet, w.expires, ok
 }
 
-// WalletReader is the Identity of a device b binds.
 func WalletReader(b wallet.Binding) Identity {
 	c := b.Claim()
 	return Identity{p: walletReader{wallet: c.Wallet, expires: c.Expires}}
 }
 
-// Keys is the server's key table, keyed by the key text EncodeKey writes.
 type Keys struct{ byKey map[string]Identity }
 
 // NewKeys builds the table from byKey, which maps key text to its grant.
@@ -145,7 +140,6 @@ func NewKeys(byKey map[string]Grant) Keys {
 	return Keys{byKey: ids}
 }
 
-// Identify is the Identity of key, false when key is not in the table.
 func (k Keys) Identify(key string) (Identity, bool) {
 	id, ok := k.byKey[key]
 	return id, ok
@@ -204,13 +198,11 @@ func Require(need ...Scope) func(http.Handler) http.Handler {
 
 type ctxKey struct{}
 
-// From is the Identity the transport put on ctx, false when there is none.
 func From(ctx context.Context) (Identity, bool) {
 	id, ok := ctx.Value(ctxKey{}).(Identity)
 	return id, ok
 }
 
-// Author is the authenticated author, "" without one.
 func Author(ctx context.Context) string {
 	id, _ := From(ctx)
 	return id.Author()

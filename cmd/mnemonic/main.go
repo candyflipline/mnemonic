@@ -1,12 +1,3 @@
-// mnemonic collects agent session traces and serves them over MCP.
-//
-//	mnemonic push [--watch] [--config ~/.mnemonic/config.toml]   one pass, or resident and woken by file writes
-//	mnemonic key [--file PATH]                         print the public key and a [[keys]] block
-//	mnemonic mcp [--config PATH]                       stdio MCP shim over the QUIC link
-//	mnemonic serve --config server.toml                push and HTTP /v1 + /mcp on one QUIC UDP endpoint, one ingest and serve loop
-//
-// Both build with CGO_ENABLED=0; serve needs the server build tag:
-// go build -tags server ./cmd/mnemonic
 package main
 
 import (

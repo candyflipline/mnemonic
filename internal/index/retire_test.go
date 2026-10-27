@@ -23,9 +23,6 @@ func retireLine(uuid string, minute int, content string) []byte {
 		retireShared, uuid, ts, content))
 }
 
-// retireInputs plants a raw source and a ch file sharing one session: the raw
-// copies win both shared uids at equal event version, so the archive copies
-// live only in the archive member's rows. It returns the two raw uids.
 func retireInputs(t *testing.T, root string) []string {
 	t.Helper()
 	raw := append(retireLine("r-0", 0, "raw zero"), retireLine("r-1", 1, "raw one")...)
@@ -188,8 +185,6 @@ func TestAppendAfterSettleDoesNotRematerializeArchiveMembers(t *testing.T) {
 	}
 }
 
-// appendRawSource writes the raw source as one zstd frame per chunk, so a
-// later chunk is an append whose frame starts at the earlier size.
 func appendRawSource(t *testing.T, root, author, machine, harness, srcID, path string, chunks [][]byte, updatedMs int64) {
 	t.Helper()
 	enc, _ := zstd.NewWriter(nil)

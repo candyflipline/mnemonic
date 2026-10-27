@@ -1,21 +1,4 @@
 #!/bin/sh
-# annot-cycle.sh STORE BIN SESSIONS NCALLS LABEL [OUTDIR]
-#
-# One paired-capture variant for the annotate stall. On a settled full-store
-# copy STORE with no annotation source, starts a serve (MemoryMax 8G, as prod),
-# makes NCALLS annotate calls (session i mod lines of SESSIONS, name
-# annot-probe-i) and records the put cycle(s) they cause: the cycle log line,
-# the wall, the part bytes it wrote, VmHWM since the calls began (clear_refs
-# reset after boot), the sampled RSS peak, cgroup memory.events, pidstat CPU and
-# disk, vmstat. Then it puts STORE back: stops serve, removes the annotation
-# source's two raw files (never recursive), boots a second serve and records
-# that boot cycle too (the reverse rebuild), so the next variant starts from the
-# same state. NCALLS=0 records the control: an idle put-free window.
-# SESSIONS holds bare engine session ids; the annotate tool takes
-# "session:" + base64url of that id, derived per call here (the bare form is
-# refused: parseMcpID requires the prefix, internal/index/q_common.go:66).
-# Run under `flock -x /var/lib/mnu/box.lock` (timed). Prints counts and
-# timings only; session ids are read from SESSIONS and never printed.
 set -eu
 store=${1:?usage: annot-cycle.sh STORE BIN SESSIONS NCALLS LABEL [OUTDIR]}
 bin=${2:?BIN}
@@ -56,7 +39,7 @@ sha256 = "$hash"
 scopes = ["read", "annotate"]
 EOF
 
-start_serve() { # log
+start_serve() {
 	serves=$(pgrep -c -f ' serve --config ' || true)
 	avail=$(free -g | awk '/^Mem:/{print $7}')
 	if [ "$serves" -ge 3 ] || [ "$avail" -lt 10 ]; then
@@ -123,8 +106,6 @@ if [ "$ncalls" -gt 0 ]; then
 		sleep 1
 		waited=$((waited + 1))
 	done
-	# a second put cycle would start within settleMax (3 s) of the last call;
-	# wait past that so "one rebuild or N" is read from the log
 	sleep 20
 fi
 sleep 5

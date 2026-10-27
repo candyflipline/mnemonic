@@ -84,9 +84,6 @@ func (c *counted) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// scope is what the caller may export: the read tools' SessionFilter, or with
-// includePrivate every session, which takes an admin token whose tenant is
-// every author.
 func scope(ctx context.Context, db *index.DB, includePrivate bool) (index.SessionFilter, error) {
 	if !includePrivate {
 		return index.Sessions(ctx, db)
@@ -150,7 +147,6 @@ func parseRequest(r *http.Request) (request, error) {
 	return req, nil
 }
 
-// parseAnnotation splits annotation's name[=value].
 func parseAnnotation(s string) (AnnotationFilter, error) {
 	name, value, hasValue := strings.Cut(s, "=")
 	if name == "" {
@@ -159,8 +155,6 @@ func parseAnnotation(s string) (AnnotationFilter, error) {
 	return AnnotationFilter{Name: name, Value: value, HasValue: hasValue}, nil
 }
 
-// rawSessionID accepts the raw session id and the MCP-facing
-// session:<base64> form (59796bc:internal/query/common.go:166).
 func rawSessionID(s string) (string, error) {
 	raw, ok := strings.CutPrefix(s, "session:")
 	if !ok {

@@ -562,9 +562,6 @@ func hasWords(s string, want []string) bool {
 // the string for a pattern this long.
 const likeMaxPattern = 1000
 
-// likeMatcher is a Shift-And automaton over a like pattern: state j is "j
-// pattern characters matched", loop marks the states a % keeps alive. One
-// pass over the string, no backtracking, at most 16 words of state.
 type likeMatcher struct {
 	n     int
 	words int

@@ -107,14 +107,10 @@ var annotateRed = sync.OnceValue(func() *redact.Redactor {
 	return red
 })
 
-// redactUserText redacts one caller-controlled string with annotateRed; a
-// string with no secret comes back unchanged.
 func redactUserText(s string) string {
 	return string(annotateRed().Line([]byte(s)))
 }
 
-// redactValue redacts the string of a label or text value; a number holds no
-// caller text.
 func redactValue(v schema.Value) schema.Value {
 	if s, ok := v.Label(); ok {
 		return schema.Label(redactUserText(s))
@@ -211,11 +207,6 @@ func (annotate) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, str
 	return data, text, nil
 }
 
-// requireTarget is nil when the caller may open session and, if spanID is
-// set, the session has that span. On the engine the events read of the
-// oracle's count is "the part holds a row of the session": annotation records
-// are rows of their own sources' parts, never of the session's part, so any
-// row of the session is an event.
 func requireTarget(ctx context.Context, db *DB, session, spanID string) error {
 	f, err := Sessions(ctx, db)
 	if err != nil {
@@ -237,8 +228,6 @@ func requireTarget(ctx context.Context, db *DB, session, spanID string) error {
 	return argErrorf("span not found in the session")
 }
 
-// sessionHasSpan walks the session's raw spans array one element at a time,
-// so the check holds one span, not the session's spans.
 func sessionHasSpan(db *DB, session, spanID string) bool {
 	st, ok := db.part(session)
 	if !ok {
@@ -264,9 +253,6 @@ func sessionHasSpan(db *DB, session, spanID string) bool {
 	return false
 }
 
-// sessionHasEvents reports whether a part holds rows of session. Annotation
-// records are rows of their own sources' parts, so any row of the session's
-// part is an event and no annotation skip is needed.
 func (db *DB) sessionHasEvents(session string) (bool, error) {
 	st, ok := db.part(session)
 	if !ok {

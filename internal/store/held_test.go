@@ -9,8 +9,6 @@ import (
 	"weak"
 )
 
-// A completed frame must be collectible while the committer is idle, without
-// another append reallocating the held slice or Close ending the goroutine.
 func TestCommitterDropsCompletedFrame(t *testing.T) {
 	c, err := open(t.TempDir(), barrier(func(touched) error { return nil }), func(error) {})
 	if err != nil {
@@ -23,8 +21,6 @@ func TestCommitterDropsCompletedFrame(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Return only a weak reference and the ticket, so the caller cannot keep
-	// the frame alive. Use the same encoder and submission path as Submit.
 	frame, ticket := func() (weak.Pointer[byte], *Ticket) {
 		lines, err := ParseLines(bytes.Repeat([]byte("a whole line\n"), 4096))
 		if err != nil {

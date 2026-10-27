@@ -75,9 +75,6 @@ func openPlain(s source) (*os.File, int64, error) {
 	return f, end, nil
 }
 
-// lastNewline is the offset just past the last '\n' in the first size bytes
-// of f, 0 when there is none. It reads backward from the end, so a growing
-// file costs one short read.
 func lastNewline(f *os.File, size int64) (int64, error) {
 	buf := make([]byte, window)
 	for at := size; at > 0; {
@@ -144,12 +141,6 @@ func (rr *redactReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-// listPlainSources is every harness file local mode indexes in place, as
-// sources of KindPlain: the key's author and machine are the local identity,
-// its src_id the file's stable id as push names it, and src the manifest push
-// would have sent (path, harness, source_name, size, updated_ms = mtime).
-// The globs are the client config's, since a glob string alone carries no
-// harness or source name.
 func listPlainSources(globs []config.SourceGlob, author, machine string) ([]source, error) {
 	files := push.ScanFiles(globs)
 	out := make([]source, 0, len(files))

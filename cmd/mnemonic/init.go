@@ -158,9 +158,6 @@ func initLaunchd(home, exe, label string) error {
 	return nil
 }
 
-// waitGone waits until launchd reports the agent gone (launchctl print exits
-// non-zero), polling every 200 ms up to within; a bootout of a running
-// watcher returns before the job is dropped.
 func waitGone(domain, label string, within time.Duration) error {
 	deadline := time.Now().Add(within)
 	for {
@@ -214,8 +211,6 @@ func runningBinary() (string, error) {
 	return real, nil
 }
 
-// writeClientConfig writes cfg beside path, loads it back so a config that
-// would not load is never installed, and renames it over path.
 func writeClientConfig(path string, cfg config.Client) error {
 	tmp := path + ".new"
 	cf, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)

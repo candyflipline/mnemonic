@@ -66,16 +66,10 @@ func TestOpenedPartListsSessionsAfterItsDirIsGone(t *testing.T) {
 	}
 }
 
-// TestConcurrentToolCallsOnOneSnapshot: the MCP handler pins one snapshot per
-// request and serializes nothing between two of them, so every lazily-filled
-// read cache of a DB must take concurrent fill. Before the fix -race reports
-// the shared frame cache's maps (row/heavyOf) and Part.ls. Each lane must
-// answer byte-identically to the sequential run, so the fix cannot change
-// behaviour.
 func TestConcurrentToolCallsOnOneSnapshot(t *testing.T) {
 	db, dir := newQueryDB(t)
 	ctx := context.Background()
-	claude := "7c666c01-d38e-4658-8650-854ffb5b626e" // a's claude-code session in newQueryDB
+	claude := "7c666c01-d38e-4658-8650-854ffb5b626e"
 
 	listArgs := `{"start_datetime":"2000-01-01T00:00:00Z","end_datetime":"2100-01-01T00:00:00Z"}`
 	searchArgs := `{"query":"project"}`
@@ -118,8 +112,6 @@ func TestConcurrentToolCallsOnOneSnapshot(t *testing.T) {
 		t.Fatalf("list_sessions returned %d sessions, want 2", len(listed.Sessions))
 	}
 
-	// The lanes race a cold DB over the same store: the race is two concurrent
-	// first requests filling the same lazily-filled caches of one snapshot.
 	racing, err := OpenDB(dir)
 	if err != nil {
 		t.Fatal(err)

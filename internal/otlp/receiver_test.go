@@ -326,7 +326,6 @@ func converge(t *testing.T, dir string, srv *server.Server) *index.Index {
 	return ix
 }
 
-// spansOf returns the session's spans ordered by less.
 func spansOf(t *testing.T, ix *index.Index, session string, less func(a, b schema.Span) bool) []schema.Span {
 	t.Helper()
 	db, release := ix.Snapshot()
@@ -336,8 +335,6 @@ func spansOf(t *testing.T, ix *index.Index, session string, less func(a, b schem
 	return spans
 }
 
-// spanLines renders each span as row, fed the parent's name or "-" when the
-// parent is missing or the span is a root.
 func spanLines(spans []schema.Span, row func(s schema.Span, parent string) string) string {
 	name := make(map[string]string, len(spans))
 	for _, s := range spans {
@@ -354,9 +351,6 @@ func spanLines(spans []schema.Span, row func(s schema.Span, parent string) strin
 	return strings.Join(lines, "\n")
 }
 
-// spanFullRow is name|parent name|kind|status|input|output|cache read|cache
-// write|cost, "-" for a missing cost, the rendering the 59796bc cache SQL
-// produced.
 func spanFullRow(s schema.Span, parent string) string {
 	cost := "null"
 	if s.Cost != nil {
@@ -367,8 +361,6 @@ func spanFullRow(s schema.Span, parent string) string {
 		strconv.FormatUint(s.CacheReadTokens, 10) + "|" + strconv.FormatUint(s.CacheWriteTokens, 10) + "|" + cost
 }
 
-// eventsOf renders each winner row of the session as
-// item|session|op kind|latency ms|agent label, in event order.
 func eventsOf(t *testing.T, ix *index.Index, session string) string {
 	t.Helper()
 	db, release := ix.Snapshot()
@@ -451,9 +443,6 @@ func TestReceiverRows(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// 59796bc answered alice|1 and bob|1 for this grouping (per-row
-		// author was an events column); the engine keeps both rows too, and
-		// their uids stay distinct because the span uid names the author.
 		if n != 2 || len(uids) != 2 {
 			t.Fatalf("rows of one span id: %d rows, %d distinct uids, want 2 and 2", n, len(uids))
 		}

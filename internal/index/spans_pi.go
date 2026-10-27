@@ -18,7 +18,6 @@ func piFamilyChatKey(r *Row) string {
 	return ""
 }
 
-// piSpans: flatSpans over piFamilyChatKey.
 func piSpans(harness, sid string, rows iter.Seq[*Row]) []schema.Span {
 	return flatSpans("pi-coding-agent", piFamilyChatKey)(harness, sid, rows)
 }

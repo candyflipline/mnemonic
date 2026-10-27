@@ -1,12 +1,4 @@
 #!/bin/sh
-# memcap-open.sh SRC OUT TAG: build SRC's scratch memcap test (a
-# *_scratch_test.go living only in SRC, never committed) and run it over
-# MEMCAP_STORE (default /var/lib/mnu/p4-store-a/index) read-only the way boot
-# opens CURRENT (index.OpenDB), under a MemoryMax scope with GOMAXPROCS=4.
-# Writes OUT/heap-TAG.pprof (inuse, taken after runtime.GC while the DB is
-# alive) and OUT/alloc-TAG.pprof (alloc_space via -test.memprofile), prints
-# the scope's memory.peak, the max sampled anon, and the test's MEMCAP_ lines.
-# Measures memory, not time: flock -s /var/lib/mnu/box.lock sh memcap-open.sh ...
 set -eu
 SRC=${1:?usage: memcap-open.sh SRC OUT TAG}
 OUT=${2:?usage: memcap-open.sh SRC OUT TAG}

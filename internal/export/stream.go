@@ -54,7 +54,6 @@ func writeArray(w io.Writer, doc []byte, marker, indent string, each func(prefix
 	return err
 }
 
-// decodeNumbers decodes one JSON value, numbers kept as their literal text.
 func decodeNumbers(b []byte) (any, error) {
 	var doc any
 	dec := json.NewDecoder(bytes.NewReader(b))
@@ -63,8 +62,6 @@ func decodeNumbers(b []byte) (any, error) {
 	return doc, err
 }
 
-// sortedIndent re-encodes one JSON value with object keys sorted and two-space
-// indentation, every line after the first starting with prefix.
 func sortedIndent(b []byte, prefix string) ([]byte, error) {
 	doc, err := decodeNumbers(b)
 	if err != nil {

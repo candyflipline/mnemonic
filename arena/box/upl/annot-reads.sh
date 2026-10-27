@@ -1,30 +1,4 @@
 #!/bin/sh
-# annot-reads.sh STORE BIN SESSIONS NCALLS LABEL [OUTDIR]
-#
-# The read-diff capture for the annotate fix. On a settled full-store copy
-# STORE with no annotation source, starts a serve (MemoryMax 8G, as prod),
-# optionally makes NCALLS annotate calls (session i mod lines of SESSIONS,
-# name annot-probe-i, number i, as annot-cycle.sh), waits for the put cycle
-# they cause, then for each session in SESSIONS writes one file per tool to
-# OUTDIR, hashed and never printed:
-#   get_trace      the annotations array, every "ts" field deleted (call time)
-#   query          the annotations relation rows for the target session
-#                  (every column but ts, sorted by annotation_id)
-#   list_sessions  the session's one entry, from a +-2 h window around its
-#                  last span end (list_sessions has no id filter)
-#   open           the first page of the session
-#   search         the session ids search_sessions returns for "annot-probe",
-#                  sorted (store-wide, so identical within one run)
-# SESSIONS holds bare engine session ids (the checkpoint form); the MCP tools
-# take "session:" + base64url of that id, annotate and query take the bare
-# form, so both are derived here. A tool error writes {"tool_error":true}
-# (identical refusals on both binaries stay equal by hash).
-# Then it puts STORE back as annot-cycle.sh does: stops serve, removes the
-# annotation source's raw files (single files, never recursive), boots a
-# second serve to record the reverse rebuild, stops it. NCALLS=0 is the
-# control run: reads only, no annotate calls, no reset boot.
-# Run under `flock -s /var/lib/mnu/box.lock` (correctness). Prints counts and
-# hashes only; session ids and corpus content stay in OUTDIR on the box.
 set -eu
 store=${1:?usage: annot-reads.sh STORE BIN SESSIONS NCALLS LABEL [OUTDIR]}
 bin=${2:?BIN}
@@ -63,7 +37,7 @@ sha256 = "$hash"
 scopes = ["read", "annotate"]
 EOF
 
-start_serve() { # log
+start_serve() {
 	serves=$(pgrep -c -f ' serve --config ' || true)
 	avail=$(free -g | awk '/^Mem:/{print $7}')
 	if [ "$serves" -ge 3 ] || [ "$avail" -lt 10 ]; then
@@ -78,7 +52,7 @@ start_serve() { # log
 	done
 }
 
-mcp() { # tool arguments outfile
+mcp() {
 	if curl -sf -H 'MCP-Protocol-Version: 2025-06-18' -H "Authorization: Bearer $(cat "$TMP/tok")" \
 		-H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
 		-d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}" \
@@ -135,7 +109,6 @@ while IFS= read -r sid; do
 	[ -z "$sid" ] && continue
 	pref=$(mcpid "$sid")
 
-	# get_trace: the annotations array only, every ts deleted (it is the call time)
 	if mcp get_trace "{\"session_id\":\"$pref\",\"include_annotations\":true}" "$TMP/gt.json" &&
 		! iserr "$TMP/gt.json"; then
 		jq '[(.result.structuredContent.data.annotations // []) | walk(if type == "object" then del(.ts) else . end)]' \
@@ -145,9 +118,6 @@ while IFS= read -r sid; do
 		echo '{"tool_error":true}' > "$out/get_trace/$i.json"
 	fi
 
-	# list window: list_sessions has no id filter; page a +-2 h window around
-	# the session's last span end (same data -> same window -> same entry).
-	# A session get_trace refuses (over the span budget) anchors through open.
 	w=$(jq -r '[.result.structuredContent.data | .. | objects | .end? // empty] | max // ""' "$TMP/gt.json" 2>/dev/null || true)
 	if [ -z "$w" ]; then
 		if mcp open "{\"id\":\"$pref\"}" "$TMP/opw.json" && ! iserr "$TMP/opw.json"; then
@@ -163,8 +133,6 @@ while IFS= read -r sid; do
 		end=2100-01-01T00:00:00Z
 	fi
 
-	# query: the annotations relation rows for the target session, ts excluded
-	# by the select, sorted by annotation_id (the id is content-derived)
 	q="from: annotations | filter: target_session_id = '$sid' | select: annotation_id, target_session_id, target_span_id, name, value_number, value_label, value_text, source, author | sort: annotation_id asc"
 	if mcp query "{\"query\":\"$q\",\"from\":\"$FROM\",\"to\":\"$TO\",\"limit\":1000}" "$TMP/q.json" &&
 		! iserr "$TMP/q.json"; then
@@ -175,7 +143,6 @@ while IFS= read -r sid; do
 		echo '{"tool_error":true}' > "$out/query/$i.json"
 	fi
 
-	# open: the first page
 	if mcp open "{\"id\":\"$pref\",\"limit\":25}" "$TMP/op.json" && ! iserr "$TMP/op.json"; then
 		jq '.result.structuredContent.data // {extract_failed:true}' "$TMP/op.json" > "$out/open/$i.json" 2>/dev/null ||
 			echo '{"extract_failed":true}' > "$out/open/$i.json"
@@ -184,7 +151,6 @@ while IFS= read -r sid; do
 		echo '{"tool_error":true}' > "$out/open/$i.json"
 	fi
 
-	# list_sessions: the session's one entry
 	found=0
 	cursor=""
 	pages=0
@@ -213,7 +179,6 @@ while IFS= read -r sid; do
 		echo '{"found":false}' > "$out/list_sessions/$i.json"
 	fi
 
-	# search: the store-wide result ids for "annot-probe", sorted
 	if mcp search_sessions '{"query":"annot-probe","n_hits":50}' "$TMP/sr.json" && ! iserr "$TMP/sr.json"; then
 		jq -r '[.result.structuredContent.data.results[]?.session.id] | unique | .[]' "$TMP/sr.json" > "$out/search/$i.txt" 2>/dev/null ||
 			: > "$out/search/$i.txt"

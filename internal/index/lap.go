@@ -54,11 +54,6 @@ func (ix *Index) Boot(root string, manifests []store.Manifest, opts IngestOption
 	return l, stats, err
 }
 
-// Next runs one cycle over every source but parses only changed, carry (the
-// keys the last cycle did not finish) and the version-stale ones the sweep
-// picks from the cached checkpoints. Every other source is Unchanged without
-// a read. publish still sees every source, and its settle
-// writes land in l.cks.
 func (l *Lap) Next(changed []layout.Key, opts IngestOptions) (IngestStats, error) {
 	for _, k := range changed {
 		l.carry[k] = true
@@ -74,8 +69,6 @@ func (l *Lap) Next(changed []layout.Key, opts IngestOptions) (IngestStats, error
 	return l.cycle(l.work(), opts, release)
 }
 
-// work is the sources a cycle after boot parses: the carried keys (changed
-// ones included) and the version-stale ones.
 func (l *Lap) work() []int {
 	want := make(map[string]bool, len(l.carry))
 	for k := range l.carry {
@@ -107,12 +100,6 @@ func (l *Lap) cycle(work []int, opts IngestOptions, release func()) (IngestStats
 	return stats, err
 }
 
-// patch re-reads the manifest of each changed key: a new key is inserted at
-// its sorted position with the checkpoint the store has for it, a changed one
-// replaced, one whose manifest is gone (a replace crashed between unlink and
-// rename) or does not parse removed, as the full listing would, and two
-// sources on one key refused as Ingest refuses them. A key that is
-// not a raw source (an archive file's) reads no manifest and changes nothing.
 func (l *Lap) patch(changed map[layout.Key]bool) error {
 	for k := range changed {
 		n := sort.Search(len(l.sources), func(i int) bool { return l.sources[i].kind == KindArchive })

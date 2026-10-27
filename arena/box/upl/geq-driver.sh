@@ -1,22 +1,4 @@
 #!/bin/sh
-# geq-driver.sh — the GEQ steps in order. Stops at once when parity is not 126/126
-# or an equiv.sh pair is not EQUIVALENT. Log: $OUT/geq-driver.log.
-# Run detached: setsid nohup sh geq-driver.sh &. With INLOCK=1 the caller already
-# holds the box lock (the whole sequence in one hold); otherwise each step takes
-# the lock itself, so other lanes interleave between steps.
-# STEPS (space separated, default all, run in this order):
-#   prep    snapshot http-1 and stream-1 (path, inode, size, mtime), then `cp -al`
-#           them to geqc-http / geqc-stream. No disk is used. The lag, openat and
-#           sweep steps only add new sources and write new-generation files
-#           (internal/index/ingest.go:344 next.Gen = prev.Gen+1 on a reparse), and the
-#           snapshot after the last step proves the originals unchanged.
-#   matrix  geq-matrix.sh ROUNDS DEN (HTTP vs stream, 1 and 4 clients, alternating)
-#   lagS lagH   lag.sh quiet probes (ack_ms, index_ms) on the stream / HTTP copy
-#   traceS      lag.sh with serve under strace openat (manifest reads per cycle), stream
-#   sweep       lag.sh SWEEP=1 with the bumped-parser stream binary on geqc-stream
-#   traceH      as traceS, HTTP
-#   fullH fullS one full push of the plain HOME each (geqf-*), equiv.sh against http-1
-# Env: BOX, SRC, DEN (32), ROUNDS (5), LAG_N (10), LAG_SPACING (15), SWEEP_N (40), SWEEP_SPACING (5)
 set -eu
 BOX=${BOX:-/var/lib/mnu}
 OUT=${OUT:-$BOX/out}
@@ -36,7 +18,7 @@ CS=$BOX/geqc-stream
 say() { echo "$(TZ=America/Los_Angeles date '+%H:%M:%S PT') $*" >> "$LOG"; }
 L() { if [ -n "${INLOCK:-}" ]; then "$@"; else flock "$LOCK" "$@"; fi; }
 snap() { find "$1" -type f -printf '%p %i %s %T@\n' | LC_ALL=C sort | sha256sum | cut -d' ' -f1; }
-lag() { # name BIN DIR extra-env...
+lag() {
 	nm=$1; bin=$2; dir=$3; shift 3
 	say "$nm wait"
 	L env "$@" SERVE_WRAP="systemd-run --scope -q -p MemoryMax=18G -p MemorySwapMax=0" FIRST_MAX=900 IDX_MAX=900 sh "$SRC/lag.sh" "$bin" "$dir" > "$OUT/geq-$nm.txt" 2>&1 || say "$nm rc!=0"

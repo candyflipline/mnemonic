@@ -8,9 +8,6 @@ package redact
 // SMALL LETTER LONG S), in keywords and in folded character classes.
 
 var (
-	// g25StartTab[text[p]]: p can begin a keyword alternative — the first
-	// letters a b c p s t in either case, plus 0xC5, the lead byte of
-	// U+017F, which folds to the s of "secret".
 	g25StartTab = func() [256]bool {
 		var t [256]bool
 		for _, c := range "aAbBcCpPsStT" {
@@ -20,7 +17,6 @@ var (
 		return t
 	}()
 
-	// g25WordTab: ASCII \b word characters.
 	g25WordTab = func() [256]bool {
 		var t [256]bool
 		for c := byte('0'); c <= '9'; c++ {
@@ -36,9 +32,6 @@ var (
 		return t
 	}()
 
-	// g25SecretTab: single-byte members of the secret run class
-	// [0-9A-Za-z_./+=-]. Under (?i) Go widens the class with the fold
-	// partners of K and S, which are multi-byte (g25SecretWidth).
 	g25SecretTab = func() [256]bool {
 		var t [256]bool
 		for _, c := range "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_./+=-" {
@@ -71,8 +64,6 @@ func g25FoldWidth(text []byte, i int, c byte) int {
 	return 0
 }
 
-// g25FoldWord matches the folded literal w at text[i] and returns the end
-// offset, or -1.
 func g25FoldWord(text []byte, i int, w string) int {
 	p := i
 	for k := 0; k < len(w); k++ {
@@ -85,8 +76,6 @@ func g25FoldWord(text []byte, i int, w string) int {
 	return p
 }
 
-// g25Sep consumes the [_-]? separator of api[_-]?key, access[_-]?token,
-// client[_-]?secret and private[_-]?key.
 func g25Sep(text []byte, p int) int {
 	if p < len(text) && (text[p] == '_' || text[p] == '-') {
 		return p + 1
@@ -94,9 +83,6 @@ func g25Sep(text []byte, p int) int {
 	return p
 }
 
-// g25SecretWidth reports the width of the secret-run character at text[i]:
-// one class byte, 2 for U+017F, 3 for U+212A (the (?i) fold partners of S
-// and K), or 0 when the byte is outside the class.
 func g25SecretWidth(text []byte, i int) int {
 	if g25SecretTab[text[i]] {
 		return 1

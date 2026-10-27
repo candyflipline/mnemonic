@@ -1,23 +1,5 @@
 package redact
 
-// Builtin rule 25 (generic-api-key), hand-written — one scan over text,
-// no regex engine. This is the hot rule: on the Oct 23 Mac measurement the
-// generic regex was about 70% of redact time.
-//
-// It reports exactly the secret-group spans of
-//
-//	(?i)\b(?:api[_-]?key|access[_-]?token|auth(?:orization)?|bearer|
-//	      client[_-]?secret|credential|passwd|password|private[_-]?key|
-//	      secret|token)\b["']?<sp>*[:=]<sp>*["']?([0-9A-Za-z_./+=-]{20,})["']?
-//
-// per the matcher contract in matchers.go (leftmost-first, non-
-// overlapping, ASCII \b, Go (?i) folding). The alternation's classes are
-// pairwise disjoint, so the only in-alternative backtrack Go regex can
-// take is auth(?:orization)? — tried long-form first, then short. Scanning
-// resumes after the whole match, whose tail ["']? is consumed but not
-// reported.
-
-// m25 is the hand-written matcher for generic-api-key.
 func m25(text []byte, out [][2]int) [][2]int {
 	n := len(text)
 	i := 0
@@ -32,12 +14,10 @@ func m25(text []byte, out [][2]int) [][2]int {
 	return out
 }
 
-// g25Find scans from byte from for the next genericPattern match and
-// returns its end and its secret group span.
 func g25Find(text []byte, from, n int) (end, g0, g1 int, ok bool) {
 	for p := from; p < n; p++ {
 		if !g25StartTab[text[p]] {
-			continue // no alternative can start here
+			continue
 		}
 		// ASCII \b before the keyword: the first keyword rune is a word
 		// character (an ASCII letter) — except U+017F, which folds to s
@@ -57,8 +37,6 @@ func g25Find(text []byte, from, n int) (end, g0, g1 int, ok bool) {
 	return 0, 0, 0, false
 }
 
-// g25MatchAt tries the alternatives beginning at p in the pattern's order;
-// the first whose whole pattern matches wins (leftmost-first).
 func g25MatchAt(text []byte, p, n int) (end, g0, g1 int, ok bool) {
 	switch c := text[p]; c {
 	case 'a', 'A':
@@ -92,8 +70,6 @@ func g25MatchAt(text []byte, p, n int) (end, g0, g1 int, ok bool) {
 	return 0, 0, 0, false
 }
 
-// g25TailAt applies \b after a keyword ending at kwEnd, then the shared
-// tail; kwEnd < 0 means the keyword did not match.
 func g25TailAt(text []byte, n, kwEnd int) (end, g0, g1 int, ok bool) {
 	if kwEnd < 0 || (kwEnd < n && g25WordTab[text[kwEnd]]) {
 		return 0, 0, 0, false
@@ -101,11 +77,6 @@ func g25TailAt(text []byte, n, kwEnd int) (end, g0, g1 int, ok bool) {
 	return g25Tail(text, n, kwEnd)
 }
 
-// g25Tail matches ["']? <sp>* [:=] <sp>* ["']? <run>{20,} ["']? from q and
-// returns the whole-match end and the run span. Greedy and unambiguous:
-// the classes are pairwise disjoint, so no backtracking can change a
-// verdict; the trailing quote, if present, is consumed by the match but
-// lies outside the reported span.
 func g25Tail(text []byte, n, q int) (end, g0, g1 int, ok bool) {
 	if q < n && (text[q] == '"' || text[q] == '\'') {
 		q++
@@ -138,9 +109,6 @@ func g25Tail(text []byte, n, q int) (end, g0, g1 int, ok bool) {
 	}
 	return end, q, r, true
 }
-
-// The eleven alternatives, in pattern order. Each returns the keyword end
-// offset, or -1.
 
 func g25APIKey(text []byte, p int) int {
 	e := g25FoldWord(text, p, "api")

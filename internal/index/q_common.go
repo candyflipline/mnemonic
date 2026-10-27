@@ -62,7 +62,6 @@ func (id mcpID) String() string {
 	}
 }
 
-// parseMcpID: every message is upstream text.
 func parseMcpID(input string) (mcpID, error) {
 	switch {
 	case strings.HasPrefix(input, "session:"):
@@ -255,7 +254,6 @@ func hasEncryptedContentField(text string) bool {
 	}
 }
 
-// searchableEventTypes is the canonical order the search filter is emitted in.
 var searchableEventTypes = []string{
 	"user_input", "assistant_response", "reasoning", "tool_call", "tool_response",
 	"compaction", "system", "runtime",

@@ -254,8 +254,6 @@ func (w *watcher) hangup() {
 	}
 }
 
-// takeRedo marks the paths a conflict ack named dirty and forgets their
-// stamps, so the next flush re-decides them from the server's state.
 func (w *watcher) takeRedo(dirty map[string]bool) {
 	if w.up == nil {
 		return
@@ -268,8 +266,6 @@ func (w *watcher) takeRedo(dirty map[string]bool) {
 	}
 }
 
-// ready reports whether a flush can make progress on dirty: some path has no
-// append still in flight. Paths that do are retried when their acks arrive.
 func (w *watcher) ready(dirty map[string]bool) bool {
 	for p := range dirty {
 		if w.up == nil || !w.up.busy(wire.SrcID(p)) {
@@ -279,10 +275,6 @@ func (w *watcher) ready(dirty map[string]bool) bool {
 	return false
 }
 
-// retryDelay is how long a stale watcher waits before it reconciles or
-// redials again; file events in the meantime wait for it too. It starts at
-// errorRetryMin, doubles for each consecutive stale pass up to errorRetryMax,
-// and a clean pass resets it.
 func (w *watcher) retryDelay() time.Duration {
 	d := errorRetryMin << min(w.retries, 8)
 	w.retries++
@@ -317,8 +309,6 @@ func (w *watcher) reconcile(ctx context.Context) Stats {
 	return w.sync(ctx, paths)
 }
 
-// flush lists the dirty directories and any glob base not seen yet, then
-// syncs the dirty files and the files those listings found.
 func (w *watcher) flush(ctx context.Context, dirty map[string]bool) Stats {
 	var paths []string
 	for p := range dirty {
@@ -399,10 +389,6 @@ func (w *watcher) classify(path string) (watchGlob, bool) {
 	return watchGlob{}, false
 }
 
-// sync watches each known path, then sends it when its (size, mtime) differs
-// from its stamp at its last completed sync. A path whose appends are still
-// in flight waits in deferred until their acks are in. A file error makes the
-// next wake reconcile after a backoff, and so does a stream that ended.
 func (w *watcher) sync(ctx context.Context, paths []string) Stats {
 	if w.sink != nil {
 		return w.syncSink(ctx, paths)
@@ -447,10 +433,6 @@ func (w *watcher) sync(ctx context.Context, paths []string) Stats {
 	return st
 }
 
-// syncSink is sync's sink branch: the same per-path stamp tests, then one
-// Sync for every path whose (size, mtime) changed. A failed Sync marks the
-// pass failed and the watcher stale, so the next reconcile hands the paths
-// over again; nothing is marked synced until Sync succeeds.
 func (w *watcher) syncSink(ctx context.Context, paths []string) Stats {
 	type due struct {
 		path  string

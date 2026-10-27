@@ -14,19 +14,12 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-// Dataset is the JSONL export: sessions filtered by one annotation, capped
-// per task (docs/design-open-source-at-scale.md:105, the SWE-smith cap of at
-// most 3 trajectories per instance).
-
-// AnnotationFilter is one --annotation name[=value].
 type AnnotationFilter struct {
 	Name     string
 	Value    string
 	HasValue bool
 }
 
-// DatasetRow is one JSONL line: the session, its task, its annotations, and
-// its validated ATIF trajectory.
 type DatasetRow struct {
 	SessionID   string          `json:"session_id"`
 	Harness     string          `json:"harness"`
@@ -45,14 +38,11 @@ type AnnotationOut struct {
 	TS     time.Time       `json:"ts"`
 }
 
-// SessionError is a session the dataset skipped, with why.
 type SessionError struct {
 	SessionID string
 	Err       error
 }
 
-// sessionKey is one annotated session: the harness and cwd of its first
-// published event, its newest event_time, and its annotations.
 type sessionKey struct {
 	id, harness, task string
 	lastUs            int64
@@ -98,7 +88,6 @@ func Dataset(w io.Writer, db *index.DB, f AnnotationFilter, perTask int, hidden 
 	if err != nil {
 		return nil, err
 	}
-	// Newest first; the session id breaks ties so the order is total.
 	sort.Slice(sessions, func(i, j int) bool { return sessionNewer(sessions[i], sessions[j]) })
 	tasks := map[string]int{}
 	emitted := 0
@@ -159,9 +148,6 @@ func sessionNewer(a, b sessionKey) bool {
 	return a.id > b.id
 }
 
-// annotationValueMatches is the SQL the annotated-sessions list kept:
-// value_label = ? OR value_text = ? OR value_number = ? with the value
-// parsed as a float.
 func annotationValueMatches(v schema.Value, f AnnotationFilter) bool {
 	if n, ok := v.Number(); ok {
 		if p, err := strconv.ParseFloat(f.Value, 64); err == nil && n == p {

@@ -1,11 +1,5 @@
 package redact
 
-// keywordAutomaton is an Aho-Corasick automaton over ASCII-folded bytes.
-// scan folds 'A'-'Z' exactly like asciiLower and nothing else, so it marks
-// exactly the rules whose keywords bytes.Contains would find in
-// asciiLower(text) — in one pass over the text, with no lowered copy.
-// Built once in New and never mutated afterwards, so Line stays safe to
-// call from many goroutines.
 type keywordAutomaton struct {
 	next []int32   // next[state*256+byte] -> next state, fail transitions baked in
 	out  []int32   // nearest state on the suffix chain that ends a keyword, -1 if none
@@ -17,7 +11,7 @@ func buildKeywordAutomaton(rules []rule) *keywordAutomaton {
 		kids map[byte]int32
 	}
 	nodes := []node{{kids: map[byte]int32{}}}
-	ends := [][]int32{{}} // ends[i]: rule indices whose keyword ends at node i
+	ends := [][]int32{{}}
 	for i := range rules {
 		for _, kw := range rules[i].keywords {
 			if len(kw) == 0 {
@@ -41,7 +35,7 @@ func buildKeywordAutomaton(rules []rule) *keywordAutomaton {
 	fail := make([]int32, n)
 	out := make([]int32, n)
 	out[0] = -1
-	order := []int32{0} // BFS order: fail[s] and out[s] are set before s is left
+	order := []int32{0}
 	for qi := 0; qi < len(order); qi++ {
 		s := order[qi]
 		for b, nx := range nodes[s].kids {
@@ -100,7 +94,7 @@ func (a *keywordAutomaton) scan(text []byte, c []bool) {
 			b += 'a' - 'A'
 		}
 		s = a.next[int(s)*256+int(b)]
-		for o := s; o >= 0; o = a.out[o] { // kr[s] first, then proper suffix outputs
+		for o := s; o >= 0; o = a.out[o] {
 			for _, ri := range a.kr[o] {
 				c[ri] = true
 			}

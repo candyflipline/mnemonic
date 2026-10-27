@@ -17,7 +17,6 @@ const quicScheme = "quic://"
 
 const DefaultKeyFile = "~/.mnemonic/key"
 
-// Addr is the host:port of Server; LoadClient has checked it.
 func (c Client) Addr() string { return strings.TrimPrefix(c.Server, quicScheme) }
 
 func LoadClient(path string) (Client, error) {

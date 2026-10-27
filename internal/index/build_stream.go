@@ -9,13 +9,6 @@ import (
 	"sort"
 )
 
-// A part is built in passes that keep no decoded row: the key pass reads every
-// member once into a compact rowKey per winner, the doc pass decodes each
-// winner's light record once in the part's order, and the section pass reads
-// each session's winners back from the part's own logs.
-
-// rowKey is what the key pass keeps of a row: what the winner rule and the
-// part's order read, and where its light record is.
 type rowKey struct {
 	uid        string
 	version    uint64
@@ -30,7 +23,6 @@ type rowKey struct {
 	src        uint16
 }
 
-// strTab interns strings to the dense ids rowKey carries.
 type strTab struct {
 	list []string
 	ids  map[string]uint32
@@ -49,7 +41,6 @@ func (t *strTab) id(b []byte) uint32 {
 	return id
 }
 
-// ranks maps each id to its place in the strings' sorted order.
 func (t *strTab) ranks() []uint32 {
 	order := make([]uint32, len(t.list))
 	for i := range order {
@@ -63,7 +54,6 @@ func (t *strTab) ranks() []uint32 {
 	return rank
 }
 
-// keyPass folds the rows of every member into the winners' keys.
 type keyPass struct {
 	members  []member
 	pos      keyPos
@@ -80,8 +70,6 @@ type authKey struct {
 	src     uint16
 }
 
-// newKeyPass starts a key pass over members whose rows total at most rows, the
-// most winners there can be.
 func newKeyPass(members []member, rows int) *keyPass {
 	return &keyPass{members: members, pos: newKeyPos(), win: map[string]int32{}, keys: make([]rowKey, 0, rows),
 		seen: map[authKey]bool{}, last: authKey{session: ^uint32(0)}}
@@ -126,8 +114,6 @@ func (p *keyPass) offer(src uint16, author string, rec []byte, loc rowLoc) error
 	return nil
 }
 
-// authorsBySession is authorsOf over every row offered: per session, the
-// authors of the members that emitted a row of it, sorted and distinct.
 func (p *keyPass) authorsBySession(cks []ckpt) map[string][]string {
 	set := map[string]map[string]bool{}
 	for a := range p.seen {
@@ -144,8 +130,6 @@ func (p *keyPass) authorsBySession(cks []ckpt) map[string][]string {
 	return out
 }
 
-// docLoc is what the doc pass needs of a winner: its session and where its
-// light record is.
 type docLoc struct {
 	lf      int64
 	session uint32
@@ -187,7 +171,6 @@ type byOrder struct {
 func (o byOrder) Len() int      { return len(o.keys) }
 func (o byOrder) Swap(i, j int) { o.keys[i], o.keys[j] = o.keys[j], o.keys[i] }
 
-// Less is orderLess over the keys' fields, after the session.
 func (o byOrder) Less(i, j int) bool {
 	a, b := &o.keys[i], &o.keys[j]
 	if a.session != b.session {
@@ -210,8 +193,6 @@ func (o byOrder) Less(i, j int) bool {
 	return a.uid < b.uid
 }
 
-// keyPos is where the fields of a rowKey sit in a light record, found from
-// Row's own field lists so a reorder there cannot desync the scan.
 type keyPos struct {
 	nStr, nInt                                   int
 	uid, session, sourceFile                     int
@@ -243,14 +224,12 @@ func newKeyPos() keyPos {
 		version: at(ints, &r.Version), emission: at(ints, &r.Emission), bits: at(ints, &r.Bits)}
 }
 
-// keyFields are the fields scan reads; the byte slices point into the record.
 type keyFields struct {
 	uid, session, sourceFile                     []byte
 	timeUs                                       int64
 	gen, lineNo, offset, version, emission, bits uint64
 }
 
-// scan reads the key fields of a light record without decoding the rest.
 func (p keyPos) scan(b []byte) (f keyFields, err error) {
 	for i := 0; i < p.nStr; i++ {
 		n, k := binary.Uvarint(b)
@@ -301,8 +280,6 @@ func (p keyPos) scan(b []byte) (f keyFields, err error) {
 }
 
 const (
-	// lightFrames and sectionFrames are how many decoded light frames the doc
-	// pass and the section pass keep.
 	lightFrames   = 16
 	sectionFrames = 4
 )
@@ -313,8 +290,6 @@ type frameID struct {
 	off    int64
 }
 
-// frameLRU keeps the last decoded frames read, the bounded reader behind both
-// passes that read light records back.
 type frameLRU struct {
 	max     int
 	recs    map[frameID][][]byte
@@ -351,8 +326,6 @@ func (c *frameLRU) get(id frameID, load func() ([][]byte, error)) ([][]byte, err
 	return recs, nil
 }
 
-// lightSource reads a winner's light record back from where the key pass
-// found it: its holder part's light log or its member's.
 type lightSource struct {
 	store   string
 	cks     []ckpt
@@ -409,10 +382,8 @@ type partView struct {
 	err        error
 }
 
-// docChunk is how many doc records docRec reads at a time.
 const docChunk = 1024
 
-// docRec is doc d's record in the part's docs file.
 func (v *partView) docRec(d int) ([]byte, error) {
 	if v.chunk == nil || d < v.chunkAt || d >= v.chunkAt+len(v.chunk)/docWidth {
 		n := min(docChunk, v.acc.nDocs-d)
@@ -433,7 +404,6 @@ func (v *partView) begin(session int) {
 	v.start, v.end = int(s.start), int(s.end)
 }
 
-// load decodes doc d into r and returns its turn seq.
 func (v *partView) load(d int, r *Row) (uint32, bool) {
 	rec, err := v.docRec(d)
 	if err != nil {
@@ -461,8 +431,6 @@ func (v *partView) load(d int, r *Row) (uint32, bool) {
 	return seq, true
 }
 
-// withSeqs yields the session's rows as the parser wrote them, each with its
-// turn seq beside it.
 func (v *partView) withSeqs() iter.Seq2[*Row, uint32] {
 	return func(yield func(*Row, uint32) bool) {
 		var r Row
@@ -475,7 +443,6 @@ func (v *partView) withSeqs() iter.Seq2[*Row, uint32] {
 	}
 }
 
-// rows yields the session's rows with TurnIndex set to the turn seq.
 func (v *partView) rows() iter.Seq[*Row] {
 	return func(yield func(*Row) bool) {
 		var r Row

@@ -13,12 +13,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-// qlSource implements ql.RowSource over the engine: it enumerates the rows of
-// one relation that the caller may read (scope.go) inside from..to, the rows
-// the old tool's temp views held (59796bc:internal/query/sqltool.go sqlScopeDDL):
-// events by event_ts, spans by start_time, sessions overlapping the range,
-// turns and annotations of the sessions in scope. A session the caller may
-// not list never reaches the evaluator, which no clause can change.
 type qlSource struct {
 	db       *DB
 	f        SessionFilter
@@ -39,8 +33,6 @@ func newQLSource(ctx context.Context, db *DB, from, to time.Time) (*qlSource, er
 	return s, nil
 }
 
-// scanCtxEvery is how many rows a scan walks between context checks; a scan
-// also checks before each part, so a cancelled query decodes nothing more.
 const scanCtxEvery = 4096
 
 func tickCtx(ctx context.Context, n *int) error {
@@ -69,17 +61,12 @@ func (s *qlSource) Scan(ctx context.Context, req ql.ScanRequest, fn func(ql.Row)
 	return fmt.Errorf("ql: the source does not serve relation %s", req.Relation)
 }
 
-// lazyRow answers Get through one compiled cell per requested column, so the
-// evaluator decides what a row costs (contract 3): a heavy column is decoded
-// only when a predicate or an output asks for it.
 type lazyRow struct {
 	cells []func() (ql.Value, error)
 }
 
 func (r lazyRow) Get(i int) (ql.Value, error) { return r.cells[i]() }
 
-// str and opt render a column: str for NOT NULL columns (the engine keeps ""
-// for absent), null for the ones the old view could hold NULL.
 func str(s string) (ql.Value, error)  { return ql.StringValue(s), nil }
 func opt(s string) (ql.Value, error)  { return strPtrValue(s), nil }
 func num(n int64) (ql.Value, error)   { return ql.IntValue(n), nil }
@@ -101,13 +88,6 @@ func msValue(ms int64) (ql.Value, error) {
 
 func usValue(us int64) (ql.Value, error) { return ql.TimeValue(time.UnixMicro(us)), nil }
 
-// ---------------------------------------------------------------- events
-
-// scanEvents walks every part's docs in stored order. req.Match narrows the
-// walk through each part's postings when every hint word is a term the
-// tokenizer could have (lowercase ASCII runs of 2..64); a shorter or
-// non-ASCII word is no term, so narrowing there could skip a row whose words
-// hold it, and the scan stays full (Run re-checks either way).
 func (s *qlSource) scanEvents(ctx context.Context, req ql.ScanRequest, fn func(ql.Row) error) error {
 	cells, err := eventCells(req.Columns)
 	if err != nil {
@@ -167,13 +147,6 @@ func eventCells(cols []ql.Column) ([]func(*Part, *Row, int) (ql.Value, error), e
 	return out, nil
 }
 
-// eventColumn answers one events column from the light row, the doc section
-// or the member source. model, request_id, trace_id, latency_ms and the
-// token counts ride the light row since the sections lane extended it: the
-// parse stamps them the way the old events table was filled, so the column is
-// the parse's value, not a payload re-derivation. An absent value reads "", 0
-// or [], never null — the old columns were NOT NULL (pinned against the
-// oracle on the arena fixture).
 var eventColumn = map[string]func(*Part, *Row, int) (ql.Value, error){
 	"event_uid":              func(_ *Part, r *Row, _ int) (ql.Value, error) { return str(r.UID) },
 	"session_id":             func(_ *Part, r *Row, _ int) (ql.Value, error) { return str(r.Session) },
@@ -260,7 +233,6 @@ func heavyColumn(i int) func(*Part, *Row, int) (ql.Value, error) {
 	}
 }
 
-// lookupPath is the first key present in m, dotted keys descending objects.
 func lookupPath(m map[string]json.RawMessage, keys []string) (json.RawMessage, bool) {
 	for _, k := range keys {
 		if v, ok := m[k]; ok {
@@ -323,8 +295,6 @@ func contentTypesCell(st *Part, r *Row, _ int) (ql.Value, error) {
 	return ql.StringsValue(nil), nil
 }
 
-// extractContentTypes is shared.ExtractContentTypes over a content array:
-// the distinct sorted non-empty type of every item.
 func extractContentTypes(content json.RawMessage) ql.Value {
 	var items []json.RawMessage
 	if json.Unmarshal(content, &items) != nil {
@@ -373,9 +343,6 @@ func floatMap(s string) (ql.Value, error) {
 	return ql.FloatMapValue(m), nil
 }
 
-// candidates intersects every hint's postings per part. It is a superset of
-// the docs whose text_content holds every hint word, so skipping the rest
-// keeps Run's re-check correct.
 func (s *qlSource) candidates(st *Part, hints []ql.MatchHint) (map[int]bool, bool) {
 	var cand map[int]bool
 	for _, h := range hints {
@@ -417,8 +384,6 @@ func isTerm(w string) bool {
 	return true
 }
 
-// docsOfTerm decodes a term's postings into its doc set; ok is false when the
-// part holds no such term.
 func (st *Part) docsOfTerm(term string) (map[int]bool, bool) {
 	p := st.postingsOf(term)
 	if p == nil {
@@ -444,13 +409,8 @@ func (st *Part) docsOfTerm(term string) (map[int]bool, bool) {
 	return out, true
 }
 
-// member is a doc's member source index (the doc record's src field).
 func (st *Part) member(d int) int { return int(binary.LittleEndian.Uint16(st.docRec(d)[10:])) }
 
-// -------------------------------------------------- sessions, turns
-
-// eachSession calls fn for every session in the part sections the caller may
-// list. overlap narrows to the sessions the old sessions view held.
 func (s *qlSource) eachSession(ctx context.Context, overlap bool, fn func(st *Part, i int, info sessInfo) error) error {
 	lo, hi := s.from.UnixMilli(), s.to.UnixMilli()
 	var ticks int
@@ -506,8 +466,6 @@ var sessionColumn = map[string]func(sessInfo, lsRec) (ql.Value, error){
 	"last_event_time":  func(i sessInfo, _ lsRec) (ql.Value, error) { return msValue(i.last) },
 	"total_turns":      func(_ sessInfo, r lsRec) (ql.Value, error) { return num(int64(r.TotalTurns)) },
 	"total_events":     func(_ sessInfo, r lsRec) (ql.Value, error) { return num(r.TotalEvents) },
-	// the sessions section's completed is max(payload_type = 'task_complete')
-	// over the session, the old sessions table's derivation.
 	"completed": func(i sessInfo, _ lsRec) (ql.Value, error) {
 		c := 0
 		if i.completed {
@@ -529,8 +487,6 @@ func sessionCells(cols []ql.Column) ([]func(sessInfo, lsRec) (ql.Value, error), 
 	return out, nil
 }
 
-// scanTurns walks the part's turns section; a turn's session must be in
-// scope, which eachSession(overlap) answers by session index.
 func (s *qlSource) scanTurns(ctx context.Context, req ql.ScanRequest, fn func(ql.Row) error) error {
 	cells, err := turnCells(req.Columns)
 	if err != nil {
@@ -594,8 +550,6 @@ func turnCells(cols []ql.Column) ([]func(*Part, []byte) (ql.Value, error), error
 	}
 	return out, nil
 }
-
-// -------------------------------------------------- spans, annotations
 
 func (s *qlSource) scanSpans(ctx context.Context, req ql.ScanRequest, fn func(ql.Row) error) error {
 	cells, err := spanCells(req.Columns)

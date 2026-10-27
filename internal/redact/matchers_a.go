@@ -1,9 +1,5 @@
 package redact
 
-// Builtin rules 0-12, hand-written (scan_redact-a.go) behind the matcher
-// contract (see matchers.go). Each entry binds the rule's head, run class
-// and bounds into one shared scanner.
-
 var (
 	m00 = token(true, prefixAWS, classAWS, 16, 16, true)                                        // aws-access-token
 	m01 = token(true, prefixGitHub, classWord, 36, 255, true)                                   // github-token
@@ -40,7 +36,6 @@ func pem(begin, end, tail string) matcher {
 	}
 }
 
-// jwt is rule 10's three-run shape.
 func jwt(text []byte, out [][2]int) [][2]int {
 	return scanJWT(text, out)
 }

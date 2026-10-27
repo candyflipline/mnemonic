@@ -8,15 +8,6 @@ import (
 	"time"
 )
 
-// TestSettleAfterHotDeltaAllocGrowsLinearlyWithMembers builds one component
-// of n archive members and one raw source naming all n sessions, settles it,
-// makes it hot with two appends (the second leaves a delta in the manifest),
-// then settles it again. The settle builds a cold part over retired archive
-// members, so rematerialize and the build open their holder, the delta, whose
-// image is decoded on open. At n = 40, 80 and 160 it fails unless the bytes
-// the settle cycle allocates per added member stay within 1.75x from the first
-// doubling to the second: opening the holder once per member decodes the
-// whole component once per member, which doubles that marginal cost.
 func TestSettleAfterHotDeltaAllocGrowsLinearlyWithMembers(t *testing.T) {
 	a40, a80, a160 := settleAfterDeltaAlloc(t, 40), settleAfterDeltaAlloc(t, 80), settleAfterDeltaAlloc(t, 160)
 	first := (float64(a80) - float64(a40)) / 40

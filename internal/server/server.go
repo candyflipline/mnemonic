@@ -103,17 +103,12 @@ func (s *Server) Identify(keys auth.Keys, serverKey ed25519.PublicKey) func(devi
 	}
 }
 
-// Booted is closed once the index has booted: from then on its steady memory
-// is all that sits beside push sessions.
 func (s *Server) Booted() <-chan struct{} { return s.booted }
 
 func (s *Server) Handler() http.Handler { return s.handler }
 
-// StoreOTLPContent sets whether OTLP message and tool content is stored; it
-// is off until set.
 func (s *Server) StoreOTLPContent(on bool) { s.otlp.SetStoreContent(on) }
 
-// ServePush serves native gRPC on l, the QUIC push listener.
 func (s *Server) ServePush(l net.Listener) error { return s.push.Serve(l) }
 
 // Drain ends live sessions with Unavailable. The caller first closes the
@@ -134,7 +129,6 @@ func (s *Server) Drain(ctx context.Context) {
 	}
 }
 
-// Close commits what the store has queued, then closes the index.
 func (s *Server) Close() error {
 	s.drain()
 	s.push.Stop()
@@ -148,31 +142,17 @@ func (s *Server) Close() error {
 	return err
 }
 
-// Cycle ingests everything pending now.
 func (s *Server) Cycle(context.Context) error { return s.cycle("settle") }
 
-// bootFirstDelay is the wait after a failed boot attempt and bootMaxDelay the
-// cap on the doubled wait, so a restart loop never hammers the manifests.
 var bootFirstDelay, bootMaxDelay = 5 * time.Second, 60 * time.Second
 
 const (
-	settleQuiet = time.Second
-	settleMax   = 3 * time.Second
-	settleEvery = 5 * time.Minute
-	// settleSource is how long a source's manifest must go without a push
-	// before it leaves its hot part for a cold one.
+	settleQuiet  = time.Second
+	settleMax    = 3 * time.Second
+	settleEvery  = 5 * time.Minute
 	settleSource = 15 * time.Minute
 )
 
-// Run lists everything once at boot, then ingests the sources changed since
-// the last cycle: after each push once pushes settle (1 s quiet, 3 s at most),
-// and every 5 min without one so hot sources settle cold, until ctx is done. A
-// parser version bump leaves sources for the sweep: cycles then run back to
-// back, each parsing stale sources under the sweep budget, until none are
-// left. A boot that yields no lap does not end Run: MCP and OTLP keep
-// serving from the index New opened, get_ingest_status carries the boot error
-// and attempt count, and the boot retries after bootFirstDelay, doubling to
-// bootMaxDelay, until it succeeds. Push is served only after it does.
 func (s *Server) Run(ctx context.Context) {
 	changed := s.st.Changed()
 	pushPending := func() bool { return len(changed) > 0 }

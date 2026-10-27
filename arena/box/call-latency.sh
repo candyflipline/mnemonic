@@ -1,29 +1,10 @@
 #!/bin/sh
-# call-latency.sh — per-call latency of search_sessions and file_attention.
-#
-## Inputs
-##   $1  BIN  the binary under test (`batch`, arena contract).
-## Requires: gen-masks.sh produced $BOX/arena/golden/calls.jsonl and
-##           $BOX/arena/hidden/calls.jsonl, and ingest-timed.sh left a full
-##           store (BASE_STORE, default $BOX/cold-1) the calls run against.
-## Env: BOX (default /var/lib/mnemonic-e3). BASE_STORE (default $BOX/cold-1).
-##      RUNS (default 5).
-#
-# RUNS fresh `BIN batch -root $BOX -store $BASE_STORE` processes (GOMAXPROCS=16),
-# each fed the golden calls then the hidden calls in one stdin stream (one
-# process, both sets, the order check uses); replies to $BOX/out/lat-<i>.jsonl.
-# Per run, per tool over BOTH sets combined: n, p50 and p95 of the reply's `us`
-# field (same nearest-rank percentiles as arena/check), errors = replies with a
-# non-empty error. Footer: median of the p50s per tool and the range across
-# runs. Summary: $BOX/out/call-latency-summary.tsv.
 set -eu
 
 BOX=${BOX:-/var/lib/mnemonic-e3}
 RUNS=${RUNS:-5}
 BIN=${1:?usage: call-latency.sh BIN}
 [ -x "$BIN" ] || { echo "not executable: $BIN" >&2; exit 2; }
-# OUT overridable so two lanes' runs (oracle and engine) never share the
-# summary and reply files; each lane passes its own dir.
 OUT=${OUT:-$BOX/out}
 CALLS=$BOX/arena
 BASE_STORE=${BASE_STORE:-$BOX/cold-1}

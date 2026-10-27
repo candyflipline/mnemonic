@@ -44,8 +44,6 @@ func redactComplete(path string, red Redactor) (*redactedLines, error) {
 	return &r, nil
 }
 
-// rawHead is the head hash a file's raw first line redacted to, keyed on that
-// line's digest, so a file that only grew is not redacted from its start again.
 type rawHead struct {
 	sum  [sha256.Size]byte
 	hash string

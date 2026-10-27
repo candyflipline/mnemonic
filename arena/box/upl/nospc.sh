@@ -1,17 +1,4 @@
 #!/bin/sh
-# FGCRASH: a W1 pwrite64 ENOSPC fails one push; the SAME server accepts retry.
-# Synthetic input only. Run on Linux, never the Mac or prod. Example:
-#   setsid nohup flock /var/lib/mnu/box.lock sh arena/box/upl/nospc.sh \
-#     /var/lib/mnu/bin/mnemonic /var/lib/mnu/nospc-$(date +%s) \
-#     </dev/null >/var/lib/mnu/out/nospc.log 2>&1 &
-# BIN must include the NOSPC fix. DIR must be new; nothing is deleted.
-# HTTP_PORT (listen) defaults to 7895, PUSH_PORT (push_listen) to 7896.
-# All generated inputs are synthetic. The store's only pwrite64 is W1's raw
-# tail write (commit.go appendFrames), so strace attaches for the injected
-# push alone and fails every pwrite64 in that window; it also traces the
-# barrier, link and rollback calls, and the log must show exactly one failed
-# call, the injected pwrite64 on the seeded raw. A second, injection-free
-# trace of the retry must show syncfs and renames and no failed call.
 set -eu
 BIN=${1:?usage: nospc.sh BIN NEW_DIR}
 DIR=${2:?usage: nospc.sh BIN NEW_DIR}
@@ -36,7 +23,6 @@ stop_trace() {
 stop_server() {
  if [ -n "$SERVE_PID" ]; then
   kill -TERM "$SERVE_PID" 2>/dev/null || true
-  # An exact child PID only; a hung server is killed after bounded shutdown.
   for _ in $(seq 1 60); do kill -0 "$SERVE_PID" 2>/dev/null || break; sleep 0.2; done
   if kill -0 "$SERVE_PID" 2>/dev/null; then kill -KILL "$SERVE_PID" 2>/dev/null || true; fi
   wait "$SERVE_PID" 2>/dev/null || true
@@ -92,8 +78,6 @@ push_ok() {
  grep -q 'scanned 1,' "$DIR/$label-client.log"
  grep -q 'failed 0,' "$DIR/$label-client.log"
 }
-# Same source path and chunk boundaries in both runs. Only updated_ms is
-# masked below, as already established by upl-box/equiv.sh.
 seed_input
 start_server baseline
 push_ok baseline-seed
@@ -170,8 +154,6 @@ check_trace retry
 kill -0 "$SERVE_PID"
 printf 'serve_pid\t%s\tsame_pid_after_fault_and_retry\tyes\n' "$SERVE_PID"
 stop_server
-# Save per-file sha manifests, then compare them. Manifest timestamps are
-# checked for type and normalized; raw frames are hashed without modification.
 python3 -I - "$DIR" <<'PY'
 import hashlib, json, pathlib, sys
 root = pathlib.Path(sys.argv[1])

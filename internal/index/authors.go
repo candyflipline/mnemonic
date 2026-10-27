@@ -10,8 +10,6 @@ func buildSessionAuthors(members []ckpt, rows []built) map[string][]string {
 	return authorsOf(rows, func(src uint16) string { return members[src].Author })
 }
 
-// authorsOf is buildSessionAuthors over any member list: author names the
-// author of the source a row came from.
 func authorsOf(rows []built, author func(src uint16) string) map[string][]string {
 	set := map[string]map[string]bool{}
 	for _, b := range rows {
@@ -35,8 +33,6 @@ func authorsOf(rows []built, author func(src uint16) string) map[string][]string
 	return out
 }
 
-// sessionAuthors is sessionID's entry in its part's session authors section,
-// nil for a session db does not hold.
 func (db *DB) sessionAuthors(sessionID string) []string {
 	st, ok := db.part(sessionID)
 	if !ok {

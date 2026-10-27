@@ -2,9 +2,6 @@ package index
 
 import "github.com/candyflipline/mnemonic/internal/schema"
 
-// annRow is one annotation harness row's heavy column: the payload the
-// annotations relation reads its value, source and ts from, and the author of
-// the source the row was parsed from.
 type annRow struct {
 	payload string
 	author  string
@@ -34,10 +31,6 @@ func buildAnnotations(rows []annRow) []schema.Annotation {
 	return out
 }
 
-// sessionAnnotations is the annotations targeting sessionID, merged from
-// every part whose annotations section holds it: one per annotation_id, a
-// duplicate id across parts keeping the earliest ts (equal ts keeps the one
-// from the lower part index), in the section order ts then id.
 func (db *DB) sessionAnnotations(sessionID string) []schema.Annotation {
 	at, ok := db.annPart[sessionID]
 	if !ok {

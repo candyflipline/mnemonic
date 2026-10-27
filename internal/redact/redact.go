@@ -226,10 +226,6 @@ func (r *Redactor) redactJSON(line []byte) []byte {
 	return append(out, line[last:]...)
 }
 
-// decodeJSONString turns a literal's content bytes into the text they
-// denote. Content without escapes is returned as-is (same slice). A
-// malformed escape only happens on input json.Valid let through despite
-// that; the caller leaves the literal untouched then.
 func decodeJSONString(content []byte) ([]byte, bool) {
 	if bytes.IndexByte(content, '\\') < 0 {
 		return content, true
@@ -304,9 +300,6 @@ func hex4(b []byte, i int) (rune, bool) {
 	return rune(v), true
 }
 
-// appendJSONString encodes s as a JSON string the way encoding/json does
-// with SetEscapeHTML(false): only what JSON requires gets escaped, so the
-// server's parser reads back exactly what was scrubbed.
 func appendJSONString(dst []byte, s []byte) []byte {
 	const hexDigits = "0123456789abcdef"
 	dst = append(dst, '"')

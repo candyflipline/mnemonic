@@ -37,7 +37,6 @@ type inflight struct {
 	bytes int64
 }
 
-// ack is a parsed pushpb.Ack. conflict and state are all applyAck needs.
 type ack struct {
 	seq      uint64
 	conflict bool
@@ -65,13 +64,9 @@ type uplink struct {
 	seq     uint64
 	acked   chan ack
 	fin     chan struct{}
-	err     error // why the stream ended; valid once fin is closed
+	err     error
 }
 
-// dial opens Sync on cfg.Server over QUIC as the machine's key, pinning
-// cfg.ServerKey, sends Hello with cfg.Machine, reads Welcome pages until more
-// is false, and starts the ack reader. The client pings every pingEvery while
-// the stream is open.
 func dial(ctx context.Context, cfg config.Client) (*uplink, error) {
 	cred, err := qnet.LoadCredential(cfg.KeyFile)
 	if err != nil {
@@ -186,7 +181,6 @@ func (u *uplink) read(ctx context.Context, conn *grpc.ClientConn) {
 	}
 }
 
-// put is one chunk the decision logic cut: a PUT's fields, now an Append.
 type put struct {
 	path, harness, srcID, sourceName string
 	offset                           int64
@@ -195,9 +189,6 @@ type put struct {
 	body                             []byte
 }
 
-// send writes one Append. It blocks while window.appends appends or
-// window.bytes body bytes are unacked, applying the acks that arrive, and
-// returns the stream's error once the stream ended.
 func (u *uplink) send(ctx context.Context, p put) error {
 	if err := u.sendOne(ctx, p); err != nil {
 		return streamErr{err}
@@ -205,8 +196,6 @@ func (u *uplink) send(ctx context.Context, p put) error {
 	return nil
 }
 
-// streamErr marks an error that ended the stream, as opposed to one that
-// failed a single file.
 type streamErr struct{ error }
 
 func (e streamErr) Unwrap() error { return e.error }
@@ -255,7 +244,6 @@ func (u *uplink) sendOne(ctx context.Context, p put) error {
 	return nil
 }
 
-// cause is why a finished stream ended.
 func (u *uplink) cause() error {
 	if u.err != nil {
 		return u.err
@@ -263,7 +251,6 @@ func (u *uplink) cause() error {
 	return io.EOF
 }
 
-// consume applies one delivered ack; an ack out of order ends the stream.
 func (u *uplink) consume(a ack) error {
 	if len(u.queue) == 0 || u.queue[0].seq != a.seq {
 		u.cancel()
@@ -279,9 +266,6 @@ func (u *uplink) consume(a ack) error {
 	return nil
 }
 
-// applyAck folds a into sources and unacked, as the uplink comment says, and
-// reports whether the path of the append it answers must be re-decided (a
-// conflict). The append stays on the queue until consume pops it.
 func (u *uplink) applyAck(a ack) (redo bool) {
 	src := u.queue[0].srcID
 	u.unacked[src]--
@@ -301,18 +285,14 @@ func (u *uplink) applyAck(a ack) (redo bool) {
 	return a.conflict
 }
 
-// busy reports whether appends of the source are still unacked.
 func (u *uplink) busy(srcID string) bool { return u.unacked[srcID] > 0 }
 
-// takeRedo returns the paths whose append was answered CONFLICT since the
-// last call.
 func (u *uplink) takeRedo() []string {
 	r := u.redo
 	u.redo = nil
 	return r
 }
 
-// drain applies acks until nothing is in flight or the stream ended.
 func (u *uplink) drain(ctx context.Context) error {
 	for len(u.queue) > 0 {
 		select {
@@ -337,8 +317,6 @@ func (u *uplink) drain(ctx context.Context) error {
 	return nil
 }
 
-// close half-closes, waits for every in-flight ack, and returns the stream's
-// error.
 func (u *uplink) close(ctx context.Context) error {
 	defer func() {
 		u.cancel()
@@ -350,15 +328,8 @@ func (u *uplink) close(ctx context.Context) error {
 	return u.drain(ctx)
 }
 
-// ended returns a channel closed when the stream ended; cause says why.
 func (u *uplink) ended() <-chan struct{} { return u.fin }
 
-// streamSource replaces syncSource: the same skip rules against
-// u.sources[srcID], the same decide/firstChunk/rawEndOf cut, every chunk sent
-// without waiting for its ack (the next chunk's offset is the previous one's
-// end). A conflict ack is the caller's: u.takeRedo names the path, and the
-// next streamSource of it re-decides from the server's state alone (no skip
-// shortcut, no tail), as the 409 retry did.
 func streamSource(ctx context.Context, red Redactor, u *uplink, f fileRef, st *Stats) error {
 	srcID := wire.SrcID(f.path)
 	entry := u.sources[srcID]

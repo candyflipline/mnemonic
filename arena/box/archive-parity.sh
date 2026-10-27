@@ -1,34 +1,4 @@
 #!/bin/sh
-# archive-parity.sh — lane U9e: archive parity, engine vs the 59796bc oracle,
-# over a store holding the frozen raw corpus plus the 16 ClickHouse archive
-# copies (ch-*), on the real corpus.
-#
-## Phases (one per invocation; the CALLER holds the box lock around it):
-##   setup   arch-oracle (an empty store holding only the 16 ch-* files
-##           hardlinked into its events/ tree at their exact relative paths,
-##           so the oracle phase is a clean build of raw + archive), arch-root
-##           (an engine dataroot: raw symlinked to the frozen raw, the 16
-##           ch-* files hardlinked under events/), arena-arch (golden/hidden/
-##           check/runs skeleton; masks copied from the raw-only arena).
-##   oracle  one oracle ingest -root $BOX -store arch-oracle (timed, time -v,
-##           vmstat alongside, caches dropped) + archive-session counts from
-##           the oracle side (list_sessions, cursor-paginated).
-##   gen     gen seed a/b from arch-oracle into arena-arch golden/hidden; how
-##           many calls touch an archive-only session; more seeds while the
-##           combined count is under MIN_ARCH (default 10), each swap logged.
-##   check   check -bin ENG/wrapper-engine -arena arena-arch -name
-##           engine-arch-<short> -skip incremental,crash,appendcrash.
-##   build   build the engine from a git-archive tarball (build-engine.sh's
-##           layout; -tags server when that links under CGO_ENABLED=0, else
-##           no tags — recorded in sha256.txt).
-##   deploy  3 timed engine cold ingests of raw+archive (fresh store each,
-##           dropped caches, GOMAXPROCS=16, vmstat/pidstat alongside) + du
-##           and the archive member count.
-##
-## Env: BOX (default /var/lib/mnemonic-e3), OUT (default $BOX/out/u9e),
-##      BIN (oracle tree with the copyRaw-fixed oracle + gen/check/seed),
-##      ENG (engine bin dir from `build`), MIN_ARCH, SEEDS, RUNS, FIRST.
-## Counts and timings only; never prints corpus content.
 set -eu
 
 BOX=${BOX:-/var/lib/mnemonic-e3}
@@ -86,7 +56,6 @@ phase_setup() {
 }
 
 ls_reply() {
-	# $1 store, $2 outprefix — cursor-paginated list_sessions into $2.jsonl
 	: > "$2.jsonl"
 	CURSOR_FILE=$2.cursor
 	: > "$CURSOR_FILE"
@@ -174,7 +143,6 @@ PYEOF
 }
 
 arch_touch() {
-	# $1 = dir with calls.jsonl+expected.jsonl -> prints archive-touching count
 	python3 -I - "$OUT" "$1" <<'PYEOF'
 import json, os, re, sys
 out, d = sys.argv[1], sys.argv[2]
@@ -370,13 +338,6 @@ PYEOF
 }
 
 phase_patchoracle() {
-	# Rebuild the arena oracle (ingest/batch/answer/), gen, check, seed from a
-	# 59796bc tarball with ONE local patch: arena/duck/duck.go's harness
-	# MemoryLimit 800MB -> ORACLE_MB (default 16000). The limit caps DuckDB's
-	# working set, not its answers; at 800MB the converge of raw+archive
-	# (9.5M-row events relation) OOMs (oracle-arch-ingest.log, 02:18Z), so the
-	# stock harness oracle cannot build the archive store at all. Recorded
-	# here and in the report; answers are still 59796bc's.
 	TARBALL=${1:?usage: archive-parity.sh patchoracle TARBALL}
 	MB=${ORACLE_MB:-16000}
 	SRC=/root/src/oracle-build-u9e

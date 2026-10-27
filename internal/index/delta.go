@@ -17,9 +17,6 @@ import (
 	"syscall"
 )
 
-// A hot component is held as an image, a full part built at an earlier
-// append, plus a delta: the rows appended since, re-framed into append-only
-// logs under deltas/<image id>. Its part dir holds only deltaFile.
 const deltaFile = "delta.json"
 
 const foldRatio = 1
@@ -33,8 +30,6 @@ type delta struct {
 	listed
 }
 
-// listed is what ListParts reports of a part, kept in delta.json so listing a
-// delta does not index it.
 type listed struct {
 	Sessions   []string `json:"sessions"`
 	ScoredDocs int64    `json:"scored_docs"`
@@ -49,7 +44,6 @@ func listedOf(st *Part) listed {
 	return l
 }
 
-// deltaID names a component held as image plus delta.
 func deltaID(cks []ckpt) string {
 	h := sha256.Sum256([]byte("delta " + fingerprint(cks)))
 	return hex.EncodeToString(h[:])
@@ -57,10 +51,6 @@ func deltaID(cks []ckpt) string {
 
 func deltasDir(store, image string) string { return filepath.Join(store, "deltas", image) }
 
-// hotPart returns the ID of the part that answers for the hot component
-// members, building it if it is missing: a delta append over the base it
-// extends, else a full build. It reports whether it wrote and how many bytes,
-// and the delta part an append opened, which the caller owns.
 func hotPart(store string, members []ckpt, prev manifestFile, byPrev map[string]string) (id string, built bool, written int64, opened *Part, err error) {
 	id = fingerprint(members)
 	if _, err := os.Stat(partDir(store, id)); err == nil {
@@ -82,8 +72,6 @@ func hotPart(store string, members []ckpt, prev manifestFile, byPrev map[string]
 	return id, true, dirSize(partDir(store, id)), nil, nil
 }
 
-// deltaBase is the delta of the hot part in prev that members extend and that
-// covers the most rows.
 func deltaBase(store string, members []ckpt, prev manifestFile) (delta, bool) {
 	now := map[string]ckpt{}
 	for _, c := range members {
@@ -112,7 +100,6 @@ func deltaBase(store string, members []ckpt, prev manifestFile) (delta, bool) {
 	return best, bestRows >= 0
 }
 
-// readDelta reads the delta.json of a part dir; ok is false for a full part.
 func readDelta(dir string) (delta, bool, error) {
 	var d delta
 	b, err := os.ReadFile(filepath.Join(dir, deltaFile))
@@ -125,8 +112,6 @@ func readDelta(dir string) (delta, bool, error) {
 	return d, true, json.Unmarshal(b, &d)
 }
 
-// readBase reads part id's delta, or an empty delta over it when it is a
-// full part.
 func readBase(store, id string) (delta, bool) {
 	dir := partDir(store, id)
 	if d, ok, err := readDelta(dir); ok || err != nil {
@@ -164,11 +149,6 @@ func mkdirDeltas(dd string) error {
 	return syncDir(filepath.Dir(deltas))
 }
 
-// appendDelta appends to base's delta logs the rows members hold past it and
-// commits part did over them. It reports false, writing nothing, when the
-// delta would outgrow foldRatio times the image, and otherwise the bytes it
-// wrote: the delta logs' growth and the committed delta.json, and the part it
-// opened over them, stamped with the committed dir, which Refresh serves in place of opening the delta again.
 func appendDelta(store string, members []ckpt, base delta, did string) (bool, int64, *Part, error) {
 	ok, written, st, err := writeDelta(store, members, base, did)
 	if st == nil {
@@ -307,7 +287,6 @@ func writeDelta(store string, members []ckpt, base delta, did string) (bool, int
 	return true, written, st, commitPart(dir, partDir(store, did))
 }
 
-// openDelta indexes the image's docs and the delta's rows in memory.
 func openDelta(dir string, d delta) (*Part, error) {
 	img, err := OpenPartDir(filepath.Join(filepath.Dir(dir), d.Image))
 	if err != nil {
@@ -339,11 +318,6 @@ func openDelta(dir string, d delta) (*Part, error) {
 	}
 	lightD, heavyD, srcD = lightD[:d.LightLen], heavyD[:d.HeavyLen], srcD[:2*d.Rows]
 
-	// win keeps, per uid, the row a full build would pick (offerRow). The
-	// image's rows come through memberRows — the image is each member's
-	// holder — and the delta's rows, the tails the append copied, through
-	// the delta logs. No row's heavy record is held: the payload reads one
-	// through the bounded heavyReader when indexRows asks for it.
 	win := map[string]winner{}
 	authors := map[string][]string{}
 	doc := 0
@@ -438,8 +412,6 @@ func openDelta(dir string, d delta) (*Part, error) {
 
 func sameStart(a, b []byte) bool { return len(a) > 0 && len(b) > 0 && &a[0] == &b[0] }
 
-// eachFrame calls fn with every row of the light log b, located at base plus
-// its frame's offset in b.
 func eachFrame(b []byte, base int64, fn func(built)) error {
 	r := bytes.NewReader(b)
 	for off := int64(0); off < int64(len(b)); {
@@ -459,7 +431,6 @@ func eachFrame(b []byte, base int64, fn func(built)) error {
 	return nil
 }
 
-// gcDeltas removes the delta logs of images not in images.
 func gcDeltas(store string, images map[string]bool) {
 	ents, _ := os.ReadDir(filepath.Join(store, "deltas"))
 	for _, e := range ents {

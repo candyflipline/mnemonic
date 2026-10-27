@@ -86,7 +86,6 @@ type Metrics struct {
 	Extra            map[string]any `json:"extra,omitempty"`
 }
 
-// eventRow is one published events row, the input of the mapping below.
 type eventRow struct {
 	EventTime       time.Time
 	RequestID       string
@@ -117,8 +116,6 @@ func notFound(sessionID string) error {
 	return fmt.Errorf("export: %w: %q", ErrSessionNotFound, sessionID)
 }
 
-// session is one session's published rows in event order, as the exports
-// read them; rows may be ranged more than once.
 type session struct {
 	id, harness string
 	src         index.ExportSession
@@ -145,13 +142,8 @@ func (s *session) rows() iter.Seq[eventRow] {
 	}
 }
 
-// errStopRows stops a rows walk early, the iterator's break.
 var errStopRows = errors.New("export: rows stopped")
 
-// openSession reads one session from the index. Only published rows take
-// part (the events table's rows, in event order, which EachRow walks). A
-// session in hidden (deleted, per the server's session controls) is not
-// found.
 func openSession(db *index.DB, sessionID string, hidden map[string]bool) (session, error) {
 	if hidden[sessionID] {
 		return session{}, notFound(sessionID)
@@ -186,9 +178,6 @@ func eventRowOf(r *index.Row) eventRow {
 	}
 }
 
-// trajectory is one session's ATIF document, built and written a step at a
-// time: plan says which step each row lands in and last the row that
-// completes each step, so a step leaves memory once it is written.
 type trajectory struct {
 	session
 	agent Agent
@@ -203,8 +192,6 @@ type rowPlan struct {
 	linked bool
 }
 
-// newTrajectory opens the session and plans its steps. The harness of the
-// first event names the agent.
 func newTrajectory(db *index.DB, sessionID string, hidden map[string]bool) (*trajectory, error) {
 	s, err := openSession(db, sessionID, hidden)
 	if err != nil {
@@ -222,7 +209,6 @@ func newTrajectory(db *index.DB, sessionID string, hidden map[string]bool) (*tra
 	return t, nil
 }
 
-// envelope is the root object with the given steps value.
 func (t *trajectory) envelope(steps []Step) Trajectory {
 	return Trajectory{SchemaVersion: SchemaVersion, SessionID: t.id, Agent: t.agent, Steps: steps}
 }
@@ -277,8 +263,6 @@ func (t *trajectory) writeCompact(w io.Writer) error {
 	})
 }
 
-// validate runs the ported validator over the envelope and then each step,
-// reporting what ValidateJSON reports for the whole document.
 func (t *trajectory) validate() error {
 	env, err := json.Marshal(t.envelope(nil))
 	if err != nil {
@@ -319,11 +303,6 @@ func (t *trajectory) validate() error {
 	return nil
 }
 
-// requestKey names the model request an assistant row belongs to, the way the
-// 59796bc spans derivations name a chat (59796bc:internal/cache/
-// index_spans_claudecode.go: request_id, else trace_id; the pi family: the
-// record id in item_id). It is "" for harnesses whose rows carry no request
-// boundary (codex, cursor), whose assistant runs stay one step.
 func requestKey(harness string, ev eventRow) string {
 	switch harness {
 	case "claude-code":
@@ -422,8 +401,6 @@ func (t *trajectory) eachStep(fn func(*Step) error) error {
 	return err
 }
 
-// buildSteps is the step builder over any rows iterator, plan and last from
-// planSteps.
 func buildSteps(plan []rowPlan, last []int32, rows iter.Seq[eventRow], fn func(*Step) error) error {
 	building := map[int32]*Step{}
 	next, r := int32(0), int32(0)

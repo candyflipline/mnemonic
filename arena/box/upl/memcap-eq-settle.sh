@@ -1,11 +1,4 @@
 #!/bin/sh
-# memcap-eq-settle.sh BIN DIR TAG: serve the store copy DIR under MemoryMax 8G
-# with no client, wait for "cycle boot:", then push one FIXED marker line so
-# every earlier hot component falls due, and stop when hot <= MAXHOT or MAX s
-# pass. MEMCAP-C byte-equivalence run: the marker's uuid, sessionId and file
-# name are constants (no `date`), so BASE and FIX push identical bytes; the
-# scratch HOME is HOMEBASE (default /var/lib/mnu/memcap-eq-home-<TAG>).
-# Setup, not timed: flock -s /var/lib/mnu/box.lock sh memcap-eq-settle.sh BIN DIR TAG
 set -eu
 BIN=${1:?usage: memcap-eq-settle.sh BIN DIR TAG}
 DIR=${2:?usage: memcap-eq-settle.sh BIN DIR TAG}

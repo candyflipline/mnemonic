@@ -65,13 +65,6 @@ func TestDuplicateUIDKeepsTheCopyOfTheLastSourceInLakeOrder(t *testing.T) {
 	}
 }
 
-// TestHotDeltaWinnerMatchesFullBuild pins the one-winner rule: a uid two
-// members of one component share must get the same winner whether the
-// component was built in full or grew by a delta append. The archive member
-// joins an existing raw session's component, so the append path deltas over
-// the raw member's part; the archive member's path (the events dir) sorts
-// after the raw path, so the delta's Path-only rule handed the shared uid to
-// the archive copy, where the full build's memberBeats keeps the raw copy.
 func TestHotDeltaWinnerMatchesFullBuild(t *testing.T) {
 	const sid = "42424242-4242-4242-8424-424242424242"
 	at := func(min int) (string, int64) {
@@ -82,7 +75,6 @@ func TestHotDeltaWinnerMatchesFullBuild(t *testing.T) {
 		return []byte(fmt.Sprintf(`{"type":"user","sessionId":%q,"cwd":"/work/win","uuid":%q,"timestamp":%q,"message":{"role":"user","content":%q}}`+"\n",
 			sid, uuid, ts, content))
 	}
-	// Eight raw lines; the second's uid the archive file copies.
 	var raw []byte
 	for i := 1; i <= 8; i++ {
 		ts, _ := at(i)
@@ -99,8 +91,7 @@ func TestHotDeltaWinnerMatchesFullBuild(t *testing.T) {
 			EventUID: uid, SessionID: sid, RecordTS: recordTS, EventTS: eventUS,
 			SourceName: "claude-code", Harness: "claude-code",
 			SourceFile: "/orig/" + sid + ".jsonl",
-			// The columns search's default event-type mask reads.
-			EventKind: "message", ActorKind: "user", PayloadType: "message",
+			EventKind:  "message", ActorKind: "user", PayloadType: "message",
 			TextContent: text, TextPreview: text,
 			EventVersion: ver, Author: "a", MachineID: "archive-ch",
 		}
@@ -115,9 +106,6 @@ func TestHotDeltaWinnerMatchesFullBuild(t *testing.T) {
 		})
 	}
 
-	// Hot: the raw source builds alone while hot (real member lengths, so
-	// the part can act as a delta base), then the archive file joins its
-	// session and the component grows by a delta append.
 	root, hot := t.TempDir(), t.TempDir()
 	writeRawSource(t, root, "a", "a2", "claude-code", "s1", "/p/s1.jsonl", raw, 1)
 	if _, err := Ingest(root, hot, 15*time.Minute, false); err != nil {
@@ -150,7 +138,6 @@ func TestHotDeltaWinnerMatchesFullBuild(t *testing.T) {
 	got := findRow(t, db, overlapUID)
 	db.Close()
 
-	// Cold: the same sources, one full build.
 	root2, cold := t.TempDir(), t.TempDir()
 	writeRawSource(t, root2, "a", "a2", "claude-code", "s1", "/p/s1.jsonl", raw, 1)
 	plantArchive(root2)
@@ -169,8 +156,6 @@ func TestHotDeltaWinnerMatchesFullBuild(t *testing.T) {
 	}
 }
 
-// plantedUIDs parses plain lines the way ingest will, so the test can plant a
-// raw row's uid in the archive file.
 func plantedUIDs(t *testing.T, plain []byte) []string {
 	t.Helper()
 	parser, ok := normalize.For("claude-code")

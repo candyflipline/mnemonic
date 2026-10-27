@@ -91,7 +91,6 @@ func removedKey(k toml.Key) string {
 	return "unknown key " + strings.Join(k, ".")
 }
 
-// Identities is the key table LoadServer validated.
 func (s Server) Identities() auth.Keys {
 	byKey := make(map[string]auth.Grant, len(s.Keys))
 	for _, k := range s.Keys {

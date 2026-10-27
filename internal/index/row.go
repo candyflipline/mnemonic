@@ -20,23 +20,20 @@ type Row struct {
 	ProjectID, RepoRelPath, WorktreeRoot, Cwd               string
 	Buckets, Native                                         string
 	TioInput, TioInPrev, TioOutPrev, TioProj, TioRel, TioWT string
-	// The event columns the derived sections read (spans, annotations):
-	// dropped by the arena engine the same move took from the cache, put
-	// back by lane U5S so a part section is a function of its rows.
-	RequestID, TraceID, ParentToolCallID string
-	AgentRunID, AgentLabel, Model        string
-	OriginEventID, OpKind, OpStatus      string
-	TimeUs                               int64
-	TsMs                                 int64
-	Gen                                  uint64
-	LineNo, Offset, Version              uint64
-	Emission, TurnIndex                  uint64
-	IsSubstream, ToolError, LatencyMs    uint64
-	InputTokens, OutputTokens            uint64
-	CacheReadTokens, CacheWriteTokens    uint64
-	Bits                                 uint64
-	HeavyFrame                           uint64
-	HeavyIdx                             uint64
+	RequestID, TraceID, ParentToolCallID                    string
+	AgentRunID, AgentLabel, Model                           string
+	OriginEventID, OpKind, OpStatus                         string
+	TimeUs                                                  int64
+	TsMs                                                    int64
+	Gen                                                     uint64
+	LineNo, Offset, Version                                 uint64
+	Emission, TurnIndex                                     uint64
+	IsSubstream, ToolError, LatencyMs                       uint64
+	InputTokens, OutputTokens                               uint64
+	CacheReadTokens, CacheWriteTokens                       uint64
+	Bits                                                    uint64
+	HeavyFrame                                              uint64
+	HeavyIdx                                                uint64
 }
 
 const (
@@ -104,8 +101,6 @@ func (r *Row) decode(b []byte) ([]byte, error) {
 	return b, nil
 }
 
-// rowFrom derives the light row from a parsed event the way the 59796bc
-// cache's converge derives its event columns (59796bc:internal/cache/sql.go).
 func rowFrom(ev *schema.Event) Row {
 	r := Row{
 		UID: ev.EventUID, Session: ev.SessionID, SourceName: ev.SourceName, Harness: ev.Harness,
@@ -167,7 +162,6 @@ func floorDiv(a, b int64) int64 {
 	return q
 }
 
-// emissionIndex is try_cast(json_extract_string(payload, '$.moraine_emission_index') AS UINTEGER), 0 on failure.
 func emissionIndex(p string) uint64 {
 	var m map[string]json.RawMessage
 	if json.Unmarshal([]byte(p), &m) != nil {
@@ -203,9 +197,6 @@ func parseUintStrict(s string) (uint64, bool) {
 	return n, true
 }
 
-// jsonExtractString renders a JSON value the way the 59796bc oracle's
-// json_extract_string does: strings unescaped, everything else as its JSON
-// text.
 func jsonExtractString(v json.RawMessage) string {
 	t := strings.TrimSpace(string(v))
 	if strings.HasPrefix(t, `"`) {

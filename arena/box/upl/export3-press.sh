@@ -1,17 +1,4 @@
 #!/bin/sh
-# export3-press.sh STORE SERVEBIN CLIENTBIN IDS OUT REFSUM
-# One boot, serve scope named export3-press (MemoryMax=8G until tightened),
-# idle 60 s, then the scope's live MemoryMax drops to idle-anon + 512 MiB
-# (systemctl set-property --runtime; memory.max echoed back). Then the 3b
-# commands in order: largest atif (line 1 of IDS) and the whole-store dataset
-# (annotation export3-none, per-task 1). During each, a loop calls MCP
-# list_sessions (limit 5) every 2 s, recording HTTP status and latency per
-# call; its pid is trapped. Per run: rc, output sha256+bytes (atif vs REFSUM,
-# dataset vs the empty sha), memory.events before/after, peak RssAnon, cgroup
-# memory.peak, wall, list_sessions ok/failed/max-latency. If the serve dies,
-# the script stops, dumps memory.events and the last samples, and never raises
-# the limit. Memory-only numbers and byte identity: run under flock -s
-# /var/lib/mnu/box.lock.
 set -eu
 store=$1 servebin=$2 client=$3 ids=$4 out=$5 refsum=$6
 port=${PORT:-18878}
@@ -58,7 +45,7 @@ until grep -q 'cycle boot' "$out/serve.log"; do
 done
 echo "boot: $(grep 'cycle boot' "$out/serve.log" | sed 's/.* in /in /')"
 
-sample() { # name: RssAnon RssFile RssShmem every 0.5 s until killed
+sample() {
 	(while kill -0 "$SERVE" 2>/dev/null; do
 		awk '/^(RssAnon|RssFile|RssShmem)/{printf "%s ", $2} END{print ""}' "/proc/$SERVE/status" 2>/dev/null
 		sleep 0.5
@@ -66,10 +53,10 @@ sample() { # name: RssAnon RssFile RssShmem every 0.5 s until killed
 	SAMPLER=$!
 }
 stop() { for p in "$SAMPLER" "$LOOP"; do [ -n "$p" ] && kill "$p" 2>/dev/null; done; wait "$SAMPLER" 2>/dev/null || true; SAMPLER=; LOOP=; }
-events() { # label: cgroup memory.peak + full memory.events counters
+events() {
 	echo "events.$1 peak=$(cat "$cg/memory.peak" 2>/dev/null || echo -) max=$(cat "$cg/memory.max" 2>/dev/null || echo -) $(tr '\n' ' ' < "$cg/memory.events" 2>/dev/null || echo gone)"
 }
-mcpl() { # name: list_sessions limit 5 every 2 s, "status latency" per call
+mcpl() {
 	(while kill -0 "$SERVE" 2>/dev/null; do
 		curl -s -o /dev/null -w '%{http_code} %{time_total}\n' --max-time 30 \
 			-X POST "$url/mcp" \
@@ -81,14 +68,14 @@ mcpl() { # name: list_sessions limit 5 every 2 s, "status latency" per call
 	done) > "$out/$1.mcp" &
 	LOOP=$!
 }
-mcpsum() { # name: ok/failed/max latency over the recorded calls
+mcpsum() {
 	awk 'NF==2{t+=$2; n++; if($2>m)m=$2; if($1==200)ok++; else bad++} END{d=0; if(n>0)d=t/n; printf "ok=%d failed=%d max_lat=%.3fs mean_lat=%.3fs", ok+0, bad+0, m+0, d}' "$out/$1.mcp"
 }
-peaks() { # name: per-column sample peaks
+peaks() {
 	f=$out/$1.samples
 	awk 'NF==3{n++; if($1+0>a)a=$1+0; if($2+0>f)f=$2+0}END{printf "peak_RssAnon_MiB=%d peak_RssFile_MiB=%d samples=%d", a/1024, f/1024, n+0}' "$f"
 }
-died() { # last words when the serve is gone: events + last samples, then stop
+died() {
 	echo "SERVE DIED during $1; not raising the limit"
 	events "$1-dead"
 	echo "last samples: $(tail -3 "$out/$1.samples" | tr '\n' '|')"

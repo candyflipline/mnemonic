@@ -14,13 +14,6 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// TestBuildHeapGrowsBoundedPerWinnerRow builds one part from a store holding
-// one session of N rows of about 1 KB each, at two sizes, and fails unless the
-// heap the build adds at its peak grows by at most 300 bytes per extra winner
-// row. The heap before the build is subtracted: it holds the checkpoint the
-// ingest left, whose parser state grows with the rows and is the build's
-// input, not its working set. The part build must not hold a decoded row per
-// winner.
 func TestBuildHeapGrowsBoundedPerWinnerRow(t *testing.T) {
 	small, large := 50_000, 200_000
 	if testing.Short() {
@@ -36,10 +29,6 @@ func TestBuildHeapGrowsBoundedPerWinnerRow(t *testing.T) {
 	}
 }
 
-// buildGrowth ingests one session of n rows, then rebuilds its part with
-// buildIndex while a sampler records the heap, and returns how far the heap
-// rose above its size before the build, at its peak. It also checks the part
-// holds n docs and reads one row back.
 func buildGrowth(t *testing.T, n int) int64 {
 	t.Helper()
 	root, store := t.TempDir(), t.TempDir()

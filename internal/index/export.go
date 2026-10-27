@@ -20,8 +20,6 @@ type ExportSession struct {
 	FirstCwd    string
 	LastEventUs int64
 
-	// NRows is the count of the session's winner rows, the ones EachRow
-	// walks: the part's rows minus the annotation harness's.
 	NRows int
 
 	st *Part
@@ -89,8 +87,6 @@ func (db *DB) EachSession(hidden map[string]bool, fn func(ExportSession) error) 
 	return nil
 }
 
-// ExportSession is one session by id, ok false when the index does not hold
-// it.
 func (db *DB) ExportSession(id string) (ExportSession, bool, error) {
 	st, ok := db.part(id)
 	if !ok {
@@ -105,7 +101,6 @@ func (db *DB) ExportSession(id string) (ExportSession, bool, error) {
 	return es, true, err
 }
 
-// ExportHasSession reports whether the index holds the session.
 func (db *DB) ExportHasSession(id string) bool {
 	_, ok := db.part(id)
 	return ok
@@ -115,10 +110,6 @@ func (db *DB) ExportHasSession(id string) bool {
 // time, span id).
 func (db *DB) ExportSpans(id string) []schema.Span { return db.sessionSpans(id) }
 
-// EachExportSpan calls fn for the session's spans relation rows, in export
-// order (start time, span id), decoding the session's spans section one
-// element at a time with a json.Decoder (the walk sessionHasSpan already
-// does), so the walk holds one span, not the session's spans.
 func (db *DB) EachExportSpan(id string, fn func(schema.Span) error) error {
 	st, ok := db.part(id)
 	if !ok {
@@ -144,9 +135,6 @@ func (db *DB) EachExportSpan(id string, fn func(schema.Span) error) error {
 	return nil
 }
 
-// exportSession reads the part's session i's columns in one pass that keeps
-// no row: Harness and FirstCwd from the first winner row, LastEventUs the
-// newest winner row's event_time, NRows the count of winner rows.
 func (st *Part) exportSession(i int) (ExportSession, error) {
 	s := st.session(i)
 	es := ExportSession{ID: s.id, st: st, si: i}

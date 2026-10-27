@@ -1,28 +1,4 @@
 #!/bin/sh
-# push-run.sh BIN DIR — one full push of the plain HOME into a fresh store.
-#
-# Makes DIR (must not exist) as a serve data_dir, starts `BIN serve` on it
-# under `strace -f` (fsync family only, fd paths with -y; --seccomp-bpf so only
-# those syscalls stop), runs ONE `BIN push` of the whole plain HOME with the
-# clock running, stops serve. The store is DIR/raw. Prints (key<TAB>value) and
-# writes the same plus raw traces to $OUT/base-<name>-*:
-#   push_wall_s       client wall, process start to exit
-#   client_stats      the client's own line (scanned/appended/replaced/failed/bytes)
-#   puts              server PUTs that wrote a manifest (one manifest fsync each)
-#   fsync_*           counts by syscall, then by store role (frame replace, frame
-#                     append, manifest, dir, other = index files outside DIR/raw)
-#   fsync_per_put     (frame + manifest + dir fsyncs) / puts
-#   err_*             client failed count, cycle lines with err!=nil, serve.log
-#                     lines naming panic or fatal
-# strace -c is not used: -c prints only per-syscall totals, and the roles above
-# need the fd path. The per-syscall totals are the same lines counted by name.
-# Alongside: pidstat -u -d on serve and push (1 s), vmstat 1, /usr/bin/time -v
-# on the client. Hold the box lock for the whole run:
-#   flock /var/lib/mnu/box.lock sh push-run.sh BIN DIR
-# Env: BOX (/var/lib/mnu), PH ($BOX/plainhome), OUT ($BOX/out), PORT (7791),
-#      QUIESCE (0; 1 waits, after the timing, for a cycle that changed nothing before stopping serve),
-#      MACHINE (plainbox), AUTHOR (uplbox), SERVE_PROCS (4: serve GOMAXPROCS),
-#      CLIENT_PROCS (unset: the Go default, every core), STRACE (1; 0 runs serve bare).
 set -eu
 
 BIN=${1:?usage: push-run.sh BIN DIR}
@@ -80,7 +56,6 @@ for _ in $(seq 1 600); do
 done
 if [ "$STRACE" = 1 ]; then SERVE=$(pgrep -P "$LAUNCH" | head -1); else SERVE=$LAUNCH; fi
 [ -n "$SERVE" ] || { echo "no serve pid" >&2; exit 1; }
-# the boot cycle on an empty store finishes before the clock starts
 sleep 3
 
 vmstat 1 > "$P-vmstat.txt" &
@@ -98,8 +73,6 @@ END=$(date +%s.%N)
 kill "$PST" "$VMS" 2>/dev/null || true
 wait "$PST" "$VMS" 2>/dev/null || true
 if [ "${QUIESCE:-0}" = 1 ]; then
-	# after the clock stopped: let serve index everything and stop on a clean
-	# shutdown, so a later serve on this store boots from a settled index
 	for _ in $(seq 1 360); do
 		last=$(grep 'cycle ' "$P-serve.log" | tail -1)
 		case $last in *"resumed=0 fresh=0 reparsed=0"*"stale=0;"*) break ;; esac

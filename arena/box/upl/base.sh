@@ -1,23 +1,4 @@
 #!/bin/sh
-# base.sh — verify and boot the box baseline store, once.
-#
-# Inputs: $BOX/base holds raw/ (cp -a of the R2 copy $BOX/raw) and the ch-*
-# parquet under events/ (the only events/ files a serve reads: archive.go
-# listArchiveSources and archiveSetFor glob author=*/machine=archive-ch/
-# harness=*/ch-*.parquet); $BOX/base.cfg/server.toml names data_dir=$BOX/base.
-#
-# Steps: (1) storesha of $BOX/raw against $BOX/base, must be equal; (2) boot
-# BIN's serve on $BOX/base as prod runs it (systemd-run scope, MemoryMax=8G,
-# MemorySwapMax=0, GOMAXPROCS=4) until the first quiet cycle (a cycle line with
-# fresh=0 resumed=0 reparsed=0 stale=0 after the boot cycle), sampling VmHWM
-# and the scope's memory.events, then SIGTERM to the exact pid; (3) storesha
-# again (the serve must not have touched raw/); (4) chmod -R a-w the base.
-# Gives up (kills the exact pid, records the evidence) after DEADLINE seconds
-# (default 4500) or when the process dies first.
-#
-# Env: BOX (/var/lib/mnu), OUT ($BOX/out/base), DEADLINE (4500).
-# Run under the box lock, detached:
-#   flock /var/lib/mnu/box.lock sh base.sh /var/lib/mnu/bin/mnemonic-19c8a0e
 set -eu
 
 BIN=${1:?usage: base.sh BIN}

@@ -1,25 +1,4 @@
 #!/bin/sh
-# geq-push.sh BIN DIR — one push of K homes (K clients at once) into a fresh store.
-#
-# push-run.sh generalised for the GEQ numbers: K concurrent `BIN push` clients
-# (one per HOME in HOMES, machine names m1..mK, or MACHINE when K=1) into ONE
-# serve, with the strace set widened to the barrier family plus renames, so a
-# stream store's group commits can be counted exactly.
-#
-# Batch counting (stream): a batch is S(B1) [RR S(B2)] RM+ S(B3). Walk the
-# strace in order; keep the last of {S syncfs, RR rename onto a raw frame,
-# RM rename onto a raw manifest}; a syncfs whose last event was RM is a B3, so
-# batches = number of those. Syncfs seen before the first RM is the boot barrier.
-# HTTP (no syncfs): one batch is one PUT; its barriers are the fsyncs on frame,
-# manifest and dir. APPENDS (env) is the append count of the input; unset, it is
-# the puts of an HTTP run (the chunker is the same code, equiv.sh proves frames
-# equal so chunk boundaries are equal).
-# Prints key<TAB>value and writes the same to $OUT/geq-<name>-summary.txt, traces
-# alongside. Hold the box lock: flock /var/lib/mnu/box.lock sh geq-push.sh BIN DIR
-# Env: BOX, HOMES (default $BOX/plainhome), OUT ($BOX/out), PORT (7821), MACHINE
-#      (plainbox), AUTHOR (uplbox), SERVE_PROCS (4), STRACE (1), APPENDS,
-#      FLOOR_GB (15: refuse when free space after PROJECTED_GB would be lower),
-#      PROJECTED_GB (the store size to come, default 25).
 set -eu
 
 BIN=${1:?usage: geq-push.sh BIN DIR}

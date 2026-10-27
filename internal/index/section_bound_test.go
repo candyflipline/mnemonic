@@ -12,17 +12,6 @@ import (
 	"time"
 )
 
-// TestSectionHeapDoesNotScaleWithAnotherSession puts one huge session H and
-// one small session S in one settled part, at two sizes of H (k and 4k tool
-// pairs, 4k about 50 MB of spans JSON). It measures the heap that (a) an
-// append to S's source and the ingest cycle that rebuilds its component, and
-// (b) sessionAuthors, sessionSpans and sessionAnnotations of S on a freshly
-// opened DB, add above the heap before them, at the peak. The growth at 4k
-// minus the growth at k must stay under 8 MB: what a call about S holds must
-// not depend on the size of H or of the part's other sections. (a) is the
-// holder step of the rebuild, memberPlan.holderAuthors over the part H and S
-// share, which the append cycle runs; the cycle's own growth (the part build's
-// section accumulators, the frame encoders) is logged, not bounded here.
 func TestSectionHeapDoesNotScaleWithAnotherSession(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds 150k rows")
@@ -43,8 +32,6 @@ func TestSectionHeapDoesNotScaleWithAnotherSession(t *testing.T) {
 	}
 }
 
-// sectionGrowth settles H (pairs tool calls) and S into one part, measures the
-// reads of S on a fresh DB, then appends a line to S and measures the cycle.
 func sectionGrowth(t *testing.T, pairs int) (holderGrowth, cycleGrowth, readGrowth int64) {
 	t.Helper()
 	root, store := t.TempDir(), t.TempDir()
@@ -129,8 +116,6 @@ func sectionGrowth(t *testing.T, pairs int) (holderGrowth, cycleGrowth, readGrow
 	return holderGrowth, cycleGrowth, readGrowth
 }
 
-// claudeToolRows is a Claude Code session: a prompt, then pairs of an
-// assistant row calling a tool and the user row returning its result.
 func claudeToolRows(sid string, pairs int) []byte {
 	t0 := time.Date(2026, 3, 2, 0, 0, 0, 0, time.UTC)
 	ts := func(i int) string { return t0.Add(time.Duration(i) * time.Second).Format("2006-01-02T15:04:05Z") }
@@ -143,8 +128,6 @@ func claudeToolRows(sid string, pairs int) []byte {
 	return []byte(b.String())
 }
 
-// peakAbove runs f and returns how far the live heap rose above its size
-// before f, at its peak, sampled every 2 ms.
 func peakAbove(f func()) int64 {
 	runtime.GC()
 	debug.FreeOSMemory()

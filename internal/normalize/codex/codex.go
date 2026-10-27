@@ -207,8 +207,6 @@ func handleCodexCustomToolCallOutput(r *codexRecord, em *shared.Emitter) {
 	output := shared.ToStr(r.payloadField("output"))
 	callID := shared.ToStr(r.payloadField("call_id"))
 	status := shared.ToStr(r.payloadField("status"))
-	// The output string re-parses to its compact JSON; a non-JSON string
-	// keeps the quoted-JSON form of the raw value.
 	outputJSON := output
 	if parsed, err := shared.DecodeJSON([]byte(output)); err == nil {
 		outputJSON = shared.Compact(parsed)

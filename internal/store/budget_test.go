@@ -9,12 +9,6 @@ import (
 	"testing"
 )
 
-// TestSubmitDropsBody pins lie 3's store half: the budget counts frames, so
-// after Submit returns a queued request must hold no uncompressed body — only
-// its frame and the metadata plan reads (the body's length). The committer is
-// held inside its barrier with the request queued while the caller's copies
-// are dropped and the heap is collected: if the request still referenced the
-// body, it stays allocated.
 func TestSubmitDropsBody(t *testing.T) {
 	const bodyBytes = 64 << 20
 
@@ -54,9 +48,9 @@ func TestSubmitDropsBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	op, lines, l = Op(Replace{}), nil, Lines{} // drop the caller's copies
+	op, lines, l = Op(Replace{}), nil, Lines{}
 
-	<-entered // the committer holds the queued batch inside its barrier
+	<-entered
 	retained := heap() - base
 	close(release)
 

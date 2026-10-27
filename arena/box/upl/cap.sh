@@ -1,17 +1,4 @@
 #!/bin/sh
-# cap.sh BIN CAPDRV DIR [CAP] — the live-session cap on a fresh store.
-#
-# One `BIN serve` on an empty DIR/data under MemoryMax=8G in its own scope,
-# then CAPDRV opens CAP+1 distinct machines under one push token: exactly one
-# must get ResourceExhausted, the other CAP must be acked, and a takeover of
-# an admitted machine at the cap must be acked with the displaced stream ended
-# Aborted. Then SIGTERM, and the wall from the signal to exit is printed.
-# With SILENT=1 a second CAPDRV run follows on the same server: CAP+4 streams
-# that never send Hello are held (the stream cap), one more is refused, each
-# held one is dropped with DeadlineExceeded at the 60 s Hello limit, and a new
-# session is then acked in the freed slot.
-# Synthetic input only; counts and codes. Run under the box lock:
-#   flock /var/lib/mnu/box.lock sh cap.sh BIN CAPDRV DIR
 BIN=$1 CAPDRV=$2 DIR=$3 CAP=${4:-10}
 HTTP_PORT=${HTTP_PORT:-7791}
 PUSH_PORT=${PUSH_PORT:-7792}

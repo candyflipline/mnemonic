@@ -65,27 +65,6 @@ func local(args []string) error {
 // settles into a cold part, what serve uses.
 const settleSource = 15 * time.Minute
 
-// runLocal indexes this machine's harness files in place under
-// opts.dataDir (the engine's KindPlain sources, no raw copy, no HTTP and no
-// push loop), feeds push.Watch's file events to the index ingest, and serves
-// MCP. Every line an ingest parses goes through the redactor push uploads
-// with, so the index holds no secret and results need no redaction of their
-// own; the files on disk are never touched.
-//
-// The data dir holds the index and raw/ for the write tools only: annotate,
-// set_visibility and delete_session append their records through the store
-// there, and nothing copies a harness file into it. IngestPlain lists those
-// records with the harness files, and the store's Wake runs the same ingest
-// the watcher's sink runs, so a tool write is searchable without waiting for
-// a harness change.
-//
-// The files are config.DefaultSources; there is no config file and no server.
-// The redactor is therefore push's with no extra patterns (redact.New(nil)),
-// the build a config-less client pushes with. MCP is loopback-only
-// (requireLoopback) and every connection is auth.Local: this machine's user
-// with every scope. Session controls load from dataDir, empty until a
-// control tool writes its first record through the store under the same
-// dataDir.
 func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) error {
 	if err := requireLoopback(opts.listen); err != nil {
 		return err
@@ -139,7 +118,7 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 	if err := firstIngest(ix, srcs, logger, author, machine, red); err != nil {
 		return err
 	}
-	sink.drainSettles(ctx, wake, logger) // the boot cycle's deferred settles, as serve sweeps after its own
+	sink.drainSettles(ctx, wake, logger)
 	tools := mcp.Handler(ix, index.Lookup)
 	mux := http.NewServeMux()
 	mux.Handle("GET /v1/export/{kind}", auth.Require(auth.Read)(export.Handler(ix, ctl)))
@@ -196,9 +175,6 @@ func expandSources(srcs []config.SourceGlob) ([]config.SourceGlob, error) {
 	return out, nil
 }
 
-// firstIngest indexes the machine's files, and the tool records the data
-// dir's raw already holds, once before MCP serves, so the store answers as
-// soon as the socket is up; the watcher and the store's Wake keep it current.
 func firstIngest(ix *index.Index, srcs []config.SourceGlob, logger *log.Logger, author, machine string, red *redact.Redactor) error {
 	start := time.Now()
 	st, err := ix.IngestPlain(srcs, author, machine, index.IngestOptions{Quiet: settleSource, Red: red})
@@ -208,17 +184,11 @@ func firstIngest(ix *index.Index, srcs []config.SourceGlob, logger *log.Logger, 
 	return err
 }
 
-// wakeQuiet and wakeMax settle a burst of tool writes into one ingest: the
-// wake sync waits for wakeQuiet without another write, at most wakeMax after
-// the first, the way serve settles a push burst.
 const (
 	wakeQuiet = time.Second
 	wakeMax   = 3 * time.Second
 )
 
-// settleWake drains what is left of a burst: it returns when the wake channel
-// has sat empty for wakeQuiet or wakeMax passed since it was called, so one
-// ingest answers the writes instead of one per record.
 func settleWake(ctx context.Context, wake <-chan struct{}) {
 	quiet := time.NewTimer(wakeQuiet)
 	defer quiet.Stop()
@@ -238,8 +208,6 @@ func settleWake(ctx context.Context, wake <-chan struct{}) {
 	}
 }
 
-// wakeCycle is the wake goroutine's one lap: settle the burst of tool writes
-// into one ingest, then run it and drain what it left.
 func (s *indexSink) wakeCycle(ctx context.Context, wake <-chan struct{}, logger *log.Logger) {
 	settleWake(ctx, wake)
 	if _, err := s.Sync(ctx, nil); err != nil {
@@ -265,11 +233,6 @@ func (s *indexSink) drainSettles(ctx context.Context, wake <-chan struct{}, logg
 	}
 }
 
-// indexSink is the watcher's sink: every changed path is subsumed by an
-// ingest of the whole machine, whose outcomes the printed stats line reports.
-// The store's Wake runs the same Sync, and the mutex keeps one ingest at a
-// time. An ingest has no ctx (the server's cycles have none either); it runs
-// to completion and the next sync's stamp tests pick up whatever moved since.
 type indexSink struct {
 	ix      *index.Index
 	srcs    []config.SourceGlob
@@ -311,9 +274,6 @@ func refuseClientDir(dir, home string) error {
 	return nil
 }
 
-// resolvePath makes p absolute and resolves symlinks through its deepest
-// existing ancestor, so a path that does not exist yet still lands where
-// MkdirAll will create it. A dangling symlink is an error.
 func resolvePath(p string) (string, error) {
 	cur, err := filepath.Abs(p)
 	if err != nil {

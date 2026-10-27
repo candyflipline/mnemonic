@@ -12,10 +12,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-// sections accumulates the three derived sections of one part at build time:
-// spans per harness, annotations one per annotation id, and session authors.
-// They are written with the part and read back by sessionSpans,
-// sessionAnnotations and sessionAuthors.
 type sections struct {
 	spans map[string][]schema.Span
 	ann   map[string][]schema.Annotation
@@ -70,7 +66,6 @@ func (s *sections) addSession(sid string, rows iter.Seq[*Row], payload func(*Row
 	}
 }
 
-// ofHarness is the rows of one harness.
 func ofHarness(rows iter.Seq[*Row], harness string) iter.Seq[*Row] {
 	return func(yield func(*Row) bool) {
 		for r := range rows {
@@ -129,7 +124,6 @@ func mustJSON(v any) []byte {
 	return b
 }
 
-// sortSpans is the sessionSpans order: by start then span_id.
 func sortSpans(spans []schema.Span) {
 	sort.Slice(spans, func(i, j int) bool {
 		if !spans[i].Start.Equal(spans[j].Start) {
@@ -148,7 +142,6 @@ func sortedAuthors(set map[string]bool) []string {
 	return out
 }
 
-// sortAnnotations is the sessionAnnotations order: by ts then id.
 func sortAnnotations(ann []schema.Annotation) {
 	sort.Slice(ann, func(i, j int) bool {
 		if !ann[i].TS.Equal(ann[j].TS) {
@@ -158,9 +151,6 @@ func sortAnnotations(ann []schema.Annotation) {
 	})
 }
 
-// secOffsets is where each session's value lies in a section file, found by
-// one scan on first use. The index holds offsets only; the value itself is
-// decoded from the section bytes when a session is asked for.
 type secOffsets struct {
 	once sync.Once
 	at   map[string][2]int
@@ -171,7 +161,6 @@ func (o *secOffsets) of(b []byte) map[string][2]int {
 	return o.at
 }
 
-// raw is session id's value as stored, a slice of b, or nil.
 func (o *secOffsets) raw(b []byte, id string) []byte {
 	r, ok := o.of(b)[id]
 	if !ok {
@@ -229,7 +218,6 @@ func skipSpace(b []byte, i int) int {
 	return i
 }
 
-// skipString is the index after the string that opens at b[i], or -1.
 func skipString(b []byte, i int) int {
 	for j := i + 1; j < len(b); {
 		q := bytes.IndexByte(b[j:], '"')
@@ -249,7 +237,6 @@ func skipString(b []byte, i int) int {
 	return -1
 }
 
-// skipValue is the index after the JSON value that starts at b[i], or -1.
 func skipValue(b []byte, i int) int {
 	if i >= len(b) {
 		return -1

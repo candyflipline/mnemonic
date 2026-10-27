@@ -37,8 +37,6 @@ echo "$TAG boot ok (pid $SPID)" >>"$RESULTS"
 
 sh "$RUN/flood.sh" 127.0.0.1 443 180 16 >"$RUN/flood-$TAG-http.json"
 sh "$RUN/flood.sh" 127.0.0.1 8741 180 16 >"$RUN/flood-$TAG-push.json"
-# The minute ticker flushes each window after it ends; wait one out so the
-# flood tail is counted before the serve stops.
 sleep 70
 
 kill "$SPID"

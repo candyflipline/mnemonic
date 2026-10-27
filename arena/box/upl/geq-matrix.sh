@@ -1,16 +1,4 @@
 #!/bin/sh
-# geq-matrix.sh ROUNDS DEN — HTTP 83b0042 against the stream binary, alternating.
-#
-# Each round runs, for the 1-client and the 4-client condition, one HTTP push and
-# one stream push of the same sub-home (geq-subset.sh DEN "s$DEN": -all for one
-# client, -q1..q4 for four at once), the side order swapped every round (HS, SH,
-# HS ...). Every pair is checked with equiv.sh (same home, so same ids): a pair
-# that is not EQUIVALENT stops the matrix with exit 1. The stream run's APPENDS is
-# the puts of the HTTP run of the same condition in round 1. Stores land in
-# $BOX/geqm and are not deleted (list them for the owner).
-# Output: $OUT/geq-m<DEN>-<cond>-<side>-r<N>-summary.txt, table via geq-table.sh.
-# Run under the box lock, once: flock /var/lib/mnu/box.lock sh geq-matrix.sh 5 32
-# Env: BOX, HTTP_BIN, STREAM_BIN, SRC (this directory).
 set -eu
 ROUNDS=${1:?usage: geq-matrix.sh ROUNDS DEN}
 DEN=${2:?usage: geq-matrix.sh ROUNDS DEN}

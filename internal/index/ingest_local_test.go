@@ -24,10 +24,6 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// TestIngestPlainReportsToolRecords pins local mode's contract: an IngestPlain
-// over a data dir reports the records the tools write through the store under
-// <dataDir>/raw, so an annotation is searchable after the write itself and not
-// only after the next harness file change.
 func TestIngestPlainReportsToolRecords(t *testing.T) {
 	dataDir := t.TempDir()
 	const session = "7c666c01-d38e-4658-8650-854ffb5b626e"
@@ -51,8 +47,6 @@ func TestIngestPlainReportsToolRecords(t *testing.T) {
 		t.Fatalf("first ingest: fresh=%d unchanged=%d, want fresh=1 (the session file)", st[Fresh], st[Unchanged])
 	}
 
-	// The record annotate appends: one schema.Annotation line through the
-	// store under the data dir, the write the local MCP ctx carries.
 	line, err := json.Marshal(schema.Annotation{
 		ID:     "0123456789abcdef0123456789abcdef",
 		Target: schema.Target{SessionID: session},
@@ -95,11 +89,6 @@ func TestIngestPlainReportsToolRecords(t *testing.T) {
 	}
 }
 
-// TestAnnotateStoresOnlyRedactedText pins the write path's redaction: the
-// annotation's user text goes through the redactor push uploads with before
-// the record is appended, so raw/ holds only redacted text on every write
-// path; the result text carries the redacted value, and a retried identical
-// call is the duplicate of the stored (redacted) record.
 func TestAnnotateStoresOnlyRedactedText(t *testing.T) {
 	db, dir := newQueryDB(t)
 	const session = "7c666c01-d38e-4658-8650-854ffb5b626e"
@@ -142,7 +131,6 @@ func TestAnnotateStoresOnlyRedactedText(t *testing.T) {
 		}
 	}
 
-	// The record the write appended under the data dir.
 	var stored []byte
 	root := filepath.Join(dir, "raw", "author=a", "machine="+store.ServerMachine, "harness="+schema.AnnotationHarness)
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -185,7 +173,6 @@ func TestAnnotateStoresOnlyRedactedText(t *testing.T) {
 		}
 	}
 
-	// The same call again is the duplicate of the stored record.
 	_, text, err = Call(ctx, db, "annotate", args)
 	if err != nil {
 		t.Fatal(err)
@@ -195,9 +182,6 @@ func TestAnnotateStoresOnlyRedactedText(t *testing.T) {
 	}
 }
 
-// pushRawCopy writes the raw copy main's old `mnemonic local` pushed: the
-// lines compressed as one zstd frame under <dataDir>/raw's author/machine/
-// harness layout, next to the manifest naming the harness file it came from.
 func pushRawCopy(t *testing.T, dataDir, author, machine, harness, sourceName, path string, lines []byte) {
 	t.Helper()
 	var frame bytes.Buffer
@@ -235,7 +219,6 @@ func pushRawCopy(t *testing.T, dataDir, author, machine, harness, sourceName, pa
 	}
 }
 
-// plainSession writes a two-line claude-code session whose user text is text.
 func plainSession(t *testing.T, path, session, text string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -265,12 +248,6 @@ func searchCount(t *testing.T, db *DB, word string) int {
 	return out.ResultCount
 }
 
-// TestIngestPlainOneCheckpointPerKey pins local mode's key ownership: a raw
-// copy old `mnemonic local` pushed under the same key as a live harness file
-// is dropped (the plain file wins, one checkpoint, nothing on disk deleted),
-// a raw copy whose plain file no longer exists is still ingested (it is the
-// only copy left), and ingest() refuses a list holding one key twice, so the
-// duplicate cannot come back by another path.
 func TestIngestPlainOneCheckpointPerKey(t *testing.T) {
 	dir := t.TempDir()
 	dataDir := filepath.Join(dir, "data")
@@ -285,8 +262,6 @@ func TestIngestPlainOneCheckpointPerKey(t *testing.T) {
 	plainSession(t, pathA, sessionA, "quorum stands.")
 	plainSession(t, pathB, sessionB, "harbor stands.")
 	plainSession(t, pathC, sessionC, "lumen stands.")
-	// Old local pushed a and b; the raw copy of a diverged from the live file
-	// (its last append never happened locally), and retention deleted b.
 	pushRawCopy(t, dataDir, author, machine, harness, "claude", pathA,
 		[]byte(fmt.Sprintf(`{"type":"user","sessionId":%q,"cwd":"/work/demo","uuid":"u0","timestamp":"2026-01-19T15:58:39.000Z","message":{"role":"user","content":"rawtwin lingers."}}`+"\n", sessionA)))
 	pushRawCopy(t, dataDir, author, machine, harness, "claude", pathB, mustRead(t, pathB))
@@ -321,7 +296,6 @@ func TestIngestPlainOneCheckpointPerKey(t *testing.T) {
 		}
 	}
 
-	// One checkpoint per key, and a's is the plain file's.
 	store := filepath.Join(dataDir, "index")
 	ents, err := os.ReadDir(srcDir(store))
 	if err != nil {
@@ -341,8 +315,6 @@ func TestIngestPlainOneCheckpointPerKey(t *testing.T) {
 		t.Fatalf("a's checkpoint: kind=%d ok=%v, want KindPlain: the live file, not the raw copy, owns the key", c.Kind, ok)
 	}
 
-	// All three sources answer search: a and c from their plain files, b from
-	// its raw copy, and the raw copy's diverged text stays out.
 	db, release := ix.Snapshot()
 	defer release()
 	for word, want := range map[string]int{"quorum": 1, "harbor": 1, "lumen": 1, "rawtwin": 0} {
@@ -351,7 +323,6 @@ func TestIngestPlainOneCheckpointPerKey(t *testing.T) {
 		}
 	}
 
-	// A list holding one key twice is refused, naming the key.
 	dup := source{kind: KindStore, mpath: pathA, key: layout.Key{Author: author, Machine: machine, Harness: harness, SrcID: wire.SrcID(pathA)}}
 	_, err = ingest(dataDir, store, []source{dup, dup}, time.Hour, true, nil)
 	if err == nil || !strings.Contains(err.Error(), sourceKey(dup.key)) {
@@ -368,11 +339,6 @@ func mustRead(t *testing.T, path string) []byte {
 	return b
 }
 
-// TestIngestPlainRedactsAtIngest pins local mode's redaction contract: every
-// line a plain source's parse reads goes through the redactor push uploads
-// with, so the index holds the redacted text and neither the event text, a
-// search term, a like filter nor lower() can return the secret. The file on
-// disk keeps it, and the checkpoint stays in the plain file's bytes.
 func TestIngestPlainRedactsAtIngest(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "session.jsonl")
@@ -407,7 +373,6 @@ func TestIngestPlainRedactsAtIngest(t *testing.T) {
 		t.Fatalf("ingest: fresh=%d, want fresh=1", st[Fresh])
 	}
 
-	// The file on disk is never touched.
 	onDisk, err := os.ReadFile(file)
 	if err != nil {
 		t.Fatal(err)
@@ -449,8 +414,6 @@ func TestIngestPlainRedactsAtIngest(t *testing.T) {
 				t.Fatalf("%s %s: response holds the secret %q:\n%s\n%s", p.name, p.args, secret, data, text)
 			}
 		}
-		// The redacted event must still be there: open answers the session and
-		// the query sees its text with the marker in place.
 		if p.name == "open" && !bytes.Contains(data, []byte("[REDACTED:aws-access-token]")) {
 			t.Fatalf("open: the redacted text is missing:\n%s", data)
 		}

@@ -12,8 +12,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-// traceBudget is the most raw spans JSON, in bytes, get_trace decodes for one
-// session; a test lowers it.
 var traceBudget = 64 << 20
 
 type getTrace struct{}
@@ -117,9 +115,6 @@ func (getTrace) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, str
 	return res, renderTrace(res), nil
 }
 
-// loadSpans is the spans relation read of main's get_trace over the engine:
-// the session's spans when the caller may open it, in the relation's order
-// start_time, kind, span_id.
 func loadSpans(db *DB, session string, f SessionFilter) []*traceSpan {
 	if !f.Opened(session) {
 		return nil
@@ -127,9 +122,6 @@ func loadSpans(db *DB, session string, f SessionFilter) []*traceSpan {
 	return spansToTrace(db.sessionSpans(session))
 }
 
-// spansToTrace converts the engine's spans to trace spans in the order the
-// oracle's `ORDER BY start_time, kind, span_id` gives: span_id is unique, so
-// the order is total.
 func spansToTrace(spans []schema.Span) []*traceSpan {
 	ordered := spans[:0:0]
 	ordered = append(ordered, spans...)
@@ -138,8 +130,6 @@ func spansToTrace(spans []schema.Span) []*traceSpan {
 		if !a.Start.Equal(b.Start) {
 			return a.Start.Before(b.Start)
 		}
-		// kind is an ENUM in the 59796bc oracle, so it sorts in declaration
-		// order, not lexicographically.
 		if ra, rb := spanKindRank(string(a.Kind)), spanKindRank(string(b.Kind)); ra != rb {
 			return ra < rb
 		}
@@ -164,7 +154,6 @@ func spansToTrace(spans []schema.Span) []*traceSpan {
 	return out
 }
 
-// spanKindRank is the spans DDL's ENUM('invoke_agent','chat','execute_tool','turn') order.
 func spanKindRank(kind string) int {
 	switch schema.SpanKind(kind) {
 	case schema.SpanInvokeAgent:
@@ -246,10 +235,6 @@ func buildTree(spans []*traceSpan) ([]*traceSpan, traceTotals) {
 	return roots, t
 }
 
-// loadAnnotations is the annotations relation read of main's get_trace over
-// the engine: the session's annotations when the caller may open it and the
-// annotation's author is the caller's tenant, in the relation's order ts,
-// annotation_id.
 func loadAnnotations(db *DB, session string, f SessionFilter) []traceAnnotation {
 	if !f.Opened(session) {
 		return nil
@@ -257,10 +242,6 @@ func loadAnnotations(db *DB, session string, f SessionFilter) []traceAnnotation 
 	return notesToTrace(db.sessionAnnotations(session), f)
 }
 
-// notesToTrace converts the engine's annotations to trace annotations in the
-// order the oracle's `ORDER BY ts, annotation_id` gives: annotation_id is
-// unique, so the order is total. The Authors("author") scope drops notes
-// whose author is outside the caller's tenant.
 func notesToTrace(notes []schema.Annotation, f SessionFilter) []traceAnnotation {
 	kept := notes[:0:0]
 	for _, n := range notes {

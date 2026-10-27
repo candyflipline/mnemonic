@@ -65,7 +65,6 @@ func TestW1NoSpaceFailsOnlyBatch(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer c.Close()
-			// Unblock before Close even when an assertion fails while the gate is held.
 			defer unblock()
 			bb, closeBase, err := openBarrier(baseDir)
 			if err != nil {
@@ -111,7 +110,6 @@ func TestW1NoSpaceFailsOnlyBatch(t *testing.T) {
 					applied(submit(st, src, seed), 8)
 				}
 			}
-			// Hold a real barrier so all four requests enter the same following batch.
 			gate.Store(true)
 			blocker := submit(c, sources[0], Backfill{Offset: 8, HeadHash: "head", RawEnd: 8})
 			select {
@@ -179,8 +177,6 @@ func TestW1NoSpaceFailsOnlyBatch(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			// The same requests can commit without restarting; their raw bytes match a
-			// separate uninterrupted store, including the server-owned request.
 			for _, st := range []*Committer{c, baseline} {
 				applied(submit(st, sources[0], extend), 16)
 				applied(submit(st, sources[1], replace), 8)

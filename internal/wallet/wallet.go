@@ -110,7 +110,6 @@ func ParseAddress(s string) (Address, error) {
 	return AddressOf(b)
 }
 
-// String is the base58 text wallets show.
 func (a Address) String() string { return encode58(a.key[:]) }
 
 // Author is the wallet's author name: AuthorPrefix and 64 lowercase hex
@@ -118,7 +117,6 @@ func (a Address) String() string { return encode58(a.key[:]) }
 // is a legal author everywhere one is printed or compared.
 func (a Address) Author() string { return AuthorPrefix + hex.EncodeToString(a.key[:]) }
 
-// PublicKey is a as the ed25519 key its signatures verify under.
 func (a Address) PublicKey() ed25519.PublicKey { return ed25519.PublicKey(a.key[:]) }
 
 // ParseSignature reads a 64-byte ed25519 signature as a wallet prints it:
@@ -142,8 +140,6 @@ type Claim struct {
 	Expires time.Time
 }
 
-// DefaultLifetime is how long a binding runs unless the recipient asks for
-// another length.
 const DefaultLifetime = 30 * 24 * time.Hour
 
 // MaxLifetime is the longest a binding may run from the moment the server

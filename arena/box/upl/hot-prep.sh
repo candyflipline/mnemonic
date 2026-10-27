@@ -1,17 +1,4 @@
 #!/bin/sh
-# hot-prep.sh DIR HOME_DIR: lay out prod-shaped hot sessions for lag.sh HOT mode.
-#
-# Picks claude-code sources from DIR/raw (read only) whose compressed size is
-# closest to each target in BIG (MB) and SMALL (MB), one source per target,
-# and decompresses each to HOME_DIR/.claude/projects/hot-NN/<name>.jsonl.
-# Pushed by lag.sh's client they become fresh sources whose sessions join the
-# original's component, so each target is one hot component the size of its
-# session (original plus copy). Prints counts and sizes only, never content.
-# Env: BIG (0.7 1.7 5 15 17 26 40, prod's hot images on Oct 26, halved),
-#      SMALL (13 targets from 0.1 to 0.7).
-#      SYNTH=N instead writes N synthetic one-session files of SYNTH_LINES (200)
-#      lines each as hot-FROM.. (SYNTH_FROM, 20): standalone small components,
-#      the idle hot sessions prod carries between pauses.
 set -eu
 DIR=${1:?usage: hot-prep.sh DIR HOME_DIR}
 HOME_DIR=${2:?usage: hot-prep.sh DIR HOME_DIR}

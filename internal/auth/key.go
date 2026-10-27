@@ -10,7 +10,6 @@ import (
 // unpadded base64url of its 32 bytes.
 func EncodeKey(pub ed25519.PublicKey) string { return base64.RawURLEncoding.EncodeToString(pub) }
 
-// ParseKey reads the text form EncodeKey writes.
 func ParseKey(s string) (ed25519.PublicKey, error) {
 	b, err := base64.RawURLEncoding.DecodeString(s)
 	if err != nil || len(b) != ed25519.PublicKeySize {

@@ -12,7 +12,6 @@ Restart=on-failure
 RestartSec=5
 TimeoutStopSec=80
 
-# The server writes only under /var/lib/mnemonic; the config and binary are read-only.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

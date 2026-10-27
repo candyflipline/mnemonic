@@ -20,8 +20,6 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// cmpPartDirs fails unless the two part dirs hold the same files with the
-// same bytes, meta.json included.
 func cmpPartDirs(t *testing.T, want, got string) {
 	t.Helper()
 	var wantFiles, gotFiles []string
@@ -62,7 +60,6 @@ func cmpPartDirs(t *testing.T, want, got string) {
 	}
 }
 
-// memberCks is the current checkpoint of every member a committed part names.
 func memberCks(t *testing.T, store, id string) []ckpt {
 	t.Helper()
 	d, ok := readBase(store, id)
@@ -80,8 +77,6 @@ func memberCks(t *testing.T, store, id string) []ckpt {
 	return cks
 }
 
-// partHolding is the committed part of store whose members include a key
-// holding substr.
 func partHolding(t *testing.T, store, substr string) string {
 	t.Helper()
 	mf, err := readManifest(store)
@@ -99,9 +94,6 @@ func partHolding(t *testing.T, store, substr string) string {
 	return ""
 }
 
-// buildBoth builds cks into two fresh part dirs, one from the members' logs
-// alone (no previous manifest) and one with holders from prev, and fails
-// unless the dirs are byte-identical.
 func buildBoth(t *testing.T, store string, cks []ckpt, prev manifestFile) {
 	t.Helper()
 	fp := fingerprint(cks)
@@ -117,13 +109,6 @@ func buildBoth(t *testing.T, store string, cks []ckpt, prev manifestFile) {
 	cmpPartDirs(t, logsDir, holderDir)
 }
 
-// TestHolderPartBytesMatchTheLogsPath pins the holder as row source: a part
-// built the way every build now reads its members — winners from the part of
-// the previous manifest that holds them, tails from the frame logs past the
-// holder's copy — is byte-identical to the same part built from the logs
-// alone. One hot append (a delta over the image, every member read from the
-// merged delta part) and one cold-shard rewrite (an unchanged member read
-// from the cold part that holds it, a first member from its logs).
 func TestHolderPartBytesMatchTheLogsPath(t *testing.T) {
 	const sid = "5c666c01-d38e-4658-8650-854ffb5b626e"
 	at := func(min int) (string, int64) {
@@ -159,13 +144,6 @@ func TestHolderPartBytesMatchTheLogsPath(t *testing.T) {
 			"machine=archive-ch", "harness=claude-code", name), rows)
 	}
 
-	// The hot append. Source s1 builds alone while hot; then two archive
-	// files join its session and s1 grows, and the component grows by a
-	// delta over s1's image. Archive b copies two of s1's uids (the raw
-	// copies win whatever the versions) and holds two uids of its own;
-	// archive f only copies s1's uids, so every row of it loses and its
-	// author reaches the part's session authors section through the
-	// holders' sections alone.
 	root, store := t.TempDir(), t.TempDir()
 	writeRawSource(t, root, "a", "m", "claude-code", "s1", "/p/s1.jsonl", raw, 1)
 	if _, err := Ingest(root, store, 15*time.Minute, false); err != nil {
@@ -206,8 +184,6 @@ func TestHolderPartBytesMatchTheLogsPath(t *testing.T) {
 	if _, isDelta, err := readDelta(partDir(store, mf.Hot[0])); err != nil || !isDelta {
 		t.Fatalf("the append did not hold a delta: isDelta %v err %v", isDelta, err)
 	}
-	// The delta part's own session authors section carries the loser-only
-	// member's author: the section is the image's union the tail rows'.
 	dp, err := OpenPartDir(partDir(store, mf.Hot[0]))
 	if err != nil {
 		t.Fatal(err)
@@ -227,10 +203,6 @@ func TestHolderPartBytesMatchTheLogsPath(t *testing.T) {
 		t.Fatalf("delta holds %d members, want 3", got)
 	}
 
-	// The cold-shard rewrite. c settles into its shard; then d, whose least
-	// session id hashes into the same shard, settles too, and the shard is
-	// rewritten with c read from the cold part that holds it and d from its
-	// first parse of the logs.
 	shard := func(s string) uint32 {
 		h := fnv.New32a()
 		h.Write([]byte(s))
@@ -275,14 +247,6 @@ func TestHolderPartBytesMatchTheLogsPath(t *testing.T) {
 	buildBoth(t, store2, cks2, mustManifest(t, store2))
 }
 
-// TestMemberRowsReadsEachHolderFrameOnce reads one member of 2,400 rows two
-// ways, from the hot part that holds it and from its frame logs, and fails
-// unless the rows agree and the holder read allocates no more than twice the
-// logs read: memberRows decodes each light frame of the holder once, not once
-// per row. (The heavy records go through holder.fc.heavyFrame, which already
-// caches.) The two heavy coordinate fields are holder-relative — they name the
-// holder part's own heavy log, and the built part's bytes are pinned by
-// TestHolderPartBytesMatchTheLogsPath — so rowsEqual skips them.
 func TestMemberRowsReadsEachHolderFrameOnce(t *testing.T) {
 	const n = 2400
 	root, store := t.TempDir(), t.TempDir()
@@ -340,8 +304,6 @@ func TestMemberRowsReadsEachHolderFrameOnce(t *testing.T) {
 			t.Fatalf("row %d differs: holder uid %q, logs uid %q", i, holderRows[i].row.UID, logsRows[i].row.UID)
 		}
 	}
-	// allocOf warms fn once (the zstd decoder's buffers) and reports the
-	// TotalAlloc of a second run, GC before it.
 	allocOf := func(fn func() error) uint64 {
 		if err := fn(); err != nil {
 			t.Fatal(err)
@@ -363,8 +325,6 @@ func TestMemberRowsReadsEachHolderFrameOnce(t *testing.T) {
 	t.Logf("holder read %d B, logs read %d B (%.2fx), %d rows", holderAlloc, logsAlloc, float64(holderAlloc)/float64(logsAlloc), len(logsRows))
 }
 
-// writeRawZst rewrites a raw source's manifest and zst, the zst the old
-// frames followed by new ones so the store's byte test resumes.
 func writeRawZst(t *testing.T, root, author, machine, harness, srcID, path string, plain, zst []byte, updatedMs int64) {
 	t.Helper()
 	dir := filepath.Join(root, "raw", "author="+author, "machine="+machine, "harness="+harness)
@@ -378,8 +338,6 @@ func writeRawZst(t *testing.T, root, author, machine, harness, srcID, path strin
 	}
 }
 
-// sourceUIDs parses plain claude lines the way ingest will, so the test can
-// plant a raw row's uid in an archive file.
 func sourceUIDs(t *testing.T, plain []byte, want int) []string {
 	t.Helper()
 	parser, ok := normalize.For("claude-code")

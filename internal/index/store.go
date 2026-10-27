@@ -68,9 +68,6 @@ type frameKey struct {
 	frame uint64
 }
 
-// forget drops every frame of st, so a retired part is not held by the cache
-// the DBs after it still share. The order slices are rebuilt into fresh
-// arrays so no dropped key lingers behind their re-sliced fronts.
 func (fc *frameCache) forget(st *Part) {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
@@ -94,7 +91,6 @@ func (fc *frameCache) forget(st *Part) {
 	fc.heavyOrder = heavy
 }
 
-// lightFrame returns key's decoded rows, decoding the frame on first use.
 func (fc *frameCache) lightFrame(st *Part, frame uint64) ([]*Row, error) {
 	k := frameKey{part: st, frame: frame}
 	fc.mu.Lock()
@@ -161,8 +157,6 @@ func mmapFile(path string) ([]byte, error) {
 	return syscall.Mmap(int(f.Fd()), 0, int(fi.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
 }
 
-// dirStamp names one part dir: a dir GC removed and a build put back under
-// the same id differs in inode or mtime.
 type dirStamp struct {
 	ino   uint64
 	mtime int64
@@ -180,7 +174,6 @@ func dirStampOf(dir string) (dirStamp, error) {
 	return at, nil
 }
 
-// OpenPartDir opens a part dir.
 func OpenPartDir(dir string) (*Part, error) {
 	at, err := dirStampOf(dir)
 	if err != nil {
@@ -252,7 +245,6 @@ func (st *Part) Close() {
 	}
 }
 
-// release drops one DB's hold on st and closes it with the last.
 func (st *Part) release() {
 	if st.refs.Add(-1) == 0 {
 		if st.fc != nil {
@@ -263,8 +255,6 @@ func (st *Part) release() {
 	}
 }
 
-// sessionSpansRaw is session id's value in the spans section as stored, a
-// slice of the section bytes, or nil for a session the part does not hold.
 func (st *Part) sessionSpansRaw(id string) []byte { return st.spansAt.raw(st.spansB, id) }
 
 func (st *Part) spansOf(id string) []schema.Span {
@@ -300,7 +290,6 @@ func (st *Part) authors() map[string][]string {
 
 func (st *Part) authOf(id string) []string { return st.authors()[id] }
 
-// authEach hands fn the authors of every session keep accepts.
 func (st *Part) authEach(keep func(id string) bool, fn func(id string, authors []string)) {
 	for id, as := range st.authors() {
 		if keep == nil || keep(id) {
@@ -309,10 +298,8 @@ func (st *Part) authEach(keep func(id string) bool, fn func(id string, authors [
 	}
 }
 
-// authSection is every session's authors, the part's own map.
 func (st *Part) authSection() map[string][]string { return st.authors() }
 
-// segments reads a log held as an image and the delta appended after it.
 type segments struct{ image, delta []byte }
 
 func (s segments) ReadAt(p []byte, off int64) (int, error) {
@@ -425,7 +412,6 @@ func (st *Part) row(d int) (*Row, error) {
 	return rows[idx], nil
 }
 
-// heavyOf returns payload_json and token_usage_json of row r.
 func (st *Part) heavyOf(r *Row) (string, string, error) {
 	recs, err := st.fc.heavyFrame(st, r.HeavyFrame)
 	if err != nil {
@@ -527,8 +513,6 @@ func (st *Part) sessionOfUID(uid string) (string, bool, error) {
 	return "", false, nil
 }
 
-// hot decodes doc d's hot record (see hotRow) and returns it with the hash of
-// its text_content.
 func (st *Part) hot(d int) (*Row, uint64, error) {
 	lo := binary.LittleEndian.Uint64(st.hotOff[d*16:])
 	th := binary.LittleEndian.Uint64(st.hotOff[d*16+8:])
@@ -540,9 +524,6 @@ func (st *Part) hot(d int) (*Row, uint64, error) {
 	return r, th, nil
 }
 
-// faCandidates returns the ascending fa.blob entries that hold every
-// trigram of needle, a superset of the entries containing it; ok is false
-// when needle is too short to narrow anything.
 func (st *Part) faCandidates(needle []byte) ([]int, bool) {
 	if len(needle) < 3 {
 		return nil, false

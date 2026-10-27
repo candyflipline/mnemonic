@@ -22,11 +22,6 @@ type shareArgs struct {
 	RequestKey string `json:"request_key"`
 }
 
-// Call appends a share (or, with revoke, an unshare) of one session with one
-// wallet as the caller's control record, under the rule set_visibility
-// keeps: only the session's sole author or an admin, never on a deleted
-// session. It answers with the wallets the session is shared with after the
-// record.
 func (shareSession) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, string, error) {
 	var a shareArgs
 	dec := json.NewDecoder(bytes.NewReader(raw))

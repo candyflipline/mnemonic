@@ -32,7 +32,6 @@ func otlpSpans(_, sid string, session iter.Seq[*Row]) []schema.Span {
 		return nil
 	}
 
-	// nearest: each row's closest emitted strict ancestor.
 	nearest := map[string]*otlpNode{}
 	otlpWalk(rows, func(from, uid string, anc *otlpNode) bool {
 		if otlpEmitted(anc.opKind) {
@@ -42,8 +41,6 @@ func otlpSpans(_, sid string, session iter.Seq[*Row]) []schema.Span {
 		return true
 	})
 
-	// root: of the emitted members of each parent cycle, the smallest
-	// item_id; the derivation calls the others non-roots, not cycle members.
 	root := map[string]bool{}
 	color := map[string]bool{}
 	for uid := range rows {
@@ -87,7 +84,6 @@ func otlpSpans(_, sid string, session iter.Seq[*Row]) []schema.Span {
 		}
 	}
 
-	// sums: what each invoke_agent carries over the chats beneath it.
 	type sums struct {
 		tok                   tokens
 		cost                  float64
@@ -151,17 +147,12 @@ func otlpSpans(_, sid string, session iter.Seq[*Row]) []schema.Span {
 	return out
 }
 
-// otlpNode is what the walks keep of a span row: the fields they read, not the
-// row, which is valid only during its yield. cost is the chat's own, the only
-// cost a walk sums.
 type otlpNode struct {
 	origin, opKind, itemID, traceID, author string
 	tok                                     tokens
 	cost                                    *float64
 }
 
-// otlpEmitted is op_kind IN ('chat', 'execute_tool', 'invoke_agent'): the
-// span rows the derivation emits; the rest only carry children.
 func otlpEmitted(opKind string) bool {
 	switch opKind {
 	case string(schema.SpanChat), string(schema.SpanExecuteTool), string(schema.SpanInvokeAgent):
@@ -195,8 +186,6 @@ func otlpWalk(rows map[string]*otlpNode, yield func(from, uid string, anc *otlpN
 	}
 }
 
-// otlpCostUsd is token_usage_native_units['cost_usd'], nil when the row
-// carries none.
 func otlpCostUsd(r *Row) *float64 {
 	if r.Native == "" {
 		return nil

@@ -64,7 +64,7 @@ h=hashlib.sha256();n=0
 for b in iter(lambda: sys.stdin.buffer.read(1<<20), b""): h.update(b); n+=len(b)
 print(h.hexdigest(), n)'
 big=$(sed -n 1p "$ids")
-run() { # name kind args...
+run() {
 	name=$1 kind=$2
 	shift 2
 	echo 5 > "/proc/$SERVE/clear_refs" 2>/dev/null || true

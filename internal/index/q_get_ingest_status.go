@@ -55,7 +55,6 @@ type stGroupRow struct {
 	parsedBytes int64
 }
 
-// stSource is one manifest's row of the cache's sources table.
 type stSource struct {
 	Author    string `json:"author"`
 	Machine   string `json:"machine"`

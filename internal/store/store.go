@@ -29,8 +29,6 @@ func readManifest(path string) (*manifestBody, error) {
 	return &m, nil
 }
 
-// Manifest is one committed source as the table holds it: what the index
-// needs from the manifest file, so boot does not read the file again.
 type Manifest struct {
 	Key     layout.Key
 	Source  wire.Source

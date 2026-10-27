@@ -22,7 +22,6 @@ type canonicalSearchSessionsArgs struct {
 	nHits      int
 }
 
-// parseSearchSessionsArgs: every message is the upstream contract text.
 func parseSearchSessionsArgs(raw json.RawMessage) (canonicalSearchSessionsArgs, error) {
 	var args struct {
 		Query      *string   `json:"query"`

@@ -19,7 +19,6 @@ import (
 
 const bootPrefix = "Index boot failing, retrying: attempt "
 
-// bootLine is get_ingest_status's boot-failure text line, "" when it has none.
 func bootLine(t *testing.T, url string) string {
 	t.Helper()
 	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_ingest_status","arguments":{}}}`

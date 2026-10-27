@@ -18,11 +18,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/wire"
 )
 
-// TestAnnotateRebuildsNoSessionPart pins the annotate contract: one annotate
-// call makes the next put cycle build at most the annotation's own data — no
-// part holding a session's events is rebuilt or rewritten, the sessions'
-// list_sessions counts and authors stay what they were, and the annotations
-// still answer through sessionAnnotations with their author.
 func TestAnnotateRebuildsNoSessionPart(t *testing.T) {
 	const sessA = "11111111-4658-8650-854f-0c666c01d38e"
 	const sessB = "22222222-4658-8650-854f-0c666c01d38e"
@@ -50,8 +45,6 @@ func TestAnnotateRebuildsNoSessionPart(t *testing.T) {
 		t.Fatal("no parts after the settling ingest")
 	}
 
-	// The record annotate appends: one schema.Annotation line per session in
-	// the author's daily annotation source (q_annotate.go Call).
 	note := func(sess, id string) []byte {
 		line, err := json.Marshal(schema.Annotation{
 			ID:     id,
@@ -121,7 +114,6 @@ func TestAnnotateRebuildsNoSessionPart(t *testing.T) {
 	}
 }
 
-// plainLines is the two-line claude-code session plainSession writes.
 func plainLines(t *testing.T, session string) []byte {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "session.jsonl")
@@ -129,8 +121,6 @@ func plainLines(t *testing.T, session string) []byte {
 	return mustRead(t, p)
 }
 
-// lsAndAuthors lists the sessions and returns, per raw session id, its
-// list_sessions event_count and its session authors.
 func lsAndAuthors(t *testing.T, store string) (map[string]int64, map[string][]string) {
 	t.Helper()
 	ix, err := Open(store)
@@ -169,7 +159,6 @@ func lsAndAuthors(t *testing.T, store string) (map[string]int64, map[string][]st
 	return counts, authors
 }
 
-// dirHash is the digest of every file of a part dir, names and bytes.
 func dirHash(dir string) (string, error) {
 	h := sha256.New()
 	var names []string

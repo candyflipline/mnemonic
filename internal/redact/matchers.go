@@ -33,12 +33,10 @@ var matchers = [26]matcher{
 	m13, m14, m15, m16, m17, m18, m19, m20, m21, m22, m23, m24, m25,
 }
 
-// regexEntry is the regex-backed matcher for builtin rule i.
 func regexEntry(i int) matcher {
 	return regexMatcher(regexp.MustCompile(builtinRules[i].pattern), builtinRules[i].secretGroup)
 }
 
-// regexMatcher wraps one compiled regex and secret group as a matcher.
 func regexMatcher(re *regexp.Regexp, group int) matcher {
 	return func(text []byte, out [][2]int) [][2]int {
 		for _, loc := range re.FindAllSubmatchIndex(text, -1) {

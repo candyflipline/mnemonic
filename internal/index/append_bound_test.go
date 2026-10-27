@@ -13,12 +13,6 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// TestAppendRebuildsOnlyTheTouchedComponent: a 10-row append is bounded by
-// its component. Other hot components whose quiet window the append's
-// updated_ms passes do not settle into their cold shards in the append's
-// cycle (b would join e's shard), so an append to a hot source writes its
-// own part only, and an append to a settled source writes its own part and
-// the one shard it left.
 func TestAppendRebuildsOnlyTheTouchedComponent(t *testing.T) {
 	session, err := os.ReadFile("../../testdata/fixtures/claude-code/session.jsonl")
 	if err != nil {

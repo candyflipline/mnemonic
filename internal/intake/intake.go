@@ -125,8 +125,6 @@ func (s *session) submit(st *store.Committer, src store.ClientSource, op store.O
 	return t, err
 }
 
-// end stops the session's submissions with cause and returns once every
-// ticket it had submitted has resolved or ctx is done.
 func (s *session) end(ctx context.Context, cause error) error {
 	s.cancel(cause)
 	s.mu.Lock()
@@ -147,9 +145,6 @@ var (
 	errStreamCap  = status.Errorf(codes.ResourceExhausted, "server is at its cap of %d open push streams; retry later", maxStreams)
 )
 
-// admit counts a stream from before its Hello is read: an unregistered
-// stream already buffers up to a message. The spare streams over maxSessions
-// cover streams before Hello and displaced sessions still unwinding.
 func (s *service) admit() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -206,14 +201,6 @@ type pending struct {
 	ticket *store.Ticket
 }
 
-// Sync runs one client's session. The receive goroutine parses each Append
-// (parseAppend), submits it and queues its ticket on a channel of
-// windowAppends slots; this goroutine waits on the tickets in order and sends
-// each Ack. A Submit or Wait error ends the stream with Unavailable (or
-// ResourceExhausted for a full disk); a parse error with InvalidArgument; a
-// server-owned machine or harness with PermissionDenied. When the stream
-// ends, submitted requests still commit; their acks are dropped and the next
-// Welcome reports them.
 func (s *service) Sync(stream grpc.BidiStreamingServer[pushpb.ClientMsg, pushpb.ServerMsg]) error {
 	author := auth.Author(stream.Context())
 	if author == "" {
@@ -282,10 +269,6 @@ func (s *service) Sync(stream grpc.BidiStreamingServer[pushpb.ClientMsg, pushpb.
 	}
 }
 
-// recvHello reads the first message, which must arrive within helloLimit. The
-// stream counts against maxStreams from admit, so a silent one would hold its
-// slot for good. Returning from Sync cancels the stream, which unblocks the
-// Recv still running here.
 func recvHello(stream grpc.BidiStreamingServer[pushpb.ClientMsg, pushpb.ServerMsg]) (*pushpb.ClientMsg, error) {
 	type received struct {
 		m   *pushpb.ClientMsg
@@ -379,9 +362,6 @@ func toStatus(err error) error {
 	return status.Error(codes.Unavailable, err.Error())
 }
 
-// parseAppend is the edge: segments and author through store.NewClientSource,
-// the offset, head hash, names, raw_end and body through store.ParseOp with
-// the PUT's rules.
 func parseAppend(author, machine string, a *pushpb.Append) (store.ClientSource, store.Op, error) {
 	return parse(author, machine, a.GetHarness(), a.GetSrcId(), a.GetOffset(), a.GetHeadHash(), a.GetSourceName(), a.GetPath(), a.GetRawEnd(), a.GetBody())
 }

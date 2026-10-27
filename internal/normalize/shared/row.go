@@ -35,10 +35,8 @@ type EventRow struct {
 	payload CanonicalJSON
 }
 
-// Payload returns the canonical payload the row was built with.
 func (r *EventRow) Payload() CanonicalJSON { return r.payload }
 
-// SetPayload replaces the payload with canonical bytes.
 func (r *EventRow) SetPayload(c CanonicalJSON) {
 	r.payload = c
 	r.Event.PayloadJSON = c.s
@@ -247,8 +245,6 @@ func (r *EventRow) MarkReasoning() *EventRow {
 	return r.SetContentTypes([]string{"reasoning"})
 }
 
-// MapOf renders the tool row as the JSON object the fold embeds under
-// moraine_tool_io.
 func (t *ToolRow) MapOf() map[string]any {
 	return map[string]any{
 		"event_uid":           t.EventUID,

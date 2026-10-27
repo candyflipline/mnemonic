@@ -1,21 +1,4 @@
 #!/bin/sh
-# plainhome.sh — build the plain client HOME from the frozen raw copy, once.
-#
-# Decompresses every raw source (RAW/author=*/machine=*/harness=*/<src>.jsonl.zst)
-# to the harness-native path config.DefaultSources expects under a HOME, using
-# the path its manifest carries, so `HOME=$PH mnemonic push` globs it as a
-# developer machine's. A source whose native path is already claimed (two
-# authors or machines on one path) goes to a distinct project dir
-# (<root>/upl-N/...) under the same glob root; nothing is overwritten. Sources
-# no DefaultSources root matches (server-owned annotation/control) are counted
-# as unmapped and skipped. Counters only; no corpus content is printed.
-#
-# Adapted from arena/box/local-cold.sh `build` (lane/engine-box3 ddb22db).
-#
-# Env: BOX (default /var/lib/mnu); RAW (default $BOX/raw, read only);
-#      PH (default $BOX/plainhome, must not exist); FREEFLOOR_GB (default 60):
-#      refuse to start when the projected tree would leave less free on /.
-# Writes $BOX/out/base-plainhome-stats.txt. Run under the box lock.
 set -eu
 
 BOX=${BOX:-/var/lib/mnu}

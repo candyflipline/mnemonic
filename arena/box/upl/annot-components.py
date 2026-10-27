@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-# annot-components.py STORE [SESSIONS_FILE]
-#
-# The census behind the annotate stall: planParts (internal/index/ingest.go)
-# unions every source that shares a session id, and an annotation source
-# names its target sessions, so annotating one session makes its whole
-# component hot. This groups STORE/index/src checkpoints the way planParts
-# does (annotation sources left out) and prints, counts and sizes only,
-# how big the component of each session is: the cost one annotate call pays.
 import json, os, sys, collections
 
 store = sys.argv[1]

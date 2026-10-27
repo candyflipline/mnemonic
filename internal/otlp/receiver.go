@@ -29,8 +29,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/store"
 )
 
-// Harness is the harness name of the source a receiver appends to and of the
-// parser that reads it.
 const Harness = "otlp"
 
 // MaxBody is the largest request body, compressed or not, a receiver reads:
@@ -148,8 +146,6 @@ var otlpReadTimeout = 30 * time.Second
 
 var errReadTimeout = errors.New("request body did not arrive in time")
 
-// readBody returns the request body, gunzipped when sent gzip-encoded, and
-// refuses either form above MaxBody with 413.
 func readBody(w http.ResponseWriter, req *http.Request) ([]byte, int, error) {
 	var src io.Reader = http.MaxBytesReader(w, req.Body, MaxBody)
 	switch enc := req.Header.Get("Content-Encoding"); enc {
