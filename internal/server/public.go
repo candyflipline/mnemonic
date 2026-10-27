@@ -192,28 +192,13 @@ func (s *Server) serveInvite(w http.ResponseWriter, r *http.Request) {
 	invitePage.Execute(w, page)
 }
 
-// JoinRequest is the body of POST /i/{token}: the joining device's public
-// key and its machine name.
-type JoinRequest struct {
-	Key     string `json:"key"`
-	Machine string `json:"machine"`
-}
-
-// JoinAnswer is what a join gets back: the QUIC address to dial, the key
-// the server proves there, and the author the machine pushes as.
-type JoinAnswer struct {
-	Server    string `json:"server"`
-	ServerKey string `json:"server_key"`
-	Author    string `json:"author"`
-}
-
 func (s *Server) serveJoin(w http.ResponseWriter, r *http.Request) {
 	h, ok := index.ParseToken(r.PathValue("token"))
 	if !ok {
 		http.Error(w, bodyNotFound, http.StatusNotFound)
 		return
 	}
-	var req JoinRequest
+	var req wire.JoinRequest
 	dec := json.NewDecoder(io.LimitReader(r.Body, maxJoinBytes))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
@@ -234,7 +219,7 @@ func (s *Server) serveJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var b bytes.Buffer
-	json.NewEncoder(&b).Encode(JoinAnswer{Server: s.share.QUICAddr, ServerKey: s.share.ServerKey, Author: author})
+	json.NewEncoder(&b).Encode(wire.JoinAnswer{Server: s.share.QUICAddr, ServerKey: s.share.ServerKey, Author: author})
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(b.Bytes())
 }

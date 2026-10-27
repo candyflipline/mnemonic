@@ -16,7 +16,7 @@ import (
 
 	"github.com/candyflipline/mnemonic/internal/config"
 	"github.com/candyflipline/mnemonic/internal/qnet"
-	"github.com/candyflipline/mnemonic/internal/server"
+	"github.com/candyflipline/mnemonic/internal/wire"
 )
 
 func init() {
@@ -105,24 +105,24 @@ func inviteURL(raw string) (string, error) {
 	return u.String(), nil
 }
 
-func postJoin(invite, key, machine string) (server.JoinAnswer, error) {
-	body, _ := json.Marshal(server.JoinRequest{Key: key, Machine: machine})
+func postJoin(invite, key, machine string) (wire.JoinAnswer, error) {
+	body, _ := json.Marshal(wire.JoinRequest{Key: key, Machine: machine})
 	hc := &http.Client{Timeout: 30 * time.Second}
 	resp, err := hc.Post(invite, "application/json", bytes.NewReader(body))
 	if err != nil {
-		return server.JoinAnswer{}, fmt.Errorf("join: %w", err)
+		return wire.JoinAnswer{}, fmt.Errorf("join: %w", err)
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if err != nil {
-		return server.JoinAnswer{}, fmt.Errorf("join: %w", err)
+		return wire.JoinAnswer{}, fmt.Errorf("join: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return server.JoinAnswer{}, fmt.Errorf("join: %s: %s", resp.Status, strings.TrimSpace(string(b)))
+		return wire.JoinAnswer{}, fmt.Errorf("join: %s: %s", resp.Status, strings.TrimSpace(string(b)))
 	}
-	var ans server.JoinAnswer
+	var ans wire.JoinAnswer
 	if err := json.Unmarshal(b, &ans); err != nil || ans.Server == "" || ans.ServerKey == "" || ans.Author == "" {
-		return server.JoinAnswer{}, fmt.Errorf("join: the server answered %q, not a join", b)
+		return wire.JoinAnswer{}, fmt.Errorf("join: the server answered %q, not a join", b)
 	}
 	return ans, nil
 }
