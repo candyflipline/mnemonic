@@ -89,19 +89,23 @@ ok "r5: $(remote "journalctl -u mnemonic --since '$since' -o cat | grep 'mnemoni
 
 TMP=$(mktemp -d)
 chmod 700 "$TMP"
-trap 'rm -f "$TMP/auth"; rmdir "$TMP"' EXIT
+trap 'rm -f "$TMP/auth" "$TMP/out"; rmdir "$TMP"' EXIT
 printf 'Authorization: Bearer %s\n' "$(tr -d '\n' <"$TOKEN_FILE")" >"$TMP/auth"
 ca=()
 [[ -n "${CA_FILE:-}" ]] && ca=(--cacert "$CA_FILE")
-code=000
+# list_sessions needs a window with explicit timezones; the last day is enough to prove the index answers.
+body=$(printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_sessions","arguments":{"limit":1,"start_datetime":"%s","end_datetime":"%s"}}}' \
+	"$(date -u -v-1d +%FT%TZ)" "$(date -u +%FT%TZ)")
+code=000 iserr=unset
 for ((i = 0; i < 300; i += 3)); do
-	code=$(curl -sS "${ca[@]}" -o /dev/null -w '%{http_code} %{http_version}' --max-time 60 \
+	code=$(curl -sS ${ca[@]+"${ca[@]}"} -o "$TMP/out" -w '%{http_code} %{http_version}' --max-time 60 \
 		-H @"$TMP/auth" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H 'MCP-Protocol-Version: 2025-06-18' \
-		--data '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_sessions","arguments":{"limit":1}}}' \
-		"https://$PUBLIC/mcp" 2>/dev/null || true)
-	[[ "$code" == 200* ]] && break
+		--data "$body" "https://$PUBLIC/mcp" 2>/dev/null || true)
+	iserr=$(jq -r '.result.isError // false' "$TMP/out" 2>/dev/null || echo unparsed)
+	[[ "$code" == 200* && "$iserr" == false ]] && break
 	sleep 3
 done
-[[ "$code" == 200* ]] || fail "r6: MCP list_sessions through Caddy answered $code"
-ok "r6: MCP list_sessions through Caddy: HTTP $code; issuer $(openssl s_client -connect "$PUBLIC:443" -servername "$PUBLIC" </dev/null 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null)"
+rm -f "$TMP/out"
+[[ "$code" == 200* && "$iserr" == false ]] || fail "r6: MCP list_sessions through Caddy answered $code isError=$iserr"
+ok "r6: MCP list_sessions through Caddy: HTTP $code, isError=false; issuer $(openssl s_client -connect "$PUBLIC:443" -servername "$PUBLIC" </dev/null 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null)"
 ok "rollback done in $(($(date +%s) - t0)) s; Mac client: arena/cutover/mac-client.sh rollback"

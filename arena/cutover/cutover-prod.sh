@@ -177,6 +177,12 @@ step_f() {
 	ok "f: $PUBLIC:8741 reachable from here: $code (before step g this is the old listener, if any)"
 }
 
+# list_sessions needs a window with explicit timezones; the last day is enough to prove the index answers.
+mcp_list_body() {
+	printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_sessions","arguments":{"limit":1,"start_datetime":"%s","end_datetime":"%s"}}}' \
+		"$(date -u -v-1d +%FT%TZ)" "$(date -u +%FT%TZ)"
+}
+
 issuer_of() {
 	openssl s_client -connect "$PUBLIC:$1" -servername "$PUBLIC" </dev/null 2>/dev/null |
 		openssl x509 -noout -issuer -enddate 2>/dev/null | tr '\n' ' '
@@ -186,7 +192,7 @@ step_g() {
 	local since t0 want_issuer cafile hdr code got port i
 	TMP=$(mktemp -d)
 	chmod 700 "$TMP"
-	trap 'rm -f "$TMP/ca.pem" "$TMP/auth"; rmdir "$TMP"' EXIT
+	trap 'rm -f "$TMP/ca.pem" "$TMP/auth" "$TMP/out"; rmdir "$TMP"' EXIT
 	t0=$(date +%s)
 	since=$(remote 'date -u "+%F %T"')
 	remote 'systemctl restart mnemonic'
@@ -218,12 +224,13 @@ step_g() {
 		curl -fsS https://letsencrypt.org/certs/staging/letsencrypt-stg-root-x1.pem https://letsencrypt.org/certs/staging/letsencrypt-stg-root-x2.pem >"$cafile"
 		curlca=(--cacert "$cafile")
 	fi
-	code=$(curl -sS "${curlca[@]}" -o /dev/null -w '%{http_code} %{http_version}' --max-time 60 \
+	code=$(curl -sS ${curlca[@]+"${curlca[@]}"} -o "$TMP/out" -w '%{http_code} %{http_version}' --max-time 60 \
 		-H @"$hdr" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H 'MCP-Protocol-Version: 2025-06-18' \
-		--data '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_sessions","arguments":{"limit":1}}}' \
-		"https://$PUBLIC/mcp")
-	[[ "$code" == 200* ]] || fail "g: MCP list_sessions on https://$PUBLIC/mcp answered $code"
-	ok "g: MCP list_sessions from this machine: HTTP $code"
+		--data "$(mcp_list_body)" "https://$PUBLIC/mcp")
+	iserr=$(jq -r '.result.isError // false' "$TMP/out" 2>/dev/null || echo unparsed)
+	rm -f "$TMP/out"
+	[[ "$code" == 200* && "$iserr" == false ]] || fail "g: MCP list_sessions on https://$PUBLIC/mcp answered $code isError=$iserr"
+	ok "g: MCP list_sessions from this machine: HTTP $code, isError=false"
 
 	local bad hs
 	bad=$(remote "journalctl -u mnemonic --since '$since' -o cat | grep -ciE 'panic|fatal|oom|out of memory|acme.*error|autocert.*error' || true")
