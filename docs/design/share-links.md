@@ -1,6 +1,6 @@
 # Links
 
-Status: approved by the owner on 2026-10-27 with the calls listed at the end. Built and merged to main on 2026-10-27. Not deployed: the tunnel, DNS and deploy wait for the owner's go.
+Status: approved by the owner on 2026-10-27 with the calls listed at the end. Deployed on 2026-10-27 as 049ec5b0, at https://share.askloyal.com. Operations are in [docs/cutover.md](../cutover.md).
 
 A link is one URL that grants one thing. There are two kinds:
 

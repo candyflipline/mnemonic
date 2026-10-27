@@ -1,0 +1,7 @@
+tunnel: a45033c5-caca-454e-85a0-a2d6a807785f
+credentials-file: /etc/cloudflared/mnemonic-share.json
+no-autoupdate: true
+ingress:
+  - hostname: share.askloyal.com
+    service: http://127.0.0.1:8742
+  - service: http_status:404

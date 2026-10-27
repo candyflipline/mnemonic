@@ -80,6 +80,37 @@ the handshake.
 The old `listen`, `push_listen`, `[tls]` and `[[tokens]]` settings fail to
 load with a message that names `[quic]` or `[[keys]]`.
 
+## Links
+
+Read links and invite links are served on a loopback listener and published
+by a Cloudflare Tunnel, so no inbound TCP port opens. The design is
+[docs/design/share-links.md](design/share-links.md).
+
+```toml
+[share]
+listen    = "127.0.0.1:8742"
+base_url  = "https://share.askloyal.com"
+quic_addr = "5.78.147.233:8741"
+```
+
+`quic_addr` is the address `mnemonic join` writes into a joining machine's
+config. Inviting a new author takes the `admin` scope on the inviter's key.
+
+The tunnel is `mnemonic-share` in the askloyal Cloudflare account, routed by
+a CNAME for `share.askloyal.com`. On the box:
+
+- `/usr/local/bin/cloudflared`, pinned to 2026.10.5, with no autoupdate.
+- `/etc/cloudflared/config.yml` is `ops/cloudflared/config.yml`.
+- `/etc/cloudflared/mnemonic-share.json` holds the tunnel's credentials and
+  is in no repo. Losing it means `cloudflared tunnel delete mnemonic-share`,
+  then create and route the tunnel again.
+- The `cloudflared-mnemonic` systemd unit is
+  `ops/systemd/cloudflared-mnemonic.service` and runs as user `cloudflared`.
+
+Once a `link`, `join` or `revoke` record exists, a build older than links
+refuses the control log at boot. Roll back only to a build that reads
+those records.
+
 ## Client onboarding
 
 Installing the client, pointing Claude Code, Codex and Cursor at the server,
