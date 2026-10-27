@@ -107,7 +107,9 @@ func inviteURL(raw string) (string, error) {
 
 func postJoin(invite, key, machine string) (wire.JoinAnswer, error) {
 	body, _ := json.Marshal(wire.JoinRequest{Key: key, Machine: machine})
-	hc := &http.Client{Timeout: 30 * time.Second}
+	// A redirect could point the POST at a host inviteURL never checked, and
+	// the answer is the server key this machine will trust.
+	hc := &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	resp, err := hc.Post(invite, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return wire.JoinAnswer{}, fmt.Errorf("join: %w", err)
