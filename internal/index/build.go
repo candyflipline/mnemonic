@@ -28,10 +28,6 @@ type built struct {
 	li  int
 }
 
-func (b built) after(w built) bool {
-	return b.lf > w.lf || b.lf == w.lf && b.li > w.li
-}
-
 var partEncoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(runtime.GOMAXPROCS(0)), zstd.WithLowerEncoderMem(true))
 var partHeavyEncoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(runtime.GOMAXPROCS(0)), zstd.WithLowerEncoderMem(true))
 
@@ -83,16 +79,6 @@ type rowLoc struct {
 	lf     int64
 	li     uint16
 	holder bool
-}
-
-func (l rowLoc) after(w rowLoc) bool {
-	switch {
-	case l.holder != w.holder:
-		return w.holder
-	case l.lf != w.lf:
-		return l.lf > w.lf
-	}
-	return l.li > w.li
 }
 
 func walkLog(store string, c ckpt, from int64, fn func(rec []byte, off int64, i int) error) error {
@@ -313,7 +299,7 @@ type winner struct {
 func offerRow(win map[string]winner, b built, m member) {
 	if w, ok := win[b.row.UID]; ok {
 		if w.b.src == b.src {
-			if b.row.Version < w.b.row.Version || b.row.Version == w.b.row.Version && !b.after(w.b) {
+			if b.row.Version < w.b.row.Version {
 				return
 			}
 		} else if !memberBeats(b.row.Version, m, w.b.row.Version, w.member) {

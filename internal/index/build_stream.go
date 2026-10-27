@@ -95,7 +95,7 @@ func (p *keyPass) offer(src uint16, author string, rec []byte, loc rowLoc) error
 	if at, ok := p.win[string(f.uid)]; ok {
 		w := &p.keys[at]
 		if w.src == src {
-			if k.version < w.version || k.version == w.version && !k.loc.after(w.loc) {
+			if k.version < w.version {
 				return nil
 			}
 		} else if !memberBeats(k.version, p.members[src], w.version, p.members[w.src]) {
