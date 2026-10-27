@@ -89,9 +89,9 @@ func (s *Server) linkView(token string, l index.ReadLink) export.LinkView {
 }
 
 func (s *Server) markdownSize(db *index.DB, token string, l index.ReadLink, n int) (int64, error) {
-	var c counted
+	var c export.Counted
 	err := export.WriteSessionMarkdown(&c, db, s.linkView(token, l), n)
-	return c.n, err
+	return c.N, err
 }
 
 func (s *Server) serveRead(w http.ResponseWriter, r *http.Request) {
@@ -113,7 +113,7 @@ func (s *Server) serveRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v := s.linkView(p.token, l)
-	out := &counted{w: w}
+	out := &export.Counted{W: w}
 	switch {
 	case p.n == 0 && p.ext == "html":
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -129,7 +129,7 @@ func (s *Server) serveRead(w http.ResponseWriter, r *http.Request) {
 		err = export.WriteSessionATIF(out, db, v, p.n)
 	}
 	if err != nil {
-		if out.n > 0 {
+		if out.N > 0 {
 			panic(http.ErrAbortHandler)
 		}
 		w.Header().Del("Content-Type")
@@ -237,22 +237,4 @@ func (s *Server) serveJoin(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(&b).Encode(JoinAnswer{Server: s.share.QUICAddr, ServerKey: s.share.ServerKey, Author: author})
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(b.Bytes())
-}
-
-// counted is a response body that counts what has been written, so an
-// error after the first byte aborts the response instead of ending a 200
-// early. A nil w only counts.
-type counted struct {
-	w io.Writer
-	n int64
-}
-
-func (c *counted) Write(p []byte) (int, error) {
-	if c.w == nil {
-		c.n += int64(len(p))
-		return len(p), nil
-	}
-	n, err := c.w.Write(p)
-	c.n += int64(n)
-	return n, err
 }

@@ -51,7 +51,7 @@ func Handler(ix *index.Index, ctl *index.Controls) http.Handler {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		out := &counted{w: w}
+		out := &Counted{W: w}
 		if req.kind == "atif" {
 			err = WriteATIF(out, db, req.session, hidden)
 		} else {
@@ -59,7 +59,7 @@ func Handler(ix *index.Index, ctl *index.Controls) http.Handler {
 		}
 		switch {
 		case err == nil:
-		case out.n > 0:
+		case out.N > 0:
 			panic(http.ErrAbortHandler)
 		case errors.Is(err, ErrSessionNotFound):
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -71,16 +71,21 @@ func Handler(ix *index.Index, ctl *index.Controls) http.Handler {
 	})
 }
 
-// counted is the response body, counting what has been written, so an error
-// after the first byte aborts the response instead of ending a 200 early.
-type counted struct {
-	w io.Writer
-	n int64
+// Counted is a response body that counts what has been written, so an error
+// after the first byte aborts the response instead of ending a 200 early. A
+// nil W only counts.
+type Counted struct {
+	W io.Writer
+	N int64
 }
 
-func (c *counted) Write(p []byte) (int, error) {
-	n, err := c.w.Write(p)
-	c.n += int64(n)
+func (c *Counted) Write(p []byte) (int, error) {
+	if c.W == nil {
+		c.N += int64(len(p))
+		return len(p), nil
+	}
+	n, err := c.W.Write(p)
+	c.N += int64(n)
 	return n, err
 }
 
@@ -99,14 +104,14 @@ func scope(ctx context.Context, db *index.DB, includePrivate bool) (index.Sessio
 func serveDataset(w http.ResponseWriter, db *index.DB, req request, hidden map[string]bool, sessions index.SessionFilter) {
 	w.Header().Set("Trailer", SkippedTrailer)
 	w.Header().Set("Content-Type", "application/x-ndjson")
-	out := &counted{w: w}
+	out := &Counted{W: w}
 	skipped, err := Dataset(out, db, req.annotation, req.perTask, hidden, sessions.Readable)
 	for _, s := range skipped {
 		w.Header().Add(SkippedTrailer, s.SessionID+": "+s.Err.Error())
 	}
 	switch {
 	case err == nil:
-	case out.n > 0:
+	case out.N > 0:
 		panic(http.ErrAbortHandler)
 	case errors.Is(err, ErrEveryFailed):
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
