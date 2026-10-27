@@ -67,9 +67,9 @@ snap() { # name: point values + cgroup counters
 }
 peaks() { # name idleanon idlefile: per-column peaks and deltas over idle
 	f=$out/$1.samples
-	a=$(sort -g "$f" | awk 'NF==3{print $1}' | tail -1)
-	fl=$(sort -g "$f" | awk 'NF==3{print $2}' | tail -1)
-	sh=$(sort -g "$f" | awk 'NF==3{print $3}' | tail -1)
+	a=$(awk 'NF==3{if($1+0>m)m=$1+0}END{print m+0}' "$f")
+	fl=$(awk 'NF==3{if($2+0>m)m=$2+0}END{print m+0}' "$f")
+	sh=$(awk 'NF==3{if($3+0>m)m=$3+0}END{print m+0}' "$f")
 	echo "$1 peak_RssAnon_MiB=$((a / 1024)) delta_anon_MiB=$(((a - $2) / 1024)) peak_RssFile_MiB=$((fl / 1024)) delta_file_MiB=$(((fl - $3) / 1024)) peak_RssShmem_MiB=$((sh / 1024)) samples=$(grep -c . "$f")"
 }
 big=$(sed -n 1p "$ids")
