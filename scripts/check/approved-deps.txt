@@ -2,6 +2,7 @@ github.com/BurntSushi/toml
 github.com/bmatcuk/doublestar/v4
 github.com/klauspost/compress
 github.com/parquet-go/parquet-go
+github.com/quic-go/quic-go
 go.opentelemetry.io/proto/otlp
 golang.org/x/crypto
 google.golang.org/genproto/googleapis/rpc

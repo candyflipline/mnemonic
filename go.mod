@@ -8,6 +8,7 @@ require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/bmatcuk/doublestar/v4 v4.8.0
 	github.com/parquet-go/parquet-go v0.32.0
+	github.com/quic-go/quic-go v0.64.1
 	go.opentelemetry.io/proto/otlp v1.11.1
 	golang.org/x/crypto v0.57.0
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260928230214-8a89bd6388cc
