@@ -314,11 +314,7 @@ func openHolders(store string, cks []ckpt, byPrev map[string]string) (holders []
 		if h == nil {
 			continue
 		}
-		// A holder holding an annotation member is a regroup leftover from
-		// when annotation sources joined their targets' components: its
-		// sections carry the annotations' author, so its members read whole
-		// and none of that section is taken.
-		if holderIndexOf(h, c.Key) >= 0 && !slices.ContainsFunc(h.meta.Members, func(m member) bool { return m.Harness == schema.AnnotationHarness }) {
+		if holderIndexOf(h, c.Key) >= 0 {
 			holders[i] = h
 		}
 	}

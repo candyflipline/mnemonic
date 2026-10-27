@@ -90,7 +90,7 @@ func (db *DB) EachSession(hidden map[string]bool, fn func(ExportSession) error) 
 }
 
 // ExportSession is one session by id, ok false when the index does not hold
-// it. Sessions made only of annotation rows come back with no rows.
+// it.
 func (db *DB) ExportSession(id string) (ExportSession, bool, error) {
 	st, ok := db.part(id)
 	if !ok {
