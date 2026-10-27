@@ -11,6 +11,9 @@
 # source's two raw files (never recursive), boots a second serve and records
 # that boot cycle too (the reverse rebuild), so the next variant starts from the
 # same state. NCALLS=0 records the control: an idle put-free window.
+# SESSIONS holds bare engine session ids; the annotate tool takes
+# "session:" + base64url of that id, derived per call here (the bare form is
+# refused: parseMcpID requires the prefix, internal/index/q_common.go:66).
 # Run under `flock -x /var/lib/mnu/box.lock` (timed). Prints counts and
 # timings only; session ids are read from SESSIONS and never printed.
 set -eu
@@ -102,10 +105,11 @@ i=0
 while [ "$i" -lt "$ncalls" ]; do
 	i=$((i + 1))
 	sid=$(sed -n "$(((i - 1) % nlines + 1))p" "$sessions")
+	pref=$(printf 'session:%s' "$(printf %s "$sid" | base64 -w0 | tr '+/' '-_' | tr -d '=')")
 	r=$(curl -sf -H 'MCP-Protocol-Version: 2025-06-18' -H "Authorization: Bearer $(cat "$TMP/admin.tok")" \
 		-H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
-		-d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"annotate\",\"arguments\":{\"session_id\":\"$sid\",\"name\":\"annot-probe-$i\",\"number\":$i}}}" "$url/mcp" || echo '{}')
-	e=$(printf %s "$r" | jq -r '.result.isError // "x"')
+		-d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"annotate\",\"arguments\":{\"session_id\":\"$pref\",\"name\":\"annot-probe-$i\",\"number\":$i}}}" "$url/mcp" || echo '{}')
+	e=$(printf %s "$r" | jq -r '.result.isError // false')
 	d=$(printf %s "$r" | jq -r '.result.structuredContent.data.duplicate // false')
 	if [ "$e" = false ]; then ok=$((ok + 1)); else fail=$((fail + 1)); fi
 	[ "$d" = true ] && dup=$((dup + 1))
