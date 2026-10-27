@@ -43,8 +43,6 @@ func spanKindInt(kind string) int {
 	return spanKindInternal
 }
 
-func ownsUsage(kind string) bool { return kind == "chat" }
-
 func statusCode(status string) int {
 	if status == "error" {
 		return statusError
@@ -115,7 +113,9 @@ func intAttr(key string, value uint64) otlpAttr {
 // by two spaces in field order, one span at a time, the spans ordered by start
 // time. The trace id is derived from the session id, a span's id is its
 // spans.span_id (16 hex chars, 8 bytes), and the root keeps no parentSpanId.
-// A session in hidden is not found.
+// Only chat spans carry gen_ai.usage.*: the spans relation rolls usage up onto
+// invoke_agent and turn spans, so a sum over the trace would count it twice. A
+// session in hidden is not found.
 func WriteOTLP(w io.Writer, db *index.DB, sessionID string, hidden map[string]bool) error {
 	if hidden[sessionID] || !db.ExportHasSession(sessionID) {
 		return notFound(sessionID)
@@ -162,7 +162,7 @@ func otlpSpanOf(traceID, sessionID string, row schema.Span) otlpSpan {
 	if row.Model != "" {
 		s.Attributes = append(s.Attributes, strAttr("gen_ai.request.model", row.Model))
 	}
-	if ownsUsage(kind) {
+	if kind == "chat" {
 		s.Attributes = append(s.Attributes,
 			intAttr("gen_ai.usage.input_tokens", row.InputTokens),
 			intAttr("gen_ai.usage.output_tokens", row.OutputTokens))
