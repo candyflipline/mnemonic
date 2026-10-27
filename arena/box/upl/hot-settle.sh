@@ -25,7 +25,7 @@ LOG=$OUT/settle-$(basename "$DIR")-$(date +%s).log
 systemd-run --scope -q -p MemoryMax=$MEM -p MemorySwapMax=0 env GOMAXPROCS=4 "$BIN" serve --config "$CFG/server.toml" > "$LOG" 2>&1 </dev/null &
 PID=$!
 trap 'kill $PID 2>/dev/null || true' EXIT
-until grep -q "push 127.0.0.1" "$LOG"; do kill -0 $PID; sleep 1; done
+until grep -q "cycle boot:" "$LOG"; do kill -0 $PID; sleep 1; done
 H=$CFG/home
 mkdir -p "$H/.claude/projects/settle"
 head -1 "$CFG/token.out" > "$CFG/token"
