@@ -81,8 +81,8 @@ const settleSource = 15 * time.Minute
 // The files are config.DefaultSources; there is no config file and no server.
 // The redactor is therefore push's with no extra patterns (redact.New(nil)),
 // the build a config-less client pushes with. MCP is loopback-only
-// (requireLoopback) and answers the bearer token "local" as this machine's
-// user with every scope. Session controls load from dataDir, empty until a
+// (requireLoopback) and every connection is auth.Local: this machine's user
+// with every scope. Session controls load from dataDir, empty until a
 // control tool writes its first record through the store under the same
 // dataDir.
 func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) error {
