@@ -325,8 +325,9 @@ func openDelta(dir string, d delta) (*Part, error) {
 
 	// win keeps, per uid, the row a full build would pick (offerRow). The
 	// image's rows come through memberRows — the image is each member's
-	// holder, its heavy records resolved from the image — and the delta's
-	// rows, the tails the append copied, through the delta logs.
+	// holder — and the delta's rows, the tails the append copied, through
+	// the delta logs. No row's heavy record is held: the payload reads one
+	// through the bounded heavyReader when indexRows asks for it.
 	win := map[string]winner{}
 	authors := map[string][]string{}
 	doc := 0
@@ -375,12 +376,11 @@ func openDelta(dir string, d delta) (*Part, error) {
 	heavy := &heavyReader{logs: []io.ReaderAt{segments{img.heavyB, heavyD}}, recs: map[heavyKey][][]byte{}}
 	files := map[string][]byte{}
 	place := func(b built) (*Row, int64, int, error) { return b.row, b.lf, b.li, nil }
-	payload := func(b built) string {
-		if b.hrec != nil {
-			return heavyPayload(b.hrec)
-		}
-		return heavy.payload(built{row: b.row})
-	}
+	// Every row's heavy record lives in the open's one heavy reader (the
+	// image's heavy then this delta's), so the payload reads it by the row's
+	// frame alone: built{row: b.row} drops src, which names the member, not
+	// a reader segment.
+	payload := func(b built) string { return heavy.payload(built{row: b.row}) }
 	write := func(name string, b []byte) error { files[name] = b; return nil }
 	meta, lsRecs, err := indexRows(bySession, place, payload, write)
 	if err != nil {
