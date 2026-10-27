@@ -85,7 +85,7 @@ func (s *Server) Handler() http.Handler { return s.handler }
 // is off until set.
 func (s *Server) StoreOTLPContent(on bool) { s.otlp.SetStoreContent(on) }
 
-// ServePush serves native gRPC on the separately bound push listener.
+// ServePush serves native gRPC on l, the QUIC push listener.
 func (s *Server) ServePush(l net.Listener) error { return s.push.Serve(l) }
 
 // Drain ends live sessions with Unavailable. The caller first closes the
