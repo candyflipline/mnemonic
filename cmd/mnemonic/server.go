@@ -61,7 +61,9 @@ func serve(args []string) error {
 		srv.Run(ctx)
 	}()
 
-	hs := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	tlsLog := newTLSLogWriter(cfg.Listen)
+	defer tlsLog.Stop()
+	hs := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second, ErrorLog: log.New(tlsLog, "", 0)}
 	ended := make(chan error, 2)
 	go func() { ended <- hs.Serve(httpListener) }()
 	go func() {
