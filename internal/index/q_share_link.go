@@ -146,7 +146,7 @@ func createInvite(c *Controls, st *store.Committer, site LinkSite, id auth.Ident
 	c.write.Lock()
 	defer c.write.Unlock()
 	now := time.Now().UTC()
-	if _, ok := c.inviteTenant(author, id.Tenant(), now); ok {
+	if c.authorInvitedElsewhere(author, id.Tenant(), now) {
 		return nil, "", argErrorf("author %s is invited into another tenant", author)
 	}
 	r, token, err := c.newLink(st, controlRecord{Kind: linkInvite, InviteAuthor: author, Expires: now.Add(days),

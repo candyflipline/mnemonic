@@ -224,17 +224,15 @@ func (c *Controls) revoke(st *store.Committer, id auth.Identity, linkID string) 
 	return err
 }
 
-// inviteTenant is the tenant a live invite for author names, other than
-// tenant, if one does: an author sits in one tenant.
-func (c *Controls) inviteTenant(author, tenant string, now time.Time) (string, bool) {
+func (c *Controls) authorInvitedElsewhere(author, tenant string, now time.Time) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	for _, l := range c.links {
 		if l.kind == linkInvite && l.invite == author && l.tenant != tenant && l.live(now) {
-			return l.tenant, true
+			return true
 		}
 	}
-	return "", false
+	return false
 }
 
 func (c *Controls) owned(id auth.Identity, now time.Time) []link {
