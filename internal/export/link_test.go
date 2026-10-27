@@ -195,3 +195,26 @@ func TestLinkAgentIDOnlyFromAgentCalls(t *testing.T) {
 		}
 	}
 }
+
+func TestLinkHumanPromptKeepsTags(t *testing.T) {
+	human := `,"origin":{"kind":"human"}`
+	db := linkDB(t, []string{
+		record("user", "u1", "2026-10-27T10:00:00.000Z", human, `"<div>pasted snippet</div>\nwhy is this broken?"`),
+		record("assistant", "a1", "2026-10-27T10:00:01.000Z", "", `[{"type":"text","text":"Unclosed."}]`),
+		record("user", "u2", "2026-10-27T10:00:02.000Z", human, `"<b>only a tag</b>"`),
+		record("assistant", "a2", "2026-10-27T10:00:03.000Z", "", `[{"type":"text","text":"Bold."}]`),
+		record("user", "u3", "2026-10-27T10:00:04.000Z", human, `"<system-reminder>x</system-reminder>kept words"`),
+	})
+	ls, err := openLinkSession(db, linkView(time.Date(2026, 10, 27, 11, 0, 0, 0, time.UTC)), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, tr := range ls.th.Turns {
+		got = append(got, tr.Prompt)
+	}
+	want := []string{"<div>pasted snippet</div>\nwhy is this broken?", "<b>only a tag</b>", "kept words"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("prompts:\n%q\nwant:\n%q", got, want)
+	}
+}

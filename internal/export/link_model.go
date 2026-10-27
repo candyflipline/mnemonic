@@ -155,7 +155,7 @@ func classifyUser(text, raw string) event {
 	if ev.class == classPrompt {
 		if strings.HasPrefix(text, "<command-message>") {
 			ev = commandPrompt(ev)
-		} else if names, rest := stripHarness(text); len(names) > 0 {
+		} else if names, rest := stripHarness(text); len(names) > 0 && p.Origin.Kind != "human" {
 			ev.text = rest
 			if rest == "" {
 				ev.class, ev.title = classContext, "Harness context: "+strings.Join(names, ", ")
