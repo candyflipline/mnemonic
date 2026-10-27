@@ -95,7 +95,7 @@ func TestAnnotateStoresOnlyRedactedText(t *testing.T) {
 	const awsKey = "AKIAIOSFODNN7EXAMPLE"
 	const ghToken = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef1234"
 	args, err := json.Marshal(map[string]any{
-		"session_id": formatSessionID(session),
+		"session_id": FormatSessionID(session),
 		"name":       "deploy-note",
 		"text":       "Deploy with " + awsKey + " using " + ghToken + " today.",
 	})

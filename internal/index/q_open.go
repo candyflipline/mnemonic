@@ -321,7 +321,7 @@ func openSessionData(scan *sessionScan, pageTurns []any, nextCursor any) map[str
 	return map[string]any{
 		"kind": "session",
 		"session": map[string]any{
-			"id":                 formatSessionID(m.sessionID),
+			"id":                 FormatSessionID(m.sessionID),
 			"title":              compactOptionalLine(label.title, summaryPreviewChars),
 			"source":             compactOptionalLine(scan.source, summaryToolNameChars),
 			"started_at":         formatRFC3339UTCMillis(m.firstEventUnixMs),
@@ -410,7 +410,7 @@ func stringSliceAny(values []string) []any {
 func openTurnData(scan *sessionScan, turn *turnAccum, c *turnCompact, events []any, nextCursor any) map[string]any {
 	m := c.metadata
 	turnID := formatTurnID(m.sessionID, m.turnSeq)
-	sessionID := formatSessionID(m.sessionID)
+	sessionID := FormatSessionID(m.sessionID)
 	toolsCalled, toolsTruncated := compactTools(c.toolsCalled)
 	if events == nil {
 		events = []any{}
@@ -484,7 +484,7 @@ func compactEventSummary(r *navRow) (string, bool) {
 func openEventData(scan *sessionScan, r *navRow, parentTurn *turnAccum) map[string]any {
 	m := scan.metadata
 	eventID := formatEventID(r.eventUID)
-	sessionID := formatSessionID(r.sessionID)
+	sessionID := FormatSessionID(r.sessionID)
 	turnID := formatTurnID(r.sessionID, r.turnSeq)
 	var terminal bool
 	if parentTurn.terminalEventUID != "" {

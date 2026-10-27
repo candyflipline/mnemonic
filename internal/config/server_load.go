@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -72,7 +73,36 @@ func LoadServer(path string) (Server, error) {
 			}
 		}
 	}
+	if cfg.Share != nil {
+		if err := cfg.Share.check(); err != nil {
+			return Server{}, fmt.Errorf("%s: [share] %w", path, err)
+		}
+	}
 	return cfg, nil
+}
+
+func (s *Share) check() error {
+	if s.Listen == "" {
+		s.Listen = DefaultShareListen
+	}
+	host, port, err := net.SplitHostPort(s.Listen)
+	n, portErr := strconv.Atoi(port)
+	if err != nil || portErr != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("listen must be a host:port with port 1..65535")
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("listen %s is not a loopback address; links reach the world only through the tunnel", s.Listen)
+	}
+	u, err := url.Parse(s.BaseURL)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return fmt.Errorf("base_url %q must be an http(s) origin such as https://share.example.com", s.BaseURL)
+	}
+	host, port, err = net.SplitHostPort(s.QUICAddr)
+	n, portErr = strconv.Atoi(port)
+	if err != nil || host == "" || portErr != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("quic_addr %q must be the host:port joining machines dial", s.QUICAddr)
+	}
+	return nil
 }
 
 func removedKey(k toml.Key) string {

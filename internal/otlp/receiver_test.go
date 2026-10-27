@@ -138,7 +138,7 @@ func TestReceiver(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
-			srv, err := server.New(dir)
+			srv, err := server.New(dir, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -280,7 +280,7 @@ const cycleJSON = `{"resourceSpans":[{
 func startServer(t *testing.T, author string, storeContent bool) (string, *server.Server, *httptest.Server) {
 	t.Helper()
 	dir := t.TempDir()
-	srv, err := server.New(dir)
+	srv, err := server.New(dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -466,7 +466,7 @@ func TestReceiverRows(t *testing.T) {
 	})
 
 	t.Run("decodes beyond the slots", func(t *testing.T) {
-		srv, err := server.New(t.TempDir())
+		srv, err := server.New(t.TempDir(), nil)
 		if err != nil {
 			t.Fatal(err)
 		}

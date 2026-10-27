@@ -54,8 +54,7 @@ func initCmd(args []string) error {
 	if err != nil {
 		return fmt.Errorf("init: home: %w", err)
 	}
-	dir := filepath.Join(home, ".mnemonic")
-	configPath := filepath.Join(dir, "config.toml")
+	configPath := filepath.Join(home, ".mnemonic", "config.toml")
 	if runtime.GOOS == "darwin" {
 		if err := checkLaunchdTakeover(home, *label, *force); err != nil {
 			return err
@@ -73,42 +72,64 @@ func initCmd(args []string) error {
 		return fmt.Errorf("--server-key <key> is required")
 	}
 
-	if *machine == "" {
-		host, err := os.Hostname()
-		if err != nil {
-			return fmt.Errorf("init: machine: %w", err)
-		}
-		*machine = config.ShortHost(host)
-	}
-	if !wire.ValidSegment(*machine) {
-		return fmt.Errorf("machine %q must match [a-z0-9._-]+", *machine)
-	}
-	if _, err := os.Stat(configPath); err == nil && !*force {
-		return fmt.Errorf("%s already exists; pass --force to overwrite it", configPath)
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("init: %s: %w", dir, err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return fmt.Errorf("init: %s: %w", dir, err)
-	}
-
-	cfg := config.Client{
-		Server:    *server,
-		ServerKey: *serverKey,
-		KeyFile:   config.DefaultKeyFile,
-		Machine:   *machine,
-		Sources:   append([]config.SourceGlob(nil), config.DefaultSources...),
-	}
-	if err := writeClientConfig(configPath, cfg); err != nil {
+	name, err := machineName(*machine)
+	if err != nil {
 		return err
 	}
-	fmt.Println("wrote " + configPath)
+	cfg := clientConfig(*server, *serverKey, name)
+	if err := saveConfig(configPath, cfg, *force); err != nil {
+		return err
+	}
 	if err := printKey(cfg.KeyFile, *author); err != nil {
 		return err
 	}
 
 	return installScheduler(home, *label)
+}
+
+// machineName is name, or this host's short name when name is empty.
+func machineName(name string) (string, error) {
+	if name == "" {
+		host, err := os.Hostname()
+		if err != nil {
+			return "", fmt.Errorf("machine: %w", err)
+		}
+		name = config.ShortHost(host)
+	}
+	if !wire.ValidSegment(name) {
+		return "", fmt.Errorf("machine %q must match [a-z0-9._-]+", name)
+	}
+	return name, nil
+}
+
+func clientConfig(server, serverKey, machine string) config.Client {
+	return config.Client{
+		Server:    server,
+		ServerKey: serverKey,
+		KeyFile:   config.DefaultKeyFile,
+		Machine:   machine,
+		Sources:   append([]config.SourceGlob(nil), config.DefaultSources...),
+	}
+}
+
+// saveConfig writes cfg to configPath in a 0700 directory, refusing to
+// replace an existing file unless force.
+func saveConfig(configPath string, cfg config.Client, force bool) error {
+	if _, err := os.Stat(configPath); err == nil && !force {
+		return fmt.Errorf("%s already exists; pass --force to overwrite it", configPath)
+	}
+	dir := filepath.Dir(configPath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("%s: %w", dir, err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("%s: %w", dir, err)
+	}
+	if err := writeClientConfig(configPath, cfg); err != nil {
+		return err
+	}
+	fmt.Println("wrote " + configPath)
+	return nil
 }
 
 func installScheduler(home, label string) error {

@@ -53,7 +53,8 @@ var pacific = func() *time.Location {
 	return loc
 }()
 
-func pacificText(t time.Time) string { return t.In(pacific).Format("Jan 2, 2006 3:04 PM MST") }
+// PacificText is t as the owner reads every time: in San Francisco time.
+func PacificText(t time.Time) string { return t.In(pacific).Format("Jan 2, 2006 3:04 PM MST") }
 
 type shareLink struct{}
 
@@ -158,9 +159,9 @@ func createInvite(c *Controls, st *store.Committer, site LinkSite, id auth.Ident
 		return nil, "", err
 	}
 	url := site.InviteURL(token)
-	data := map[string]any{"url": url, "link_id": r.LinkID, "kind": string(linkInvite), "author": author, "expires": pacificText(r.Expires)}
+	data := map[string]any{"url": url, "link_id": r.LinkID, "kind": string(linkInvite), "author": author, "expires": PacificText(r.Expires)}
 	text := fmt.Sprintf("%s\nInvite %s admits one machine as %s until %s. On that machine: mnemonic join %s",
-		url, r.LinkID, author, pacificText(r.Expires), url)
+		url, r.LinkID, author, PacificText(r.Expires), url)
 	return data, text, nil
 }
 
@@ -220,11 +221,11 @@ func createRead(ctx context.Context, db *DB, c *Controls, st *store.Committer, s
 	}
 	url := site.ReadURL(token)
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\nLink %s reads %s as of now, until %s.", url, r.LinkID, count(len(rows), "session"), pacificText(r.Expires))
+	fmt.Fprintf(&b, "%s\nLink %s reads %s as of now, until %s.", url, r.LinkID, count(len(rows), "session"), PacificText(r.Expires))
 	for i, row := range rows {
 		fmt.Fprintf(&b, "\n%d. %s, %s, %s, %s, %s markdown", i+1, row.Harness, row.Project, row.Start, count(row.Messages, "message"), byteText(row.MarkdownBytes))
 	}
-	data := map[string]any{"url": url, "link_id": r.LinkID, "kind": string(linkRead), "expires": pacificText(r.Expires), "sessions": rows}
+	data := map[string]any{"url": url, "link_id": r.LinkID, "kind": string(linkRead), "expires": PacificText(r.Expires), "sessions": rows}
 	return data, b.String(), nil
 }
 
@@ -232,7 +233,7 @@ func createRead(ctx context.Context, db *DB, c *Controls, st *store.Committer, s
 // harness, project (its first working directory's base name), start, and the
 // user and assistant messages at or before cutoff.
 func sessionRow(db *DB, session string, cutoff time.Time) linkSessionRow {
-	row := linkSessionRow{SessionID: formatSessionID(session), Project: "-", Start: "start unknown"}
+	row := linkSessionRow{SessionID: FormatSessionID(session), Project: "-", Start: "start unknown"}
 	es, ok, err := db.ExportSession(session)
 	if err != nil || !ok {
 		return row
@@ -256,7 +257,7 @@ func sessionRow(db *DB, session string, cutoff time.Time) linkSessionRow {
 		return nil
 	})
 	if start != 0 {
-		row.Start = pacificText(time.UnixMicro(start))
+		row.Start = PacificText(time.UnixMicro(start))
 	}
 	return row
 }
@@ -295,7 +296,7 @@ func listLinks(c *Controls, id auth.Identity) (any, string, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s.", count(len(links), "live link"))
 	for i, l := range links {
-		row := linkListRow{LinkID: l.id, Kind: string(l.kind), Expires: pacificText(l.expires), Title: l.title,
+		row := linkListRow{LinkID: l.id, Kind: string(l.kind), Expires: PacificText(l.expires), Title: l.title,
 			Sessions: len(l.sessions), Invite: l.invite, Key: l.joinKey, Machine: l.machine}
 		rows[i] = row
 		switch {

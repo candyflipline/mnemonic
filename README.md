@@ -111,6 +111,43 @@ Ask your agent: "Call `list_sessions` for today, limit 1." A result that starts 
 
 The tools are `search_sessions`, `open`, `list_sessions`, `get_trace`, `file_attention`, `get_ingest_status`, `query`, `annotate`, `set_visibility`, `delete_session`, and `share_link`. `annotate` needs the `annotate` scope on your key. `set_visibility`, `delete_session` and `share_link` act on your own sessions with any key and need `admin` for another author's.
 
+## Links
+
+A link is one URL that grants one thing. The design is in [docs/design/share-links.md](docs/design/share-links.md).
+
+**Read link.** Anyone holding it reads a set of your sessions, as they were when you made the link, in a browser or with an agent. They install nothing. Ask your agent to call `share_link`:
+
+```
+share_link {"session_ids": ["session:…", "session:…"], "title": "QUIC context", "days": 30}
+```
+
+From a terminal, `mnemonic share` takes session ids or Claude Code session uuids, prints the URL and, on macOS, copies it:
+
+```
+mnemonic share 7c666c01-d38e-4658-8650-854ffb5b626e session:… --title "QUIC context"
+```
+
+The answer lists each session's harness, project, start, messages and rendered size. Open the link and check it before you send it. `<url>.md` is the whole link as markdown, and `<url>/<n>.md` and `<url>/<n>.json` are session `n` alone. Only a session's sole author, or an admin key, may link it.
+
+**Invite link.** It admits one machine into your tenant. The machine pushes as the author the invite names and reads what your tenant reads. Inviting a machine for your own author takes any key, and for another author an admin key:
+
+```
+share_link {"invite": "vlad", "days": 7}
+```
+
+On the new machine, install the client and run `mnemonic join <url>`. It creates the key, writes `~/.mnemonic/config.toml`, installs the push agent as `init` does, and prints the MCP lines above. Nobody edits `[[keys]]` or copies the server key.
+
+`share_link {}` lists your live links and the key and machine that joined each invite. `share_link {"revoke": "<link id>"}` ends either kind. A revoked read link answers 410, and a revoked invite's machine is refused at its next request.
+
+The server serves links only with a `[share]` section in its config:
+
+```
+[share]
+listen    = "127.0.0.1:8742"            # loopback only
+base_url  = "https://share.example.com" # the public origin in front of it
+quic_addr = "HOST:8741"                 # what a joining machine dials
+```
+
 ## Known gap
 
 OTLP is served only on the QUIC HTTP endpoint, so an OTLP exporter that speaks plain HTTPS cannot reach the server and no forwarder exists.
