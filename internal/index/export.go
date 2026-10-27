@@ -81,6 +81,7 @@ func (db *DB) EachSession(hidden map[string]bool, fn func(ExportSession) error) 
 		if err != nil {
 			return err
 		}
+		es.Annotations = db.sessionAnnotations(es.ID)
 		if err := fn(es); err != nil {
 			return err
 		}
@@ -100,6 +101,7 @@ func (db *DB) ExportSession(id string) (ExportSession, bool, error) {
 		return ExportSession{}, false, nil
 	}
 	es, err := st.exportSession(i)
+	es.Annotations = db.sessionAnnotations(id)
 	return es, true, err
 }
 
@@ -161,7 +163,6 @@ func (st *Part) exportSession(i int) (ExportSession, error) {
 	if err != nil {
 		return es, err
 	}
-	es.Annotations = st.annOf(s.id)
 	return es, nil
 }
 
