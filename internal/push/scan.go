@@ -23,8 +23,7 @@ func redactLines(red Redactor, raw []byte, base int64) redactedLines {
 		if nl < 0 {
 			return r
 		}
-		r.body = append(r.body, red.Line(raw[:nl])...)
-		r.body = append(r.body, '\n')
+		r.body = red.AppendLine(r.body, raw[:nl+1])
 		at += int64(nl + 1)
 		r.rawEnds = append(r.rawEnds, at)
 		raw = raw[nl+1:]

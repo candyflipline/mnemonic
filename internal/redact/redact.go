@@ -114,6 +114,25 @@ var builtinRules = []ruleSpec{
 // Extra patterns get the ids upstream would give them (extra-pattern-1, ...)
 // and, having no keywords, are always scanned rather than prefiltered.
 func New(extraPatterns []string) (*Redactor, error) {
+	extras := make([]rule, 0, len(extraPatterns))
+	for i, p := range extraPatterns {
+		re, err := regexp.Compile(p)
+		if err != nil {
+			return nil, fmt.Errorf("failed to compile redaction.extra_patterns[%d] for extra-pattern-%d: %w", i, i+1, err)
+		}
+		extras = append(extras, rule{
+			id:       fmt.Sprintf("extra-pattern-%d", i+1),
+			m:        regexMatcher(re, 0),
+			minLen:   1,
+			priority: len(builtinRules) + i,
+		})
+	}
+	return withExtras(extras), nil
+}
+
+func Default() *Redactor { return withExtras(nil) }
+
+func withExtras(extras []rule) *Redactor {
 	r := &Redactor{}
 	for i := range builtinRules {
 		spec := &builtinRules[i]
@@ -127,18 +146,7 @@ func New(extraPatterns []string) (*Redactor, error) {
 			priority:    spec.priority,
 		})
 	}
-	for i, p := range extraPatterns {
-		re, err := regexp.Compile(p)
-		if err != nil {
-			return nil, fmt.Errorf("failed to compile redaction.extra_patterns[%d] for extra-pattern-%d: %w", i, i+1, err)
-		}
-		r.rules = append(r.rules, rule{
-			id:       fmt.Sprintf("extra-pattern-%d", i+1),
-			m:        regexMatcher(re, 0),
-			minLen:   1,
-			priority: len(builtinRules) + i,
-		})
-	}
+	r.rules = append(r.rules, extras...)
 	byPriority := make(map[int]string, len(r.rules))
 	for _, ru := range r.rules {
 		if other, dup := byPriority[ru.priority]; dup {
@@ -147,7 +155,7 @@ func New(extraPatterns []string) (*Redactor, error) {
 		byPriority[ru.priority] = ru.id
 	}
 	r.buildPrefilter()
-	return r, nil
+	return r
 }
 
 func (r *Redactor) buildPrefilter() {
@@ -173,6 +181,15 @@ func (r *Redactor) Line(line []byte) []byte {
 		return out
 	}
 	return r.redactJSON(line)
+}
+
+func (r *Redactor) AppendLine(dst, line []byte) []byte {
+	text, terminated := bytes.CutSuffix(line, []byte{'\n'})
+	dst = append(dst, r.Line(text)...)
+	if terminated {
+		dst = append(dst, '\n')
+	}
+	return dst
 }
 
 func (r *Redactor) redactJSON(line []byte) []byte {

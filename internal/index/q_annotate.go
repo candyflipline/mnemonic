@@ -43,29 +43,31 @@ type annotateArgs struct {
 	RequestID string                  `json:"request_id"`
 }
 
-func parseAnnotateArgs(raw json.RawMessage) (a annotateArgs, session string, value schema.Value, err error) {
+func parseAnnotateArgs(raw json.RawMessage) (redactedAnnotation, error) {
+	var a annotateArgs
+	var value schema.Value
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&a); err != nil {
-		return a, "", value, argErrorf("invalid arguments: %s", err)
+		return redactedAnnotation{}, argErrorf("invalid arguments: %s", err)
 	}
 	id, err := parseMcpID(a.SessionID)
 	if err != nil {
-		return a, "", value, err
+		return redactedAnnotation{}, err
 	}
 	if id.kind != kindSession {
-		return a, "", value, argErrorf("session_id must be a session id")
+		return redactedAnnotation{}, argErrorf("session_id must be a session id")
 	}
 	if a.Source == "" {
 		a.Source = schema.SourceHuman
 	}
 	switch {
 	case strings.TrimSpace(a.Name) == "" || utf8.RuneCountInString(a.Name) > annotationNameMax:
-		return a, "", value, argErrorf("name must be 1 to %d characters", annotationNameMax)
+		return redactedAnnotation{}, argErrorf("name must be 1 to %d characters", annotationNameMax)
 	case !slices.Contains([]schema.AnnotationSource{schema.SourceHuman, schema.SourceScorer, schema.SourceCI}, a.Source):
-		return a, "", value, argErrorf("source must be human, scorer or ci")
+		return redactedAnnotation{}, argErrorf("source must be human, scorer or ci")
 	case utf8.RuneCountInString(a.RequestID) > requestIDMax:
-		return a, "", value, argErrorf("request_id must be at most %d characters", requestIDMax)
+		return redactedAnnotation{}, argErrorf("request_id must be at most %d characters", requestIDMax)
 	}
 	set := 0
 	for _, p := range []bool{a.Number != nil, a.Label != nil, a.Text != nil} {
@@ -74,38 +76,42 @@ func parseAnnotateArgs(raw json.RawMessage) (a annotateArgs, session string, val
 		}
 	}
 	if set != 1 {
-		return a, "", value, argErrorf("give exactly one of number, label or text")
+		return redactedAnnotation{}, argErrorf("give exactly one of number, label or text")
 	}
 	switch {
 	case a.Number != nil:
 		value = schema.Number(*a.Number)
 	case a.Label != nil:
 		if *a.Label == "" || utf8.RuneCountInString(*a.Label) > annotationLabelMax {
-			return a, "", value, argErrorf("label must be 1 to %d characters", annotationLabelMax)
+			return redactedAnnotation{}, argErrorf("label must be 1 to %d characters", annotationLabelMax)
 		}
 		value = schema.Label(*a.Label)
 	default:
 		if *a.Text == "" || utf8.RuneCountInString(*a.Text) > annotationTextMax {
-			return a, "", value, argErrorf("text must be 1 to %d characters", annotationTextMax)
+			return redactedAnnotation{}, argErrorf("text must be 1 to %d characters", annotationTextMax)
 		}
 		value = schema.Text(*a.Text)
 	}
-	return a, id.session, value, nil
+	return redactedAnnotation{
+		target:     schema.Target{SessionID: id.session, SpanID: a.SpanID},
+		sessionArg: a.SessionID,
+		name:       redactUserText(a.Name),
+		value:      redactValue(value),
+		source:     schema.AnnotationSource(redactUserText(string(a.Source))),
+		requestID:  a.RequestID,
+	}, nil
 }
 
-// annotateRed is the redactor every annotate write passes the caller's user
-// text through, built once as a config-less client builds it (redact.New(nil):
-// the redactor push uploads with, no config file, no extra patterns). No
-// redactor reaches a tool's ctx — server raw arrived redacted from push and
-// local mode redacts its harness files at ingest — so the write path redacts
-// here, one behaviour in both modes. Redactor is safe for concurrent use.
-var annotateRed = sync.OnceValue(func() *redact.Redactor {
-	red, err := redact.New(nil)
-	if err != nil {
-		panic("index: " + err.Error()) // unreachable: no extra patterns to compile
-	}
-	return red
-})
+type redactedAnnotation struct {
+	target     schema.Target
+	sessionArg string
+	name       string
+	value      schema.Value
+	source     schema.AnnotationSource
+	requestID  string
+}
+
+var annotateRed = sync.OnceValue(redact.Default)
 
 func redactUserText(s string) string {
 	return string(annotateRed().Line([]byte(s)))
@@ -121,21 +127,14 @@ func redactValue(v schema.Value) schema.Value {
 	return v
 }
 
-// annotationKey is the idempotency key of an annotate call: the hash of the
-// annotation without its timestamp, plus the client's request_id when it gave
-// one. Call hands it the redacted name, source and value — the key is of the
-// record the store actually holds, so a retried identical call repeats it (the
-// same secrets redact to the same bytes) and the annotation's id is
-// recomputable from the stored record. A different annotation under the same
-// request_id gets its own key, so the store never mistakes it for the first.
-func annotationKey(a annotateArgs, session string, value schema.Value) (string, error) {
+func (r redactedAnnotation) key() (string, error) {
 	b, err := json.Marshal(struct {
 		Target    schema.Target           `json:"target"`
 		Name      string                  `json:"name"`
 		Value     schema.Value            `json:"value"`
 		Source    schema.AnnotationSource `json:"source"`
 		RequestID string                  `json:"request_id,omitempty"`
-	}{schema.Target{SessionID: session, SpanID: a.SpanID}, a.Name, value, a.Source, a.RequestID})
+	}{r.target, r.name, r.value, r.source, r.requestID})
 	if err != nil {
 		return "", err
 	}
@@ -165,30 +164,23 @@ func (annotate) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, str
 	if !id.Can(auth.Annotate) {
 		return nil, "", argErrorf("token lacks scope annotate")
 	}
-	a, session, value, err := parseAnnotateArgs(raw)
+	r, err := parseAnnotateArgs(raw)
 	if err != nil {
 		return nil, "", err
 	}
-	// raw/ holds only redacted text: the write path is a raw boundary like
-	// push's upload and local ingest, so every field the caller controls goes
-	// through the redactor before the record is built. The key, the appended
-	// line and the result text all come from the redacted forms.
-	a.Name = redactUserText(a.Name)
-	a.Source = schema.AnnotationSource(redactUserText(string(a.Source)))
-	value = redactValue(value)
-	if err := requireTarget(ctx, db, session, a.SpanID); err != nil {
+	if err := requireTarget(ctx, db, r.target.SessionID, r.target.SpanID); err != nil {
 		return nil, "", err
 	}
-	key, err := annotationKey(a, session, value)
+	key, err := r.key()
 	if err != nil {
 		return nil, "", err
 	}
 	note := schema.Annotation{
 		ID:     annotationID(id.Author(), key),
-		Target: schema.Target{SessionID: session, SpanID: a.SpanID},
-		Name:   a.Name,
-		Value:  value,
-		Source: a.Source,
+		Target: r.target,
+		Name:   r.name,
+		Value:  r.value,
+		Source: r.source,
 		TS:     time.Now().UTC().Truncate(time.Millisecond),
 	}
 	line, err := json.Marshal(note)
@@ -199,10 +191,10 @@ func (annotate) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, str
 	if err != nil {
 		return nil, "", err
 	}
-	data := annotateResult{AnnotationID: note.ID, SessionID: a.SessionID, SpanID: a.SpanID, Name: a.Name, RequestKey: key, Duplicate: duplicate}
-	text := "Annotated " + a.SessionID + " with " + a.Name + "=" + valueText(value) + "."
+	data := annotateResult{AnnotationID: note.ID, SessionID: r.sessionArg, SpanID: r.target.SpanID, Name: r.name, RequestKey: key, Duplicate: duplicate}
+	text := "Annotated " + r.sessionArg + " with " + r.name + "=" + valueText(r.value) + "."
 	if duplicate {
-		text = "Already annotated: " + a.Name + "=" + valueText(value) + " on " + a.SessionID + " (no change)."
+		text = "Already annotated: " + r.name + "=" + valueText(r.value) + " on " + r.sessionArg + " (no change)."
 	}
 	return data, text, nil
 }

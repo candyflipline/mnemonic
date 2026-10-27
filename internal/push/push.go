@@ -19,7 +19,7 @@ import (
 )
 
 type Redactor interface {
-	Line(line []byte) []byte
+	AppendLine(dst, line []byte) []byte
 }
 
 type Stats struct {

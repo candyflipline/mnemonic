@@ -110,10 +110,7 @@ func TestFuzzAgainstOracle(t *testing.T) {
 		}
 		n = v
 	}
-	live, err := New(nil)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	live := Default()
 	orc, err := newOracle(nil)
 	if err != nil {
 		t.Fatalf("newOracle: %v", err)

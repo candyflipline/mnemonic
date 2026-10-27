@@ -8,10 +8,7 @@ import (
 )
 
 func TestBuiltinRuleIDs(t *testing.T) {
-	r, err := New(nil)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	r := Default()
 	want := []string{
 		"aws-access-token", "github-token", "github-fine-grained-token",
 		"gitlab-token", "slack-token", "slack-webhook", "google-api-key",
@@ -37,10 +34,7 @@ func TestBuiltinRuleIDs(t *testing.T) {
 }
 
 func TestLineTable(t *testing.T) {
-	r, err := New(nil)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	r := Default()
 	cases := []struct {
 		name, in, want string
 	}{
@@ -144,10 +138,7 @@ func TestNewInvalidPattern(t *testing.T) {
 }
 
 func TestLargeSecretFreeText(t *testing.T) {
-	r, err := New(nil)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	r := Default()
 	in := []byte(`{"text":"` + strings.Repeat("z", 2*1024*1024) + `"}`)
 	got := r.Line(in)
 	if !bytes.Equal(got, in) {

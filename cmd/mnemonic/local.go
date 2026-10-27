@@ -85,10 +85,7 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 		return err
 	}
 	author, machine := localIdentity()
-	red, err := redact.New(nil) // as push builds it: no config file, no extra patterns
-	if err != nil {
-		return err
-	}
+	red := redact.Default()
 	// This process is the data dir's one writer for its whole life — the
 	// watcher and the store's Wake both ingest — so it takes the index dir's
 	// writer lock before the first ingest, and a second local on the same dir

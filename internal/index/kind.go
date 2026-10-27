@@ -95,10 +95,6 @@ func completeLinesEnd(f *os.File, size int64) (int64, error) {
 	return 0, nil
 }
 
-// redactReader is push's per-line redaction over a stream: every line read
-// goes through red.Line, the exact bytes push's redactLines uploads for the
-// same lines, so a local parse sees what the server path's raw holds and the
-// parser's offsets and uids match it byte for byte.
 type redactReader struct {
 	src io.Closer
 	r   *bufio.Reader
@@ -120,16 +116,7 @@ func (rr *redactReader) Read(p []byte) (int, error) {
 		}
 		line, err := rr.r.ReadBytes('\n')
 		rr.err = err
-		if len(line) == 0 {
-			continue
-		}
-		if line[len(line)-1] == '\n' {
-			line = line[:len(line)-1]
-			rr.out = rr.red.Line(line)
-			rr.out = append(rr.out, '\n')
-		} else {
-			rr.out = rr.red.Line(line)
-		}
+		rr.out = rr.red.AppendLine(rr.out, line)
 	}
 	n := copy(p, rr.out)
 	rr.out = rr.out[n:]

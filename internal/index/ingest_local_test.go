@@ -355,17 +355,13 @@ func TestIngestPlainRedactsAtIngest(t *testing.T) {
 	if err := os.WriteFile(file, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	red, err := redact.New(nil) // as push builds it: no config file, no extra patterns
-	if err != nil {
-		t.Fatal(err)
-	}
 	globs := []config.SourceGlob{{Harness: "claude-code", SourceName: "claude", Glob: file}}
 	ix, err := Open(filepath.Join(dir, "index"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ix.Close()
-	st, err := ix.IngestPlain(globs, "tester", "testbox", IngestOptions{SettleAll: true, Red: red})
+	st, err := ix.IngestPlain(globs, "tester", "testbox", IngestOptions{SettleAll: true, Red: redact.Default()})
 	if err != nil {
 		t.Fatal(err)
 	}
