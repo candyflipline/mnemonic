@@ -15,6 +15,10 @@
 #   open           the first page of the session
 #   search         the session ids search_sessions returns for "annot-probe",
 #                  sorted (store-wide, so identical within one run)
+# SESSIONS holds bare engine session ids (the checkpoint form); the MCP tools
+# take "session:" + base64url of that id, annotate and query take the bare
+# form, so both are derived here. A tool error writes {"tool_error":true}
+# (identical refusals on both binaries stay equal by hash).
 # Then it puts STORE back as annot-cycle.sh does: stops serve, removes the
 # annotation source's raw files (single files, never recursive), boots a
 # second serve to record the reverse rebuild, stops it. NCALLS=0 is the
@@ -24,7 +28,7 @@
 set -eu
 store=${1:?usage: annot-reads.sh STORE BIN SESSIONS NCALLS LABEL [OUTDIR]}
 bin=${2:?BIN}
-sessions=${3:?SESSIONS file, one id per line}
+sessions=${3:?SESSIONS file, one bare session id per line}
 ncalls=${4:?NCALLS}
 label=${5:?LABEL}
 out=${6:-/var/lib/mnu/annotbox-reads/$label}
@@ -84,6 +88,8 @@ mcp() { # tool arguments outfile
 	echo '{"curl_failed":true}' > "$3"
 	return 1
 }
+iserr() { [ "$(jq -r '.result.isError // false' "$1" 2>/dev/null)" = true ]; }
+mcpid() { printf 'session:%s' "$(printf %s "$1" | base64 -w0 | tr '+/' '-_' | tr -d '=')"; }
 
 log=$out/serve.log
 start_serve "$log"
@@ -98,14 +104,15 @@ if [ "$ncalls" -gt 0 ]; then
 	while [ "$i" -lt "$ncalls" ]; do
 		i=$((i + 1))
 		sid=$(sed -n "$(((i - 1) % nlines + 1))p" "$sessions")
-		if mcp annotate "{\"session_id\":\"$sid\",\"name\":\"annot-probe-$i\",\"number\":$i}" "$TMP/ann.json"; then
-			e=$(jq -r '.result.isError // "x"' "$TMP/ann.json")
+		pref=$(mcpid "$sid")
+		if mcp annotate "{\"session_id\":\"$pref\",\"name\":\"annot-probe-$i\",\"number\":$i}" "$TMP/ann.json" &&
+			! iserr "$TMP/ann.json"; then
+			ok=$((ok + 1))
 			d=$(jq -r '.result.structuredContent.data.duplicate // false' "$TMP/ann.json")
+			[ "$d" = true ] && dup=$((dup + 1))
 		else
-			e=x d=false
+			fail=$((fail + 1))
 		fi
-		if [ "$e" = false ]; then ok=$((ok + 1)); else fail=$((fail + 1)); fi
-		[ "$d" = true ] && dup=$((dup + 1))
 	done
 	waited=0
 	while [ "$(pcount "$log")" = "$before" ] && [ "$waited" -lt 900 ]; do
@@ -122,23 +129,31 @@ TO=$(date -u -d '+1 days' +%Y-%m-%dT00:00:00Z)
 for tool in get_trace query list_sessions open search; do mkdir -p "$out/$tool"; done
 
 i=0
-gt_ok=0 q_ok=0 ls_ok=0 op_ok=0 sr_ok=0 ls_found=0
+gt_err=0 q_err=0 ls_err=0 op_err=0 sr_err=0 ls_found=0
 while IFS= read -r sid; do
 	i=$((i + 1))
 	[ -z "$sid" ] && continue
+	pref=$(mcpid "$sid")
 
 	# get_trace: the annotations array only, every ts deleted (it is the call time)
-	if mcp get_trace "{\"session_id\":\"$sid\",\"include_annotations\":true}" "$TMP/gt.json" &&
-		jq '[(.result.structuredContent.annotations // []) | walk(if type == "object" then del(.ts) else . end)]' \
-			"$TMP/gt.json" > "$out/get_trace/$i.json" 2>/dev/null; then
-		gt_ok=$((gt_ok + 1))
+	if mcp get_trace "{\"session_id\":\"$pref\",\"include_annotations\":true}" "$TMP/gt.json" &&
+		! iserr "$TMP/gt.json"; then
+		jq '[(.result.structuredContent.data.annotations // []) | walk(if type == "object" then del(.ts) else . end)]' \
+			"$TMP/gt.json" > "$out/get_trace/$i.json" 2>/dev/null || echo '{"extract_failed":true}' > "$out/get_trace/$i.json"
 	else
-		echo '{"extract_failed":true}' > "$out/get_trace/$i.json"
+		gt_err=$((gt_err + 1))
+		echo '{"tool_error":true}' > "$out/get_trace/$i.json"
 	fi
 
 	# list window: list_sessions has no id filter; page a +-2 h window around
-	# the session's last span end (same data -> same window -> same entry)
-	w=$(jq -r '[.. | objects | .End? // empty] | max // ""' "$TMP/gt.json")
+	# the session's last span end (same data -> same window -> same entry).
+	# A session get_trace refuses (over the span budget) anchors through open.
+	w=$(jq -r '[.result.structuredContent.data | .. | objects | .end? // empty] | max // ""' "$TMP/gt.json" 2>/dev/null || true)
+	if [ -z "$w" ]; then
+		if mcp open "{\"id\":\"$pref\"}" "$TMP/opw.json" && ! iserr "$TMP/opw.json"; then
+			w=$(jq -r '[.result.structuredContent.data | .. | objects | (.end? // .last_event_time? // .lastEventTime? // empty)] | max // ""' "$TMP/opw.json" 2>/dev/null || true)
+		fi
+	fi
 	if [ -n "$w" ]; then
 		wep=$(date -u -d "$w" +%s)
 		start=$(date -u -d "@$((wep - 7200))" +%Y-%m-%dT%H:%M:%SZ)
@@ -150,13 +165,23 @@ while IFS= read -r sid; do
 
 	# query: the annotations relation rows for the target session, ts excluded
 	# by the select, sorted by annotation_id (the id is content-derived)
-	bare=${sid#session:}
-	q="from: annotations | filter: target_session_id = '$bare' | select: annotation_id, target_session_id, target_span_id, name, value_number, value_label, value_text, source, author | sort: annotation_id asc"
+	q="from: annotations | filter: target_session_id = '$sid' | select: annotation_id, target_session_id, target_span_id, name, value_number, value_label, value_text, source, author | sort: annotation_id asc"
 	if mcp query "{\"query\":\"$q\",\"from\":\"$FROM\",\"to\":\"$TO\",\"limit\":1000}" "$TMP/q.json" &&
-		jq '.result.structuredContent // {extract_failed:true}' "$TMP/q.json" > "$out/query/$i.json" 2>/dev/null; then
-		q_ok=$((q_ok + 1))
+		! iserr "$TMP/q.json"; then
+		jq '.result.structuredContent.data // {extract_failed:true}' "$TMP/q.json" > "$out/query/$i.json" 2>/dev/null ||
+			echo '{"extract_failed":true}' > "$out/query/$i.json"
 	else
-		echo '{"extract_failed":true}' > "$out/query/$i.json"
+		q_err=$((q_err + 1))
+		echo '{"tool_error":true}' > "$out/query/$i.json"
+	fi
+
+	# open: the first page
+	if mcp open "{\"id\":\"$pref\",\"limit\":25}" "$TMP/op.json" && ! iserr "$TMP/op.json"; then
+		jq '.result.structuredContent.data // {extract_failed:true}' "$TMP/op.json" > "$out/open/$i.json" 2>/dev/null ||
+			echo '{"extract_failed":true}' > "$out/open/$i.json"
+	else
+		op_err=$((op_err + 1))
+		echo '{"tool_error":true}' > "$out/open/$i.json"
 	fi
 
 	# list_sessions: the session's one entry
@@ -167,46 +192,39 @@ while IFS= read -r sid; do
 		body="{\"start_datetime\":\"$start\",\"end_datetime\":\"$end\",\"limit\":25"
 		if [ -n "$cursor" ]; then body="$body,\"cursor\":\"$cursor\""; fi
 		body="$body}"
-		mcp list_sessions "$body" "$TMP/ls.json" || break
-		jq -c --arg sid "$sid" '(.result.structuredContent.items // .result.structuredContent.Items // [])[]
-			| select((.session_id // .SessionID) == $sid)' "$TMP/ls.json" > "$out/list_sessions/$i.json" 2>/dev/null ||
+		if ! mcp list_sessions "$body" "$TMP/ls.json" || iserr "$TMP/ls.json"; then
+			ls_err=$((ls_err + 1))
+			break
+		fi
+		jq -c --arg sid "$pref" '(.result.structuredContent.data.items // .result.structuredContent.data.Items // [])[]
+			| select((.session_id // .SessionID // "") == $sid)' "$TMP/ls.json" > "$out/list_sessions/$i.json" 2>/dev/null ||
 			: > "$out/list_sessions/$i.json"
 		if [ -s "$out/list_sessions/$i.json" ]; then
 			found=1
 			break
 		fi
-		cursor=$(jq -r '.result.structuredContent.next_cursor // .result.structuredContent.NextCursor // ""' "$TMP/ls.json" 2>/dev/null || true)
+		cursor=$(jq -r '.result.structuredContent.data.next_cursor // .result.structuredContent.data.NextCursor // ""' "$TMP/ls.json" 2>/dev/null || true)
 		[ -z "$cursor" -o "$cursor" = null ] && break
 		pages=$((pages + 1))
 	done
 	if [ "$found" = 1 ]; then
-		ls_ok=$((ls_ok + 1))
 		ls_found=$((ls_found + 1))
 	else
 		echo '{"found":false}' > "$out/list_sessions/$i.json"
-		ls_ok=$((ls_ok + 1))
-	fi
-
-	# open: the first page
-	if mcp open "{\"id\":\"$sid\",\"limit\":25}" "$TMP/op.json" &&
-		jq '.result.structuredContent // {extract_failed:true}' "$TMP/op.json" > "$out/open/$i.json" 2>/dev/null; then
-		op_ok=$((op_ok + 1))
-	else
-		echo '{"extract_failed":true}' > "$out/open/$i.json"
 	fi
 
 	# search: the store-wide result ids for "annot-probe", sorted
-	if mcp search_sessions '{"query":"annot-probe","n_hits":50}' "$TMP/sr.json" &&
-		jq -r '[.result.structuredContent.results[]?.session_id] | unique | .[]' "$TMP/sr.json" > "$out/search/$i.txt" 2>/dev/null; then
-		sr_ok=$((sr_ok + 1))
+	if mcp search_sessions '{"query":"annot-probe","n_hits":50}' "$TMP/sr.json" && ! iserr "$TMP/sr.json"; then
+		jq -r '[.result.structuredContent.data.results[]?.session_id] | unique | .[]' "$TMP/sr.json" > "$out/search/$i.txt" 2>/dev/null ||
+			: > "$out/search/$i.txt"
 	else
+		sr_err=$((sr_err + 1))
 		: > "$out/search/$i.txt"
 	fi
 done < "$sessions"
-echo "$label reads sessions=$i get_trace=$gt_ok query=$q_ok list=$ls_ok (found=$ls_found) open=$op_ok search=$sr_ok"
+echo "$label reads sessions=$i get_trace_err=$gt_err query_err=$q_err list_err=$ls_err (found=$ls_found) open_err=$op_err search_err=$sr_err"
 search_ids=$(cat "$out"/search/*.txt | sort -u | wc -l)
 echo "$label search_unique_ids=$search_ids"
-grep 'cycle boot' "$log" | tail -1 | sed 's/.*cycle boot: /boot: /' || true
 stop_serve
 
 if [ "${RESET:-1}" = 1 ] && [ "$ncalls" -gt 0 ]; then
