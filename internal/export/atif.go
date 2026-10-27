@@ -170,12 +170,10 @@ type trajectory struct {
 	cut   *stepCut
 }
 
-// rowPlan is where one row lands; linked marks a tool result that keeps its
-// source_call_id.
 type rowPlan struct {
-	step    int32
-	linked  bool
-	dropped bool
+	step              int32
+	keepsSourceCallID bool
+	dropped           bool
 }
 
 func newTrajectory(db *index.DB, sessionID string, hidden map[string]bool) (*trajectory, error) {
@@ -354,10 +352,10 @@ func planSteps(harness string, rows iter.Seq2[eventRow, error]) (plan []rowPlan,
 func resultStep(ev eventRow, cur int32, curCalls map[string]bool, latest map[string]int32, steps int32) rowPlan {
 	if id := ev.ToolCallID; id != "" {
 		if cur >= 0 && curCalls[id] {
-			return rowPlan{step: cur, linked: true}
+			return rowPlan{step: cur, keepsSourceCallID: true}
 		}
 		if k, ok := latest[id]; ok {
-			return rowPlan{step: k, linked: true}
+			return rowPlan{step: k, keepsSourceCallID: true}
 		}
 	}
 	home := cur
@@ -396,7 +394,7 @@ func buildSteps(plan []rowPlan, last []int32, rows iter.Seq2[eventRow, error], f
 				absorbAssistant(s, ev)
 			case ev.ActorKind == "tool":
 				res := ObservationResult{Content: ev.TextContent}
-				if p.linked {
+				if p.keepsSourceCallID {
 					res.SourceCallID = ev.ToolCallID
 				}
 				if s.Observation == nil {
