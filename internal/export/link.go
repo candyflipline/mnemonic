@@ -9,12 +9,13 @@ import (
 
 // LinkView is one read link as the renderers see it: the sessions the caller
 // already checked are readable, in the owner's order, read as of Cutoff.
-// SessionURL gives the URL of session n (1-based) in format ext, "md" or
-// "json".
+// MarkdownURL is the whole link's .md URL. SessionURL gives the URL of
+// session n (1-based) in format ext, "md" or "json".
 type LinkView struct {
 	Title, Note string
 	SessionIDs  []string
 	Cutoff      time.Time
+	MarkdownURL string
 	SessionURL  func(n int, ext string) string
 }
 
