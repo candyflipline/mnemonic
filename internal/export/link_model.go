@@ -54,6 +54,7 @@ type step struct {
 
 type toolCall struct {
 	id                string
+	at                time.Time
 	Name, Summary     string
 	Args              string
 	ArgsCut           bool
@@ -353,6 +354,7 @@ type runBuilder struct {
 	th     *thread
 	cur    *turn
 	calls  map[string]*toolCall
+	list   []*toolCall
 	seen   map[string]bool
 	first  time.Time
 	parent string
@@ -428,7 +430,7 @@ func (b *convBuilder) add(r *index.Row, payload func() string) {
 			t.Work = append(t.Work, &step{Kind: stepNote, Text: ev.text})
 		}
 	case classCall:
-		c := &toolCall{id: r.ToolCallID, Name: r.ToolName, Summary: callSummary(r.ToolName, r.TioInput, r.Text), URL: b.jsonURL}
+		c := &toolCall{id: r.ToolCallID, at: at, Name: r.ToolName, Summary: callSummary(r.ToolName, r.TioInput, r.Text), URL: b.jsonURL}
 		args := r.TioInput
 		if args == "" {
 			args = r.Text
@@ -437,6 +439,7 @@ func (b *convBuilder) add(r *index.Row, payload func() string) {
 		if r.ToolName == "AskUserQuestion" {
 			c.questions = r.TioInput
 		}
+		rb.list = append(rb.list, c)
 		if r.ToolCallID != "" {
 			rb.calls[r.ToolCallID] = c
 		}
@@ -462,8 +465,10 @@ func (rb *runBuilder) result(id, text string, at time.Time) {
 	if c.questions != "" {
 		t.Asks = append(t.Asks, answeredQuestions(c.questions, text)...)
 	}
-	if m := agentIDText.FindStringSubmatch(text); m != nil {
-		c.agentID = m[1]
+	if c.Name == "Agent" || c.Name == "Task" {
+		if m := agentIDText.FindStringSubmatch(text); m != nil {
+			c.agentID = m[1]
+		}
 	}
 }
 
@@ -491,14 +496,19 @@ func (b *convBuilder) finish(session int) *thread {
 			t.settle()
 		}
 	}
+	var all []*toolCall
+	for _, id := range b.order {
+		all = append(all, b.runs[id].list...)
+	}
+	sort.SliceStable(all, func(i, j int) bool { return all[i].at.Before(all[j].at) })
 	byCall := map[string]*toolCall{}
 	byAgent := map[string]*toolCall{}
-	for _, rb := range b.runs {
-		for id, c := range rb.calls {
-			byCall[id] = c
-			if c.agentID != "" {
-				byAgent[c.agentID] = c
-			}
+	for _, c := range all {
+		if c.id != "" && byCall[c.id] == nil {
+			byCall[c.id] = c
+		}
+		if c.agentID != "" && byAgent[c.agentID] == nil {
+			byAgent[c.agentID] = c
 		}
 	}
 	main := b.run("")
@@ -508,9 +518,9 @@ func (b *convBuilder) finish(session int) *thread {
 		}
 		rb := b.runs[id]
 		sub := subagentOf(id, rb.th)
-		c := byAgent[id]
+		c := byCall[rb.parent]
 		if c == nil {
-			c = byCall[rb.parent]
+			c = byAgent[id]
 		}
 		if c == nil || c.Sub != nil {
 			c = &toolCall{Name: "Agent", Summary: "Subagent " + id, Done: true}

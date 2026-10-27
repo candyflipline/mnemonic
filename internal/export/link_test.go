@@ -164,3 +164,34 @@ func TestRenderMarkdown(t *testing.T) {
 		}
 	}
 }
+
+func TestLinkAgentIDOnlyFromAgentCalls(t *testing.T) {
+	sub := `,"isSidechain":true,"agentId":"a1b2c3"`
+	human := `,"origin":{"kind":"human"}`
+	db := linkDB(t, []string{
+		record("user", "u1", "2026-10-27T10:00:00.000Z", human, `"Find tests."`),
+		toolUse("a1", "2026-10-27T10:00:01.000Z", "", "t1", "Agent", `{"description":"Find tests","prompt":"Find the tests."}`),
+		toolResult("u2", "2026-10-27T10:00:02.000Z", "", "t1", `"Async agent launched.\nagentId: a1b2c3 (internal ID)"`),
+		record("user", "s1", "2026-10-27T10:00:03.000Z", sub, `"Find the tests."`),
+		record("assistant", "s2", "2026-10-27T10:00:04.000Z", sub, `[{"type":"text","text":"One test file."}]`),
+		record("assistant", "a2", "2026-10-27T10:00:05.000Z", "", `[{"type":"text","text":"Started."}]`),
+		record("user", "u3", "2026-10-27T10:01:00.000Z", human, `"Check on it."`),
+		toolUse("a3", "2026-10-27T10:01:01.000Z", "", "t2", "Bash", `{"command":"cat log","description":"Read the log"}`),
+		toolResult("u4", "2026-10-27T10:01:02.000Z", "", "t2", `"started agentId: a1b2c3 earlier"`),
+		record("assistant", "a4", "2026-10-27T10:01:03.000Z", "", `[{"type":"text","text":"Done."}]`),
+	})
+	for i := 0; i < 20; i++ {
+		ls, err := openLinkSession(db, linkView(time.Date(2026, 10, 27, 11, 0, 0, 0, time.UTC)), 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := [][]string{workLines(ls.th.Turns[0].Work), workLines(ls.th.Turns[1].Work)}
+		want := [][]string{
+			{"subagent Find tests: Find the tests. |  | One test file."},
+			{"tool Bash: Read the log -> started agentId: a1b2c3 earlier"},
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("render %d work:\n%#v\nwant:\n%#v", i, got, want)
+		}
+	}
+}
