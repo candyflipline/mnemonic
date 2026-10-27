@@ -1,8 +1,3 @@
-// Package qnet carries gRPC push and HTTP over one QUIC (UDP) endpoint. Each
-// side is an ed25519 key: the client pins the server's key, the server asks
-// Identify about the client's key, and the TLS 1.3 handshake proves both
-// keys. The Identity Identify returns is attached to every conn the server
-// accepts.
 package qnet
 
 import (
@@ -56,13 +51,8 @@ type Server struct {
 	once     sync.Once
 }
 
-// Identify maps a client's proven device key to its Identity. It runs twice per connection, in
-// the handshake, where a refusal is a TLS alert, and again when the conn is
-// served, so it reads live state and holds no cache of its own.
 type Identify func(device ed25519.PublicKey) (auth.Identity, bool)
 
-// Listen binds the UDP address addr. identify maps a client to its Identity;
-// a client it refuses fails its handshake.
 func Listen(addr string, priv ed25519.PrivateKey, identify Identify) (*Server, error) {
 	cert, err := certificate(priv)
 	if err != nil {
@@ -180,8 +170,6 @@ func peerOf(cs tls.ConnectionState) (ed25519.PublicKey, error) {
 	return peerCert(raw)
 }
 
-// Dial opens a QUIC connection and one stream to addr speaking alpn as priv.
-// It fails unless the server proves serverKey and accepts priv.
 func Dial(ctx context.Context, addr string, priv ed25519.PrivateKey, serverKey string, alpn string) (net.Conn, error) {
 	cert, err := certificate(priv)
 	if err != nil {

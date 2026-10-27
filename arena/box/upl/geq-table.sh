@@ -1,8 +1,4 @@
 #!/bin/sh
-# geq-table.sh GLOB... — median, min, max, n of the numeric keys across geq summaries.
-# Usage: geq-table.sh KEY 'out/geq-m32-c1-http-r*-summary.txt' ...  (one glob per row)
-# Prints "<glob>\t<key>\tmedian\tmin\tmax\tn". Keys with several values per file
-# (client_cpu_pct) are summed per file by taking the first field only.
 set -eu
 KEY=${1:?usage: geq-table.sh KEY GLOB...}
 shift

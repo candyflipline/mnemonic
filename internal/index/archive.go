@@ -406,9 +406,6 @@ func (w *archiveWriter) ckpt(k layout.Key, m manifest, size int64, sha string) c
 	}, Gen: w.gen, LightLen: w.lightLen, HeavyLen: w.heavyLen}
 }
 
-// archiveWriters holds the members a parse has touched, at most limit with
-// open logs. Rows are not sorted by session, so the least recently used
-// member's logs are synced and closed on open of a new one.
 type archiveWriters struct {
 	store   string
 	fileKey string

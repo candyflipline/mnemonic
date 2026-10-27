@@ -147,8 +147,6 @@ func (l *Lap) patch(changed map[layout.Key]bool) error {
 	return nil
 }
 
-// readSourceManifest is one raw manifest: false when it is gone, or does not
-// parse (said on stderr).
 func readSourceManifest(path string) (manifest, bool, error) {
 	var m manifest
 	b, err := os.ReadFile(path)

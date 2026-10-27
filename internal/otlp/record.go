@@ -67,8 +67,6 @@ func Decode(line []byte) (*Record, error) {
 	return &r, nil
 }
 
-// Start is the record's own time: a span's start, a log's time, else its
-// observed time. 0 when it has none.
 func (r *Record) Start() uint64 {
 	switch {
 	case r.StartUnixNano != 0:
@@ -79,8 +77,6 @@ func (r *Record) Start() uint64 {
 	return r.ObservedNano
 }
 
-// LookupStr is the first non-empty string value among keys, record
-// attributes before resource attributes.
 func (r *Record) LookupStr(keys ...string) string {
 	for _, m := range [...]map[string]any{r.Attributes, r.Resource} {
 		for _, k := range keys {
@@ -92,8 +88,6 @@ func (r *Record) LookupStr(keys ...string) string {
 	return ""
 }
 
-// Str is attrs[key] as a string: strings as they are, numbers and booleans
-// in their JSON form, "" for anything else.
 func Str(attrs map[string]any, key string) string {
 	switch v := attrs[key].(type) {
 	case string:
@@ -106,8 +100,6 @@ func Str(attrs map[string]any, key string) string {
 	return ""
 }
 
-// Num is the first of keys that attrs holds as a number, or as a string that
-// parses as one.
 func Num(attrs map[string]any, keys ...string) (float64, bool) {
 	for _, k := range keys {
 		var s string
@@ -126,8 +118,6 @@ func Num(attrs map[string]any, keys ...string) (float64, bool) {
 	return 0, false
 }
 
-// Count is Num as a token count: negative values are 0 and values past
-// uint32 saturate.
 func Count(attrs map[string]any, keys ...string) uint32 {
 	f, ok := Num(attrs, keys...)
 	if !ok || f <= 0 {
@@ -149,8 +139,6 @@ func SpanUID(author, traceID, spanID string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// LogUID is the event_uid of a log record: the hash of its stored line, which
-// carries the author.
 func LogUID(line []byte) string {
 	h := sha256.New()
 	h.Write([]byte("otlp|log|"))

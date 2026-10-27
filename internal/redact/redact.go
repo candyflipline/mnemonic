@@ -46,7 +46,6 @@ type redactionSpan struct {
 	priority   int
 }
 
-// Redactor is safe for concurrent use.
 type Redactor struct {
 	rules      []rule
 	auto       *keywordAutomaton

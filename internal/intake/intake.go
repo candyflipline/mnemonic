@@ -1,7 +1,3 @@
-// Package intake is the transport onto the store's one write path: the
-// push stream (gRPC Push.Sync over the QUIC push ALPN). It
-// parses its wire into store types here, at the edge, and answers only with
-// what store.Ticket.Wait returned.
 package intake
 
 import (
@@ -388,8 +384,6 @@ func checkSegments(segs ...string) error {
 	return nil
 }
 
-// ackOf takes a store.Ack, which only a durable batch makes. An invalid Ack is
-// a server bug: the stream ends with Internal and nothing is acked.
 func ackOf(seq uint64, a store.Ack) (*pushpb.ServerMsg, error) {
 	if !a.Valid() {
 		return nil, errors.New("ack of a batch that is not durable")
@@ -406,8 +400,6 @@ func ackOf(seq uint64, a store.Ack) (*pushpb.ServerMsg, error) {
 	return &pushpb.ServerMsg{Msg: &pushpb.ServerMsg_Ack{Ack: &pushpb.Ack{Seq: seq, Result: res, State: stateOf(a.State())}}}, nil
 }
 
-// welcome pages sources into Welcome messages of welcomePage entries; the
-// last has more false and carries the Window. No sources is one empty page.
 func welcome(sources []wire.Source) []*pushpb.ServerMsg {
 	var out []*pushpb.ServerMsg
 	for {

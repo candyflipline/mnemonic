@@ -1,22 +1,3 @@
-// Command capdrv is the box tool for the live-session cap proof. Against a
-// QUIC push listener it opens N distinct machines under one key, one
-// connection each, waits for each Welcome, sends one synthetic Append and waits
-// for its Ack, then prints one row per client with the status code the server
-// gave it. It then opens the first acked machine again (a takeover at the
-// cap) and reports the status the displaced stream ended with. Tooling only;
-// counts and codes, never content.
-//
-//	capdrv -server host:port -server-key K -key-file F -cap N [-prefix cap]
-//	capdrv -server host:port -server-key K -key-file F -cap N -silent [-prefix cap]
-//
-// Exit 0 when exactly one of the N+1 clients was ResourceExhausted, the other
-// N were acked, the takeover was acked and the displaced stream ended Aborted.
-//
-// With -silent it opens N+4 streams (the server's stream cap) that never send
-// Hello, then one more: the extra one must end ResourceExhausted at once, each
-// held one must end DeadlineExceeded "no Hello within" 55 to 70 s after it
-// opened (the measured seconds are printed), and a new session must then be
-// admitted and acked. Exit 0 when all three hold.
 package main
 
 import (

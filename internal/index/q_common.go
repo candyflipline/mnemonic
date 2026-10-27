@@ -160,8 +160,6 @@ func formatRFC3339UTCMillis(unixMs int64) string {
 	return time.UnixMilli(unixMs).UTC().Format("2006-01-02T15:04:05.000Z")
 }
 
-// FormatSessionID is the MCP id of the raw session id, which for Claude Code
-// is the session uuid its transcripts carry.
 func FormatSessionID(raw string) string {
 	return "session:" + b64RawURL.EncodeToString([]byte(raw))
 }

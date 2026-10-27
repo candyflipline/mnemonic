@@ -81,8 +81,6 @@ var writer = func() string {
 	return bi.Main.Version
 }()
 
-// recordShapes is, per action (and link kind), the fields a record must set
-// and the further ones it may; any other field set refuses the record.
 var recordShapes = map[string]struct{ required, optional []string }{
 	"delete":      {required: []string{"session_id"}},
 	"visibility":  {required: []string{"session_id", "visibility"}},
@@ -184,10 +182,6 @@ func (l lww) losesTo(r controlRecord) bool {
 	return r.TS.After(l.ts) || (r.TS.Equal(l.ts) && r.RequestKey > l.key)
 }
 
-// Controls is every control record in raw, the copy reads consult: a record
-// counts from the moment record returns, before any converge. links holds
-// every link by id; byToken and byKey index it for the public listener and
-// the handshake, and only apply writes the three.
 type Controls struct {
 	write    sync.Mutex
 	mu       sync.RWMutex
@@ -271,8 +265,6 @@ func (c *Controls) record(st *store.Committer, author string, r controlRecord) (
 	return c.recordLocked(st, author, r)
 }
 
-// recordLocked is record for a caller that holds c.write, so it can decide
-// from the controls and record that decision with no write between.
 func (c *Controls) recordLocked(st *store.Committer, author string, r controlRecord) (duplicate bool, err error) {
 	r.TS, r.Writer = time.Now().UTC(), writer
 	line, err := json.Marshal(r)
@@ -350,9 +342,6 @@ func parseControlArgs(raw json.RawMessage) (controlArgs, string, error) {
 	return a, id.session, nil
 }
 
-// actor is the caller on ctx when it may act on session: every author of
-// the session is in the caller's tenant, and the caller is its sole author or
-// holds an admin token. Any other session is not found.
 func actor(ctx context.Context, db *DB, c *Controls, session string) (auth.Identity, error) {
 	id, ok := auth.From(ctx)
 	if !ok || c == nil || store.From(ctx) == nil {

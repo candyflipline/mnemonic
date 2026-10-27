@@ -1,12 +1,4 @@
 #!/bin/sh
-# hot-settle.sh BIN DIR: serve DIR under MemoryMax MEM (8G) with no client
-# until a cycle logs hot <= MAXHOT (default 1) or MAX s pass (default 1800),
-# then stop it. Once serve listens it pushes one marker line from a scratch
-# HOME: a source is due to settle when it is settleSource older than the newest
-# source, so the marker makes every earlier hot component due, and the settle
-# cycles (every 5 min, parsing nothing) settle up to GOMAXPROCS shards each.
-# Resets a store to cold before lag.sh HOT mode.
-# Setup, not timed: flock -s /var/lib/mnu/box.lock sh hot-settle.sh BIN DIR
 set -eu
 BIN=${1:?usage: hot-settle.sh BIN DIR}
 DIR=${2:?usage: hot-settle.sh BIN DIR}

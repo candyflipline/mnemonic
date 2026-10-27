@@ -95,9 +95,6 @@ type htmlStep struct {
 	Class string
 }
 
-// WriteLinkHTML writes the link as one self-contained page: inline CSS, no
-// script, no fetch. Each session streams through w as it is read, so the page
-// is never held whole.
 func WriteLinkHTML(w io.Writer, db *index.DB, v LinkView) error {
 	sessions, err := openLink(db, v)
 	if err != nil {

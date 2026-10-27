@@ -1,6 +1,3 @@
-// Package auth maps client public keys to identities. The transport proves
-// the key and attaches the Identity to the request's context; who a request
-// reads and writes as comes from that key, never from the request.
 package auth
 
 import (
@@ -21,8 +18,6 @@ const (
 
 var Scopes = [...]Scope{Read, Push, Annotate, Admin}
 
-// DefaultTenant is the tenant of a key entry that names none, and of every
-// author no key entry names.
 const DefaultTenant = "default"
 
 type Grant struct {
@@ -30,8 +25,6 @@ type Grant struct {
 	Scopes         []Scope
 }
 
-// AuthorSet is the authors of one tenant: Names, or every author but Names
-// when Except.
 type AuthorSet struct {
 	Names  []string
 	Except bool
@@ -39,8 +32,6 @@ type AuthorSet struct {
 
 func (s AuthorSet) Has(author string) bool { return slices.Contains(s.Names, author) != s.Except }
 
-// Member is a device key an invite admitted. It acts as Author in Tenant
-// with MemberScopes, like a configured key.
 type Member struct{ Key, Tenant, Author string }
 
 var MemberScopes = []Scope{Read, Push}
@@ -53,9 +44,6 @@ type Roster interface {
 	EachMember(fn func(Member))
 }
 
-// Keys is who may connect: the configured grants, and the members the roster
-// holds at each call, so a member admitted or removed after boot counts at
-// once.
 type Keys struct {
 	grants map[string]Grant
 	roster Roster
@@ -63,8 +51,6 @@ type Keys struct {
 
 func NewKeys(byKey map[string]Grant) Keys { return Keys{grants: byKey} }
 
-// WithMembers is k admitting the members r holds, which it asks on every
-// Identify and on every read of an Identity's member set.
 func (k Keys) WithMembers(r Roster) Keys {
 	k.roster = r
 	return k
@@ -77,7 +63,6 @@ func (k Keys) member(key string) (Member, bool) {
 	return k.roster.Member(key)
 }
 
-// Identify is the Identity of key: its grant, else the live member it is.
 func (k Keys) Identify(key string) (Identity, bool) {
 	if g, ok := k.grants[key]; ok {
 		return Identity{tenant: g.Tenant, author: g.Author, scopes: g.Scopes, keys: &k}, true
@@ -88,8 +73,6 @@ func (k Keys) Identify(key string) (Identity, bool) {
 	return Identity{}, false
 }
 
-// tenantOf is every author's tenant: the grants' and the live members'. A
-// grant wins over a member naming the same author.
 func (k Keys) tenantOf() map[string]string {
 	out := map[string]string{}
 	if k.roster != nil {
@@ -101,10 +84,6 @@ func (k Keys) tenantOf() map[string]string {
 	return out
 }
 
-// Identity is who an authenticated request is. Keys.Identify and Local make
-// it and no one else can. The zero Identity grants nothing. Its member set
-// and, for a member, whether it is still admitted are read from its Keys at
-// each call, so an open connection sees a join or a revoke at once.
 type Identity struct {
 	tenant, author string
 	scopes         []Scope
@@ -129,8 +108,6 @@ func (id Identity) Members() AuthorSet {
 	return members(id.keys.tenantOf(), id.tenant)
 }
 
-// Admitted is false once the invite that admitted a member is revoked, and
-// true for every other Identity that grants anything.
 func (id Identity) Admitted() bool {
 	if id.member == "" {
 		return id.scopes != nil
@@ -139,8 +116,6 @@ func (id Identity) Admitted() bool {
 	return ok
 }
 
-// TenantOf is the tenant of author as the configured keys and the live
-// members name it, false when none does.
 func (id Identity) TenantOf(author string) (string, bool) {
 	if id.keys == nil {
 		return "", false
@@ -149,7 +124,6 @@ func (id Identity) TenantOf(author string) (string, bool) {
 	return t, ok
 }
 
-// Local is the in-process identity of local mode: DefaultTenant, every scope.
 func Local(author string) Identity {
 	return Identity{tenant: DefaultTenant, author: author, scopes: slices.Clone(Scopes[:]), local: true}
 }
@@ -172,9 +146,6 @@ func NewContext(ctx context.Context, id Identity) context.Context {
 	return context.WithValue(ctx, ctxKey{}, id)
 }
 
-// Require rejects a request whose ctx carries no Identity, or a member's
-// whose invite was revoked since its connection opened (401), or whose
-// Identity lacks one of need (403).
 func Require(need ...Scope) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

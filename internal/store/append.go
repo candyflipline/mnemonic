@@ -18,11 +18,6 @@ var ServerHarnesses = [...]string{schema.AnnotationHarness, "otlp", "control"}
 
 func isServerHarness(h string) bool { return slices.Contains(ServerHarnesses[:], h) }
 
-// ServerSource names a server-owned source: the author it belongs to (always
-// the caller's, from auth), one of ServerHarnesses, a stream within it (an
-// OTLP service, or "" for one stream per harness) and the UTC day it collects,
-// a midnight in UTC. Each day is its own source, so a manifest holds one
-// day's request keys.
 type ServerSource struct {
 	Author, Harness, Stream string
 	Day                     time.Time
@@ -63,8 +58,6 @@ func (src ServerSource) validate() error {
 
 type ctxKey struct{}
 
-// WithStore puts st on ctx, the way an MCP tool reaches Append; the caller's
-// author is auth.Author on the same ctx.
 func WithStore(ctx context.Context, st *Committer) context.Context {
 	return context.WithValue(ctx, ctxKey{}, st)
 }

@@ -26,8 +26,6 @@ type DatasetRow struct {
 	Annotations []AnnotationOut `json:"annotations"`
 }
 
-// AnnotationOut is one annotation of the session, its value carrying exactly
-// one of number, label or text (internal/schema/annotations.go:65-69).
 type AnnotationOut struct {
 	Name   string          `json:"name"`
 	Value  json.RawMessage `json:"value"`
@@ -47,17 +45,8 @@ type sessionKey struct {
 	annotations       []schema.Annotation
 }
 
-// ErrEveryFailed is Dataset's error when every matching session failed
-// validation.
 var ErrEveryFailed = errors.New("every matching session failed")
 
-// Dataset writes the sessions matching the annotation to w as JSONL, at most
-// perTask per task, newest first, one session and one step at a time. A task
-// is the cwd of the session's first published event. Sessions in hidden, and
-// those listed refuses, are left out. A session that fails validation does not
-// count toward its task's cap and comes back in skipped; Dataset errs with
-// ErrEveryFailed only when every matching session failed, and with w's error
-// when a write fails.
 func Dataset(w io.Writer, db *index.DB, f AnnotationFilter, perTask int, hidden map[string]bool, listed func(sessionID string) bool) (skipped []SessionError, err error) {
 	if f.Name == "" {
 		return nil, fmt.Errorf("export: --annotation needs a name")
@@ -158,7 +147,6 @@ func annotationValueMatches(v schema.Value, f AnnotationFilter) bool {
 
 const annotationTSPrecision = time.Microsecond
 
-// annotationOuts renders the session's annotations oldest first.
 func annotationOuts(ann []schema.Annotation) []AnnotationOut {
 	sorted := make([]schema.Annotation, len(ann))
 	copy(sorted, ann)

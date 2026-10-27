@@ -9,8 +9,6 @@ import (
 
 const vnodeEvents = syscall.NOTE_WRITE | syscall.NOTE_EXTEND | syscall.NOTE_DELETE | syscall.NOTE_RENAME
 
-// notifier parks its reader after each batch until the next take, so a burst
-// of writes wakes the process once rather than once per write.
 type notifier struct {
 	kq      int
 	changes *changes

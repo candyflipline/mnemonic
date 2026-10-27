@@ -54,27 +54,14 @@ type watcher struct {
 	watchErr error
 }
 
-// Sink is where a watcher hands the paths whose (size, mtime) changed since
-// their last sync, instead of the push stream: local mode feeds them to the
-// index ingest. Sync brings the sink's index up to the named files and
-// reports what it did; an error fails the pass, and the watcher retries on
-// the same backoff a failed push gets.
 type Sink interface {
 	Sync(ctx context.Context, paths []string) (Stats, error)
 }
 
-// Watch runs until ctx ends. Paths named by file events are sent at the first
-// quietFor tick after the first unsent event that finds no newer event, or
-// flushWithin after it, whichever comes first; a stats line is printed when
-// something was sent or failed. It holds one push stream open and, whenever
-// the stream ends, backs off, redials and runs one full pass.
 func Watch(ctx context.Context, cfg config.Client, red Redactor, out io.Writer) error {
 	return newWatcher(cfg, red).run(ctx, out)
 }
 
-// WatchSink is Watch with every changed path handed to sink instead of pushed: no server is contacted, nothing is redacted, and the sink owns
-// its own sync state — it is told, it is not kept current. Syncing still
-// follows the watcher's quiet window and stamp tests.
 func WatchSink(ctx context.Context, cfg config.Client, sink Sink, out io.Writer) error {
 	w := newWatcher(cfg, nil)
 	w.sink = sink

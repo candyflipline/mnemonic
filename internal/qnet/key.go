@@ -18,8 +18,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/auth"
 )
 
-// LoadOrCreateKey reads the ed25519 seed at path, writing a new one (file
-// mode 0600, parent directory 0700) when the file does not exist.
 func LoadOrCreateKey(path string) (ed25519.PrivateKey, error) {
 	raw, err := os.ReadFile(path)
 	if err == nil {
@@ -71,7 +69,6 @@ func certificate(key ed25519.PrivateKey) (tls.Certificate, error) {
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, nil
 }
 
-// peerCert is the key a peer's one self-signed certificate proves.
 func peerCert(raw [][]byte) (ed25519.PublicKey, error) {
 	if len(raw) != 1 {
 		return nil, fmt.Errorf("peer sent %d certificates, want 1", len(raw))

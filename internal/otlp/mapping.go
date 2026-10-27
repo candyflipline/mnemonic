@@ -52,9 +52,6 @@ var spanNameKinds = map[string]schema.SpanKind{
 	"claude_code.interaction": schema.SpanInvokeAgent,
 }
 
-// KindOf is the span kind a stored span stands for, "" when it is none of
-// the kinds the spans relation holds. gen_ai.operation.name wins over
-// openinference.span.kind, which wins over the span's name.
 func KindOf(r *Record) schema.SpanKind {
 	if k, ok := operationKinds[Str(r.Attributes, OperationName)]; ok {
 		return k

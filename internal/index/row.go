@@ -9,8 +9,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-// Row is the light part of one parsed event: every field a tool reads except
-// payload_json and token_usage_json, which live in the heavy log.
 type Row struct {
 	UID, Session, SourceName, Harness, InfProv, Author      string
 	SourceFile, SourceRef                                   string

@@ -7,12 +7,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/auth"
 )
 
-// SessionFilter is what the caller on a ctx may read, as predicates over raw
-// session ids. A session is the tenant's when every author in its session
-// authors is a member, so a session whose authors span two tenants is no
-// one's; a delete hides it from everyone, and private hides it from all but
-// its sole author. The zero SessionFilter, which a ctx without an
-// auth.Identity gets, passes everything.
 type SessionFilter struct {
 	db     *DB
 	scoped bool
@@ -71,7 +65,6 @@ func (f SessionFilter) soleAuthor(sessionID, author string) bool {
 	return len(authors) == 1 && (author == "" || authors[0] == author)
 }
 
-// Readable is whether the caller may list, search or open sessionID.
 func (f SessionFilter) Readable(sessionID string) bool {
 	return !f.hidden[sessionID] && f.inTenant(sessionID)
 }

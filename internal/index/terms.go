@@ -6,11 +6,6 @@ import (
 	"sort"
 )
 
-// The term dictionary of a part, sorted and front-coded in blocks of
-// termBlock: each entry is the uvarint length shared with the previous term
-// (0 at a block's start), the uvarint suffix length and bytes, then the
-// uvarint offset and length of its postings. terms.idx holds each block's u32
-// start, and terms.filter a filterBits-bit bloom filter of every term.
 const (
 	termBlock  = 16
 	filterBits = 2048 * 8

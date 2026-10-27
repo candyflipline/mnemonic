@@ -59,8 +59,6 @@ func duckSubstr(s string, n int) string {
 	return s
 }
 
-// lsAggregate folds a session's winner rows, in event order with each row's
-// turn seq, into its rollup.
 func lsAggregate(rows iter.Seq2[*borrowedRow, uint32], payload func(*borrowedRow) string) lsRec {
 	var rec lsRec
 	var web, mcp, tool bool
@@ -153,7 +151,6 @@ func lsAggregate(rows iter.Seq2[*borrowedRow, uint32], payload func(*borrowedRow
 	return rec
 }
 
-// lsMinKey is the fields of a row the arg_min order reads.
 type lsMinKey struct {
 	ts                  int64
 	name, file, uid     string

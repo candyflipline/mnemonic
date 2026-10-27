@@ -4,9 +4,6 @@ import "iter"
 
 type borrowedRow Row
 
-// sessionView hands a session's materialized winners to the derivations as
-// the iterators they take, for the delta image, which holds its rows in
-// memory; a full part's sections read the part's own logs (partView).
 type sessionView struct {
 	evs       []built
 	seqs      []uint32

@@ -10,9 +10,6 @@ import (
 	"syscall"
 )
 
-// ErrLocked is why a writer was refused an index dir: another process holds
-// its writer lock. The refusal's text names the holder's pid when the lock
-// file says one.
 var ErrLocked = errors.New("index dir locked by another writer")
 
 const writerLockName = "writer.lock"
@@ -37,10 +34,6 @@ type lockRegistry struct {
 
 var registry = &lockRegistry{locks: map[string]*IndexLock{}}
 
-// HoldIndexLock takes store's writer lock now and holds it until Unlock, so
-// serve or local owns the dir for its whole life. It refuses, with the holder
-// named, when another writer holds the dir — and answers with the lock this
-// process already holds when it is called again for the same dir.
 func HoldIndexLock(store string) (*IndexLock, error) {
 	r := registry
 	r.mu.Lock()
@@ -53,12 +46,6 @@ func HoldIndexLock(store string) (*IndexLock, error) {
 	return l, nil
 }
 
-// IngestLock is the writer lock every ingest passes through: it borrows the
-// lock this process holds for the dir when it holds one, and otherwise takes
-// the dir for this one ingest, refusing with the holder named while another
-// process holds it. The release must be called when the ingest is done; the
-// dir is freed when the last ingest on it is done and no HoldIndexLock owner
-// still holds it.
 func IngestLock(store string) (release func(), err error) {
 	r := registry
 	r.mu.Lock()
@@ -76,8 +63,6 @@ func IngestLock(store string) (release func(), err error) {
 	}, nil
 }
 
-// Unlock ends the HoldIndexLock owner's hold. The dir is freed at once, or
-// when the ingest still running on it is done.
 func (l *IndexLock) Unlock() error {
 	r := registry
 	r.mu.Lock()

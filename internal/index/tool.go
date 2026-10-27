@@ -16,7 +16,6 @@ type Tool interface {
 	Call(ctx context.Context, db *DB, args json.RawMessage) (data any, text string, err error)
 }
 
-// ArgError is a caller mistake (MCP isError result), not a server failure.
 type ArgError struct{ Msg string }
 
 func (e *ArgError) Error() string { return e.Msg }
@@ -30,8 +29,6 @@ func Lookup(name string) (Tool, bool) {
 	return t, ok
 }
 
-// Call runs one tool over db and encodes its data as the batch harness
-// answers a line; a panicking tool is an error.
 func Call(ctx context.Context, db *DB, tool string, args json.RawMessage) (data json.RawMessage, text string, err error) {
 	defer func() {
 		if p := recover(); p != nil {

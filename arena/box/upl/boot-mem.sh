@@ -1,10 +1,4 @@
 #!/bin/sh
-# boot-mem.sh BIN DIR TAG: boot BIN serve on DIR with no client under
-# systemd-run --scope MemoryMax MEM (8G), wait for the "cycle boot:" line (or
-# the serve's exit, or MAX s), keep it HOLD s more, stop it, and print
-# memory.peak, the max sampled anon (memory.stat), VmHWM, oom_kill and the
-# kernel's oom lines since launch, with hot-shape.sh before and after.
-# Measures memory, not time: flock -s /var/lib/mnu/box.lock sh boot-mem.sh ...
 set -eu
 BIN=${1:?usage: boot-mem.sh BIN DIR TAG}
 DIR=${2:?usage: boot-mem.sh BIN DIR TAG}

@@ -1,11 +1,4 @@
 #!/bin/sh
-# p4-cycle.sh BIN DIR TAG — one lag.sh run (ROWS-row probes) on DIR under
-# MemoryMax 8G, sampling the serve's VmHWM and its scope's memory.events
-# oom_kill every 2 s. PROFILE=1 also records `perf record -g` for 60 s and
-# `strace -c -f` for 30 s on the serve once the first probe row prints
-# (an unreported run: the tracers slow it down). Hold the box lock:
-#   flock /var/lib/mnu/box.lock sh p4-cycle.sh BIN DIR TAG
-# Env: as lag.sh (N 10, ROWS 10, SPACING 15, PORT 7841, PUSH_PORT 7842), OUT.
 set -eu
 BIN=${1:?usage: p4-cycle.sh BIN DIR TAG}
 DIR=${2:?usage: p4-cycle.sh BIN DIR TAG}

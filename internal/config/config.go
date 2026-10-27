@@ -74,9 +74,6 @@ type Server struct {
 	Share   *Share     `toml:"share"`
 }
 
-// Share is the listener that serves links (/s/ and /i/), on loopback only.
-// BaseURL is its public origin and QUICAddr the host:port a joining machine
-// dials.
 type Share struct {
 	Listen   string `toml:"listen"`
 	BaseURL  string `toml:"base_url"`
@@ -85,8 +82,6 @@ type Share struct {
 
 const DefaultShareListen = "127.0.0.1:8742"
 
-// QUIC is the one UDP endpoint. KeyFile holds the server's ed25519 key and
-// defaults to data_dir/server.key.
 type QUIC struct {
 	Listen  string `toml:"listen"`
 	KeyFile string `toml:"key_file"`

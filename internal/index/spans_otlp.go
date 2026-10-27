@@ -9,14 +9,6 @@ import (
 
 const otlpMaxEdges = 65
 
-// otlpSpans: each events row with payload_type 'span' and an op_kind of chat,
-// execute_tool or invoke_agent is a span keyed by the author and the OTLP
-// span id (trace_id, item_id); other span rows are not emitted and their
-// children hang under the nearest emitted ancestor, else the root. Of the
-// emitted spans on a parent cycle the one with the smallest item_id is the
-// root. A chat carries its own usage; an invoke_agent carries the sum over
-// the chats beneath it, else its own. The parent link is origin_event_id, the
-// event_uid of the parent span's row.
 func otlpSpans(_, sid string, session iter.Seq[*borrowedRow]) []schema.Span {
 	rows := map[string]*otlpNode{}
 	for r := range session {
@@ -162,9 +154,6 @@ func otlpEmitted(opKind string) bool {
 	return false
 }
 
-// otlpWalk follows each row's origin_event_id chain upward, calling yield on
-// every distinct strict ancestor, nearest first, at most otlpMaxEdges edges
-// out, and stopping where yield returns false.
 func otlpWalk(rows map[string]*otlpNode, yield func(from, uid string, anc *otlpNode) bool) {
 	for from := range rows {
 		seen := map[string]bool{from: true}

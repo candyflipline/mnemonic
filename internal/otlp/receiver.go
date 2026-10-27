@@ -1,6 +1,3 @@
-// Package otlp is the OTLP/HTTP receiver: POST /v1/traces and POST /v1/logs
-// turn each request into JSON lines appended to the author's server-owned
-// otlp source, one line per span or log record.
 package otlp
 
 import (
@@ -46,8 +43,6 @@ const (
 	jsonType     = "application/json"
 )
 
-// Receiver appends OTLP requests to st. Message content is stored only after
-// SetStoreContent(true).
 type Receiver struct {
 	st           *store.Committer
 	storeContent atomic.Bool
@@ -60,8 +55,6 @@ func NewReceiver(st *store.Committer) *Receiver {
 
 func (r *Receiver) SetStoreContent(on bool) { r.storeContent.Store(on) }
 
-// Traces serves POST /v1/traces and Logs POST /v1/logs; both expect the
-// caller's author on the request context (auth.Require).
 func (r *Receiver) Traces() http.Handler {
 	return r.handler(func() proto.Message { return &colltrace.ExportTraceServiceRequest{} },
 		func(m proto.Message, content bool) (*batch, proto.Message) {

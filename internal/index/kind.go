@@ -17,14 +17,10 @@ import (
 
 const SettleSource = 15 * time.Minute
 
-// Kind is where a source's bytes live.
 type Kind uint8
 
 const (
-	// KindStore is a pushed source in the store: raw/.../<src>.jsonl.zst
-	// read up to its manifest's zst_size.
 	KindStore Kind = iota
-	// KindPlain is a harness's own JSONL file read in place (local mode).
 	KindPlain
 )
 

@@ -56,7 +56,6 @@ type parsed struct {
 	Sessions   []string        `json:"sessions"`
 }
 
-// ckpt is parsed plus where this disk keeps the rows.
 type ckpt struct {
 	parsed
 	Gen      int   `json:"gen"`
@@ -69,7 +68,6 @@ type ckpt struct {
 	ColdSHA   string `json:"cold_sha,omitempty"`
 }
 
-// logLayout 1 numbers a row's version by its place in its source.
 const logLayout = 1
 
 type planEntry struct {
@@ -183,8 +181,6 @@ func listSources(root string) (*sourceSet, error) {
 	return sourcesOf(root, listed)
 }
 
-// sourcesOf is the store sources of manifests in manifest path order, then
-// the archive files, each with its checkpoint.
 func sourcesOf(root string, manifests []store.Manifest) (*sourceSet, error) {
 	stored := make([]source, len(manifests))
 	for i, m := range manifests {
@@ -314,8 +310,6 @@ func wantCkpt(s source, parser normalize.Parser) ckpt {
 		Path: filepath.ToSlash(s.key.Events(""))}}
 }
 
-// extends reports whether the input up to end still holds the bytes prev was
-// parsed from, so only the bytes past it parse.
 func extends(raw *os.File, end int64, want, prev ckpt) bool {
 	if !prev.sameInput(want) || prev.State.Provisional() && prev.Offset < end {
 		return false
@@ -473,8 +467,6 @@ func (l frameLogs) add(r *Row, payload, tokenUsage string) error {
 	return err
 }
 
-// sync makes every added record durable and returns the lengths a
-// checkpoint may then name.
 func (l frameLogs) sync() (lightLen, heavyLen int64, err error) {
 	for _, w := range []*frameWriter{l.heavy, l.light} {
 		if err := w.flush(); err != nil {
@@ -573,11 +565,8 @@ type IngestStats [4]int
 
 const sweepBudget = 5 * time.Second
 
-// beforeWriterLock, non-nil in tests, runs just before a writer takes the
-// dir's writer lock.
 var beforeWriterLock func()
 
-// writerLock is held only inside withWriterLock's fn.
 type writerLock struct{ store string }
 
 func withWriterLock(store string, fn func(writerLock) error) error {
@@ -781,9 +770,6 @@ func parserVersion(s source) int {
 	return p.Version()
 }
 
-// versionStale reports whether s would re-parse from byte 0 only because its
-// parser has a newer Version than its checkpoint: no new bytes and none lost,
-// so it is sweep work, bounded per cycle, not push work.
 func versionStale(s source) bool {
 	if !s.kind.sweepable() || s.ck == nil {
 		return false

@@ -136,7 +136,6 @@ func logSize(dir, name string) (int64, error) {
 	return fi.Size(), nil
 }
 
-// mkdirDeltas fsyncs the entries MkdirAll adds: dd in deltas, deltas in the store.
 func mkdirDeltas(dd string) error {
 	if err := os.MkdirAll(dd, 0o755); err != nil {
 		return err

@@ -1,9 +1,4 @@
 #!/bin/sh
-# memcap-eq-compare.sh BASE-COPY FIX-COPY: sha256 every file in the part dirs
-# each side's cycle wrote (files newer than that side's OUT/stamp-<base> file),
-# sorted by path, and diff BASE vs FIX; then diff CURRENT with updated_ms
-# zeroed (the only timestamp field of CURRENT's sources, q_get_ingest_status.go:63).
-# Correctness run: flock -s /var/lib/mnu/box.lock sh memcap-eq-compare.sh BASE FIX
 set -eu
 B=${1:?usage: memcap-eq-compare.sh BASE-COPY FIX-COPY}
 F=${2:?usage: memcap-eq-compare.sh BASE-COPY FIX-COPY}

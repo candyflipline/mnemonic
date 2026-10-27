@@ -1,10 +1,4 @@
 #!/bin/sh
-# Runs inside its own network namespace (box-run.sh creates it), where 443 and
-# 8741 are free and nothing on the host's ports is touched. Boots the serve,
-# floods the HTTP listener then the push listener at about 16/s for 3 minutes
-# each, waits out the minute ticker so the flood tail lands in summaries,
-# collects counts, and stops the serve by its exact pid.
-# Usage: in-ns.sh BIN TAG RUN RESULTS
 set -u
 BIN=$1
 TAG=$2

@@ -365,9 +365,6 @@ func (s *lightSource) record(src uint16, loc rowLoc) ([]byte, error) {
 	return recs[loc.li], nil
 }
 
-// partView hands one session of the new part to the derived sections as the
-// iterators they take, each row decoded from the part's own light log with
-// its member's author; payload reads the part's own heavy log.
 type partView struct {
 	acc        *partAcc
 	cks        []ckpt

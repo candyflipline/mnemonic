@@ -62,8 +62,6 @@ func (c *stepCut) filter(fn func(*Step) error) func(*Step) error {
 	}
 }
 
-// linkSession is session n of a link, opened once so its page header and its
-// body read the same plan.
 type linkSession struct {
 	n              int
 	t              *trajectory
@@ -146,8 +144,6 @@ func (ls *linkSession) describe() string {
 	return strings.Join(parts, ", ")
 }
 
-// stepView is what a step shows: the one shape the markdown and the HTML both
-// print, so the two cannot drift.
 type stepView struct {
 	Role, Message string
 	Calls         []callView
@@ -279,8 +275,6 @@ func (ls *linkSession) writeMarkdown(bw *bufio.Writer, level string) error {
 	})
 }
 
-// WriteLinkMarkdown writes the whole link as markdown: title, note, a
-// numbered list of the sessions with their .md URLs, then each session.
 func WriteLinkMarkdown(w io.Writer, db *index.DB, v LinkView) error {
 	sessions, err := openLink(db, v)
 	if err != nil {
@@ -304,8 +298,6 @@ func WriteLinkMarkdown(w io.Writer, db *index.DB, v LinkView) error {
 	return bw.Flush()
 }
 
-// WriteSessionMarkdown writes session n (1-based) of the link as markdown.
-// An n outside the link is ErrSessionNotFound.
 func WriteSessionMarkdown(w io.Writer, db *index.DB, v LinkView, n int) error {
 	ls, err := openLinkSession(db, v, n)
 	if err != nil {
@@ -318,10 +310,6 @@ func WriteSessionMarkdown(w io.Writer, db *index.DB, v LinkView, n int) error {
 	return bw.Flush()
 }
 
-// WriteSessionATIF writes session n of the link as the validated ATIF
-// trajectory WriteATIF writes, with the steps stamped after the cutoff
-// dropped and the rest renumbered from 1. A session with no step at or before
-// the cutoff is refused as ErrInvalidATIF, as an empty trajectory is.
 func WriteSessionATIF(w io.Writer, db *index.DB, v LinkView, n int) error {
 	t, err := openCut(db, v, n)
 	if err != nil {

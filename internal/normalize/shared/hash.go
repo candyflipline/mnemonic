@@ -19,7 +19,6 @@ func EventUID(sourceFile string, sourceLineNo, sourceOffset uint64, recordFinger
 	return hex.EncodeToString(sum[:])
 }
 
-// RawHash is the first 64 bits of the SHA-256 of s, big-endian.
 func RawHash(s string) uint64 {
 	sum := sha256.Sum256([]byte(s))
 	return mustU64(hex.EncodeToString(sum[:8]))

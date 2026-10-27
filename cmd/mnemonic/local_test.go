@@ -60,10 +60,6 @@ func TestRefuseClientDir(t *testing.T) {
 	}
 }
 
-// TestWakeCycleDrainsSettles pins the wake path's drain: a cycle that parses
-// bytes settles nothing (internal/index's settle budget), so the wake path
-// must keep cycling until the sweep has no work left, the way serve does,
-// instead of leaving a due component hot until a restart.
 func TestWakeCycleDrainsSettles(t *testing.T) {
 	fixture, err := os.ReadFile(filepath.Join("..", "..", "testdata", "fixtures", "claude-code", "session.jsonl"))
 	if err != nil {

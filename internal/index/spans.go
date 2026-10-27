@@ -9,10 +9,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-// spanBuilders derive a session's spans section from its winner rows of one
-// harness, in event order with turn_seq current:
-// 59796bc:internal/cache/index_spans_<harness>.go. rows may be ranged over
-// more than once.
 var spanBuilders = map[string]func(harness, sid string, rows iter.Seq[*borrowedRow]) []schema.Span{
 	"claude-code":     claudeCodeSpans,
 	"codex":           codexSpans,

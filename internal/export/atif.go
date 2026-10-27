@@ -1,8 +1,3 @@
-// Package export writes sessions out of the index in the interchange formats
-// the design doc names under HTTP export: ATIF trajectories validated against
-// the ported Harbor rules, OTLP/JSON traces built from the spans relation, and
-// JSONL datasets filtered by annotation (docs/design-open-source-at-scale.md
-// 102-105).
 package export
 
 import (
@@ -104,12 +99,8 @@ type eventRow struct {
 	CacheWrite      uint64
 }
 
-// ErrInvalidATIF is an ATIF export's error when the validator refuses the
-// trajectory.
 var ErrInvalidATIF = errors.New("ATIF validation failed")
 
-// ErrSessionNotFound is what an export answers for a session the index does
-// not know and for one in hidden, so the two cannot be told apart.
 var ErrSessionNotFound = errors.New("session not found")
 
 func notFound(sessionID string) error {
@@ -207,9 +198,6 @@ func (t *trajectory) envelope(steps []Step) Trajectory {
 	return Trajectory{SchemaVersion: SchemaVersion, SessionID: t.id, Agent: t.agent, Steps: steps}
 }
 
-// WriteATIF writes the session's trajectory to w once the ported validator
-// accepts it, laid out as the CLI prints it: keys sorted at every level and
-// indented by two spaces. A refused trajectory writes nothing.
 func WriteATIF(w io.Writer, db *index.DB, sessionID string, hidden map[string]bool) error {
 	t, err := newTrajectory(db, sessionID, hidden)
 	if err != nil {
@@ -226,11 +214,8 @@ func (t *trajectory) writeIndented(w io.Writer) error {
 	return v.write(w, "  ")
 }
 
-// validTrajectory is a trajectory the ported validator accepted.
 type validTrajectory struct{ *trajectory }
 
-// write writes the trajectory as json.Marshal lays it out when indent is empty,
-// and as WriteATIF lays it out otherwise.
 func (v validTrajectory) write(w io.Writer, indent string) error {
 	env, err := json.Marshal(v.envelope([]Step{}))
 	if err != nil {
@@ -312,10 +297,6 @@ func requestKey(harness string, ev eventRow) string {
 	return ""
 }
 
-// planSteps maps rows to steps: one step per user message, per model request
-// within a run of assistant rows (message, reasoning, tool_call), and per
-// system/meta row. Steps are numbered in the order they open, which is the
-// order they close.
 func planSteps(harness string, rows iter.Seq2[eventRow, error]) (plan []rowPlan, last []int32, err error) {
 	latest := map[string]int32{}
 	curCalls := map[string]bool{}
@@ -370,10 +351,6 @@ func planSteps(harness string, rows iter.Seq2[eventRow, error]) (plan []rowPlan,
 	return plan, last, nil
 }
 
-// resultStep places a tool result: on the step whose tool_calls carry its
-// tool_call_id (the open agent run first, then the newest closed step) keeping
-// its source_call_id, else on the open agent run, else on the newest step,
-// without one. A result with neither an id match nor content is dropped.
 func resultStep(ev eventRow, cur int32, curCalls map[string]bool, latest map[string]int32, steps int32) rowPlan {
 	if id := ev.ToolCallID; id != "" {
 		if cur >= 0 && curCalls[id] {
@@ -393,8 +370,6 @@ func resultStep(ev eventRow, cur int32, curCalls map[string]bool, latest map[str
 	return rowPlan{step: home}
 }
 
-// eachStep builds the planned steps from the rows and hands each to fn, in
-// order, as soon as its last row is read.
 func (t *trajectory) eachStep(fn func(*Step) error) error {
 	if t.cut != nil {
 		fn = t.cut.filter(fn)

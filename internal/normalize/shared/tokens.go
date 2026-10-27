@@ -125,8 +125,6 @@ func (t TokenAccounting) WithRawUsage(usage JSON) TokenAccounting {
 	return t
 }
 
-// FirstOf returns the first member of v present under any of keys, explicit
-// null included.
 func FirstOf(v JSON, keys ...string) JSON {
 	val, _ := FirstPresent(v, keys...)
 	return val

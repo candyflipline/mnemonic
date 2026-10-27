@@ -14,8 +14,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/index"
 )
 
-// SkippedTrailer is the dataset response's trailer: "<session id>: <error>"
-// per session that failed validation.
 const SkippedTrailer = "Mnemonic-Skipped"
 
 type request struct {
@@ -69,9 +67,6 @@ func Handler(ix *index.Index, ctl *index.Controls) http.Handler {
 	})
 }
 
-// Counted is a response body that counts what has been written, so an error
-// after the first byte aborts the response instead of ending a 200 early. A
-// nil W only counts.
 type Counted struct {
 	W io.Writer
 	N int64

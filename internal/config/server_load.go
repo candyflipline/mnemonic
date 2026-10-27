@@ -114,8 +114,6 @@ func (s *Share) check() error {
 	return nil
 }
 
-// IsLoopbackHost is whether host (no port) names this machine: localhost or a
-// loopback address. It is the one place plaintext http is allowed.
 func IsLoopbackHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true

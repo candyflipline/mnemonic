@@ -100,8 +100,6 @@ func share(args []string) error {
 	return nil
 }
 
-// sessionRef is arg as a session id: itself when it already is one, else
-// the session whose raw id it is, as a Claude Code session uuid is.
 func sessionRef(arg string) string {
 	if strings.HasPrefix(arg, "session:") {
 		return arg

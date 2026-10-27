@@ -150,8 +150,6 @@ func holderIndexOf(holder *Part, key string) int {
 	return -1
 }
 
-// memberFrom reports where c's tail starts when holder holds it. ok is false
-// when c must be read from its logs whole.
 func memberFrom(c ckpt, holder *Part) (from int64, ok bool) {
 	hs := holderIndexOf(holder, c.Key)
 	if hs < 0 {
@@ -195,13 +193,6 @@ func sameParsed(a, b parsed) bool {
 		a.Offset == b.Offset && a.WindowSHA == b.WindowSHA && a.State == b.State && a.Rows == b.Rows
 }
 
-// walkMember calls fn with the light record of every row a part build reads
-// of one member: the rows the holder part holds for it, then the tail from
-// from, read from the member's frame logs. holder is the part of the previous
-// manifest that holds the member, nil to read every row from the logs (a cold
-// build's first run, or a holder a re-parse left behind). A member fully
-// covered by its holder is read from the holder alone and its logs are never
-// opened. rec is valid until fn returns.
 func walkMember(store string, c ckpt, holder *Part, from int64, fn func(rec []byte, loc rowLoc) error) error {
 	if holder == nil && c.retired() {
 		return fmt.Errorf("%s: retired member read without a holder", c.Key)
@@ -728,9 +719,6 @@ func tokenize(text string, emit func(string)) int {
 	return n
 }
 
-// heavyReader reads the heavy records of rows at build, decoding a few frames
-// at a time; a row's src picks its log. Logs open on first use: a member whose
-// rows its holder carries never opens its own.
 type heavyReader struct {
 	store string
 	cks   []ckpt

@@ -24,9 +24,6 @@ func newSections() *sections {
 	}
 }
 
-// addSession folds one session's winner rows, in event order with turn_seq
-// current, into the spans and annotations sections. rows may be ranged over
-// more than once.
 func (s *sections) addSession(sid string, rows iter.Seq[*borrowedRow], payload func(*borrowedRow) string) {
 	seen := map[string]bool{}
 	var anns []annRow

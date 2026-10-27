@@ -9,10 +9,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-// ExportSession is one session as the exports read it: the session's columns,
-// the annotations targeting it, and its winner rows read one at a time through
-// EachRow. Harness and FirstCwd are the first row's, LastEventUs the newest
-// row's event_time, the sessions-table columns the dataset export orders by.
 type ExportSession struct {
 	ID          string
 	Annotations []schema.Annotation
@@ -51,8 +47,6 @@ func (es ExportSession) EachRow(fn func(*Row) error) error {
 	return nil
 }
 
-// EachSession calls fn for every session the export may read, in session id
-// order; hidden reports sessions the session controls hide from the export.
 func (db *DB) EachSession(hidden map[string]bool, fn func(ExportSession) error) error {
 	type ref struct {
 		id string
@@ -101,8 +95,6 @@ func (db *DB) ExportHasSession(id string) bool {
 	return ok
 }
 
-// ExportSpans is the session's spans relation rows, in export order (start
-// time, span id).
 func (db *DB) ExportSpans(id string) []schema.Span { return db.sessionSpans(id) }
 
 func (db *DB) EachExportSpan(id string, fn func(schema.Span) error) error {
@@ -157,9 +149,6 @@ func (r Row) EventTime() time.Time {
 	return spanTime(eventTimeUs(&r))
 }
 
-// ExportHidden is the set of sessions an operator export on the server's data
-// dir must not emit: every deleted session, and every private one unless
-// includePrivate. The operator sees every author, so tenancy plays no part.
 func (c *Controls) ExportHidden(includePrivate bool) map[string]bool {
 	sets := c.sets()
 	hidden := make(map[string]bool, len(sets.deleted)+len(sets.private))

@@ -1,6 +1,3 @@
-// Package push is the client side of the wire protocol: scan the configured
-// globs, diff against the server's state from Welcome, send only whole
-// redacted lines over one gRPC stream.
 package push
 
 import (
@@ -157,10 +154,6 @@ type File struct {
 	Size       int64
 }
 
-// ScanFiles matches sources' globs the way a push scan does and returns the
-// regular files found, deduplicated by absolute path, in scan order. Local
-// mode names its plain sources from it, so their src ids and manifest fields
-// are what push would have sent for the same file.
 func ScanFiles(sources []config.SourceGlob) []File {
 	refs := scan(sources)
 	out := make([]File, 0, len(refs))

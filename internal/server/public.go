@@ -24,9 +24,6 @@ const (
 	maxJoinBytes = 4 << 10
 )
 
-// Public is the [share] listener's handler: read links under /s/, invites
-// under /i/, nothing else. It is the only code that reads a token: it parses
-// it, finds the link, and hands the renderers a view.
 func (s *Server) Public() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /s/{path...}", s.serveRead)
@@ -42,8 +39,6 @@ func (s *Server) Public() http.Handler {
 	})
 }
 
-// readPath is one URL form of a read link: the whole link (n 0) as HTML or
-// markdown, or session n as markdown or ATIF JSON.
 type readPath struct {
 	token string
 	n     int

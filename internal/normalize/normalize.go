@@ -27,9 +27,6 @@ type State struct {
 	RecordTSHint string `json:"record_ts_hint"`
 }
 
-// Provisional reports that lines were read but none carried a record
-// timestamp, so the rows emitted for them take the first timestamp of lines
-// not read yet: a resumed parse cannot yield a whole-file parse's rows.
 func (s State) Provisional() bool { return s.LineNo > 0 && s.RecordTSHint == "" }
 
 type Parser interface {

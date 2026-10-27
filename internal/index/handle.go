@@ -9,10 +9,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/redact"
 )
 
-// Index is the engine handle the server, MCP and the harness hold: a store
-// dir and the DB of the CURRENT it last opened. Snapshot pins that DB for one
-// call; Refresh swaps in the DB of a newer CURRENT, and the old one is closed
-// once the last call pinning it releases it.
 type Index struct {
 	store string
 	lock  *IndexLock
@@ -27,15 +23,11 @@ type snapshot struct {
 	retired bool
 }
 
-// Open is the Index over store, serving its CURRENT, or nothing until the
-// first ingest commits one.
 func Open(store string) (*Index, error) {
 	ix := &Index{store: store, cur: &snapshot{db: emptyDB()}}
 	return ix, ix.Refresh()
 }
 
-// OpenExclusive is Open with store's writer lock held for the Index's life:
-// Close closes it and then unlocks.
 func OpenExclusive(store string) (*Index, error) {
 	lock, err := HoldIndexLock(store)
 	if err != nil {
@@ -54,14 +46,11 @@ func emptyDB() *DB { return &DB{sessPart: map[string]int{}} }
 // openRetryHook, non-nil in tests, runs between open retries.
 var openRetryHook func()
 
-// Ingest brings the store up to root's raw and serves the result.
 func (ix *Index) Ingest(root string, opts IngestOptions) (IngestStats, error) {
 	st, err := Ingest(root, ix.store, opts.Quiet, opts.SettleAll)
 	return st, errors.Join(err, ix.Refresh())
 }
 
-// IngestPlain brings the store up to the machine's harness files read in
-// place as KindPlain sources (local mode) and serves the result.
 func (ix *Index) IngestPlain(globs []config.SourceGlob, author, machine string, opts IngestOptions) (IngestStats, error) {
 	st, err := IngestPlain(ix.store, globs, author, machine, opts)
 	return st, errors.Join(err, ix.Refresh())
@@ -74,13 +63,6 @@ func (ix *Index) IngestPlain(globs []config.SourceGlob, author, machine string, 
 // caller rather than serve as an empty index.
 const openTries = 3
 
-// Refresh opens CURRENT when its bytes changed since the DB being served,
-// taking from that DB the parts it still names (openDB). No
-// CURRENT is nothing published yet and keeps the DB being served (Open's is
-// empty); a part CURRENT names that no longer opens is retried on a freshly
-// read CURRENT a bounded number of times and, still failing, returns the
-// error — never an empty DB with a nil error, which is what export would
-// write out.
 func (ix *Index) Refresh() error { return ix.refresh(nil) }
 
 func (ix *Index) refresh(opened map[string]*Part) error {
@@ -116,7 +98,6 @@ func (ix *Index) refresh(opened map[string]*Part) error {
 	}
 }
 
-// Snapshot pins the DB being served; release unpins it.
 func (ix *Index) Snapshot() (db *DB, release func()) {
 	ix.mu.Lock()
 	s := ix.cur

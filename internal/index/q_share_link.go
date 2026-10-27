@@ -17,9 +17,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/wire"
 )
 
-// LinkSite is where read links are served, which only the server knows:
-// BaseURL is the public origin, and MarkdownSize is the size of session n of
-// a read link as its .md URL renders it.
 type LinkSite struct {
 	BaseURL      string
 	MarkdownSize func(db *DB, token string, l ReadLink, n int) (int64, error)
@@ -53,7 +50,6 @@ var pacific = func() *time.Location {
 	return loc
 }()
 
-// PacificText is t as the owner reads every time: in San Francisco time.
 func PacificText(t time.Time) string { return t.In(pacific).Format("Jan 2, 2006 3:04 PM MST") }
 
 type shareLink struct{}
@@ -239,9 +235,6 @@ func createRead(ctx context.Context, db *DB, c *Controls, st *store.Committer, s
 	return data, b.String(), nil
 }
 
-// sessionRow is what the owner checks before sending a link: the session's
-// harness, project (its first working directory's base name), start, and the
-// user and assistant messages at or before cutoff.
 func sessionRow(db *DB, session string, cutoff time.Time) linkSessionRow {
 	row := linkSessionRow{SessionID: FormatSessionID(session), Project: "-", Start: "start unknown"}
 	es, ok, err := db.ExportSession(session)

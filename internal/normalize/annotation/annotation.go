@@ -1,5 +1,3 @@
-// Package annotation parses the annotation source the annotate tool appends
-// to: one events row per annotation line, as schema.AnnotationHarness names.
 package annotation
 
 import (

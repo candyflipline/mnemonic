@@ -19,9 +19,6 @@ func (authInfo) AuthType() string { return "qnet" }
 
 type creds struct{}
 
-// Credentials is the server side of gRPC over qnet: ServerHandshake reports
-// the Identity of a qnet conn, and refuses any other conn. Dialers use
-// insecure credentials, since QUIC already encrypts.
 func Credentials() credentials.TransportCredentials { return creds{} }
 
 func FromPeer(ctx context.Context) (auth.Identity, bool) {

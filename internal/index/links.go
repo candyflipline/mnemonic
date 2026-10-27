@@ -26,12 +26,8 @@ const (
 	tokenBytes = 16
 )
 
-// TokenHash is the SHA-256 of a link's token, the only form of it the
-// controls hold.
 type TokenHash [sha256.Size]byte
 
-// ParseToken is the hash of a token as a link URL carries it: 16 bytes in
-// canonical unpadded base64url. Anything else is no token.
 func ParseToken(s string) (TokenHash, bool) {
 	b, err := base64.RawURLEncoding.Strict().DecodeString(s)
 	if err != nil || len(b) != tokenBytes || base64.RawURLEncoding.EncodeToString(b) != s {
@@ -105,8 +101,6 @@ func (c *Controls) applyLink(r controlRecord) {
 	}
 }
 
-// Member is the device key a live invite admitted, which every handshake and
-// request consults.
 func (c *Controls) Member(key string) (auth.Member, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -117,7 +111,6 @@ func (c *Controls) Member(key string) (auth.Member, bool) {
 	return auth.Member{Key: key, Tenant: l.tenant, Author: l.invite}, true
 }
 
-// EachMember calls fn for every admitted member, under the read lock.
 func (c *Controls) EachMember(fn func(auth.Member)) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -126,8 +119,6 @@ func (c *Controls) EachMember(fn func(auth.Member)) {
 	}
 }
 
-// ReadLink is a live read link as its readers see it: the sessions still
-// readable through it, in the owner's order, read as of Cutoff.
 type ReadLink struct {
 	ID, Title, Note string
 	SessionIDs      []string
@@ -156,7 +147,6 @@ func (c *Controls) OpenRead(db *DB, h TokenHash, now time.Time) (ReadLink, error
 	return rl, nil
 }
 
-// Invite is a live, unused invite: who the joining machine will push as.
 type Invite struct {
 	ID, Author string
 	Expires    time.Time
@@ -175,9 +165,6 @@ func (c *Controls) OpenInvite(h TokenHash, now time.Time) (Invite, error) {
 	return Invite{ID: l.id, Author: l.invite, Expires: l.expires}, nil
 }
 
-// Join admits key through the invite h names and answers the author it
-// pushes as. The first join wins: the same key again gets the same answer
-// and writes nothing, any other key gets ErrLinkGone.
 func (c *Controls) Join(st *store.Committer, h TokenHash, key, machine string, now time.Time) (string, error) {
 	c.write.Lock()
 	defer c.write.Unlock()
@@ -204,8 +191,6 @@ func (c *Controls) Join(st *store.Committer, h TokenHash, key, machine string, n
 	return l.invite, nil
 }
 
-// newLink records r, a link record lacking its id and token, and answers
-// the token, which exists nowhere else from then on.
 func (c *Controls) newLink(st *store.Committer, r controlRecord) (controlRecord, string, error) {
 	id := make([]byte, linkIDLen/2)
 	rand.Read(id)
@@ -217,14 +202,10 @@ func (c *Controls) newLink(st *store.Committer, r controlRecord) (controlRecord,
 	return r, token, nil
 }
 
-// owns is whether id may see and revoke l: l's own author, or an admin of
-// l's tenant.
 func owns(id auth.Identity, l *link) bool {
 	return l.kind != "" && l.tenant == id.Tenant() && (l.author == id.Author() || id.Can(auth.Admin))
 }
 
-// revoke records the revoke of the link named linkID; a link already
-// revoked writes nothing.
 func (c *Controls) revoke(st *store.Committer, id auth.Identity, linkID string) error {
 	c.write.Lock()
 	defer c.write.Unlock()
@@ -254,7 +235,6 @@ func (c *Controls) inviteTenant(author, tenant string, now time.Time) (string, b
 	return "", false
 }
 
-// owned is the live links id may see, newest first.
 func (c *Controls) owned(id auth.Identity, now time.Time) []link {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

@@ -29,7 +29,6 @@ const (
 	queueRequests   = 2 * maxBatchAppends
 )
 
-// Lines is a non-empty run of whole lines, each ending in '\n'.
 type Lines struct{ b []byte }
 
 var errLines = errors.New("body must be non-empty whole lines")
@@ -74,8 +73,6 @@ type Extend struct {
 	Lines    Lines
 }
 
-// Backfill records RawEnd when the source is Offset long with HeadHash; Size,
-// ZstSize and UpdatedMs stay, so the index re-parses nothing.
 type Backfill struct {
 	Offset   int64
 	HeadHash string
@@ -139,17 +136,11 @@ func ParseOp(offset int64, headHash, sourceName, path string, rawEnd int64, body
 type Verdict uint8
 
 const (
-	// Applied: State is the source after the change.
 	Applied Verdict = iota + 1
-	// Conflict: nothing written; State is the source as stored, zero when
-	// there is none.
 	Conflict
-	// Duplicate: a server append whose request key was already applied.
 	Duplicate
 )
 
-// Ack is a request's answer once its batch is durable. The zero Ack is
-// invalid; committed.acks makes every other one.
 type Ack struct {
 	verdict Verdict
 	state   wire.Source
@@ -172,8 +163,6 @@ func (t *Ticket) resolve(a Ack) { t.ack = a; close(t.done) }
 
 func (t *Ticket) fail(err error) { t.err = err; close(t.done) }
 
-// Wait returns the Ack once the request's batch passed its last barrier, or
-// the error that stopped the committer.
 func (t *Ticket) Wait(ctx context.Context) (a Ack, err error) {
 	select {
 	case <-t.done:
@@ -183,9 +172,6 @@ func (t *Ticket) Wait(ctx context.Context) (a Ack, err error) {
 	}
 }
 
-// Committer is the one writer of raw/. Every client change and server append
-// is a request on its queue; one goroutine commits them in batches. The table
-// is every source's manifest, loaded at Open and written through.
 type Committer struct {
 	dataDir string
 	barrier barrier
@@ -215,9 +201,6 @@ type request struct {
 	ticket *Ticket
 }
 
-// Open loads the table from every manifest under dataDir, removes the temp
-// files a crash left, and starts the committer. A failed write or barrier
-// stops the committer and exits the process.
 func Open(dataDir string) (*Committer, error) {
 	b, closeFS, err := openBarrier(dataDir)
 	if err != nil {
@@ -337,8 +320,6 @@ func isTemp(name string) bool {
 		(strings.Contains(name, ".json.") || strings.Contains(name, ".jsonl.zst."))
 }
 
-// Close stops intake, commits what is queued, and returns the error that
-// stopped the committer, if any.
 func (c *Committer) Close() error {
 	c.intake.Lock()
 	if !c.closed {
@@ -355,8 +336,6 @@ func (c *Committer) Close() error {
 
 var errClosed = errors.New("store: closed")
 
-// Submit queues op for src and returns its ticket. The frame is encoded on the
-// caller's goroutine; Submit blocks while queueBytes of frames are queued.
 func (c *Committer) Submit(ctx context.Context, src ClientSource, op Op) (*Ticket, error) {
 	switch o := op.(type) {
 	case Replace:
@@ -371,8 +350,6 @@ func (c *Committer) Submit(ctx context.Context, src ClientSource, op Op) (*Ticke
 	return nil, fmt.Errorf("store: op %T is not a client op", op)
 }
 
-// Flush returns once every request whose Submit returned before the call has
-// its answer, or once the committer stops or ctx ends.
 func (c *Committer) Flush(ctx context.Context) {
 	if t, err := c.submit(ctx, layout.Key{}, flush{}, nil); err == nil {
 		t.Wait(ctx)
@@ -419,9 +396,6 @@ func (c *Committer) stoppedErr() error {
 	}
 }
 
-// Append is the server-owned write: lines onto src, created when missing. A
-// non-empty requestKey already applied to src or to the day before it changes
-// nothing and reports duplicate; an empty one never dedups.
 func (c *Committer) Append(src ServerSource, requestKey string, lines []byte) (_ wire.Source, duplicate bool, _ error) {
 	if err := src.validate(); err != nil {
 		return wire.Source{}, false, err
@@ -449,8 +423,6 @@ func (c *Committer) Append(src ServerSource, requestKey string, lines []byte) (_
 	return a.State(), a.Verdict() == Duplicate, nil
 }
 
-// Sources is author's sources on machine as the table holds them, sorted by
-// SrcID.
 func (c *Committer) Sources(author, machine string) []wire.Source {
 	c.mu.RLock()
 	out := []wire.Source{}
@@ -464,11 +436,8 @@ func (c *Committer) Sources(author, machine string) []wire.Source {
 	return out
 }
 
-// Changed fires after a batch that changed a source commits.
 func (c *Committer) Changed() <-chan struct{} { return c.changes.ready }
 
-// TakeChanged returns every key changed since the last take and clears the
-// set.
 func (c *Committer) TakeChanged() []layout.Key {
 	c.changes.mu.Lock()
 	keys := c.changes.keys

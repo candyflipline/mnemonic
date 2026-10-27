@@ -220,8 +220,6 @@ func cycleMember(from *traceSpan, byID map[string]*traceSpan) *traceSpan {
 	return r
 }
 
-// rootTotals sums only the roots: each root's tokens and cost already include
-// everything beneath it.
 func rootTotals(spans int, roots []*traceSpan) traceTotals {
 	t := traceTotals{Spans: spans}
 	for _, r := range roots {

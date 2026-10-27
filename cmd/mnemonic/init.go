@@ -83,7 +83,6 @@ func initCmd(args []string) error {
 	return installScheduler(home, *label)
 }
 
-// machineName is name, or this host's short name when name is empty.
 func machineName(name string) (string, error) {
 	if name == "" {
 		host, err := os.Hostname()
@@ -108,8 +107,6 @@ func clientConfig(server, serverKey, machine string) config.Client {
 	}
 }
 
-// saveConfig writes cfg to configPath in a 0700 directory, refusing to
-// replace an existing file unless force.
 func saveConfig(configPath string, cfg config.Client, force bool) error {
 	if _, err := os.Stat(configPath); err == nil && !force {
 		return fmt.Errorf("%s already exists; pass --force to overwrite it", configPath)

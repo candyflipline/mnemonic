@@ -16,8 +16,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-// Part is a read-only view of one committed index. Its light and heavy logs
-// hold the frames of its own docs, so it needs nothing outside its members.
 type Part struct {
 	meta                      indexMeta
 	docs, sessions, sessStr   []byte
@@ -44,8 +42,6 @@ type Part struct {
 	refs                      atomic.Int32
 }
 
-// frameCache holds the last decoded light and heavy frames of every part of
-// one DB, so batch memory is bounded by the cache sizes, not by the part count.
 type frameCache struct {
 	mu         sync.Mutex
 	light      map[frameKey][]*Row

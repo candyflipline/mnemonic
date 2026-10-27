@@ -1,5 +1,3 @@
-// Package server is `mnemonic serve` without its flags: the HTTP surface
-// (/v1 pushes, /mcp) over one index, and the loop that ingests raw into it.
 package server
 
 import (
@@ -40,17 +38,8 @@ type Server struct {
 	share   *Share
 }
 
-// Share is what serving links needs: BaseURL, the public origin of the
-// [share] listener, and QUICAddr and ServerKey, what a join answers.
 type Share struct{ BaseURL, QUICAddr, ServerKey string }
 
-// New opens the index under dataDir, loads the session controls from raw,
-// and mounts the store (push scope) and MCP (read scope) behind auth.Require. MCP
-// tools find the store with store.From and the controls with
-// index.WithControls on their ctx. The server takes the index dir's writer
-// lock for its whole life — it is the dir's one writer — and refuses to start
-// under another one, naming the holder. A nil share serves no links, and
-// share_link says so.
 func New(dataDir string, share *Share) (*Server, error) {
 	ctl, err := index.LoadControls(dataDir)
 	if err != nil {
@@ -91,10 +80,6 @@ func New(dataDir string, share *Share) (*Server, error) {
 	return s, nil
 }
 
-// Identify is the handshake's one admission rule: a key keys configures is
-// its Identity, else a key a live invite admitted is that member; every
-// other key is refused. Members are read from the controls at each call, so
-// a join counts at the next handshake and a revoke refuses it.
 func (s *Server) Identify(keys auth.Keys) func(device ed25519.PublicKey) (auth.Identity, bool) {
 	keys = keys.WithMembers(s.ctl)
 	return func(device ed25519.PublicKey) (auth.Identity, bool) {

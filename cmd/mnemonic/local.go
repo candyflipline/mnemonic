@@ -82,10 +82,6 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 	}
 	author, machine := localIdentity()
 	red := redact.Default()
-	// This process is the data dir's one writer for its whole life — the
-	// watcher and the store's Wake both ingest — so it takes the index dir's
-	// writer lock before the first ingest, and a second local on the same dir
-	// is refused here, before it ingests anything.
 	ix, err := index.OpenExclusive(layout.IndexDir(opts.dataDir))
 	if err != nil {
 		return err

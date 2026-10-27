@@ -85,10 +85,6 @@ Codex, in ~/.codex/config.toml:
 	return nil
 }
 
-// inviteURL is raw as the URL a join posts to: an https URL (http only for a
-// loopback host) whose path is /i/<token>, with any .md suffix dropped. The
-// answer carries the server key this machine will trust, so plaintext would
-// let anyone on the path substitute their own.
 func inviteURL(raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {

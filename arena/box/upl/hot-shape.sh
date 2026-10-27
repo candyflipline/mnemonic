@@ -1,9 +1,4 @@
 #!/bin/sh
-# hot-shape.sh DATA_DIR: the hot set of a store, sizes only (read only, safe
-# on prod). Hot parts are CURRENT's "hot" list. A hot part holding delta.json
-# answers through a delta over an image: the images are the dirs under
-# index/deltas, sized by index/parts/<image>/{light,heavy}. Any other hot part
-# is a full part, sized by its own light and heavy.
 cd "${1:?usage: hot-shape.sh DATA_DIR}/index" || exit 1
 n=0 nd=0 nf=0 fl=0 fh=0 ni=0 il=0 ih=0 m=0
 for i in $(sed -n 's/.*"hot":\[\([^]]*\)\].*/\1/p' CURRENT | tr -d '"' | tr , ' '); do

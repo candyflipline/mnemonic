@@ -31,8 +31,6 @@ const (
 
 var annotationSources = []AnnotationSource{SourceHuman, SourceScorer, SourceCI}
 
-// Target is what an annotation judges: a session, or one span of it when
-// SpanID is set.
 type Target struct {
 	SessionID string `json:"session_id"`
 	SpanID    string `json:"span_id,omitempty"`
@@ -46,8 +44,6 @@ const (
 	valueText
 )
 
-// Value is exactly one of a number, a label or a text; build it with Number,
-// Label or Text. Its JSON is an object with one key: number, label or text.
 type Value struct {
 	kind   valueKind
 	number float64
@@ -107,8 +103,6 @@ func (v *Value) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// Annotation is one append-only judgment of a session or span. Author is the
-// annotating caller's, filled from the source's path, never from the JSON.
 type Annotation struct {
 	ID     string           `json:"id"`
 	Target Target           `json:"target"`
@@ -119,8 +113,6 @@ type Annotation struct {
 	Author string           `json:"-"`
 }
 
-// ParseAnnotation reads one raw annotation line and rejects every shape the
-// annotations relation cannot hold.
 func ParseAnnotation(line []byte) (Annotation, error) {
 	var a Annotation
 	if err := json.Unmarshal(line, &a); err != nil {

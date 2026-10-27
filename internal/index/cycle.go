@@ -2,11 +2,6 @@ package index
 
 import "sync"
 
-// CycleStats is what one Ingest wrote, so a server cycle can prove an append
-// is bounded by its component: bytes and parts written, by kind. LogBytes is
-// the source frame logs' growth, PartBytes the parts/ tree's (a delta append's
-// delta.json and its delta logs' growth), PartsBuilt the parts written; the
-// hot and cold counts are the plan's, hot and settled components alike.
 type CycleStats struct {
 	LogBytes   int64
 	PartBytes  int64
@@ -49,14 +44,9 @@ func takeCycle(store string) cycleRecord {
 
 func (ix *Index) LastCycle() CycleStats { return takeCycle(ix.store).stats }
 
-// SweepStale is the work the last Ingest left for the next cycle: sources for
-// the parser-version sweep and due components it did not settle. It is zero
-// once both are done; the server runs cycles back to back while it is not.
 func (ix *Index) SweepStale() int {
 	r := takeCycle(ix.store)
 	return r.stale + r.settle
 }
 
-// CycleFailed is the sources whose parse failed in the last Ingest; the cycle
-// went on without them, and each stays on its older output.
 func (ix *Index) CycleFailed() int { return takeCycle(ix.store).failed }

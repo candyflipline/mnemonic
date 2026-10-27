@@ -8,9 +8,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/wire"
 )
 
-// manifestBody is what a Key.Manifest file holds: the wire.Source the protocol
-// answers with, plus zst_size, the raw-file length Source.Size is known to
-// cover, and the request keys a server source applied.
 type manifestBody struct {
 	wire.Source
 	ZstSize int64    `json:"zst_size"`
@@ -35,8 +32,6 @@ type Manifest struct {
 	ZstSize int64
 }
 
-// Manifests is every source in the table, in no order. After Open it is what
-// loadDurableTable read; the committer keeps it current as batches commit.
 func (c *Committer) Manifests() []Manifest {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

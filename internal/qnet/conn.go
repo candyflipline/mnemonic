@@ -53,8 +53,6 @@ func (c *conn) Close() error {
 	return nil
 }
 
-// IdentityOf is the Identity of a conn accepted from Server.Push or
-// Server.HTTP, false for any other conn.
 func IdentityOf(c net.Conn) (auth.Identity, bool) {
 	sc, ok := c.(*conn)
 	if !ok || !sc.served {

@@ -1,9 +1,3 @@
-// Package layout names every path under the server's data dir. Each author
-// and machine writes only under its own prefix, so pushes never contend.
-//
-//	raw/author=A/machine=M/harness=H/<src_id>.jsonl.zst   redacted raw lines, zstd frames appended
-//	raw/author=A/machine=M/harness=H/<src_id>.json        wire.Source, the manifest entry
-//	index/                                                the engine's store (internal/index), derived from raw/
 package layout
 
 import "path/filepath"

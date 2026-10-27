@@ -17,13 +17,6 @@ type manifestFile struct {
 	Sources []stSource `json:"sources"`
 }
 
-// DB is every part of one committed manifest. Parts partition sessions, so a
-// session's events, turns and rollups live in exactly one part; only BM25's
-// corpus statistics are summed across parts. A part is shared by every DB
-// that names it and closes with the last of them. Only the annotations
-// section crosses parts: a part may hold annotation entries for a session
-// whose rows live in another part, so annPart indexes, per target session,
-// every part whose annotations section holds it.
 type DB struct {
 	parts      []*Part
 	ids        []string
@@ -61,9 +54,6 @@ func reusable(p *Part, dir string) bool {
 	return err == nil && at == p.at
 }
 
-// PartOpenError is a CURRENT naming a part that no longer opens: the writer's
-// GC removed the part after publishing a newer CURRENT, or the store is
-// damaged. Open and Refresh re-read CURRENT and retry before surfacing it.
 type PartOpenError struct {
 	Part string
 	Err  error
