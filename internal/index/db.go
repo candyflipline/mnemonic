@@ -66,7 +66,7 @@ func OpenDB(store string) (*DB, error) { return openDB(store, nil, nil) }
 // openDB opens the parts CURRENT names, taking from prev each one it opened
 // from the same dir. A committed part dir is never written again, and the
 // delta logs a delta part reads are truncated only to the length the delta
-// in CURRENT names, so a part taken from prev reads what a fresh open would.
+// in CURRENT names, so a part taken from prev reads what a fresh open would, and a hot delta is indexed once, not once per Refresh.
 // The caller keeps prev pinned until openDB returns. opened is parts the
 // caller opened, by id, and hands over: each one CURRENT names joins the DB
 // when its stamp matches the dir's, and every other one closes.
