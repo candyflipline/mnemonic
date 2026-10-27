@@ -44,80 +44,121 @@ type AuthorSet struct {
 
 func (s AuthorSet) Has(author string) bool { return slices.Contains(s.Names, author) != s.Except }
 
-// Identity is who an authenticated request is: one sealed principal. Keys and
-// Local make it and no one else can. The zero Identity grants nothing.
-type Identity struct{ p principal }
+// Member is a device key an invite admitted. It acts as Author in Tenant
+// with MemberScopes, like a configured key.
+type Member struct{ Key, Tenant, Author string }
 
-type principal interface {
-	tenant() string
-	author() string
-	can(Scope) bool
-	members() AuthorSet
+var MemberScopes = []Scope{Read, Push}
+
+// Keys is who may connect: the configured grants, and the members live
+// reports at each call, so a member admitted or removed after boot counts at
+// once.
+type Keys struct {
+	grants map[string]Grant
+	live   func() []Member
 }
 
-type configured struct {
-	tenantName, authorName string
-	scopes                 []Scope
-	set                    AuthorSet
+func NewKeys(byKey map[string]Grant) Keys { return Keys{grants: byKey} }
+
+// WithMembers is k admitting the members live reports, which it calls on
+// every Identify and on every read of an Identity's member set.
+func (k Keys) WithMembers(live func() []Member) Keys {
+	k.live = live
+	return k
 }
 
-func (c configured) tenant() string     { return c.tenantName }
-func (c configured) author() string     { return c.authorName }
-func (c configured) can(s Scope) bool   { return slices.Contains(c.scopes, s) }
-func (c configured) members() AuthorSet { return c.set }
-
-func (id Identity) Tenant() string {
-	if id.p == nil {
-		return ""
+func (k Keys) members() []Member {
+	if k.live == nil {
+		return nil
 	}
-	return id.p.tenant()
+	return k.live()
 }
 
-func (id Identity) Author() string {
-	if id.p == nil {
-		return ""
-	}
-	return id.p.author()
-}
-
-func (id Identity) Can(s Scope) bool { return id.p != nil && id.p.can(s) }
-
-func (id Identity) Members() AuthorSet {
-	if id.p == nil {
-		return AuthorSet{}
-	}
-	return id.p.members()
-}
-
-type Keys struct{ byKey map[string]Identity }
-
-// NewKeys builds the table from byKey, which maps key text to its grant.
-// Members are computed over every grant.
-func NewKeys(byKey map[string]Grant) Keys {
-	tenantOf := map[string]string{}
-	for _, g := range byKey {
-		tenantOf[g.Author] = tenantOr(g.Tenant)
-	}
-	ids := make(map[string]Identity, len(byKey))
-	for k, g := range byKey {
+// Identify is the Identity of key: its grant, else the live member it is.
+func (k Keys) Identify(key string) (Identity, bool) {
+	if g, ok := k.grants[key]; ok {
 		scopes := g.Scopes
 		if scopes == nil {
 			scopes = DefaultScopes
 		}
-		tenant := tenantOr(g.Tenant)
-		ids[k] = Identity{p: configured{tenantName: tenant, authorName: g.Author, scopes: scopes, set: members(tenantOf, tenant)}}
+		return Identity{tenant: tenantOr(g.Tenant), author: g.Author, scopes: scopes, keys: &k}, true
 	}
-	return Keys{byKey: ids}
+	for _, m := range k.members() {
+		if m.Key == key {
+			return Identity{tenant: m.Tenant, author: m.Author, scopes: MemberScopes, keys: &k, member: key}, true
+		}
+	}
+	return Identity{}, false
 }
 
-func (k Keys) Identify(key string) (Identity, bool) {
-	id, ok := k.byKey[key]
-	return id, ok
+// tenantOf is every author's tenant: the grants' and the live members'. A
+// grant wins over a member naming the same author.
+func (k Keys) tenantOf() map[string]string {
+	out := map[string]string{}
+	for _, m := range k.members() {
+		out[m.Author] = m.Tenant
+	}
+	for _, g := range k.grants {
+		out[g.Author] = tenantOr(g.Tenant)
+	}
+	return out
+}
+
+// Identity is who an authenticated request is. Keys.Identify and Local make
+// it and no one else can. The zero Identity grants nothing. Its member set
+// and, for a member, whether it is still admitted are read from its Keys at
+// each call, so an open connection sees a join or a revoke at once.
+type Identity struct {
+	tenant, author string
+	scopes         []Scope
+	keys           *Keys
+	member         string
+	local          bool
+}
+
+func (id Identity) Tenant() string { return id.tenant }
+
+func (id Identity) Author() string { return id.author }
+
+func (id Identity) Can(s Scope) bool { return slices.Contains(id.scopes, s) }
+
+func (id Identity) Members() AuthorSet {
+	switch {
+	case id.local:
+		return AuthorSet{Except: true}
+	case id.keys == nil:
+		return AuthorSet{}
+	}
+	return members(id.keys.tenantOf(), id.tenant)
+}
+
+// Admitted is false once the invite that admitted a member is revoked, and
+// true for every other Identity that grants anything.
+func (id Identity) Admitted() bool {
+	if id.member == "" {
+		return id.scopes != nil
+	}
+	for _, m := range id.keys.members() {
+		if m.Key == id.member {
+			return true
+		}
+	}
+	return false
+}
+
+// TenantOf is the tenant of author as the configured keys and the live
+// members name it, false when none does.
+func (id Identity) TenantOf(author string) (string, bool) {
+	if id.keys == nil {
+		return "", false
+	}
+	t, ok := id.keys.tenantOf()[author]
+	return t, ok
 }
 
 // Local is the in-process identity of local mode: DefaultTenant, every scope.
 func Local(author string) Identity {
-	return Identity{p: configured{tenantName: DefaultTenant, authorName: author, scopes: slices.Clone(Scopes[:]), set: AuthorSet{Except: true}}}
+	return Identity{tenant: DefaultTenant, author: author, scopes: slices.Clone(Scopes[:]), local: true}
 }
 
 func tenantOr(t string) string {

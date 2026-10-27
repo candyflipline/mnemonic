@@ -109,7 +109,7 @@ Check: call `list_sessions` once and tell the operator whether it worked.
 
 Ask your agent: "Call `list_sessions` for today, limit 1." A result that starts with `mnemonic.mcp.list_sessions.v1` means the key, the address, and the config are right. A session you ran a minute ago appears after the next push cycle.
 
-The tools are `search_sessions`, `open`, `list_sessions`, `get_trace`, `file_attention`, `get_ingest_status`, `query`, `annotate`, `set_visibility`, and `delete_session`. `annotate` needs the `annotate` scope on your key. `set_visibility` and `delete_session` act on your own sessions with any key and need `admin` for another author's.
+The tools are `search_sessions`, `open`, `list_sessions`, `get_trace`, `file_attention`, `get_ingest_status`, `query`, `annotate`, `set_visibility`, `delete_session`, and `share_link`. `annotate` needs the `annotate` scope on your key. `set_visibility`, `delete_session` and `share_link` act on your own sessions with any key and need `admin` for another author's.
 
 ## Known gap
 

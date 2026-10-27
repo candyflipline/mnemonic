@@ -23,6 +23,7 @@ import (
 
 	"github.com/candyflipline/mnemonic/internal/auth"
 	"github.com/candyflipline/mnemonic/internal/store"
+	"github.com/candyflipline/mnemonic/internal/wire"
 )
 
 const controlHarness = "control"
@@ -39,15 +40,31 @@ type controlAction string
 const (
 	actVisibility controlAction = "visibility"
 	actDelete     controlAction = "delete"
+	actLink       controlAction = "link"
+	actJoin       controlAction = "join"
+	actRevoke     controlAction = "revoke"
 )
 
 type controlRecord struct {
-	SessionID  string        `json:"session_id"`
-	Action     controlAction `json:"action"`
-	Visibility visibility    `json:"visibility,omitempty"`
-	TS         time.Time     `json:"ts"`
-	RequestKey string        `json:"request_key"`
-	Writer     string        `json:"writer,omitempty"`
+	SessionID    string        `json:"session_id,omitempty"`
+	Action       controlAction `json:"action"`
+	Visibility   visibility    `json:"visibility,omitempty"`
+	LinkID       string        `json:"link_id,omitempty"`
+	Kind         linkKind      `json:"kind,omitempty"`
+	TokenSHA256  string        `json:"token_sha256,omitempty"`
+	SessionIDs   []string      `json:"session_ids,omitempty"`
+	Title        string        `json:"title,omitempty"`
+	Note         string        `json:"note,omitempty"`
+	Cutoff       time.Time     `json:"cutoff,omitzero"`
+	Expires      time.Time     `json:"expires,omitzero"`
+	InviteAuthor string        `json:"invite_author,omitempty"`
+	Author       string        `json:"author,omitempty"`
+	Tenant       string        `json:"tenant,omitempty"`
+	Key          string        `json:"key,omitempty"`
+	Machine      string        `json:"machine,omitempty"`
+	TS           time.Time     `json:"ts"`
+	RequestKey   string        `json:"request_key"`
+	Writer       string        `json:"writer,omitempty"`
 }
 
 var writer = func() string {
@@ -63,20 +80,90 @@ var writer = func() string {
 	return bi.Main.Version
 }()
 
+// recordShapes is, per action (and link kind), the fields a record must set
+// and the further ones it may; any other field set refuses the record.
+var recordShapes = map[string]struct{ required, optional []string }{
+	"delete":      {required: []string{"session_id"}},
+	"visibility":  {required: []string{"session_id", "visibility"}},
+	"link/read":   {required: []string{"link_id", "token_sha256", "session_ids", "cutoff", "expires", "author", "tenant"}, optional: []string{"title", "note"}},
+	"link/invite": {required: []string{"link_id", "token_sha256", "invite_author", "expires", "author", "tenant"}},
+	"join":        {required: []string{"link_id", "key", "machine"}},
+	"revoke":      {required: []string{"link_id"}},
+}
+
+func (r controlRecord) set() []string {
+	var out []string
+	for _, f := range []struct {
+		name string
+		set  bool
+	}{
+		{"session_id", r.SessionID != ""}, {"visibility", r.Visibility != ""}, {"link_id", r.LinkID != ""},
+		{"token_sha256", r.TokenSHA256 != ""}, {"session_ids", r.SessionIDs != nil}, {"title", r.Title != ""},
+		{"note", r.Note != ""}, {"cutoff", !r.Cutoff.IsZero()}, {"expires", !r.Expires.IsZero()},
+		{"invite_author", r.InviteAuthor != ""}, {"author", r.Author != ""}, {"tenant", r.Tenant != ""},
+		{"key", r.Key != ""}, {"machine", r.Machine != ""},
+	} {
+		if f.set {
+			out = append(out, f.name)
+		}
+	}
+	return out
+}
+
 func parseControl(line []byte) (controlRecord, error) {
 	var r controlRecord
 	if err := json.Unmarshal(line, &r); err != nil {
 		return r, err
 	}
+	if r.RequestKey == "" || r.TS.IsZero() {
+		return r, fmt.Errorf("control record lacks request_key or ts")
+	}
+	shape := string(r.Action)
+	if r.Action == actLink {
+		shape += "/" + string(r.Kind)
+	} else if r.Kind != "" {
+		shape += "/"
+	}
+	want, ok := recordShapes[shape]
+	if !ok {
+		return r, fmt.Errorf("control record action %q kind %q", r.Action, r.Kind)
+	}
+	set := r.set()
+	for _, f := range want.required {
+		if !slices.Contains(set, f) {
+			return r, fmt.Errorf("control record %s lacks %s", shape, f)
+		}
+	}
+	for _, f := range set {
+		if !slices.Contains(want.required, f) && !slices.Contains(want.optional, f) {
+			return r, fmt.Errorf("control record %s carries %s", shape, f)
+		}
+	}
 	switch {
-	case r.SessionID == "" || r.RequestKey == "" || r.TS.IsZero():
-		return r, fmt.Errorf("control record lacks session_id, request_key or ts")
-	case r.Action == actDelete && r.Visibility == "":
-	case r.Action == actVisibility && slices.Contains([]visibility{visPrivate, visTeam}, r.Visibility):
-	default:
-		return r, fmt.Errorf("control record action %q visibility %q", r.Action, r.Visibility)
+	case r.Visibility != "" && !slices.Contains([]visibility{visPrivate, visTeam}, r.Visibility):
+		return r, fmt.Errorf("control record visibility %q", r.Visibility)
+	case r.LinkID != "" && !isHex(r.LinkID, linkIDLen):
+		return r, fmt.Errorf("control record link_id %q is not %d hex digits", r.LinkID, linkIDLen)
+	case r.TokenSHA256 != "" && !isHex(r.TokenSHA256, 2*sha256.Size):
+		return r, fmt.Errorf("control record token_sha256 is not %d hex digits", 2*sha256.Size)
+	case slices.Contains(r.SessionIDs, "") || (r.SessionIDs != nil && len(r.SessionIDs) == 0):
+		return r, fmt.Errorf("control record session_ids holds an empty id or none")
+	case r.InviteAuthor != "" && !wire.ValidSegment(r.InviteAuthor):
+		return r, fmt.Errorf("control record invite_author %q", r.InviteAuthor)
+	case r.Machine != "" && !wire.ValidSegment(r.Machine):
+		return r, fmt.Errorf("control record machine %q", r.Machine)
+	}
+	if r.Key != "" {
+		if _, err := auth.ParseKey(r.Key); err != nil {
+			return r, fmt.Errorf("control record: %w", err)
+		}
 	}
 	return r, nil
+}
+
+func isHex(s string, n int) bool {
+	_, err := hex.DecodeString(s)
+	return err == nil && len(s) == n && strings.ToLower(s) == s
 }
 
 type sessionControl struct {
@@ -86,15 +173,25 @@ type sessionControl struct {
 	deleted    bool
 }
 
-// Controls is every session control record in raw, the copy reads consult:
-// a record counts from the moment record returns, before any converge.
+// Controls is every control record in raw, the copy reads consult: a record
+// counts from the moment record returns, before any converge. links holds
+// every link by id; byToken and byKey index it for the public listener and
+// the handshake, and only apply writes the three.
 type Controls struct {
 	write    sync.Mutex
 	mu       sync.RWMutex
 	sessions map[string]sessionControl
+	links    map[string]*link
+	byToken  map[[sha256.Size]byte]*link
+	byKey    map[string]*link
 }
 
 func (c *Controls) apply(r controlRecord) {
+	switch r.Action {
+	case actLink, actJoin, actRevoke:
+		c.applyLink(r)
+		return
+	}
 	s := c.sessions[r.SessionID]
 	switch r.Action {
 	case actDelete:
@@ -111,7 +208,7 @@ func (c *Controls) apply(r controlRecord) {
 // its manifest covers, so a torn append the manifest never recorded is not
 // read.
 func LoadControls(dataDir string) (*Controls, error) {
-	c := &Controls{sessions: map[string]sessionControl{}}
+	c := &Controls{sessions: map[string]sessionControl{}, links: map[string]*link{}, byToken: map[[sha256.Size]byte]*link{}, byKey: map[string]*link{}}
 	manifests, err := filepath.Glob(filepath.Join(dataDir, "raw", "author=*", "machine="+store.ServerMachine, "harness="+controlHarness, "*.json"))
 	if err != nil {
 		return nil, err
@@ -160,6 +257,12 @@ func (c *Controls) loadSource(manifest string) error {
 func (c *Controls) record(st *store.Committer, author string, r controlRecord) (duplicate bool, err error) {
 	c.write.Lock()
 	defer c.write.Unlock()
+	return c.recordLocked(st, author, r)
+}
+
+// recordLocked is record for a caller that holds c.write, so it can decide
+// from the controls and record that decision with no write between.
+func (c *Controls) recordLocked(st *store.Committer, author string, r controlRecord) (duplicate bool, err error) {
 	r.TS, r.Writer = time.Now().UTC(), writer
 	line, err := json.Marshal(r)
 	if err != nil {
