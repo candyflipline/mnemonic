@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -146,6 +145,22 @@ func TestFixtureExports(t *testing.T) {
 					"trajectory.agent: required field is missing",
 				},
 			},
+			"int-refuses-float": {
+				head + `{"step_id":1.0,"source":"user","message":"hi"}]}`,
+				[]string{"trajectory.steps.0.step_id: expected integer, got number", "trajectory.steps.0.step_id: expected 1 (sequential from 1), got 1.0"},
+			},
+			"int-refuses-bool": {
+				head + `{"step_id":true,"source":"user","message":"hi"}]}`,
+				[]string{"trajectory.steps.0.step_id: expected integer, got boolean"},
+			},
+			"int-refuses-string": {
+				head + `{"step_id":"1","source":"user","message":"hi"}]}`,
+				[]string{"trajectory.steps.0.step_id: expected integer, got string"},
+			},
+			"bool-refuses-int": {
+				head + `{"step_id":1,"source":"agent","message":"hi","is_copied_context":1}]}`,
+				[]string{"trajectory.steps.0.is_copied_context: expected boolean, got number"},
+			},
 			"empty-trajectory-id": {
 				head + `{"step_id":1,"source":"user","message":"hi"}],"subagent_trajectories":[{"trajectory_id":"","agent":{"name":"s","version":"1"},"steps":[{"step_id":1,"source":"user","message":"x"}]}]}`,
 				nil,
@@ -202,9 +217,19 @@ func TestRequestsSplitAgentSteps(t *testing.T) {
 		{EventTime: at, ActorKind: "tool", EventKind: "tool_result", ToolCallID: "call_1", TextContent: "file body"},
 		{EventTime: at, ActorKind: "assistant", EventKind: "message", RequestID: "req-2", TextContent: "done", InputTokens: 200, OutputTokens: 9},
 	}
-	plan, last := planSteps("claude-code", slices.Values(evs))
+	rows := func(yield func(eventRow, error) bool) {
+		for _, ev := range evs {
+			if !yield(ev, nil) {
+				return
+			}
+		}
+	}
+	plan, last, err := planSteps("claude-code", rows)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var steps []Step
-	if err := buildSteps(plan, last, slices.Values(evs), func(s *Step) error { steps = append(steps, *s); return nil }); err != nil {
+	if err := buildSteps(plan, last, rows, func(s *Step) error { steps = append(steps, *s); return nil }); err != nil {
 		t.Fatal(err)
 	}
 	type stepGot struct {

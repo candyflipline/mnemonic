@@ -119,25 +119,18 @@ func notFound(sessionID string) error {
 type session struct {
 	id, harness string
 	src         index.ExportSession
-	// rowErr is the first rows-walk read error, set by rows and returned
-	// after every range, so a frame read failure fails the export instead
-	// of writing a short document.
-	rowErr error
 }
 
-// rows walks the session's rows one at a time, remembering the first read
-// error in rowErr for the caller to return after its range. errStopRows, the
-// early break, is not an error.
-func (s *session) rows() iter.Seq[eventRow] {
-	return func(yield func(eventRow) bool) {
+func (s *session) rows() iter.Seq2[eventRow, error] {
+	return func(yield func(eventRow, error) bool) {
 		err := s.src.EachRow(func(r *index.Row) error {
-			if yield(eventRowOf(r)) {
+			if yield(eventRowOf(r), nil) {
 				return nil
 			}
 			return errStopRows
 		})
-		if err != nil && err != errStopRows && s.rowErr == nil {
-			s.rowErr = err
+		if err != nil && err != errStopRows {
+			yield(eventRow{}, err)
 		}
 	}
 }
@@ -185,11 +178,12 @@ type trajectory struct {
 	last  []int32
 }
 
-// rowPlan is where one row lands: the index of its step, or -1 for a row no
-// step takes; linked marks a tool result that keeps its source_call_id.
+// rowPlan is where one row lands; linked marks a tool result that keeps its
+// source_call_id.
 type rowPlan struct {
-	step   int32
-	linked bool
+	step    int32
+	linked  bool
+	dropped bool
 }
 
 func newTrajectory(db *index.DB, sessionID string, hidden map[string]bool) (*trajectory, error) {
@@ -202,8 +196,7 @@ func newTrajectory(db *index.DB, sessionID string, hidden map[string]bool) (*tra
 		version = p.Version()
 	}
 	t := &trajectory{session: s, agent: Agent{Name: s.harness, Version: strconv.Itoa(version)}}
-	t.plan, t.last = planSteps(s.harness, s.rows())
-	if err := s.rowErr; err != nil {
+	if t.plan, t.last, err = planSteps(s.harness, s.rows()); err != nil {
 		return nil, err
 	}
 	return t, nil
@@ -221,56 +214,54 @@ func WriteATIF(w io.Writer, db *index.DB, sessionID string, hidden map[string]bo
 	if err != nil {
 		return err
 	}
-	if err := t.validate(); err != nil {
-		return err
-	}
-	env, err := json.Marshal(t.envelope([]Step{}))
+	v, err := t.validate()
 	if err != nil {
 		return err
 	}
-	if env, err = sortedIndent(env, ""); err != nil {
+	return v.write(w, "  ")
+}
+
+// validTrajectory is a trajectory the ported validator accepted.
+type validTrajectory struct{ *trajectory }
+
+// write writes the trajectory as json.Marshal lays it out when indent is empty,
+// and as WriteATIF lays it out otherwise.
+func (v validTrajectory) write(w io.Writer, indent string) error {
+	env, err := json.Marshal(v.envelope([]Step{}))
+	if err != nil {
 		return err
 	}
-	return writeArray(w, env, `"steps": []`, "  ", func(prefix string, put func([]byte) error) error {
-		return t.eachStep(func(s *Step) error {
+	marker := `"steps":[]`
+	if indent != "" {
+		if env, err = sortedIndent(env, ""); err != nil {
+			return err
+		}
+		marker = `"steps": []`
+	}
+	return writeArray(w, env, marker, indent, func(prefix string, put func([]byte) error) error {
+		return v.eachStep(func(s *Step) error {
 			b, err := json.Marshal(s)
 			if err != nil {
 				return err
 			}
-			if b, err = sortedIndent(b, prefix); err != nil {
-				return err
+			if indent != "" {
+				if b, err = sortedIndent(b, prefix); err != nil {
+					return err
+				}
 			}
 			return put(b)
 		})
 	})
 }
 
-// writeCompact writes the trajectory as json.Marshal lays it out, unchecked:
-// the caller validated it.
-func (t *trajectory) writeCompact(w io.Writer) error {
-	env, err := json.Marshal(t.envelope([]Step{}))
-	if err != nil {
-		return err
-	}
-	return writeArray(w, env, `"steps":[]`, "", func(_ string, put func([]byte) error) error {
-		return t.eachStep(func(s *Step) error {
-			b, err := json.Marshal(s)
-			if err != nil {
-				return err
-			}
-			return put(b)
-		})
-	})
-}
-
-func (t *trajectory) validate() error {
+func (t *trajectory) validate() (validTrajectory, error) {
 	env, err := json.Marshal(t.envelope(nil))
 	if err != nil {
-		return err
+		return validTrajectory{}, err
 	}
 	root, err := decodeNumbers(env)
 	if err != nil {
-		return err
+		return validTrajectory{}, err
 	}
 	obj := root.(map[string]any)
 	v := &validator{}
@@ -289,7 +280,7 @@ func (t *trajectory) validate() error {
 		return nil
 	})
 	if err != nil {
-		return err
+		return validTrajectory{}, err
 	}
 	if steps.n == 0 {
 		v.missing("steps")
@@ -298,9 +289,9 @@ func (t *trajectory) validate() error {
 	}
 	v.trajectoryTail(obj)
 	if len(v.errs) > 0 {
-		return fmt.Errorf("export: %w: %s", ErrInvalidATIF, strings.Join(v.errs, "; "))
+		return validTrajectory{}, fmt.Errorf("export: %w: %s", ErrInvalidATIF, strings.Join(v.errs, "; "))
 	}
-	return nil
+	return validTrajectory{t}, nil
 }
 
 func requestKey(harness string, ev eventRow) string {
@@ -318,12 +309,9 @@ func requestKey(harness string, ev eventRow) string {
 
 // planSteps maps rows to steps: one step per user message, per model request
 // within a run of assistant rows (message, reasoning, tool_call), and per
-// system/meta row. A tool result joins the step whose tool_calls carry its
-// tool_call_id (the open agent run first, then the newest closed step), else
-// the open agent run, else the newest step, and keeps its source_call_id only
-// on an exact match; a result with neither id match nor content is dropped.
-// Steps are numbered in the order they open, which is the order they close.
-func planSteps(harness string, rows iter.Seq[eventRow]) (plan []rowPlan, last []int32) {
+// system/meta row. Steps are numbered in the order they open, which is the
+// order they close.
+func planSteps(harness string, rows iter.Seq2[eventRow, error]) (plan []rowPlan, last []int32, err error) {
 	latest := map[string]int32{}
 	curCalls := map[string]bool{}
 	cur, curReq := int32(-1), ""
@@ -339,8 +327,11 @@ func planSteps(harness string, rows iter.Seq[eventRow]) (plan []rowPlan, last []
 		cur, curReq = -1, ""
 	}
 	r := int32(0)
-	for ev := range rows {
-		step, linked := int32(-1), false
+	for ev, err := range rows {
+		if err != nil {
+			return nil, nil, err
+		}
+		var p rowPlan
 		switch {
 		case ev.ActorKind == "assistant" && isAssistantKind(ev.EventKind):
 			req := requestKey(harness, ev)
@@ -356,57 +347,62 @@ func planSteps(harness string, rows iter.Seq[eventRow]) (plan []rowPlan, last []
 			if ev.EventKind == "tool_call" && ev.ToolCallID != "" {
 				curCalls[ev.ToolCallID] = true
 			}
-			step = cur
+			p = rowPlan{step: cur}
 		case ev.ActorKind == "tool":
-			home, found := int32(-1), false
-			if ev.ToolCallID != "" {
-				if cur >= 0 && curCalls[ev.ToolCallID] {
-					home, found = cur, true
-				} else if k, ok := latest[ev.ToolCallID]; ok {
-					home, found = k, true
-				}
-			}
-			if !found {
-				home = cur
-				if home < 0 {
-					home = int32(len(last)) - 1
-				}
-			}
-			if home >= 0 && (found || ev.TextContent != "") {
-				step, linked = home, found
-			}
+			p = resultStep(ev, cur, curCalls, latest, int32(len(last)))
 		default:
 			if cur >= 0 {
 				closeCur()
 			}
-			step = open()
+			p = rowPlan{step: open()}
 		}
-		plan = append(plan, rowPlan{step, linked})
-		if step >= 0 {
-			last[step] = r
+		plan = append(plan, p)
+		if !p.dropped {
+			last[p.step] = r
 		}
 		r++
 	}
-	return plan, last
+	return plan, last, nil
+}
+
+// resultStep places a tool result: on the step whose tool_calls carry its
+// tool_call_id (the open agent run first, then the newest closed step) keeping
+// its source_call_id, else on the open agent run, else on the newest step,
+// without one. A result with neither an id match nor content is dropped.
+func resultStep(ev eventRow, cur int32, curCalls map[string]bool, latest map[string]int32, steps int32) rowPlan {
+	if id := ev.ToolCallID; id != "" {
+		if cur >= 0 && curCalls[id] {
+			return rowPlan{step: cur, linked: true}
+		}
+		if k, ok := latest[id]; ok {
+			return rowPlan{step: k, linked: true}
+		}
+	}
+	home := cur
+	if home < 0 {
+		home = steps - 1
+	}
+	if home < 0 || ev.TextContent == "" {
+		return rowPlan{dropped: true}
+	}
+	return rowPlan{step: home}
 }
 
 // eachStep builds the planned steps from the rows and hands each to fn, in
-// order, as soon as its last row is read. A rows read error comes back after
-// the range, the writers' cue to fail rather than end a short document.
+// order, as soon as its last row is read.
 func (t *trajectory) eachStep(fn func(*Step) error) error {
-	err := buildSteps(t.plan, t.last, t.rows(), fn)
-	if err == nil {
-		err = t.session.rowErr
-	}
-	return err
+	return buildSteps(t.plan, t.last, t.rows(), fn)
 }
 
-func buildSteps(plan []rowPlan, last []int32, rows iter.Seq[eventRow], fn func(*Step) error) error {
+func buildSteps(plan []rowPlan, last []int32, rows iter.Seq2[eventRow, error], fn func(*Step) error) error {
 	building := map[int32]*Step{}
 	next, r := int32(0), int32(0)
-	for ev := range rows {
+	for ev, err := range rows {
+		if err != nil {
+			return err
+		}
 		p := plan[r]
-		if p.step >= 0 {
+		if !p.dropped {
 			s := building[p.step]
 			switch {
 			case ev.ActorKind == "assistant" && isAssistantKind(ev.EventKind):

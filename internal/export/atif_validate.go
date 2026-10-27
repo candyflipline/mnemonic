@@ -13,14 +13,6 @@ import (
 // trajectory models it drives to Go. Like validator.py:22-23 it collects every
 // violation, and like validator.py:161-201 it reports each one as
 // "trajectory.<loc>: <message>" with the field path joined by dots.
-//
-// Deviation from validator.py: errors raised by the models' trajectory-level
-// validators (step-id sequencing, tool-call references) carry the location of
-// the offending field, where Pydantic reports them at the root.
-//
-// Known gap, kept on purpose: Pydantic's lax mode coerces, and this port does
-// not. An int field rejects 1.0, true and "1" here where Pydantic accepts
-// them, and a bool field rejects 0 and 1. The export never emits those shapes.
 
 func ValidateJSON(b []byte) []string {
 	doc, err := decodeNumbers(b)

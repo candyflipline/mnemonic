@@ -1,7 +1,6 @@
 package export
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,7 +24,6 @@ type DatasetRow struct {
 	Harness     string          `json:"harness"`
 	Task        string          `json:"task"`
 	Annotations []AnnotationOut `json:"annotations"`
-	ATIF        json.RawMessage `json:"atif"`
 }
 
 // AnnotationOut is one annotation of the session, its value carrying exactly
@@ -96,8 +94,9 @@ func Dataset(w io.Writer, db *index.DB, f AnnotationFilter, perTask int, hidden 
 			continue
 		}
 		t, err := newTrajectory(db, s.id, hidden)
+		var v validTrajectory
 		if err == nil {
-			err = t.validate()
+			v, err = t.validate()
 		}
 		if err != nil {
 			skipped = append(skipped, SessionError{s.id, err})
@@ -110,7 +109,7 @@ func Dataset(w io.Writer, db *index.DB, f AnnotationFilter, perTask int, hidden 
 			Harness:     s.harness,
 			Task:        s.task,
 			Annotations: annotationOuts(s.annotations),
-		}, t); err != nil {
+		}, v); err != nil {
 			return skipped, err
 		}
 	}
@@ -120,21 +119,18 @@ func Dataset(w io.Writer, db *index.DB, f AnnotationFilter, perTask int, hidden 
 	return skipped, nil
 }
 
-// writeRow writes one JSONL line: row as json.Marshal lays it out, its atif
-// the trajectory written in place of the null row carries.
-func writeRow(w io.Writer, row DatasetRow, t *trajectory) error {
-	line, err := json.Marshal(row)
+func writeRow(w io.Writer, row DatasetRow, v validTrajectory) error {
+	head, err := json.Marshal(row)
 	if err != nil {
 		return err
 	}
-	const tail = "null}"
-	if !bytes.HasSuffix(line, []byte(tail)) {
-		return fmt.Errorf("export: dataset row does not end in atif")
-	}
-	if _, err := w.Write(line[:len(line)-len(tail)]); err != nil {
+	if _, err := w.Write(head[:len(head)-1]); err != nil {
 		return err
 	}
-	if err := t.writeCompact(w); err != nil {
+	if _, err := io.WriteString(w, `,"atif":`); err != nil {
+		return err
+	}
+	if err := v.write(w, ""); err != nil {
 		return err
 	}
 	_, err = io.WriteString(w, "}\n")
@@ -161,13 +157,14 @@ func annotationValueMatches(v schema.Value, f AnnotationFilter) bool {
 	return s == f.Value
 }
 
-// annotationOuts renders the session's annotations oldest first, each ts at
-// the TIMESTAMPTZ precision the annotations relation kept.
+const annotationTSPrecision = time.Microsecond
+
+// annotationOuts renders the session's annotations oldest first.
 func annotationOuts(ann []schema.Annotation) []AnnotationOut {
 	sorted := make([]schema.Annotation, len(ann))
 	copy(sorted, ann)
 	sort.Slice(sorted, func(i, j int) bool {
-		ti, tj := sorted[i].TS.Truncate(time.Microsecond), sorted[j].TS.Truncate(time.Microsecond)
+		ti, tj := sorted[i].TS.Truncate(annotationTSPrecision), sorted[j].TS.Truncate(annotationTSPrecision)
 		if !ti.Equal(tj) {
 			return ti.Before(tj)
 		}
@@ -176,7 +173,7 @@ func annotationOuts(ann []schema.Annotation) []AnnotationOut {
 	out := make([]AnnotationOut, 0, len(sorted))
 	for _, a := range sorted {
 		o := AnnotationOut{Name: a.Name, Source: string(a.Source), Author: a.Author,
-			TS: a.TS.UTC().Truncate(time.Microsecond)}
+			TS: a.TS.UTC().Truncate(annotationTSPrecision)}
 		if n, ok := a.Value.Number(); ok {
 			o.Value, _ = json.Marshal(map[string]float64{"number": n})
 		} else if s, ok := a.Value.Label(); ok {

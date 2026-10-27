@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -51,7 +50,7 @@ func Handler(ix *index.Index, ctl *index.Controls) http.Handler {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		out := &counted{w: w}
+		out := &startedBody{w: w}
 		if req.kind == "atif" {
 			err = WriteATIF(out, db, req.session, hidden)
 		} else {
@@ -59,29 +58,32 @@ func Handler(ix *index.Index, ctl *index.Controls) http.Handler {
 		}
 		switch {
 		case err == nil:
-		case out.n > 0:
-			panic(http.ErrAbortHandler)
 		case errors.Is(err, ErrSessionNotFound):
-			http.Error(w, err.Error(), http.StatusNotFound)
+			out.fail(err, http.StatusNotFound)
 		case errors.Is(err, ErrInvalidATIF):
-			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			out.fail(err, http.StatusUnprocessableEntity)
 		default:
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			out.fail(err, http.StatusInternalServerError)
 		}
 	})
 }
 
-// counted is the response body, counting what has been written, so an error
-// after the first byte aborts the response instead of ending a 200 early.
-type counted struct {
-	w io.Writer
+type startedBody struct {
+	w http.ResponseWriter
 	n int64
 }
 
-func (c *counted) Write(p []byte) (int, error) {
-	n, err := c.w.Write(p)
-	c.n += int64(n)
+func (b *startedBody) Write(p []byte) (int, error) {
+	n, err := b.w.Write(p)
+	b.n += int64(n)
 	return n, err
+}
+
+func (b *startedBody) fail(err error, status int) {
+	if b.n > 0 {
+		panic(http.ErrAbortHandler)
+	}
+	http.Error(b.w, err.Error(), status)
 }
 
 func scope(ctx context.Context, db *index.DB, includePrivate bool) (index.SessionFilter, error) {
@@ -99,19 +101,17 @@ func scope(ctx context.Context, db *index.DB, includePrivate bool) (index.Sessio
 func serveDataset(w http.ResponseWriter, db *index.DB, req request, hidden map[string]bool, sessions index.SessionFilter) {
 	w.Header().Set("Trailer", SkippedTrailer)
 	w.Header().Set("Content-Type", "application/x-ndjson")
-	out := &counted{w: w}
+	out := &startedBody{w: w}
 	skipped, err := Dataset(out, db, req.annotation, req.perTask, hidden, sessions.Listed)
 	for _, s := range skipped {
 		w.Header().Add(SkippedTrailer, s.SessionID+": "+s.Err.Error())
 	}
 	switch {
 	case err == nil:
-	case out.n > 0:
-		panic(http.ErrAbortHandler)
 	case errors.Is(err, ErrEveryFailed):
-		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		out.fail(err, http.StatusUnprocessableEntity)
 	default:
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		out.fail(err, http.StatusInternalServerError)
 	}
 }
 

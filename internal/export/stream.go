@@ -7,11 +7,11 @@ import (
 	"io"
 )
 
-// writeArray writes doc, a JSON document that holds marker (`"key": []` or
-// `"key":[]`) once, with that empty array filled by each, one element at a
-// time, laid out as json.Marshal (indent "") or json.MarshalIndent (indent
-// "  ") lays out the whole document. each gets the prefix an element's lines
-// carry and puts each element's bytes.
+// writeArray writes doc with the one empty array at marker filled by each, one
+// element at a time, because encoding/json cannot stream an array. A doc
+// without the marker is an error, so a layout change fails the export instead
+// of corrupting it. each gets the prefix an element's lines carry and puts each
+// element's bytes.
 func writeArray(w io.Writer, doc []byte, marker, indent string, each func(prefix string, put func([]byte) error) error) error {
 	at := bytes.LastIndex(doc, []byte(marker))
 	if at < 0 {
