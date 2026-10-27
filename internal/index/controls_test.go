@@ -20,7 +20,7 @@ func TestParseControl(t *testing.T) {
 		{`{"action":"revoke",` + id + `,` + ts + `}`, ""},
 
 		{`{"session_id":"s1","action":"visibility","visibility":"link",` + ts + `}`, `control record visibility "link"`},
-		{`{"session_id":"s1","action":"share","wallet":"7xKX",` + ts + `}`, `control record action "share" kind ""`},
+		{`{"session_id":"s1","action":"share",` + ts + `}`, `control record action "share" kind ""`},
 		{`{"session_id":"s1","action":"delete","kind":"read",` + ts + `}`, `control record action "delete" kind "read"`},
 		{`{"action":"delete",` + ts + `}`, `control record delete lacks session_id`},
 		{`{"session_id":"s1","action":"delete"}`, `control record lacks request_key or ts`},
