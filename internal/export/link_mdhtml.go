@@ -184,6 +184,9 @@ func link(href, label string) string {
 
 func inline(s string) string {
 	var b strings.Builder
+	closers := map[byte]*closerIndex{'*': {s: s, c: '*'}, '_': {s: s, c: '_'}}
+	linkSeek := &seeker{s: s, sub: "]("}
+	parenSeek := &seeker{s: s, sub: ")"}
 	for i := 0; i < len(s); {
 		c := s[i]
 		switch {
@@ -198,7 +201,7 @@ func inline(s string) string {
 			i += n
 			continue
 		case c == '[':
-			if label, target, n, ok := linkAt(s[i:]); ok {
+			if label, target, n, ok := linkAt(s, i, linkSeek, parenSeek); ok {
 				if href, ok := safeHref(target); ok {
 					b.WriteString(link(href, inline(label)))
 				} else {
@@ -214,7 +217,7 @@ func inline(s string) string {
 				continue
 			}
 		case c == '*' || c == '_' && (i == 0 || !isWord(s[i-1])):
-			if end := emphasisEnd(s[i+1:], c); end > 0 {
+			if end := emphasisEnd(s, i, closers[c]); end > 0 {
 				b.WriteString("<em>" + inline(s[i+1:i+1+end]) + "</em>")
 				i += 2 + end
 				continue
@@ -262,29 +265,66 @@ func isWord(c byte) bool {
 	return c == '_' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }
 
-func emphasisEnd(s string, c byte) int {
-	if s == "" || s[0] == ' ' || s[0] == c {
-		return -1
-	}
-	for j := 1; j < len(s); j++ {
-		if s[j] == c && s[j-1] != ' ' && (c == '*' || j+1 == len(s) || !isWord(s[j+1])) {
-			return j
-		}
-	}
-	return -1
+type closerIndex struct {
+	s    string
+	c    byte
+	at   int
+	done bool
 }
 
-func linkAt(s string) (label, target string, n int, ok bool) {
-	close := strings.Index(s, "](")
-	if close < 0 || strings.ContainsAny(s[1:close], "[]") {
+func (ci *closerIndex) next(from int) int {
+	if ci.done && ci.at >= from {
+		return ci.at
+	}
+	k := from
+	for ; k < len(ci.s); k++ {
+		if ci.s[k] == ci.c && ci.s[k-1] != ' ' && (ci.c == '*' || k+1 == len(ci.s) || !isWord(ci.s[k+1])) {
+			break
+		}
+	}
+	ci.at, ci.done = k, true
+	return k
+}
+
+func emphasisEnd(s string, i int, ci *closerIndex) int {
+	if i+1 >= len(s) || s[i+1] == ' ' || s[i+1] == s[i] {
+		return -1
+	}
+	k := ci.next(i + 2)
+	if k >= len(s) {
+		return -1
+	}
+	return k - (i + 1)
+}
+
+type seeker struct {
+	s, sub string
+	at     int
+	done   bool
+}
+
+func (k *seeker) next(from int) int {
+	if !k.done || (k.at >= 0 && k.at < from) {
+		i := strings.Index(k.s[from:], k.sub)
+		k.at, k.done = i, true
+		if i >= 0 {
+			k.at += from
+		}
+	}
+	return k.at
+}
+
+func linkAt(s string, i int, closeSeek, parenSeek *seeker) (label, target string, n int, ok bool) {
+	close := closeSeek.next(i)
+	if close < 0 || strings.ContainsAny(s[i+1:close], "[]") {
 		return "", "", 0, false
 	}
-	end := strings.IndexByte(s[close+2:], ')')
+	end := parenSeek.next(close + 2)
 	if end < 0 {
 		return "", "", 0, false
 	}
-	target = strings.TrimSpace(s[close+2 : close+2+end])
-	return s[1:close], target, close + 3 + end, true
+	target = strings.TrimSpace(s[close+2 : end])
+	return s[i+1 : close], target, end + 1 - i, true
 }
 
 func bareURLEnd(s string) int {

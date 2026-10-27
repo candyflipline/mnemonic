@@ -218,3 +218,17 @@ func TestLinkHumanPromptKeepsTags(t *testing.T) {
 		t.Fatalf("prompts:\n%q\nwant:\n%q", got, want)
 	}
 }
+
+func TestRenderMarkdownEmphasisIsLinear(t *testing.T) {
+	for _, unit := range []string{"_a <b> ", "*a <b> "} {
+		src := strings.Repeat(unit, 900<<10/len(unit))
+		start := time.Now()
+		out := string(renderMarkdown(src))
+		if d := time.Since(start); d > time.Second {
+			t.Errorf("renderMarkdown of %d KB of %q took %v, want under 1s", len(src)>>10, unit, d)
+		}
+		if strings.Contains(out, "<b>") || !strings.Contains(out, "&lt;b&gt;") {
+			t.Errorf("output for %q is not escaped: %.80s", unit, out)
+		}
+	}
+}
