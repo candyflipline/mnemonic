@@ -122,33 +122,31 @@ func fromLogs(req *colllogs.ExportLogsServiceRequest, storeContent bool) *batch 
 	return b
 }
 
-// stampSessions gives each record its session: the first SessionKeys
-// attribute it carries (record before resource), else the one a record of its
-// trace in this request carries (the first in service name order, then in
-// request order), else the trace id. Spans of one trace that
-// arrive in different requests, only some naming a session, land in
-// different sessions.
 func stampSessions(b *batch) {
-	byTrace := map[string]string{}
-	services := slices.Sorted(maps.Keys(b.byService))
-	for _, service := range services {
+	sessionByTrace := stampRecordSessions(b)
+	for _, rs := range b.byService {
+		for i := range rs {
+			if rs[i].SessionID == "" {
+				rs[i].SessionID = cmp.Or(sessionByTrace[rs[i].TraceID], rs[i].TraceID)
+			}
+		}
+	}
+}
+
+func stampRecordSessions(b *batch) map[string]string {
+	sessionByTrace := map[string]string{}
+	for _, service := range slices.Sorted(maps.Keys(b.byService)) {
 		rs := b.byService[service]
 		for i := range rs {
 			rs[i].SessionID = rs[i].LookupStr(SessionKeys...)
 			if rs[i].SessionID != "" && rs[i].TraceID != "" {
-				if _, ok := byTrace[rs[i].TraceID]; !ok {
-					byTrace[rs[i].TraceID] = rs[i].SessionID
+				if _, ok := sessionByTrace[rs[i].TraceID]; !ok {
+					sessionByTrace[rs[i].TraceID] = rs[i].SessionID
 				}
 			}
 		}
 	}
-	for _, rs := range b.byService {
-		for i := range rs {
-			if rs[i].SessionID == "" {
-				rs[i].SessionID = cmp.Or(byTrace[rs[i].TraceID], rs[i].TraceID)
-			}
-		}
-	}
+	return sessionByTrace
 }
 
 func resourceOf(res *resourcepb.Resource, storeContent bool) (map[string]any, string) {
