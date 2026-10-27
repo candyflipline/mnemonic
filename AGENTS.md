@@ -10,7 +10,7 @@ Collects agent session traces (Claude Code, Codex, Cursor, ...) from every machi
   - ingests appended raw straight into the engine's store (`internal/index`), woken by each commit after 1 s of quiet and every 5 min without one. A cycle reads only the sources changed since the last cycle; the full listing happens at boot;
   - answers MCP on `POST /mcp` (`internal/mcp`, over `internal/index`).
 - Raw is the source of truth, and the index store is derived. Each parser has its own `Version()`; a source's checkpoint records the version it was parsed at, and serve re-parses a source recorded below its parser's version, so a fix re-parses only its harness. `TestVersionNamesOutput` hashes each harness's goldens and fails naming the harness whose output changed without a bump, and the number to bump to (one past every version in its table). Goldens miss changes their fixtures do not exercise (7587f30 moved none), so a fix whose output change they miss bumps by hand.
-- Paths live in `internal/layout`. The push protocol is `internal/wire` (messages in `internal/wire/pushpb/push.proto`). Auth (bearer token → author) is `internal/auth`; the author is never taken from a request.
+- Paths live in `internal/layout`. The push protocol is `internal/wire` (messages in `internal/wire/pushpb/push.proto`). Auth (client key → author) is `internal/auth`; `internal/qnet` carries both client paths over one QUIC UDP port and attaches the key's Identity, and the author is never taken from a request.
 
 ## Contracts (change only with the owner)
 | Contract | File | Pinned by |

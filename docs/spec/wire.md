@@ -2,7 +2,7 @@
 
 How a producer sends raw transcript lines to a mnemonic server, so that a stranger can write one without reading Go. Everything here is what the code does today; each fact names the line that does it. A server is `mnemonic serve` or `mnemonic local`; they speak the same protocol.
 
-A producer needs three things: a bearer token, a stable name for each file it sends, and the discipline to send whole lines. The server keeps one raw file per source and one manifest entry per source. The manifest is the only sync state: the server tells the producer where each source stands and the producer sends only what is missing.
+A producer needs three things: an ed25519 key the server lists, a stable name for each file it sends, and the discipline to send whole lines. The server keeps one raw file per source and one manifest entry per source. The manifest is the only sync state: the server tells the producer where each source stands and the producer sends only what is missing.
 
 Producers push over one gRPC stream ([The push stream](#the-push-stream)); it is the only client path in. The HTTP `PUT` and manifest `GET` that used to sit beside it were deleted in this deploy, after the PUT census found a single client, which moved to the stream.
 
@@ -10,7 +10,7 @@ Related specs: [events](events.md) (what the server makes of the lines), [spans]
 
 ## Authentication
 
-The push stream carries a bearer token as `authorization` request metadata. The push server's stream interceptor passes it to `Tokens.Check` with scope `auth.Push` (`internal/intake/intake.go:61-75`), the same check HTTP's `Require` uses. The server stores only `sha256(token)` as lowercase hex (`internal/auth/auth.go:120-123`) and maps it to an author. A missing or unknown token is gRPC `Unauthenticated` (`internal/auth/auth.go:142-146`), and a known token without the push scope is gRPC `PermissionDenied` (`internal/auth/auth.go:148-151`). The author a stream writes as is the token's author, never a field of the request (`internal/auth/auth.go:1-3`, `internal/store/store.go:104`).
+A producer is proven by its ed25519 key, in the TLS 1.3 handshake of the QUIC connection ([Connect](#connect)). The server lists admitted keys as `[[keys]]` (key, author, tenant, scopes). A key it does not list fails the handshake, and a request never carries credentials. The transport attaches the key's Identity to the connection (`internal/qnet`, `internal/auth/key.go`). The push stream's interceptor reads that Identity and checks scope `auth.Push`, the same check HTTP's `Require` uses (`internal/intake/intake.go`). An Identity without the push scope is gRPC `PermissionDenied`, and a connection with no Identity is `Unauthenticated`. The author a stream writes as is the key's author, never a field of the request. A header or metadata a client sends is ignored.
 
 ## Identifiers
 
@@ -36,7 +36,7 @@ The push protocol is one bidirectional gRPC call, `mnemonic.push.v1.Push/Sync`. 
 
 ### Connect
 
-The client dials the server's one listener over HTTP/2 and sends `authorization: Bearer <token>` as metadata. Its first message is `Hello`, carrying its machine name. The author is the token's, never a field.
+The client dials the server's UDP endpoint (`quic://host:8741` in its config) with ALPN `mnemonic-push/1` (`qnet.ALPNPush`), presents its key, and checks that the server proves the key it pinned as `server_key`. The server's own key is `server.key` in its data dir. Each QUIC stream that the server accepts is one connection, and gRPC runs over it as HTTP/2. The client's first message is `Hello`, carrying its machine name. The author is the key's, never a field. MCP and OTLP use the same endpoint under ALPN `mnemonic-http/1` (`qnet.ALPNHTTP`).
 
 ### Welcome and the window
 
