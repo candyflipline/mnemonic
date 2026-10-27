@@ -574,12 +574,27 @@ type IngestStats [4]int
 
 const sweepBudget = 5 * time.Second
 
-func Ingest(root, store string, quiet time.Duration, settleAll bool) (IngestStats, error) {
-	sources, err := listSources(root)
-	if err != nil {
-		return IngestStats{}, err
+// beforeWriterLock, non-nil in tests, runs just before a writer takes the
+// dir's writer lock.
+var beforeWriterLock func()
+
+// writerLock is held only inside withWriterLock's fn.
+type writerLock struct{ store string }
+
+func withWriterLock(store string, fn func(writerLock) error) error {
+	if beforeWriterLock != nil {
+		beforeWriterLock()
 	}
-	return ingest(root, store, sources, quiet, settleAll, nil)
+	release, err := IngestLock(store)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return fn(writerLock{store: store})
+}
+
+func Ingest(root, store string, quiet time.Duration, settleAll bool) (IngestStats, error) {
+	return ingest(root, store, func() (*sourceSet, error) { return listSources(root) }, quiet, settleAll, nil)
 }
 
 // IngestPlain brings store up to the machine's harness files the client globs
@@ -592,14 +607,18 @@ func Ingest(root, store string, quiet time.Duration, settleAll bool) (IngestStat
 // the index dir under the data dir (layout.IndexDir), so root is its parent
 // and the store sources' raw opens under it.
 func IngestPlain(store string, globs []config.SourceGlob, author, machine string, opts IngestOptions) (IngestStats, error) {
+	root := filepath.Dir(store)
+	return ingest(root, store, func() (*sourceSet, error) { return listPlainAndStore(root, globs, author, machine) }, opts.Quiet, opts.SettleAll, opts.Red)
+}
+
+func listPlainAndStore(root string, globs []config.SourceGlob, author, machine string) (*sourceSet, error) {
 	plain, err := listPlainSources(globs, author, machine)
 	if err != nil {
-		return IngestStats{}, err
+		return nil, err
 	}
-	root := filepath.Dir(store)
 	tool, err := listSources(root)
 	if err != nil {
-		return IngestStats{}, err
+		return nil, err
 	}
 	// The live harness file wins: old `mnemonic local` pushed every harness
 	// file into <root>/raw under the same key the plain source carries, so a
@@ -613,17 +632,17 @@ func IngestPlain(store string, globs []config.SourceGlob, author, machine string
 	}
 	sources := &sourceSet{}
 	if err := sources.add(plain...); err != nil {
-		return IngestStats{}, err
+		return nil, err
 	}
 	for _, s := range tool.list {
 		if s.kind == KindStore && plainKeys[sourceKey(s.key)] {
 			continue
 		}
 		if err := sources.add(s); err != nil {
-			return IngestStats{}, err
+			return nil, err
 		}
 	}
-	return ingest(root, store, sources, opts.Quiet, opts.SettleAll, opts.Red)
+	return sources, nil
 }
 
 // ingest is the cycle both entry points share: parse the sources, publish the
@@ -631,22 +650,18 @@ func IngestPlain(store string, globs []config.SourceGlob, author, machine string
 // KindPlain source opens its own path and ignores it. red is local mode's
 // redactor: every line a parse reads goes through it, the bytes push's upload
 // carries, so the index holds what the server path's raw holds.
-//
-// It is also the one place every writer passes through, so it holds the dir's
-// writer lock for the lap: both package entries, Index.Ingest and
-// Index.IngestPlain, and so serve's cycle, local's sink, export's pre-export
-// ingest and the harness subcommand all exclude each other here, and a
-// process holding the dir for its whole life (serve, local) borrows its own
-// lock instead of refusing itself.
-func ingest(root, store string, sources *sourceSet, quiet time.Duration, settleAll bool, red *redact.Redactor) (IngestStats, error) {
-	release, err := IngestLock(store)
-	if err != nil {
-		return IngestStats{}, err
-	}
-	defer release()
-	readCkpts(store, sources.list)
-	stats, _, opened, err := cycle(root, store, sources.list, allOf(sources.list), quiet, settleAll, red)
-	closeParts(opened)
+func ingest(root, store string, list func() (*sourceSet, error), quiet time.Duration, settleAll bool, red *redact.Redactor) (stats IngestStats, err error) {
+	err = withWriterLock(store, func(w writerLock) error {
+		sources, err := list()
+		if err != nil {
+			return err
+		}
+		readCkpts(store, sources.list)
+		var opened map[string]*Part
+		stats, _, opened, err = sources.cycle(w, root, allOf(sources.list), quiet, settleAll, red)
+		closeParts(opened)
+		return err
+	})
 	return stats, err
 }
 
@@ -659,9 +674,10 @@ func allOf(sources []source) []int {
 }
 
 // cycle parses the sources work indexes, counts every other one Unchanged,
-// publishes them all and records the lap. Each source's ck is updated to the
-// one its parse or settle leaves. The caller holds the dir's writer lock.
-func cycle(root, store string, sources []source, work []int, quiet time.Duration, settleAll bool, red *redact.Redactor) (stats IngestStats, outcomes map[string]Outcome, opened map[string]*Part, err error) {
+// publishes them all and records the lap; each source's ck becomes the one
+// its parse or settle leaves.
+func (ss *sourceSet) cycle(w writerLock, root string, work []int, quiet time.Duration, settleAll bool, red *redact.Redactor) (stats IngestStats, outcomes map[string]Outcome, opened map[string]*Part, err error) {
+	store, sources := w.store, ss.list
 	debug.SetGCPercent(25)
 	var rec cycleRecord
 	defer func() { recordCycle(store, rec) }()

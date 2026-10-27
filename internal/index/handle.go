@@ -16,6 +16,7 @@ import (
 // once the last call pinning it releases it.
 type Index struct {
 	store string
+	lock  *IndexLock
 	mu    sync.Mutex
 	cur   *snapshot
 }
@@ -32,6 +33,21 @@ type snapshot struct {
 func Open(store string) (*Index, error) {
 	ix := &Index{store: store, cur: &snapshot{db: emptyDB()}}
 	return ix, ix.Refresh()
+}
+
+// OpenExclusive is Open with store's writer lock held for the Index's life:
+// Close closes it and then unlocks.
+func OpenExclusive(store string) (*Index, error) {
+	lock, err := HoldIndexLock(store)
+	if err != nil {
+		return nil, err
+	}
+	ix, err := Open(store)
+	if err != nil {
+		return nil, errors.Join(err, lock.Unlock())
+	}
+	ix.lock = lock
+	return ix, nil
 }
 
 func emptyDB() *DB { return &DB{sessPart: map[string]int{}} }
@@ -86,7 +102,7 @@ func (ix *Index) refresh(opened map[string]*Part) error {
 			ix.mu.Lock()
 			old := ix.cur
 			ix.cur = &snapshot{db: db, stamp: stamp}
-			ix.retire(old)
+			ix.retireLocked(old)
 			ix.mu.Unlock()
 			return nil
 		}
@@ -122,8 +138,7 @@ func (ix *Index) Snapshot() (db *DB, release func()) {
 	}
 }
 
-// retire closes s now or when its last pin releases it; ix.mu is held.
-func (ix *Index) retire(s *snapshot) {
+func (ix *Index) retireLocked(s *snapshot) {
 	s.retired = true
 	if s.refs == 0 {
 		s.db.Close()
@@ -132,8 +147,11 @@ func (ix *Index) retire(s *snapshot) {
 
 func (ix *Index) Close() error {
 	ix.mu.Lock()
-	defer ix.mu.Unlock()
-	ix.retire(ix.cur)
+	ix.retireLocked(ix.cur)
+	ix.mu.Unlock()
+	if ix.lock != nil {
+		return ix.lock.Unlock()
+	}
 	return nil
 }
 

@@ -46,17 +46,12 @@ type Part struct {
 
 // frameCache holds the last decoded light and heavy frames of every part of
 // one DB, so batch memory is bounded by the cache sizes, not by the part count.
-// The MCP handler pins one snapshot per request and serializes nothing between
-// two of them, so the cache owns its lock: each lookup-and-fill is atomic and
-// the lock is never held across a tool call. scratch is the decode buffer the
-// fills share, safe because a fill runs under the lock.
 type frameCache struct {
 	mu         sync.Mutex
 	light      map[frameKey][]*Row
 	lightOrder []frameKey
 	heavy      map[frameKey][][]byte
 	heavyOrder []frameKey
-	scratch    []byte
 }
 
 func newFrameCache() *frameCache {
@@ -98,7 +93,7 @@ func (fc *frameCache) lightFrame(st *Part, frame uint64) ([]*Row, error) {
 	if rows, ok := fc.light[k]; ok {
 		return rows, nil
 	}
-	recs, _, err := readFrame(segments{st.lightB, st.lightD}, int64(k.frame), fc.scratch)
+	recs, _, err := readFrame(segments{st.lightB, st.lightD}, int64(k.frame), nil)
 	if err != nil {
 		return nil, err
 	}

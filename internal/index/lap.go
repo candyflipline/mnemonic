@@ -21,9 +21,8 @@ import (
 // Its premise: after boot, raw/ changes only through the store's committer,
 // which reports every key it changed, and the index store changes only
 // through this Lap, which holds its dir for the server's life. Archive files
-// (machine=archive-ch) are written by nothing since import-ch retired, so the
-// boot listing is their only one. Anything else that writes raw/ needs a
-// restart.
+// (machine=archive-ch) are written by nothing, so the boot listing is their
+// only one. Anything else that writes raw/ needs a restart.
 type Lap struct {
 	ix      *Index
 	root    string
@@ -37,17 +36,22 @@ type Lap struct {
 // publishes again. manifests is the store's table: the committer has already
 // read every manifest file once at Open, so boot does not read them again.
 func (ix *Index) Boot(root string, manifests []store.Manifest, opts IngestOptions) (*Lap, IngestStats, error) {
-	sources, err := sourcesOf(root, manifests)
+	l := &Lap{ix: ix, root: root}
+	var c cycled
+	err := withWriterLock(ix.store, func(w writerLock) error {
+		sources, err := sourcesOf(root, manifests)
+		if err != nil {
+			return err
+		}
+		readCkpts(ix.store, sources.list)
+		l.sources = sources
+		c = l.cycle(w, allOf(sources.list), opts)
+		return nil
+	})
 	if err != nil {
 		return nil, IngestStats{}, err
 	}
-	release, err := IngestLock(ix.store)
-	if err != nil {
-		return nil, IngestStats{}, err
-	}
-	readCkpts(ix.store, sources.list)
-	l := &Lap{ix: ix, root: root, sources: sources}
-	stats, err := l.cycle(allOf(sources.list), opts, release)
+	stats, err := l.serve(c)
 	return l, stats, err
 }
 
@@ -55,15 +59,21 @@ func (l *Lap) Next(changed []layout.Key, opts IngestOptions) (IngestStats, error
 	for _, k := range changed {
 		l.carry[k] = true
 	}
-	release, err := IngestLock(l.ix.store)
+	var c cycled
+	var patchErr error
+	err := withWriterLock(l.ix.store, func(w writerLock) error {
+		if patchErr = l.patch(l.carry); patchErr == nil {
+			c = l.cycle(w, l.work(), opts)
+		}
+		return nil
+	})
 	if err != nil {
 		return IngestStats{}, err
 	}
-	if err := l.patch(l.carry); err != nil {
-		release()
-		return IngestStats{}, errors.Join(err, l.ix.Refresh())
+	if patchErr != nil {
+		return IngestStats{}, errors.Join(patchErr, l.ix.Refresh())
 	}
-	return l.cycle(l.work(), opts, release)
+	return l.serve(c)
 }
 
 func (l *Lap) work() []int {
@@ -80,21 +90,33 @@ func (l *Lap) work() []int {
 	return work
 }
 
-// cycle parses the sources work names, publishes all of them, releases the
-// writer lock and serves the result. carry becomes the keys among work whose
-// parse did not complete, or all of work when the publish or the serve failed:
-// their checkpoints may have moved past what CURRENT names.
-func (l *Lap) cycle(work []int, opts IngestOptions, release func()) (IngestStats, error) {
-	stats, outcomes, opened, err := cycle(l.root, l.ix.store, l.sources.list, work, opts.Quiet, opts.SettleAll, opts.Red)
-	release()
-	err = errors.Join(err, l.ix.refresh(opened))
+type cycled struct {
+	work     []int
+	stats    IngestStats
+	outcomes map[string]Outcome
+	opened   map[string]*Part
+	err      error
+}
+
+func (l *Lap) cycle(w writerLock, work []int, opts IngestOptions) cycled {
+	c := cycled{work: work}
+	c.stats, c.outcomes, c.opened, c.err = l.sources.cycle(w, l.root, work, opts.Quiet, opts.SettleAll, opts.Red)
+	return c
+}
+
+// serve serves what a cycle published, after its writer lock is released.
+// carry becomes the keys among its work whose parse did not complete, or all
+// of the work when the publish or the serve failed: their checkpoints may
+// have moved past what CURRENT names.
+func (l *Lap) serve(c cycled) (IngestStats, error) {
+	err := errors.Join(c.err, l.ix.refresh(c.opened))
 	l.carry = map[layout.Key]bool{}
-	for _, i := range work {
-		if _, ok := outcomes[sourceKey(l.sources.list[i].key)]; !ok || err != nil {
+	for _, i := range c.work {
+		if _, ok := c.outcomes[sourceKey(l.sources.list[i].key)]; !ok || err != nil {
 			l.carry[l.sources.list[i].key] = true
 		}
 	}
-	return stats, err
+	return c.stats, err
 }
 
 func (l *Lap) patch(changed map[layout.Key]bool) error {

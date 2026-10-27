@@ -24,33 +24,32 @@ const writerLockName = "writer.lock"
 // while it holds the dir (serve, local): they borrow the held lock instead of
 // taking a second one.
 type IndexLock struct {
-	f    *os.File
-	key  string
-	held bool // HoldIndexLock's owner has not called Unlock yet
-	laps int  // ingests running on the lock now
+	f          *os.File
+	key        string
+	ownerHolds bool
+	ingests    int
 }
 
-// locks is the index dirs this process holds, by cleaned dir, and mu is the
-// one mutex over it and over every held and laps field in it. serve and local
-// hold their dir for the process's whole life; an ingest without one holds
-// the dir only for its lap (IngestLock).
-var (
-	locks = map[string]*IndexLock{}
+type lockRegistry struct {
 	mu    sync.Mutex
-)
+	locks map[string]*IndexLock
+}
+
+var registry = &lockRegistry{locks: map[string]*IndexLock{}}
 
 // HoldIndexLock takes store's writer lock now and holds it until Unlock, so
 // serve or local owns the dir for its whole life. It refuses, with the holder
 // named, when another writer holds the dir — and answers with the lock this
 // process already holds when it is called again for the same dir.
 func HoldIndexLock(store string) (*IndexLock, error) {
-	mu.Lock()
-	defer mu.Unlock()
-	l, err := lockLocked(store)
+	r := registry
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	l, err := r.get(store)
 	if err != nil {
 		return nil, err
 	}
-	l.held = true
+	l.ownerHolds = true
 	return l, nil
 }
 
@@ -61,52 +60,50 @@ func HoldIndexLock(store string) (*IndexLock, error) {
 // dir is freed when the last ingest on it is done and no HoldIndexLock owner
 // still holds it.
 func IngestLock(store string) (release func(), err error) {
-	mu.Lock()
-	defer mu.Unlock()
-	l, err := lockLocked(store)
+	r := registry
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	l, err := r.get(store)
 	if err != nil {
 		return nil, err
 	}
-	l.laps++
+	l.ingests++
 	return func() {
-		mu.Lock()
-		defer mu.Unlock()
-		l.laps--
-		l.dropIfIdle()
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		l.ingests--
+		r.dropIfIdle(l)
 	}, nil
 }
 
 // Unlock ends the HoldIndexLock owner's hold. The dir is freed at once, or
 // when the ingest still running on it is done.
 func (l *IndexLock) Unlock() error {
-	mu.Lock()
-	defer mu.Unlock()
-	l.held = false
-	return l.dropIfIdle()
+	r := registry
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	l.ownerHolds = false
+	return r.dropIfIdle(l)
 }
 
-// lockLocked is the lock this process holds for store, taking it when it holds
-// none. mu is held.
-func lockLocked(store string) (*IndexLock, error) {
+func (r *lockRegistry) get(store string) (*IndexLock, error) {
 	key := filepath.Clean(store)
-	if l := locks[key]; l != nil {
+	if l := r.locks[key]; l != nil {
 		return l, nil
 	}
 	l, err := takeLock(store)
 	if err != nil {
 		return nil, err
 	}
-	locks[key] = l
+	r.locks[key] = l
 	return l, nil
 }
 
-// dropIfIdle drops the flock and forgets the lock once nothing uses it, so
-// the next writer takes the dir. mu is held.
-func (l *IndexLock) dropIfIdle() error {
-	if l.held || l.laps > 0 || locks[l.key] != l {
+func (r *lockRegistry) dropIfIdle(l *IndexLock) error {
+	if l.ownerHolds || l.ingests > 0 || r.locks[l.key] != l {
 		return nil
 	}
-	delete(locks, l.key)
+	delete(r.locks, l.key)
 	err := syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN)
 	if cerr := l.f.Close(); err == nil {
 		err = cerr
@@ -136,11 +133,13 @@ func takeLock(store string) (*IndexLock, error) {
 		}
 		return nil, err
 	}
-	// We hold the dir: leave our pid for the next writer's refusal. The write
-	// is a courtesy, not a commit point, so its errors stay ignored.
-	f.Truncate(0)
-	fmt.Fprintf(f, "pid %d, %s\n", os.Getpid(), filepath.Base(os.Args[0]))
+	stampHolder(f)
 	return &IndexLock{f: f, key: filepath.Clean(store)}, nil
+}
+
+func stampHolder(f *os.File) {
+	_ = f.Truncate(0)
+	_, _ = fmt.Fprintf(f, "pid %d, %s\n", os.Getpid(), filepath.Base(os.Args[0]))
 }
 
 func readHolder(path string) string {
