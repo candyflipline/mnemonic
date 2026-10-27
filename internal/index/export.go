@@ -47,6 +47,11 @@ func (es ExportSession) EachRow(fn func(*Row) error) error {
 	return nil
 }
 
+func (es ExportSession) Payload(r *Row) (string, error) {
+	p, _, err := es.st.heavyOf(r)
+	return p, err
+}
+
 func (db *DB) EachSession(hidden map[string]bool, fn func(ExportSession) error) error {
 	type ref struct {
 		id string

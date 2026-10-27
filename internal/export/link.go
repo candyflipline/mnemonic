@@ -2,8 +2,6 @@ package export
 
 import (
 	"bufio"
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"path"
@@ -28,7 +26,6 @@ type LinkView struct {
 }
 
 const (
-	maxArgsBytes   = 300
 	maxResultBytes = 4096
 	unstamped      = "2100-01-01T00:00:00.000Z"
 	timeLayout     = "2006-01-02 15:04 MST"
@@ -64,10 +61,10 @@ func (c *stepCut) filter(fn func(*Step) error) func(*Step) error {
 
 type linkSession struct {
 	n              int
-	t              *trajectory
+	harness        string
 	project        string
 	start          time.Time
-	steps          int
+	th             *thread
 	mdURL, jsonURL string
 }
 
@@ -84,25 +81,20 @@ func openCut(db *index.DB, v LinkView, n int) (*trajectory, error) {
 }
 
 func openLinkSession(db *index.DB, v LinkView, n int) (*linkSession, error) {
-	t, err := openCut(db, v, n)
+	if n < 1 || n > len(v.SessionIDs) {
+		return nil, fmt.Errorf("export: %w: link has %d sessions, not %d", ErrSessionNotFound, len(v.SessionIDs), n)
+	}
+	s, err := openSession(db, v.SessionIDs[n-1], nil)
 	if err != nil {
 		return nil, err
 	}
-	ls := &linkSession{n: n, t: t, mdURL: v.SessionURL(n, "md"), jsonURL: v.SessionURL(n, "json")}
-	if cwd := t.src.FirstCwd; cwd != "" {
+	ls := &linkSession{n: n, harness: s.harness, mdURL: v.SessionURL(n, "md"), jsonURL: v.SessionURL(n, "json")}
+	if cwd := s.src.FirstCwd; cwd != "" {
 		if p := path.Base(cwd); p != "/" && p != "." {
 			ls.project = p
 		}
 	}
-	err = t.eachStep(func(s *Step) error {
-		if ls.start.IsZero() && s.Timestamp != "" && s.Timestamp != unstamped {
-			ls.start, _ = time.Parse("2006-01-02T15:04:05.000Z", s.Timestamp)
-		}
-		if !viewOf(s, "").empty() {
-			ls.steps++
-		}
-		return nil
-	})
+	ls.th, ls.start, err = buildConversation(s.src, isoMillis(v.Cutoff), ls.jsonURL, n)
 	if err != nil {
 		return nil, err
 	}
@@ -121,78 +113,30 @@ func openLink(db *index.DB, v LinkView) ([]*linkSession, error) {
 	return out, nil
 }
 
-func (ls *linkSession) startText() string {
-	if ls.start.IsZero() {
+func pacificTime(t time.Time) string {
+	if t.IsZero() {
 		return "start unknown"
 	}
-	return ls.start.In(pacific).Format(timeLayout)
+	return t.In(pacific).Format(timeLayout)
 }
 
-func (ls *linkSession) stepsText() string {
-	if ls.steps == 1 {
-		return "1 step"
+func (ls *linkSession) prompts() int {
+	n := 0
+	for _, t := range ls.th.Turns {
+		if t.Human() {
+			n++
+		}
 	}
-	return fmt.Sprintf("%d steps", ls.steps)
+	return n
 }
 
 func (ls *linkSession) describe() string {
-	parts := []string{ls.t.harness}
+	parts := []string{ls.harness}
 	if ls.project != "" {
 		parts = append(parts, ls.project)
 	}
-	parts = append(parts, ls.startText(), ls.stepsText())
+	parts = append(parts, pacificTime(ls.start), plural(ls.prompts(), "prompt"))
 	return strings.Join(parts, ", ")
-}
-
-type stepView struct {
-	Role, Message string
-	Calls         []callView
-	Results       []resultView
-}
-
-type callView struct {
-	Name, Args string
-	Cut        bool
-}
-
-type resultView struct {
-	Label, Body string
-	Cut         bool
-	Size        int
-	URL         string
-}
-
-func (v stepView) empty() bool {
-	return v.Message == "" && len(v.Calls) == 0 && len(v.Results) == 0
-}
-
-func viewOf(s *Step, jsonURL string) stepView {
-	v := stepView{Message: s.Message}
-	switch s.Source {
-	case "user":
-		v.Role = "User"
-	case "agent":
-		v.Role = "Assistant"
-	default:
-		v.Role = "System"
-	}
-	names := map[string]string{}
-	for _, c := range s.ToolCalls {
-		names[c.ToolCallID] = c.FunctionName
-		args, cut := cutBytes(compactJSON(c.Arguments), maxArgsBytes)
-		v.Calls = append(v.Calls, callView{Name: c.FunctionName, Args: args, Cut: cut})
-	}
-	if s.Observation != nil {
-		for _, r := range s.Observation.Results {
-			rv := resultView{Label: "result", Size: len(r.Content), URL: jsonURL}
-			if name := names[r.SourceCallID]; name != "" {
-				rv.Label = "result of " + name
-			}
-			rv.Body, rv.Cut = cutBytes(r.Content, maxResultBytes)
-			v.Results = append(v.Results, rv)
-		}
-	}
-	return v
 }
 
 func cutBytes(s string, n int) (string, bool) {
@@ -205,55 +149,33 @@ func cutBytes(s string, n int) (string, bool) {
 	return s[:n], true
 }
 
-func compactJSON(m map[string]any) string {
-	var b bytes.Buffer
-	enc := json.NewEncoder(&b)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(m); err != nil {
-		return "{}"
-	}
-	return strings.TrimSuffix(b.String(), "\n")
+func quoted(text string) string {
+	return "> " + strings.ReplaceAll(text, "\n", "\n> ") + "\n\n"
 }
 
-func fenced(body string) string {
-	run, longest := 0, 0
-	for _, r := range body {
-		if r == '`' {
-			run++
-			longest = max(longest, run)
-		} else {
-			run = 0
-		}
-	}
-	fence := strings.Repeat("`", max(3, longest+1))
-	return fence + "\n" + body + "\n" + fence + "\n"
-}
-
-func writeStepMarkdown(b *strings.Builder, v stepView) {
-	fmt.Fprintf(b, "### %s\n\n", v.Role)
-	if v.Message != "" {
-		b.WriteString(v.Message + "\n\n")
-	}
-	for _, c := range v.Calls {
-		sep := " "
-		if c.Args == "" {
-			sep = ""
-		}
-		suffix := ""
-		if c.Cut {
-			suffix = " [cut]"
-		}
-		fmt.Fprintf(b, "Tool call: %s%s%s%s\n\n", c.Name, sep, c.Args, suffix)
-	}
-	for _, r := range v.Results {
-		fmt.Fprintf(b, "Tool %s:\n\n", r.Label)
-		if r.Body == "" {
-			b.WriteString("(empty)\n\n")
-			continue
-		}
-		b.WriteString(fenced(r.Body) + "\n")
-		if r.Cut {
-			fmt.Fprintf(b, "Output cut at 4 KB of %d bytes. The full output is at %s\n\n", r.Size, r.URL)
+func writeWorkLog(b *strings.Builder, steps []*step, indent string) {
+	for _, s := range steps {
+		switch s.Kind {
+		case stepNote:
+			fmt.Fprintf(b, "%s- Note: %s\n", indent, clip(s.Text, 200))
+		case stepNotice:
+			fmt.Fprintf(b, "%s- %s\n", indent, s.Text)
+		case stepTool:
+			c := s.Call
+			line := c.Name
+			if c.Summary != "" {
+				line += ": " + c.Summary
+			}
+			if c.Sub == nil {
+				fmt.Fprintf(b, "%s- %s\n", indent, line)
+				continue
+			}
+			fmt.Fprintf(b, "%s- Subagent: %s (%s). Its report:\n\n", indent, c.Summary, c.Sub.StepsSummary())
+			report := c.Sub.Report
+			if report == "" {
+				report = "(no report)"
+			}
+			b.WriteString(quoted(report))
 		}
 	}
 }
@@ -262,17 +184,36 @@ func (ls *linkSession) writeMarkdown(bw *bufio.Writer, level string) error {
 	if _, err := fmt.Fprintf(bw, "%s Session %d: %s\n\n", level, ls.n, ls.describe()); err != nil {
 		return err
 	}
+	fmt.Fprintf(bw, "Tool outputs are left out. The full session, with every tool call and output, is at %s\n\n", ls.jsonURL)
 	var b strings.Builder
-	return ls.t.eachStep(func(s *Step) error {
-		v := viewOf(s, ls.jsonURL)
-		if v.empty() {
-			return nil
-		}
+	n := 0
+	for _, t := range ls.th.Turns {
 		b.Reset()
-		writeStepMarkdown(&b, v)
-		_, err := bw.WriteString(b.String())
-		return err
-	})
+		switch {
+		case t.Human():
+			n++
+			fmt.Fprintf(&b, "%s# Turn %d, %s\n\n**User:**\n\n%s\n\n", level, n, pacificTime(t.At), t.Prompt)
+		case t.Background():
+			fmt.Fprintf(&b, "%s# Background update, %s\n\n%s\n\n", level, pacificTime(t.At), t.Prompt)
+		default:
+			fmt.Fprintf(&b, "%s# Before the first prompt, %s\n\n", level, pacificTime(t.At))
+		}
+		for _, q := range t.Asks {
+			fmt.Fprintf(&b, "**Asked:** %s\n\n**Answered:** %s\n\n", q.Question, q.Answer)
+		}
+		if len(t.Work) > 0 {
+			fmt.Fprintf(&b, "**Work** (%s):\n\n", t.workStats())
+			writeWorkLog(&b, t.Work, "")
+			b.WriteString("\n")
+		}
+		if t.Answer != "" {
+			b.WriteString("**Answer:**\n\n" + t.Answer + "\n\n")
+		}
+		if _, err := bw.WriteString(b.String()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func WriteLinkMarkdown(w io.Writer, db *index.DB, v LinkView) error {
