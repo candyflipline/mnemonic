@@ -42,7 +42,7 @@ func fingerprint(cks []ckpt) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "format %d\n", partFormat)
 	for _, c := range cks {
-		fmt.Fprintf(h, "%s %d %d %d %s %d\n", c.Key, c.Parser, c.Layout, c.ZstSize, c.WindowSHA, c.Rows)
+		fmt.Fprintf(h, "%s %d %d %d %s %d\n", c.Key, c.Parser, c.Layout, c.Offset, c.WindowSHA, c.Rows)
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -155,7 +155,7 @@ func memberFrom(c ckpt, holder *Part) (from int64, ok bool) {
 	}
 	if c.ColdLight > 0 {
 		at := c.parsed
-		at.ZstSize, at.Rows, at.WindowSHA, at.State = c.ColdZst, c.ColdRows, c.ColdSHA, hm.State
+		at.Offset, at.Rows, at.WindowSHA, at.State = c.ColdZst, c.ColdRows, c.ColdSHA, hm.State
 		if sameParsed(hm.parsed, at) && c.Rows > c.ColdRows && c.LightLen >= c.ColdLight {
 			return c.ColdLight, true
 		}
@@ -167,7 +167,7 @@ func sameParsed(a, b parsed) bool {
 	return a.Key == b.Key && a.Kind == b.Kind && a.Parser == b.Parser && a.Layout == b.Layout &&
 		a.Harness == b.Harness && a.SourceName == b.SourceName && a.SourceFile == b.SourceFile &&
 		a.Path == b.Path && a.Author == b.Author && a.Machine == b.Machine &&
-		a.ZstSize == b.ZstSize && a.WindowSHA == b.WindowSHA && a.State == b.State && a.Rows == b.Rows
+		a.Offset == b.Offset && a.WindowSHA == b.WindowSHA && a.State == b.State && a.Rows == b.Rows
 }
 
 // walkMember calls fn with the light record of every row a part build reads

@@ -27,8 +27,7 @@ import (
 type Lap struct {
 	ix      *Index
 	root    string
-	sources []source
-	cks     []*ckpt // cks[i] is sources[i]'s checkpoint, nil when none
+	sources *sourceSet
 	carry   map[layout.Key]bool
 }
 
@@ -38,19 +37,17 @@ type Lap struct {
 // publishes again. manifests is the store's table: the committer has already
 // read every manifest file once at Open, so boot does not read them again.
 func (ix *Index) Boot(root string, manifests []store.Manifest, opts IngestOptions) (*Lap, IngestStats, error) {
-	sources, err := bootSources(root, manifests)
+	sources, err := sourcesOf(root, manifests)
 	if err != nil {
-		return nil, IngestStats{}, err
-	}
-	if err := oneKeyEach(sources); err != nil {
 		return nil, IngestStats{}, err
 	}
 	release, err := IngestLock(ix.store)
 	if err != nil {
 		return nil, IngestStats{}, err
 	}
-	l := &Lap{ix: ix, root: root, sources: sources, cks: readCkpts(ix.store, sources)}
-	stats, err := l.cycle(allOf(sources), opts, release)
+	readCkpts(ix.store, sources.list)
+	l := &Lap{ix: ix, root: root, sources: sources}
+	stats, err := l.cycle(allOf(sources.list), opts, release)
 	return l, stats, err
 }
 
@@ -75,8 +72,8 @@ func (l *Lap) work() []int {
 		want[sourceKey(k)] = true
 	}
 	var work []int
-	for i, s := range l.sources {
-		if want[sourceKey(s.key)] || versionStale(s, l.cks[i]) {
+	for i, s := range l.sources.list {
+		if want[sourceKey(s.key)] || versionStale(s) {
 			work = append(work, i)
 		}
 	}
@@ -88,13 +85,13 @@ func (l *Lap) work() []int {
 // parse did not complete, or all of work when the publish or the serve failed:
 // their checkpoints may have moved past what CURRENT names.
 func (l *Lap) cycle(work []int, opts IngestOptions, release func()) (IngestStats, error) {
-	stats, outcomes, opened, err := cycle(l.root, l.ix.store, l.sources, l.cks, work, opts.Quiet, opts.SettleAll, opts.Red)
+	stats, outcomes, opened, err := cycle(l.root, l.ix.store, l.sources.list, work, opts.Quiet, opts.SettleAll, opts.Red)
 	release()
 	err = errors.Join(err, l.ix.refresh(opened))
 	l.carry = map[layout.Key]bool{}
 	for _, i := range work {
-		if _, ok := outcomes[sourceKey(l.sources[i].key)]; !ok || err != nil {
-			l.carry[l.sources[i].key] = true
+		if _, ok := outcomes[sourceKey(l.sources.list[i].key)]; !ok || err != nil {
+			l.carry[l.sources.list[i].key] = true
 		}
 	}
 	return stats, err
@@ -102,49 +99,34 @@ func (l *Lap) cycle(work []int, opts IngestOptions, release func()) (IngestStats
 
 func (l *Lap) patch(changed map[layout.Key]bool) error {
 	for k := range changed {
-		n := sort.Search(len(l.sources), func(i int) bool { return l.sources[i].kind == KindArchive })
+		list := l.sources.list
+		n := sort.Search(len(list), func(i int) bool { return list[i].kind == KindArchive })
 		p := k.Manifest(l.root)
-		i, found := slices.BinarySearchFunc(l.sources[:n], p, func(s source, p string) int { return strings.Compare(s.mpath, p) })
+		i, found := slices.BinarySearchFunc(list[:n], p, func(s source, p string) int { return strings.Compare(s.mpath, p) })
 		m, ok, err := readSourceManifest(p)
 		if err != nil {
 			return err
 		}
 		switch {
 		case ok && found:
-			l.sources[i].src = m
+			list[i].src = m
 		case ok:
-			s := source{kind: KindStore, mpath: p, key: k, src: m}
-			var c *ckpt
+			s := storeSource(l.root, store.Manifest{Key: k, Source: m.Source, ZstSize: m.ZstSize})
 			if have, ok := readCkpt(l.ix.store, sourceKey(k)); ok {
-				c = &have
+				s.ck = &have
 			}
-			l.sources = slices.Insert(l.sources, i, s)
-			l.cks = slices.Insert(l.cks, i, c)
+			if err := l.sources.insert(i, s); err != nil {
+				return err
+			}
 		case found:
-			l.sources = slices.Delete(l.sources, i, i+1)
-			l.cks = slices.Delete(l.cks, i, i+1)
+			l.sources.remove(i)
 		}
 	}
-	return oneKeyEach(l.sources)
+	return nil
 }
 
-// bootSources is listSources over the store's manifests: store sources in
-// manifest path order, then the archive files.
-func bootSources(root string, manifests []store.Manifest) ([]source, error) {
-	out := make([]source, len(manifests))
-	for i, m := range manifests {
-		out[i] = source{kind: KindStore, mpath: m.Key.Manifest(root), key: m.Key, src: manifest{Source: m.Source, ZstSize: m.ZstSize}}
-	}
-	slices.SortFunc(out, func(a, b source) int { return strings.Compare(a.mpath, b.mpath) })
-	archive, err := listArchiveSources(root)
-	if err != nil {
-		return nil, err
-	}
-	return append(out, archive...), nil
-}
-
-// readSourceManifest is one raw manifest as listSources reads it: false when
-// it is gone, or does not parse (said on stderr, and the source skipped).
+// readSourceManifest is one raw manifest: false when it is gone, or does not
+// parse (said on stderr).
 func readSourceManifest(path string) (manifest, bool, error) {
 	var m manifest
 	b, err := os.ReadFile(path)

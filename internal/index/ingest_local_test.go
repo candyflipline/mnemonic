@@ -324,9 +324,9 @@ func TestIngestPlainOneCheckpointPerKey(t *testing.T) {
 	}
 
 	dup := source{kind: KindStore, mpath: pathA, key: layout.Key{Author: author, Machine: machine, Harness: harness, SrcID: wire.SrcID(pathA)}}
-	_, err = ingest(dataDir, store, []source{dup, dup}, time.Hour, true, nil)
+	err = (&sourceSet{}).add(dup, dup)
 	if err == nil || !strings.Contains(err.Error(), sourceKey(dup.key)) {
-		t.Fatalf("ingest with a duplicate key: err=%v, want it to name %s", err, sourceKey(dup.key))
+		t.Fatalf("a source list with a duplicate key: err=%v, want it to name %s", err, sourceKey(dup.key))
 	}
 }
 

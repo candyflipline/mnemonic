@@ -14,19 +14,18 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// Kind is where a source's bytes live. Only reading them differs by kind:
-// the checkpoint's offset is in the kind's own bytes, and planning, parts,
-// winners and tools never look at it.
+// Kind is where a source's bytes live.
 type Kind uint8
 
 const (
 	// KindStore is a pushed source in the store: raw/.../<src>.jsonl.zst
-	// read up to its manifest's zst_size. The offset is in compressed bytes.
+	// read up to its manifest's zst_size.
 	KindStore Kind = iota
-	// KindPlain is a harness's own JSONL file read in place (local mode). The
-	// offset is in the file's plain bytes.
+	// KindPlain is a harness's own JSONL file read in place (local mode).
 	KindPlain
 )
+
+func (k Kind) sweepable() bool { return k == KindStore }
 
 func (k Kind) open(root string, s source) (*os.File, int64, error) {
 	if k == KindPlain {
@@ -36,10 +35,18 @@ func (k Kind) open(root string, s source) (*os.File, int64, error) {
 }
 
 func (k Kind) extends(f *os.File, end int64, prev ckpt) bool {
-	if k == KindPlain {
-		return plainExtends(f, end, prev)
+	if prev.Offset > end {
+		return false
 	}
-	return storeExtends(f, end, prev)
+	if sum, err := windowSHA(f, prev.Offset); err != nil || sum != prev.WindowSHA {
+		return false
+	}
+	if k == KindPlain || prev.Offset == end {
+		return true
+	}
+	magic := make([]byte, 4)
+	_, err := f.ReadAt(magic, prev.Offset)
+	return err == nil && bytes.Equal(magic, zstdMagic)
 }
 
 func (k Kind) reader(f *os.File, from, end int64) (io.ReadCloser, error) {
@@ -54,9 +61,6 @@ func (k Kind) reader(f *os.File, from, end int64) (io.ReadCloser, error) {
 	return zr.IOReadCloser(), nil
 }
 
-// openPlain opens a KindPlain source's file in place and the end a parse may
-// read to: the offset just past the last newline, so a line being written is
-// left for the next run. A file without a complete line reads to 0.
 func openPlain(s source) (*os.File, int64, error) {
 	f, err := os.Open(s.src.Path)
 	if err != nil {
@@ -67,7 +71,7 @@ func openPlain(s source) (*os.File, int64, error) {
 		f.Close()
 		return nil, 0, err
 	}
-	end, err := lastNewline(f, fi.Size())
+	end, err := completeLinesEnd(f, fi.Size())
 	if err != nil {
 		f.Close()
 		return nil, 0, err
@@ -75,7 +79,7 @@ func openPlain(s source) (*os.File, int64, error) {
 	return f, end, nil
 }
 
-func lastNewline(f *os.File, size int64) (int64, error) {
+func completeLinesEnd(f *os.File, size int64) (int64, error) {
 	buf := make([]byte, window)
 	for at := size; at > 0; {
 		step := min(int64(len(buf)), at)
@@ -91,32 +95,23 @@ func lastNewline(f *os.File, size int64) (int64, error) {
 	return 0, nil
 }
 
-// plainExtends is KindPlain's byte test: the 64 KB of the file before the
-// checkpoint offset hash to prev.WindowSHA; on a mismatch the source parses
-// from byte 0 into gen+1. The offset itself is at a newline boundary by
-// construction, and extends already refused a checkpoint past the input.
-func plainExtends(f *os.File, end int64, prev ckpt) bool {
-	sum, err := windowSHA(f, prev.ZstSize)
-	return err == nil && sum == prev.WindowSHA
-}
-
 // redactReader is push's per-line redaction over a stream: every line read
 // goes through red.Line, the exact bytes push's redactLines uploads for the
 // same lines, so a local parse sees what the server path's raw holds and the
 // parser's offsets and uids match it byte for byte.
 type redactReader struct {
+	src io.Closer
 	r   *bufio.Reader
 	red *redact.Redactor
 	out []byte
 	err error
 }
 
-func newRedactReader(r io.Reader, red *redact.Redactor) *redactReader {
-	return &redactReader{r: bufio.NewReaderSize(r, lightFrame), red: red}
+func newRedactReader(r io.ReadCloser, red *redact.Redactor) *redactReader {
+	return &redactReader{src: r, r: bufio.NewReaderSize(r, lightFrame), red: red}
 }
 
-// Close closes nothing: the wrapped reader's Close runs in ingestSource.
-func (rr *redactReader) Close() error { return nil }
+func (rr *redactReader) Close() error { return rr.src.Close() }
 
 func (rr *redactReader) Read(p []byte) (int, error) {
 	for len(rr.out) == 0 {

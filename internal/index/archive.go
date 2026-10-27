@@ -77,6 +77,20 @@ func archiveMemberKey(fileKey, sessionID string) string {
 	return fileKey + archiveMemberSep + sessionID
 }
 
+func readArchiveMembers(store, fileKey string) ([]ckpt, bool) {
+	fc, ok := readCkpt(store, fileKey)
+	if !ok {
+		return nil, false
+	}
+	var out []ckpt
+	for _, sid := range fc.Sessions {
+		if c, ok := readCkpt(store, archiveMemberKey(fileKey, sid)); ok {
+			out = append(out, c)
+		}
+	}
+	return out, true
+}
+
 // memberBeats reports whether a row of version v from member m beats the
 // incumbent row of version wv from member w. Two raw members go by the lake
 // path alone, the greater first, then the lesser key: the oracle's raw
@@ -265,7 +279,7 @@ func ingestArchive(store string, s source) (Outcome, int64, error) {
 	}
 	sum := own + "|" + set.digest
 	prev, has := readCkpt(store, key)
-	if has && prev.Kind == KindArchive && prev.ZstSize == end && prev.WindowSHA == sum {
+	if has && prev.Kind == KindArchive && prev.Offset == end && prev.WindowSHA == sum {
 		return Unchanged, 0, nil
 	}
 	pf, err := parquet.OpenFile(f, end)
@@ -358,8 +372,8 @@ func wantArchiveCkpt(s source, size int64, sum string, rows int64, sessions []st
 		Key: sourceKey(s.key), Kind: KindArchive, Layout: logLayout,
 		Harness: s.src.Harness, SourceFile: s.src.Path,
 		Author: s.key.Author, Machine: s.key.Machine,
-		Path:    filepath.ToSlash(s.key.Events("")),
-		ZstSize: size, WindowSHA: sum,
+		Path:   filepath.ToSlash(s.key.Events("")),
+		Offset: size, WindowSHA: sum,
 		Rows: rows, Sessions: sessions,
 	}, ColdZst: size}
 }
@@ -396,7 +410,7 @@ func (w *archiveWriter) ckpt(k layout.Key, m manifest, size int64, sha string) c
 		Author: k.Author, Machine: k.Machine,
 		Path:     filepath.ToSlash(k.Events("")),
 		Sessions: []string{strings.TrimPrefix(w.key, sourceKey(k)+archiveMemberSep)},
-		ZstSize:  size, WindowSHA: sha,
+		Offset:   size, WindowSHA: sha,
 		Rows: w.rows,
 	}, Gen: w.gen, LightLen: w.lightLen, HeavyLen: w.heavyLen}
 }
@@ -836,7 +850,7 @@ func restreamMembers(store, path string, idx []int, cks []ckpt) error {
 	var fileKey string
 	for _, i := range idx {
 		c := cks[i]
-		if c.ZstSize != fi.Size() || c.WindowSHA != own+"|"+set.digest {
+		if c.Offset != fi.Size() || c.WindowSHA != own+"|"+set.digest {
 			return fmt.Errorf("%s: %s: the file changed since the member was streamed", path, c.Key)
 		}
 		sid := c.Sessions[0]

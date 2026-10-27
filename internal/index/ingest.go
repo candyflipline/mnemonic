@@ -27,6 +27,7 @@ import (
 	_ "github.com/candyflipline/mnemonic/internal/normalize/all"
 	"github.com/candyflipline/mnemonic/internal/redact"
 	"github.com/candyflipline/mnemonic/internal/schema"
+	"github.com/candyflipline/mnemonic/internal/store"
 	"github.com/candyflipline/mnemonic/internal/wire"
 	"github.com/klauspost/compress/zstd"
 )
@@ -47,7 +48,7 @@ type parsed struct {
 	Path       string          `json:"path"`
 	Author     string          `json:"author"`
 	Machine    string          `json:"machine"`
-	ZstSize    int64           `json:"zst_size"`
+	Offset     int64           `json:"zst_size"`
 	WindowSHA  string          `json:"window_sha256"`
 	State      normalize.State `json:"state"`
 	Rows       int64           `json:"rows"`
@@ -73,7 +74,18 @@ type ckpt struct {
 // version by its place in its source, where the parser stamped the wall clock.
 const logLayout = 1
 
-func (c ckpt) hot() bool { return c.ZstSize != c.ColdZst }
+type planEntry struct {
+	ck           ckpt
+	owner        *source
+	due, touched bool
+}
+
+func writeCkpt(store string, c ckpt) error {
+	b, _ := json.Marshal(c)
+	return writeFileAtomic(ckptPath(store, c.Key), b)
+}
+
+func (c ckpt) hot() bool { return c.Offset != c.ColdZst }
 
 const window = 64 << 10
 
@@ -101,53 +113,95 @@ type source struct {
 	mpath string
 	key   layout.Key
 	src   manifest
+	ck    *ckpt
 }
 
-func listSources(root string) ([]source, error) {
+func storeSource(root string, m store.Manifest) source {
+	return source{kind: KindStore, mpath: m.Key.Manifest(root), key: m.Key, src: manifest{Source: m.Source, ZstSize: m.ZstSize}}
+}
+
+type sourceSet struct {
+	list []source
+	keys map[string]bool
+}
+
+func (ss *sourceSet) insert(i int, s source) error {
+	k := sourceKey(s.key)
+	if ss.keys[k] {
+		return fmt.Errorf("ingest: duplicate source key %s", k)
+	}
+	if ss.keys == nil {
+		ss.keys = map[string]bool{}
+	}
+	ss.keys[k] = true
+	ss.list = slices.Insert(ss.list, i, s)
+	return nil
+}
+
+func (ss *sourceSet) add(s ...source) error {
+	for _, s := range s {
+		if err := ss.insert(len(ss.list), s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (ss *sourceSet) remove(i int) {
+	delete(ss.keys, sourceKey(ss.list[i].key))
+	ss.list = slices.Delete(ss.list, i, i+1)
+}
+
+func listSources(root string) (*sourceSet, error) {
 	rawDir := filepath.Join(root, "raw")
 	paths, err := filepath.Glob(filepath.Join(rawDir, "author=*", "machine=*", "harness=*", "*.json"))
 	if err != nil {
 		return nil, err
 	}
-	sort.Strings(paths)
-	mans := make([]manifest, len(paths))
+	mans := make([]store.Manifest, len(paths))
+	ok := make([]bool, len(paths))
 	errs := make([]error, len(paths))
-	bad := make([]error, len(paths))
 	eachIndex(len(paths), func(i int) {
-		b, err := os.ReadFile(paths[i])
-		if err != nil {
-			errs[i] = err
-			return
-		}
-		bad[i] = json.Unmarshal(b, &mans[i])
-	})
-	var out []source
-	for i, p := range paths {
-		if errs[i] != nil {
-			return nil, errs[i]
-		}
-		if bad[i] != nil {
-			fmt.Fprintf(os.Stderr, "ingest: %s: %v\n", p, bad[i])
-			continue
-		}
-		m := mans[i]
-		rel, _ := filepath.Rel(rawDir, p)
+		var m manifest
+		m, ok[i], errs[i] = readSourceManifest(paths[i])
+		rel, _ := filepath.Rel(rawDir, paths[i])
 		parts := strings.Split(rel, string(filepath.Separator))
-		if len(parts) != 4 {
-			continue
-		}
-		out = append(out, source{kind: KindStore, mpath: p, src: m, key: layout.Key{
+		mans[i] = store.Manifest{Source: m.Source, ZstSize: m.ZstSize, Key: layout.Key{
 			Author:  strings.TrimPrefix(parts[0], "author="),
 			Machine: strings.TrimPrefix(parts[1], "machine="),
 			Harness: strings.TrimPrefix(parts[2], "harness="),
 			SrcID:   strings.TrimSuffix(parts[3], ".json"),
-		}})
+		}}
+	})
+	var listed []store.Manifest
+	for i := range paths {
+		if errs[i] != nil {
+			return nil, errs[i]
+		}
+		if ok[i] {
+			listed = append(listed, mans[i])
+		}
 	}
+	return sourcesOf(root, listed)
+}
+
+// sourcesOf is the store sources of manifests in manifest path order, then
+// the archive files, each with its checkpoint.
+func sourcesOf(root string, manifests []store.Manifest) (*sourceSet, error) {
+	stored := make([]source, len(manifests))
+	for i, m := range manifests {
+		stored[i] = storeSource(root, m)
+	}
+	slices.SortFunc(stored, func(a, b source) int { return strings.Compare(a.mpath, b.mpath) })
 	archive, err := listArchiveSources(root)
 	if err != nil {
 		return nil, err
 	}
-	return append(out, archive...), nil
+	ss := &sourceSet{}
+	if err := ss.add(stored...); err != nil {
+		return nil, err
+	}
+	return ss, ss.add(archive...)
 }
 
 func readCkpt(store, key string) (ckpt, bool) {
@@ -159,17 +213,15 @@ func readCkpt(store, key string) (ckpt, bool) {
 	return c, true
 }
 
-func readCkpts(store string, sources []source) []*ckpt {
-	out := make([]*ckpt, len(sources))
+func readCkpts(store string, sources []source) {
 	eachIndex(len(sources), func(i int) {
 		if sources[i].kind == KindArchive {
 			return
 		}
 		if c, ok := readCkpt(store, sourceKey(sources[i].key)); ok {
-			out[i] = &c
+			sources[i].ck = &c
 		}
 	})
-	return out
 }
 
 func eachIndex(n int, fn func(int)) {
@@ -265,46 +317,27 @@ func wantCkpt(s source, parser normalize.Parser) ckpt {
 }
 
 // extends reports whether the input up to end still holds the bytes prev was
-// parsed from, under the same kind, parser and identity, so only the bytes
-// past it parse. Past a Provisional State they cannot: its rows take a
-// timestamp from lines not read yet. The byte test is the kind's.
+// parsed from, so only the bytes past it parse.
 func extends(raw *os.File, end int64, want, prev ckpt) bool {
-	if prev.Kind != want.Kind || prev.Parser != want.Parser || prev.Harness != want.Harness || prev.SourceName != want.SourceName ||
-		prev.SourceFile != want.SourceFile || prev.Layout != want.Layout || prev.ZstSize > end ||
-		prev.State.Provisional() && prev.ZstSize < end {
+	if !prev.sameInput(want) || prev.State.Provisional() && prev.Offset < end {
 		return false
 	}
 	return want.Kind.extends(raw, end, prev)
 }
 
-func storeExtends(raw *os.File, end int64, prev ckpt) bool {
-	if sum, err := windowSHA(raw, prev.ZstSize); err != nil || sum != prev.WindowSHA {
-		return false
-	}
-	if prev.ZstSize < end {
-		magic := make([]byte, 4)
-		if _, err := raw.ReadAt(magic, prev.ZstSize); err != nil || !bytes.Equal(magic, zstdMagic) {
-			return false
-		}
-	}
-	return true
+func (c ckpt) sameInput(want ckpt) bool {
+	return c.Kind == want.Kind && c.Parser == want.Parser && c.Harness == want.Harness && c.SourceName == want.SourceName &&
+		c.SourceFile == want.SourceFile && c.Layout == want.Layout
 }
 
 // ingestSource brings one source's logs up to its input, parsing only the
 // bytes past its checkpoint when the input still extends it, and reports what
-// it did and how many log bytes it appended. red (local mode) sits between the
-// input and the parser: each line the parser reads has been through red.Line,
-// exactly the bytes push uploads for the same line. cur is the source's
-// checkpoint, nil for none, and the checkpoint the source has after is
-// returned with the outcome (nil for an archive file, whose kind keeps its own).
-func ingestSource(root, store string, s source, cur *ckpt, red *redact.Redactor) (Outcome, int64, *ckpt, error) {
-	if s.kind == KindArchive {
-		// Before normalize.For: archive harnesses do have parsers, but the
-		// parquet is read by the archive kind, not parsed as raw (DESIGN.md,
-		// Archive kind (d)).
-		o, written, err := ingestArchive(store, s)
-		return o, written, nil, err
-	}
+// it did, how many log bytes it appended and the checkpoint the source has
+// after. red (local mode) sits between the input and the parser: each line the
+// parser reads has been through red.Line, exactly the bytes push uploads for
+// the same line.
+func ingestSource(root, store string, s source, red *redact.Redactor) (Outcome, int64, *ckpt, error) {
+	cur := s.ck
 	key := sourceKey(s.key)
 	parser, ok := normalize.For(s.src.Harness)
 	if !ok {
@@ -323,7 +356,7 @@ func ingestSource(root, store string, s source, cur *ckpt, red *redact.Redactor)
 		prev = *cur
 	}
 	resumed := has && extends(raw, end, want, prev)
-	if resumed && prev.ZstSize == end {
+	if resumed && prev.Offset == end {
 		return Unchanged, 0, cur, nil
 	}
 	next := want
@@ -346,14 +379,14 @@ func ingestSource(root, store string, s source, cur *ckpt, red *redact.Redactor)
 	}
 	defer heavyF.Close()
 
-	zr, err := s.kind.reader(raw, from.ZstSize, end)
+	zr, err := s.kind.reader(raw, from.Offset, end)
 	if err != nil {
 		return 0, 0, cur, err
 	}
-	defer zr.Close()
 	if red != nil {
 		zr = newRedactReader(zr, red)
 	}
+	defer zr.Close()
 
 	lw := &frameWriter{f: lightF, off: from.LightLen, target: lightFrame, enc: encoder}
 	hw := &frameWriter{f: heavyF, off: from.HeavyLen, target: heavyFrame, enc: heavyEncoder}
@@ -399,7 +432,7 @@ func ingestSource(root, store string, s source, cur *ckpt, red *redact.Redactor)
 	if err != nil {
 		return 0, 0, cur, err
 	}
-	next.ZstSize, next.WindowSHA, next.State = end, sum, state
+	next.Offset, next.WindowSHA, next.State = end, sum, state
 	next.LightLen, next.HeavyLen, next.Rows = lw.off, hw.off, rows
 	for s := range sessions {
 		next.Sessions = append(next.Sessions, s)
@@ -559,13 +592,19 @@ func IngestPlain(store string, globs []config.SourceGlob, author, machine string
 	for _, s := range plain {
 		plainKeys[sourceKey(s.key)] = true
 	}
-	for _, s := range tool {
+	sources := &sourceSet{}
+	if err := sources.add(plain...); err != nil {
+		return IngestStats{}, err
+	}
+	for _, s := range tool.list {
 		if s.kind == KindStore && plainKeys[sourceKey(s.key)] {
 			continue
 		}
-		plain = append(plain, s)
+		if err := sources.add(s); err != nil {
+			return IngestStats{}, err
+		}
 	}
-	return ingest(root, store, plain, opts.Quiet, opts.SettleAll, opts.Red)
+	return ingest(root, store, sources, opts.Quiet, opts.SettleAll, opts.Red)
 }
 
 // ingest is the cycle both entry points share: parse the sources, publish the
@@ -580,35 +619,16 @@ func IngestPlain(store string, globs []config.SourceGlob, author, machine string
 // ingest and the harness subcommand all exclude each other here, and a
 // process holding the dir for its whole life (serve, local) borrows its own
 // lock instead of refusing itself.
-func ingest(root, store string, sources []source, quiet time.Duration, settleAll bool, red *redact.Redactor) (IngestStats, error) {
-	if err := oneKeyEach(sources); err != nil {
-		return IngestStats{}, err
-	}
+func ingest(root, store string, sources *sourceSet, quiet time.Duration, settleAll bool, red *redact.Redactor) (IngestStats, error) {
 	release, err := IngestLock(store)
 	if err != nil {
 		return IngestStats{}, err
 	}
 	defer release()
-	stats, _, opened, err := cycle(root, store, sources, readCkpts(store, sources), allOf(sources), quiet, settleAll, red)
+	readCkpts(store, sources.list)
+	stats, _, opened, err := cycle(root, store, sources.list, allOf(sources.list), quiet, settleAll, red)
 	closeParts(opened)
 	return stats, err
-}
-
-// oneKeyEach refuses two sources on one key: they would run two ingestSource
-// workers over the same checkpoint and light/heavy logs, each truncating what
-// the other appends. IngestPlain drops the raw copy behind a plain file; every
-// other caller's list is one source per key by construction, so a duplicate
-// here is refused loudly instead of corrupting the store.
-func oneKeyEach(sources []source) error {
-	seen := make(map[string]bool, len(sources))
-	for _, s := range sources {
-		k := sourceKey(s.key)
-		if seen[k] {
-			return fmt.Errorf("ingest: duplicate source key %s", k)
-		}
-		seen[k] = true
-	}
-	return nil
 }
 
 func allOf(sources []source) []int {
@@ -620,10 +640,9 @@ func allOf(sources []source) []int {
 }
 
 // cycle parses the sources work indexes, counts every other one Unchanged,
-// publishes them all and records the lap. cks holds each source's checkpoint
-// and is updated to the one its parse or settle leaves. The caller holds the
-// dir's writer lock.
-func cycle(root, store string, sources []source, cks []*ckpt, work []int, quiet time.Duration, settleAll bool, red *redact.Redactor) (stats IngestStats, outcomes map[string]Outcome, opened map[string]*Part, err error) {
+// publishes them all and records the lap. Each source's ck is updated to the
+// one its parse or settle leaves. The caller holds the dir's writer lock.
+func cycle(root, store string, sources []source, work []int, quiet time.Duration, settleAll bool, red *redact.Redactor) (stats IngestStats, outcomes map[string]Outcome, opened map[string]*Part, err error) {
 	debug.SetGCPercent(25)
 	var rec cycleRecord
 	defer func() { recordCycle(store, rec) }()
@@ -631,14 +650,14 @@ func cycle(root, store string, sources []source, cks []*ckpt, work []int, quiet 
 		return
 	}
 	take := takeCycle(store)
-	outcomes, logBytes, stale, failSweep := parseSources(root, store, sources, cks, work, take.failSweep, red)
+	outcomes, logBytes, stale, failSweep := parseSources(root, store, sources, work, take.failSweep, red)
 	for _, o := range outcomes {
 		stats[o]++
 	}
 	stats[Unchanged] += len(sources) - len(work)
 	rec = cycleRecord{stats: CycleStats{LogBytes: logBytes}, stale: stale,
 		failed: len(work) - len(outcomes), failSweep: failSweep}
-	cs, deferred, opened, perr := publish(store, sources, cks, quiet, settleAll, outcomes)
+	cs, deferred, opened, perr := publish(store, sources, quiet, settleAll, outcomes)
 	cs.LogBytes = logBytes
 	rec.stats, rec.settle = cs, deferred
 	return stats, outcomes, opened, perr
@@ -650,9 +669,9 @@ func cycle(root, store string, sources []source, cks []*ckpt, work []int, quiet 
 // the failSweep to carry into it: the version-stale sources whose re-parse
 // failed, so one poison source cannot keep the sweep cycling, plus skip for
 // the keys already known to fail at their version. A source that failed has no
-// outcome. cks holds each source's checkpoint (readCkpts) and is updated to
-// the one each parse leaves.
-func parseSources(root, store string, sources []source, cks []*ckpt, work []int, skip map[string]int, red *redact.Redactor) (outcomes map[string]Outcome, logBytes int64, stale int, failSweep map[string]int) {
+// outcome. Each source's ck (readCkpts) is updated to the one its parse
+// leaves.
+func parseSources(root, store string, sources []source, work []int, skip map[string]int, red *redact.Redactor) (outcomes map[string]Outcome, logBytes int64, stale int, failSweep map[string]int) {
 	outcomes = make(map[string]Outcome, len(work))
 	failSweep = map[string]int{}
 	for k, v := range skip {
@@ -662,7 +681,7 @@ func parseSources(root, store string, sources []source, cks []*ckpt, work []int,
 	var sweep []int
 	for _, i := range work {
 		s := sources[i]
-		if versionStale(s, cks[i]) && failSweep[sourceKey(s.key)] != parserVersion(s) {
+		if versionStale(s) && failSweep[sourceKey(s.key)] != parserVersion(s) {
 			sweep = append(sweep, i)
 			continue
 		}
@@ -679,14 +698,13 @@ func parseSources(root, store string, sources []source, cks []*ckpt, work []int,
 			defer wg.Done()
 			var failed []int
 			for i := range jobs {
-				s := sources[i]
-				o, written, c, err := ingestSource(root, store, s, cks[i], red)
+				s := &sources[i]
+				o, written, err := s.ingest(root, store, red)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "ingest: %s: %v\n", s.mpath, err)
 					failed = append(failed, i)
 					continue
 				}
-				cks[i] = c
 				mu.Lock()
 				outcomes[sourceKey(s.key)] = o
 				logBytes += written
@@ -713,7 +731,7 @@ func parseSources(root, store string, sources []source, cks []*ckpt, work []int,
 	}()
 	for failed := range done {
 		for _, i := range failed {
-			if versionStale(sources[i], cks[i]) {
+			if versionStale(sources[i]) {
 				failSweep[sourceKey(sources[i].key)] = parserVersion(sources[i])
 			}
 		}
@@ -731,23 +749,32 @@ func parserVersion(s source) int {
 
 // versionStale reports whether s would re-parse from byte 0 only because its
 // parser has a newer Version than its checkpoint: no new bytes and none lost,
-// so it is sweep work, bounded per cycle, not push work. KindPlain sources are
-// never sweep work; their byte test is not the manifest's size. c is s's
-// checkpoint, nil for none.
-func versionStale(s source, c *ckpt) bool {
-	if s.kind != KindStore || c == nil {
+// so it is sweep work, bounded per cycle, not push work.
+func versionStale(s source) bool {
+	if !s.kind.sweepable() || s.ck == nil {
 		return false
 	}
-	return c.Parser != parserVersion(s) && c.ZstSize == s.src.ZstSize
+	return s.ck.Parser != parserVersion(s) && s.ck.Offset == s.src.ZstSize
+}
+
+func (s *source) ingest(root, store string, red *redact.Redactor) (Outcome, int64, error) {
+	if s.kind == KindArchive {
+		return ingestArchive(store, *s)
+	}
+	o, written, c, err := ingestSource(root, store, *s, red)
+	if err == nil {
+		s.ck = c
+	}
+	return o, written, err
 }
 
 // publish plans the parts of the sources' checkpoints, builds the missing ones
 // and points CURRENT at them, reporting what it wrote and how many components
 // whose quiet window has passed it left hot for a later cycle (settleSet).
-// cur holds each source's checkpoint (parseSources) and takes the ones a
-// settle writes; outcomes is what this cycle's parse did, by source key. The
-// delta parts its appends opened come back by id, owned by the caller.
-func publish(store string, sources []source, cur []*ckpt, quiet time.Duration, settleAll bool, outcomes map[string]Outcome) (CycleStats, int, map[string]*Part, error) {
+// Each source's ck (parseSources) takes the one a settle writes; outcomes is
+// what this cycle's parse did, by source key. The delta parts its appends
+// opened come back by id, owned by the caller.
+func publish(store string, sources []source, quiet time.Duration, settleAll bool, outcomes map[string]Outcome) (CycleStats, int, map[string]*Part, error) {
 	parsedAny := false
 	for _, o := range outcomes {
 		parsedAny = parsedAny || o != Unchanged
@@ -756,62 +783,50 @@ func publish(store string, sources []source, cur []*ckpt, quiet time.Duration, s
 	for _, s := range sources {
 		newest = max(newest, s.src.UpdatedMs)
 	}
-	var cks []ckpt
-	var from []int // from[i] is the index in sources of cks[i], -1 for an archive member
-	var due, touched []bool
+	var entries []planEntry
 	var srcs []stSource
 	var keepExtra []string
-	for si, s := range sources {
+	for i := range sources {
+		s := &sources[i]
+		due := settleAll || s.src.UpdatedMs <= newest-quiet.Milliseconds()
+		touched := outcomes[sourceKey(s.key)] > Unchanged
 		if s.kind == KindArchive {
-			// The archive file's checkpoint expands into its per-session
-			// member checkpoints, which plan and build like any member; the
-			// file itself never joins planning, and its sources row is
-			// omitted — the cache's sources table skips archive files too,
-			// so get_ingest_status and list_sessions must not count them.
-			// Its rows still count in parts and ls rollups.
-			fk := sourceKey(s.key)
-			fc, ok := readCkpt(store, fk)
-			if !ok {
-				continue
+			// No sources row: the cache's sources table skips archive files,
+			// so get_ingest_status and list_sessions do not count them.
+			members, ok := readArchiveMembers(store, sourceKey(s.key))
+			if ok {
+				keepExtra = append(keepExtra, ckptPath(store, sourceKey(s.key)))
 			}
-			keepExtra = append(keepExtra, ckptPath(store, fk))
-			for _, sid := range fc.Sessions {
-				mk := archiveMemberKey(fk, sid)
-				c, ok := readCkpt(store, mk)
-				if !ok {
-					continue
-				}
-				cks = append(cks, c)
-				from = append(from, -1)
-				due = append(due, settleAll || s.src.UpdatedMs <= newest-quiet.Milliseconds())
-				touched = append(touched, outcomes[fk] > Unchanged)
+			for _, c := range members {
+				entries = append(entries, planEntry{ck: c, due: due, touched: touched})
 			}
 			continue
 		}
 		row := stSource{Author: s.key.Author, Machine: s.key.Machine, Harness: s.key.Harness, UpdatedMs: s.src.UpdatedMs, Size: s.src.Size}
-		if c := cur[si]; c != nil {
-			cks = append(cks, *c)
-			from = append(from, si)
-			due = append(due, settleAll || s.src.UpdatedMs <= newest-quiet.Milliseconds())
-			touched = append(touched, outcomes[sourceKey(s.key)] > Unchanged)
-			row.Events = c.Rows
+		if s.ck != nil {
+			entries = append(entries, planEntry{ck: *s.ck, owner: s, due: due, touched: touched})
+			row.Events = s.ck.Rows
 		}
 		srcs = append(srcs, row)
 	}
-	settle, deferred := settleSet(cks, due, touched, settleShards(settleAll, parsedAny))
-	for i := range cks {
+	settle, deferred := settleSet(entries, settleShards(settleAll, parsedAny))
+	for i := range entries {
 		if !settle[i] {
 			continue
 		}
-		cks[i].ColdZst, cks[i].ColdRows, cks[i].ColdLight, cks[i].ColdSHA = cks[i].ZstSize, cks[i].Rows, cks[i].LightLen, cks[i].WindowSHA
-		b, _ := json.Marshal(cks[i])
-		if err := writeFileAtomic(ckptPath(store, cks[i].Key), b); err != nil {
+		e := &entries[i]
+		e.ck.ColdZst, e.ck.ColdRows, e.ck.ColdLight, e.ck.ColdSHA = e.ck.Offset, e.ck.Rows, e.ck.LightLen, e.ck.WindowSHA
+		if err := writeCkpt(store, e.ck); err != nil {
 			return CycleStats{}, deferred, nil, err
 		}
-		if si := from[i]; si >= 0 {
-			c := cks[i]
-			cur[si] = &c
+		if e.owner != nil {
+			c := e.ck
+			e.owner.ck = &c
 		}
+	}
+	cks := make([]ckpt, len(entries))
+	for i, e := range entries {
+		cks[i] = e.ck
 	}
 	parts := planParts(cks)
 	prev, _ := readManifest(store)
@@ -1138,18 +1153,22 @@ func settleShards(settleAll, parsedAny bool) int {
 // the settling components alone, so a cold build, and one resumed after a
 // crash mid-parse, settles in the cycle that publishes it. deferred counts the
 // due components left hot for a later cycle.
-func settleSet(cks []ckpt, due, touched []bool, budget int) (settle []bool, deferred int) {
+func settleSet(entries []planEntry, budget int) (settle []bool, deferred int) {
+	cks := make([]ckpt, len(entries))
+	for i, e := range entries {
+		cks[i] = e.ck
+	}
 	root, least, hot := componentsOf(cks)
 	ready := map[int]bool{}
 	for r, h := range hot {
 		ready[r] = h
 	}
 	parsedComp := map[int]bool{}
-	for i, c := range cks {
-		if c.hot() && !due[i] {
+	for i, e := range entries {
+		if e.ck.hot() && !e.due {
 			ready[root[i]] = false
 		}
-		parsedComp[root[i]] = parsedComp[root[i]] || touched[i]
+		parsedComp[root[i]] = parsedComp[root[i]] || e.touched
 	}
 	held := map[uint32]bool{}
 	for r, h := range hot {

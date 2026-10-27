@@ -21,9 +21,8 @@ func (k Key) dir(root, kind string) string {
 func (k Key) Raw(root string) string      { return filepath.Join(k.dir(root, "raw"), k.SrcID+".jsonl.zst") }
 func (k Key) Manifest(root string) string { return filepath.Join(k.dir(root, "raw"), k.SrcID+".json") }
 
-// Events is the source's path in the lake layout. Nothing writes or reads
-// events parquet any more; internal/index uses the path as the winner rule's
-// source order key (lake path order).
+// Events is the source's path in the lake layout; internal/index orders a
+// uid's copies by it.
 func (k Key) Events(root string) string {
 	return filepath.Join(k.dir(root, "events"), k.SrcID+".parquet")
 }

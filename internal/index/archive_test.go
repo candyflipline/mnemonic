@@ -94,7 +94,7 @@ func TestArchiveKind(t *testing.T) {
 		t.Fatal("no member checkpoint for the shared session")
 	}
 	if mc.Kind != KindArchive || !slices.Equal(mc.Sessions, []string{archS1}) || mc.Rows != 2 ||
-		mc.ZstSize != fc.ZstSize || mc.WindowSHA != fc.WindowSHA || mc.Author != "a" || mc.Gen != 0 {
+		mc.Offset != fc.Offset || mc.WindowSHA != fc.WindowSHA || mc.Author != "a" || mc.Gen != 0 {
 		t.Fatalf("shared member: %+v", mc.parsed)
 	}
 	for _, c := range []struct {
