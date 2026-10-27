@@ -36,7 +36,6 @@ listen = ":8741"
 # key    = "<public key>"
 # author = "chris"
 EOF
-	echo "install-server.sh: wrote /etc/mnemonic/server.toml; add [[keys]] entries, then restart"
 fi
 
 if command -v ufw >/dev/null; then
@@ -46,11 +45,15 @@ if command -v ufw >/dev/null; then
 	fi
 fi
 
-systemctl daemon-reload
-systemctl enable --now mnemonic.service
-systemctl status mnemonic.service --no-pager || true
+out=$(runuser -u mnemonic -- env HOME=/var/lib/mnemonic /usr/local/bin/mnemonic key --file /var/lib/mnemonic/server.key)
 
-if [[ -f /var/lib/mnemonic/server.key ]]; then
-	out=$(/usr/local/bin/mnemonic key --file /var/lib/mnemonic/server.key)
-	echo "server key: ${out%%$'\n'*}"
+systemctl daemon-reload
+if grep -qE '^[[:space:]]*\[\[keys\]\]' /etc/mnemonic/server.toml; then
+	systemctl enable --now mnemonic.service
+	systemctl status mnemonic.service --no-pager || true
+else
+	systemctl enable mnemonic.service
+	echo "install-server.sh: /etc/mnemonic/server.toml has no [[keys]]; add one per client machine (from mnemonic key on that machine), then systemctl restart mnemonic"
 fi
+
+echo "server key: ${out%%$'\n'*}"
