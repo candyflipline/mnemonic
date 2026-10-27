@@ -68,6 +68,32 @@ type frameKey struct {
 	frame uint64
 }
 
+// forget drops every frame of st, so a retired part is not held by the cache
+// the DBs after it still share. The order slices are rebuilt into fresh
+// arrays so no dropped key lingers behind their re-sliced fronts.
+func (fc *frameCache) forget(st *Part) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	var light []frameKey
+	for _, k := range fc.lightOrder {
+		if k.part == st {
+			delete(fc.light, k)
+		} else {
+			light = append(light, k)
+		}
+	}
+	fc.lightOrder = light
+	var heavy []frameKey
+	for _, k := range fc.heavyOrder {
+		if k.part == st {
+			delete(fc.heavy, k)
+		} else {
+			heavy = append(heavy, k)
+		}
+	}
+	fc.heavyOrder = heavy
+}
+
 // lightFrame returns key's decoded rows, decoding the frame on first use.
 func (fc *frameCache) lightFrame(st *Part, frame uint64) ([]*Row, error) {
 	k := frameKey{part: st, frame: frame}
@@ -229,6 +255,10 @@ func (st *Part) Close() {
 // release drops one DB's hold on st and closes it with the last.
 func (st *Part) release() {
 	if st.refs.Add(-1) == 0 {
+		if st.fc != nil {
+			st.fc.forget(st)
+			st.fc = nil
+		}
 		st.Close()
 	}
 }
