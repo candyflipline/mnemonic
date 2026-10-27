@@ -15,8 +15,9 @@ import (
 // sole author and the wallets it is shared with, and link opens a session
 // with a sole author by id to any caller. A wallet reader has no members: it
 // lists exactly the sessions shared with its wallet, read from the controls
-// when the filter is made, and nothing once its binding has expired. The zero SessionFilter, which a ctx without an
-// auth.Identity gets, passes everything.
+// when the filter is made, and nothing once its binding has expired. The
+// zero SessionFilter, which a ctx without an auth.Identity gets, passes
+// everything.
 type SessionFilter struct {
 	db     *DB
 	scoped bool

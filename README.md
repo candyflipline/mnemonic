@@ -109,7 +109,35 @@ Check: call `list_sessions` once and tell the operator whether it worked.
 
 Ask your agent: "Call `list_sessions` for today, limit 1." A result that starts with `mnemonic.mcp.list_sessions.v1` means the key, the address, and the config are right. A session you ran a minute ago appears after the next push cycle.
 
-The tools are `search_sessions`, `open`, `list_sessions`, `get_trace`, `file_attention`, `get_ingest_status`, `query`, `annotate`, `set_visibility`, and `delete_session`. `annotate` needs the `annotate` scope on your key. `set_visibility` and `delete_session` act on your own sessions with any key and need `admin` for another author's.
+The tools are `search_sessions`, `open`, `list_sessions`, `get_trace`, `file_attention`, `get_ingest_status`, `query`, `annotate`, `set_visibility`, `delete_session`, and `share_session`. `annotate` needs the `annotate` scope on your key. `set_visibility`, `delete_session` and `share_session` act on your own sessions with any key and need `admin` for another author's.
+
+## Share a session with a wallet
+
+You can let someone read one of your sessions by sharing it with their Solana wallet address. They need no `[[keys]]` entry, and the server config does not change. They read only the sessions shared with their wallet, and they cannot push, annotate or change anything. The design is in [docs/design/wallet-sharing.md](docs/design/wallet-sharing.md).
+
+**Owner.** Ask your agent to call `share_session` with the session id and the wallet address:
+
+```
+share_session {"session_id": "session:…", "wallet": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"}
+share_session {"session_id": "session:…", "wallet": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU", "revoke": true}
+```
+
+A revoke takes effect on the recipient's next request. Send the recipient `HOST` and `SERVER_KEY`.
+
+**Recipient.** Install the client as above, but do not run `init`, because a wallet reader has nothing to push. Write `~/.mnemonic/config.toml` by hand:
+
+```
+server     = "quic://HOST:8741"
+server_key = "SERVER_KEY"
+```
+
+Then bind this machine's key to your wallet in one of three ways. Each way writes `~/.mnemonic/key.wallet` beside the key and lasts 30 days unless you pass `--days` (at most 366).
+
+- **Solana CLI keypair file.** Run `mnemonic wallet bind --keypair ~/.config/solana/id.json`. The command signs the binding with the keypair and stores nothing else from the file.
+- **Phantom.** Run `mnemonic wallet bind --phantom`, open the printed `http://127.0.0.1:…` link in the browser that has Phantom, connect, and approve the message. Phantom signs only that message, never a transaction.
+- **Paste, including Ledger.** Print the message with `mnemonic wallet message --wallet <your address>`, then sign it with `solana sign-offchain-message --keypair <keypair or usb://ledger> '<the line>'`, then store the result with `mnemonic wallet bind --message '<the line>' --signature <the signature>`.
+
+`mnemonic wallet show` prints the bound wallet and its expiry. Point your agent at the server with `mnemonic mcp` as above. `list_sessions` shows the sessions shared with you. Each machine binds once. A machine whose wallet has no shared session, or whose binding has expired, is refused at the handshake.
 
 ## Known gap
 

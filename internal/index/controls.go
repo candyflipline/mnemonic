@@ -120,8 +120,8 @@ func (s stamp) before(r controlRecord) bool {
 
 // Controls is every session control record in raw, the copy reads consult:
 // a record counts from the moment record returns, before any converge.
-// byWallet is derived from sessions by apply alone, under the same lock: the
-// sessions each wallet's latest stamp shares, so the handshake asks one map.
+// byWallet is the sessions each wallet's latest stamp shares, so the
+// handshake asks one map.
 type Controls struct {
 	write    sync.Mutex
 	mu       sync.RWMutex
@@ -167,7 +167,7 @@ func (c *Controls) apply(r controlRecord) {
 // shareTime is the ts a new share or unshare of r's wallet and session is
 // recorded at: now, or one nanosecond past that pair's latest decision when
 // the clock reads earlier, so a wall-clock step back cannot make a new
-// decision lose to an older one. record calls it under the write lock.
+// decision lose to an older one.
 func (c *Controls) shareTime(r controlRecord, now time.Time) time.Time {
 	w, _ := wallet.ParseAddress(r.Wallet)
 	c.mu.RLock()
