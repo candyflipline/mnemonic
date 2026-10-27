@@ -69,8 +69,7 @@ type ckpt struct {
 	ColdSHA   string `json:"cold_sha,omitempty"`
 }
 
-// logLayout is the shape of the rows a log holds. Layout 1 numbers a row's
-// version by its place in its source, where the parser stamped the wall clock.
+// logLayout 1 numbers a row's version by its place in its source.
 const logLayout = 1
 
 type planEntry struct {

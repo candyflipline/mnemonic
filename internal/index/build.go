@@ -15,6 +15,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/candyflipline/mnemonic/internal/schema"
 	"github.com/klauspost/compress/zstd"
@@ -34,8 +35,6 @@ func (b built) after(w built) bool {
 var partEncoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(runtime.GOMAXPROCS(0)), zstd.WithLowerEncoderMem(true))
 var partHeavyEncoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(runtime.GOMAXPROCS(0)), zstd.WithLowerEncoderMem(true))
 
-// partFormat is hashed into every part ID, so a store built by an older layout
-// rebuilds its parts instead of opening them.
 const partFormat = 7
 
 // fingerprint reads only what members parsed, so a restored store names every
@@ -655,10 +654,8 @@ func eventTimeUs(r *Row) int64 {
 }
 
 // ingestedAtUs stands in for the lake's ingested_at on rows without a
-// parseable record_ts: one fixed stamp, later than any record_ts, so the
-// order a clean run gives does not depend on when or in how many runs a
-// source was parsed (CONTRACT-NOTES 4).
-const ingestedAtUs int64 = 4102444800000000
+// parseable record_ts, so their order does not depend on when a source was parsed.
+var ingestedAtUs = time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC).UnixMicro()
 
 func orderLess(a, b *Row) bool {
 	ta, tb := eventTimeUs(a), eventTimeUs(b)
