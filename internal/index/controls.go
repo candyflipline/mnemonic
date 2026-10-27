@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -105,7 +106,8 @@ type sessionControl struct {
 }
 
 // stamp is the latest share or unshare of one session with one wallet, by the
-// same last-writer-wins order as visibility: later ts, then greater key.
+// same last-writer-wins order as visibility: later ts, then greater key. An
+// unshare stays as a stamp, so replaying an older share cannot revive it.
 type stamp struct {
 	shared bool
 	ts     time.Time
@@ -137,32 +139,81 @@ func (c *Controls) apply(r controlRecord) {
 			s.visibility, s.ts, s.key = r.Visibility, r.TS, r.RequestKey
 		}
 	case actShare, actUnshare:
-		// TODO: w := wallet.ParseAddress(r.Wallet) (parseControl checked it);
-		// if s.shares[w].before(r): set s.shares[w] = stamp{r.Action == actShare, r.TS, r.RequestKey}
-		// and set or clear c.byWallet[w][r.SessionID], deleting an empty inner map.
-		panic("not implemented")
+		w, _ := wallet.ParseAddress(r.Wallet)
+		if s.shares == nil {
+			s.shares = map[wallet.Address]stamp{}
+		}
+		if !s.shares[w].before(r) {
+			break
+		}
+		shared := r.Action == actShare
+		s.shares[w] = stamp{shared: shared, ts: r.TS, key: r.RequestKey}
+		set := c.byWallet[w]
+		switch {
+		case shared && set == nil:
+			c.byWallet[w] = map[string]bool{r.SessionID: true}
+		case shared:
+			set[r.SessionID] = true
+		default:
+			delete(set, r.SessionID)
+			if len(set) == 0 {
+				delete(c.byWallet, w)
+			}
+		}
 	}
 	c.sessions[r.SessionID] = s
+}
+
+// shareTime is the ts a new share or unshare of r's wallet and session is
+// recorded at: now, or one nanosecond past that pair's latest decision when
+// the clock reads earlier, so a wall-clock step back cannot make a new
+// decision lose to an older one. record calls it under the write lock.
+func (c *Controls) shareTime(r controlRecord, now time.Time) time.Time {
+	w, _ := wallet.ParseAddress(r.Wallet)
+	c.mu.RLock()
+	prev := c.sessions[r.SessionID].shares[w].ts
+	c.mu.RUnlock()
+	if now.After(prev) {
+		return now
+	}
+	return prev.Add(time.Nanosecond)
 }
 
 // Admits is whether w may connect: some session not deleted is shared with
 // it now. The handshake calls it, through server.Identify, on every new
 // connection.
 func (c *Controls) Admits(w wallet.Address) bool {
-	// TODO: RLock; any id in c.byWallet[w] with !c.sessions[id].deleted.
-	panic("not implemented")
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for id := range c.byWallet[w] {
+		if !c.sessions[id].deleted {
+			return true
+		}
+	}
+	return false
 }
 
 // sharedWith is the sessions shared with w now, deleted ones included (the
 // filter hides those), as a set the caller owns.
 func (c *Controls) sharedWith(w wallet.Address) map[string]bool {
-	panic("not implemented")
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return maps.Clone(c.byWallet[w])
 }
 
 // walletsOf is the wallets session is shared with now, sorted base58, for
 // share_session's answer.
 func (c *Controls) walletsOf(session string) []string {
-	panic("not implemented")
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := []string{}
+	for w, st := range c.sessions[session].shares {
+		if st.shared {
+			out = append(out, w.String())
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // LoadControls reads every control source under dataDir up to the length
@@ -221,6 +272,9 @@ func (c *Controls) record(st *store.Committer, author string, r controlRecord) (
 	c.write.Lock()
 	defer c.write.Unlock()
 	r.TS, r.Writer = time.Now().UTC(), writer
+	if r.Action == actShare || r.Action == actUnshare {
+		r.TS = c.shareTime(r, r.TS)
+	}
 	line, err := json.Marshal(r)
 	if err != nil {
 		return false, err
