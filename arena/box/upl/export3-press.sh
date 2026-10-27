@@ -82,7 +82,7 @@ mcpl() { # name: list_sessions limit 5 every 2 s, "status latency" per call
 	LOOP=$!
 }
 mcpsum() { # name: ok/failed/max latency over the recorded calls
-	awk 'NF==2{t+=$2; if($2>m)m=$2; if($1==200)ok++; else bad++} END{printf "ok=%d failed=%d max_lat=%.3fs mean_lat=%.3fs", ok+0, bad+0, m+0, (ok+bad)>0?t/(ok+bad):0}' "$out/$1.mcp"
+	awk 'NF==2{t+=$2; n++; if($2>m)m=$2; if($1==200)ok++; else bad++} END{d=0; if(n>0)d=t/n; printf "ok=%d failed=%d max_lat=%.3fs mean_lat=%.3fs", ok+0, bad+0, m+0, d}' "$out/$1.mcp"
 }
 peaks() { # name: per-column sample peaks
 	f=$out/$1.samples
