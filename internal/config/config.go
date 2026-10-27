@@ -19,6 +19,8 @@ type Client struct {
 	PushAddress string          `toml:"push_address"`
 	Token       string          `toml:"token"`
 	TokenFile   string          `toml:"token_file"`
+	ServerKey   string          `toml:"server_key"`
+	KeyFile     string          `toml:"key_file"`
 	Machine     string          `toml:"machine"`
 	Sources     []SourceGlob    `toml:"sources"`
 	Redaction   ClientRedaction `toml:"redaction"`
@@ -72,7 +74,24 @@ type Server struct {
 	PushListen string       `toml:"push_listen"`
 	TLS        TLS          `toml:"tls"`
 	Tokens     []TokenEntry `toml:"tokens"`
+	QUIC       QUIC         `toml:"quic"`
+	Keys       []KeyEntry   `toml:"keys"`
 	OTLP       OTLP         `toml:"otlp"`
+}
+
+// QUIC is the one UDP endpoint. KeyFile holds the server's ed25519 key and
+// defaults to data_dir/server.key.
+type QUIC struct {
+	Listen  string `toml:"listen"`
+	KeyFile string `toml:"key_file"`
+}
+
+// KeyEntry admits one client key (auth.EncodeKey form) as Author.
+type KeyEntry struct {
+	Key    string       `toml:"key"`
+	Author string       `toml:"author"`
+	Tenant string       `toml:"tenant"`
+	Scopes []auth.Scope `toml:"scopes"`
 }
 
 // TLS serves both listeners with Let's Encrypt certificates for Hosts,
