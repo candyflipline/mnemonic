@@ -179,9 +179,9 @@ func (c *Controls) shareTime(r controlRecord, now time.Time) time.Time {
 	return prev.Add(time.Nanosecond)
 }
 
-// Admits is whether w may connect: some session not deleted is shared with
-// it now. The handshake calls it, through server.Identify, on every new
-// connection.
+// Admits is whether w may read: some session not deleted is shared with it
+// now. The handshake calls it, through server.Identify, on every new
+// connection, and Sessions on every request.
 func (c *Controls) Admits(w wallet.Address) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
