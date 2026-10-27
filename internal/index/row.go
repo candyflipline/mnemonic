@@ -129,11 +129,11 @@ func rowFrom(ev *schema.Event) Row {
 		b, _ := json.Marshal(ev.TokenUsageNativeUnits)
 		r.Native = string(b)
 	}
-	if us, ok := duckTimestampUs(ev.RecordTS); ok {
+	if us, ok := parseISOTimestampUs(ev.RecordTS); ok {
 		r.TimeUs = us
 		r.Bits |= bitTimeOK
 	}
-	if us, ok := duckTimestampUs(ev.EventTS); ok {
+	if us, ok := parseISOTimestampUs(ev.EventTS); ok {
 		r.TsMs = floorDiv(us, 1000)
 	}
 	p := ev.PayloadJSON
