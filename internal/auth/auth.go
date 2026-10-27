@@ -37,11 +37,10 @@ type Member struct{ Key, Tenant, Author string }
 var MemberScopes = []Scope{Read, Push}
 
 // Roster is the members that are admitted right now. Member answers one key
-// in constant time; EachMember visits every member and fn must not call back
-// into the roster.
+// in constant time.
 type Roster interface {
 	Member(key string) (Member, bool)
-	EachMember(fn func(Member))
+	Members() []Member
 }
 
 type Keys struct {
@@ -76,7 +75,9 @@ func (k Keys) Identify(key string) (Identity, bool) {
 func (k Keys) tenantOf() map[string]string {
 	out := map[string]string{}
 	if k.roster != nil {
-		k.roster.EachMember(func(m Member) { out[m.Author] = m.Tenant })
+		for _, m := range k.roster.Members() {
+			out[m.Author] = m.Tenant
+		}
 	}
 	for _, g := range k.grants {
 		out[g.Author] = g.Tenant

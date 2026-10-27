@@ -111,12 +111,14 @@ func (c *Controls) Member(key string) (auth.Member, bool) {
 	return auth.Member{Key: key, Tenant: l.tenant, Author: l.invite}, true
 }
 
-func (c *Controls) EachMember(fn func(auth.Member)) {
+func (c *Controls) Members() []auth.Member {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	out := make([]auth.Member, 0, len(c.byKey))
 	for key, l := range c.byKey {
-		fn(auth.Member{Key: key, Tenant: l.tenant, Author: l.invite})
+		out = append(out, auth.Member{Key: key, Tenant: l.tenant, Author: l.invite})
 	}
+	return out
 }
 
 type ReadLink struct {

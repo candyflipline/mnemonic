@@ -2,9 +2,11 @@ package auth
 
 import (
 	"context"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -45,11 +47,7 @@ type roster map[string]Member
 
 func (r roster) Member(key string) (Member, bool) { m, ok := r[key]; return m, ok }
 
-func (r roster) EachMember(fn func(Member)) {
-	for _, m := range r {
-		fn(m)
-	}
-}
+func (r roster) Members() []Member { return slices.Collect(maps.Values(r)) }
 
 func TestUnnamedAuthorIsRefused(t *testing.T) {
 	keys := NewKeys(map[string]Grant{
