@@ -129,16 +129,13 @@ func WriteOTLP(w io.Writer, db *index.DB, sessionID string, hidden map[string]bo
 		return err
 	}
 	return writeArray(w, env, `"spans": []`, "  ", func(prefix string, put func([]byte) error) error {
-		for _, row := range db.ExportSpans(sessionID) {
+		return db.EachExportSpan(sessionID, func(row schema.Span) error {
 			b, err := json.MarshalIndent(otlpSpanOf(traceID, sessionID, row), prefix, "  ")
 			if err != nil {
 				return err
 			}
-			if err := put(b); err != nil {
-				return err
-			}
-		}
-		return nil
+			return put(b)
+		})
 	})
 }
 

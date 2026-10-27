@@ -1,6 +1,8 @@
 package index
 
 import (
+	"bytes"
+	"encoding/json"
 	"sort"
 	"time"
 
@@ -110,6 +112,35 @@ func (db *DB) ExportHasSession(id string) bool {
 // ExportSpans is the session's spans relation rows, in export order (start
 // time, span id).
 func (db *DB) ExportSpans(id string) []schema.Span { return db.sessionSpans(id) }
+
+// EachExportSpan calls fn for the session's spans relation rows, in export
+// order (start time, span id), decoding the session's spans section one
+// element at a time with a json.Decoder (the walk sessionHasSpan already
+// does), so the walk holds one span, not the session's spans.
+func (db *DB) EachExportSpan(id string, fn func(schema.Span) error) error {
+	st, ok := db.part(id)
+	if !ok {
+		return nil
+	}
+	raw := st.sessionSpansRaw(id)
+	if raw == nil {
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if t, err := dec.Token(); err != nil || t != json.Delim('[') {
+		return nil
+	}
+	for dec.More() {
+		var s schema.Span
+		if err := dec.Decode(&s); err != nil {
+			return err
+		}
+		if err := fn(s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // exportSession reads the part's session i's columns in one pass that keeps
 // no row: Harness and FirstCwd from the first winner row, LastEventUs the
