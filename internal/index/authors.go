@@ -2,10 +2,10 @@ package index
 
 import "sort"
 
-func authorsOf(rows []built, author func(src uint16) string) map[string][]string {
+func authorsOf(rows []built, author func(memberIdx uint16) string) map[string][]string {
 	set := map[string]map[string]bool{}
 	for _, b := range rows {
-		sid, a := b.row.Session, author(b.src)
+		sid, a := b.row.Session, author(b.memberIdx)
 		if sid == "" || a == "" {
 			continue
 		}

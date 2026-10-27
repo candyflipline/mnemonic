@@ -20,7 +20,7 @@ type rowKey struct {
 	loc        rowLoc
 	sourceFile uint32
 	session    uint32
-	src        uint16
+	memberIdx  uint16
 }
 
 type strTab struct {
@@ -66,8 +66,8 @@ type keyPass struct {
 }
 
 type authKey struct {
-	session uint32
-	src     uint16
+	session   uint32
+	memberIdx uint16
 }
 
 func newKeyPass(members []member, rows int) *keyPass {
@@ -75,30 +75,30 @@ func newKeyPass(members []member, rows int) *keyPass {
 		seen: map[authKey]bool{}, last: authKey{session: ^uint32(0)}}
 }
 
-func (p *keyPass) offer(src uint16, author string, rec []byte, loc rowLoc) error {
+func (p *keyPass) offer(memberIdx uint16, author string, rec []byte, loc rowLoc) error {
 	f, err := p.pos.scan(rec)
 	if err != nil {
 		return err
 	}
 	k := rowKey{version: f.version, gen: f.gen, offset: f.offset, lineNo: f.lineNo, emission: f.emission,
-		loc: loc, src: src, session: p.sessions.id(f.session), sourceFile: p.files.id(f.sourceFile)}
+		loc: loc, memberIdx: memberIdx, session: p.sessions.id(f.session), sourceFile: p.files.id(f.sourceFile)}
 	k.timeUs = ingestedAtUs
 	if f.bits&bitTimeOK != 0 {
 		k.timeUs = f.timeUs
 	}
 	if len(f.session) > 0 && author != "" {
-		if a := (authKey{k.session, src}); a != p.last {
+		if a := (authKey{k.session, memberIdx}); a != p.last {
 			p.last = a
 			p.seen[a] = true
 		}
 	}
 	if at, ok := p.win[string(f.uid)]; ok {
 		w := &p.keys[at]
-		if w.src == src {
+		if w.memberIdx == memberIdx {
 			if k.version < w.version {
 				return nil
 			}
-		} else if !memberBeats(k.version, p.members[src], w.version, p.members[w.src]) {
+		} else if !memberBeats(k.version, p.members[memberIdx], w.version, p.members[w.memberIdx]) {
 			return nil
 		}
 		k.uid = w.uid
@@ -118,7 +118,7 @@ func (p *keyPass) authorsBySession(cks []ckpt) map[string][]string {
 		if set[sid] == nil {
 			set[sid] = map[string]bool{}
 		}
-		set[sid][cks[a.src].Author] = true
+		set[sid][cks[a.memberIdx].Author] = true
 	}
 	out := make(map[string][]string, len(set))
 	for sid, as := range set {
@@ -128,10 +128,10 @@ func (p *keyPass) authorsBySession(cks []ckpt) map[string][]string {
 }
 
 type docLoc struct {
-	lf      int64
-	session uint32
-	li      frameIdx
-	src     uint16
+	lf        int64
+	session   uint32
+	li        frameIdx
+	memberIdx uint16
 }
 
 type frameIdx uint16
@@ -158,7 +158,7 @@ func (p *keyPass) takeWinners() []docLoc {
 	locs := make([]docLoc, len(keys))
 	for i := range keys {
 		k := &keys[i]
-		locs[i] = docLoc{lf: k.loc.lf, session: k.session, li: frameIdxOf(k.loc), src: k.src}
+		locs[i] = docLoc{lf: k.loc.lf, session: k.session, li: frameIdxOf(k.loc), memberIdx: k.memberIdx}
 	}
 	return locs
 }
@@ -285,9 +285,9 @@ const (
 )
 
 type frameID struct {
-	src    uint16
-	holder bool
-	off    int64
+	memberIdx uint16
+	holder    bool
+	off       int64
 }
 
 type frameLRU struct {
@@ -333,18 +333,18 @@ type lightSource struct {
 	frames  *frameLRU
 }
 
-func (s *lightSource) record(src uint16, loc rowLoc) ([]byte, error) {
-	id := frameID{src: src, holder: loc.holder, off: loc.lf}
+func (s *lightSource) record(memberIdx uint16, loc rowLoc) ([]byte, error) {
+	id := frameID{memberIdx: memberIdx, holder: loc.holder, off: loc.lf}
 	recs, err := s.frames.get(id, func() ([][]byte, error) {
 		if loc.holder {
-			h := s.holders[src]
+			h := s.holders[memberIdx]
 			recs, _, err := readFrame(segments{h.lightB, h.lightD}, loc.lf, nil)
 			if err != nil {
-				return nil, fmt.Errorf("%s: holder %s: %w", s.cks[src].Key, h.meta.Fingerprint, err)
+				return nil, fmt.Errorf("%s: holder %s: %w", s.cks[memberIdx].Key, h.meta.Fingerprint, err)
 			}
 			return recs, nil
 		}
-		c := s.cks[src]
+		c := s.cks[memberIdx]
 		f, err := os.Open(logPath(s.store, c.Key, c.Gen, "light"))
 		if err != nil {
 			return nil, err
@@ -360,7 +360,7 @@ func (s *lightSource) record(src uint16, loc rowLoc) ([]byte, error) {
 		return nil, err
 	}
 	if int(loc.li) >= len(recs) {
-		return nil, fmt.Errorf("%s: light index past frame", s.cks[src].Key)
+		return nil, fmt.Errorf("%s: light index past frame", s.cks[memberIdx].Key)
 	}
 	return recs[loc.li], nil
 }
@@ -407,7 +407,7 @@ func (v *partView) load(d int, r *Row) (uint32, bool) {
 		return 0, false
 	}
 	lf, li := int64(binary.LittleEndian.Uint64(rec[0:])), int(binary.LittleEndian.Uint16(rec[8:]))
-	src, seq := binary.LittleEndian.Uint16(rec[10:]), binary.LittleEndian.Uint32(rec[20:])
+	memberIdx, seq := binary.LittleEndian.Uint16(rec[10:]), binary.LittleEndian.Uint32(rec[20:])
 	recs, err := v.frames.get(frameID{off: lf}, func() ([][]byte, error) {
 		recs, _, err := readFrame(v.light, lf, nil)
 		return recs, err
@@ -417,7 +417,7 @@ func (v *partView) load(d int, r *Row) (uint32, bool) {
 	}
 	if err == nil {
 		*r = Row{}
-		err = v.cks[src].decodeRow(r, recs[li])
+		err = v.cks[memberIdx].decodeRow(r, recs[li])
 	}
 	if err != nil {
 		v.err = err

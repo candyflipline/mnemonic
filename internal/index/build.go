@@ -22,10 +22,10 @@ import (
 )
 
 type built struct {
-	row *Row
-	src uint16
-	lf  int64
-	li  int
+	row       *Row
+	memberIdx uint16
+	lf        int64
+	li        int
 }
 
 var partEncoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(runtime.GOMAXPROCS(0)), zstd.WithLowerEncoderMem(true))
@@ -58,8 +58,6 @@ type indexMeta struct {
 	Members     []member `json:"members,omitempty"`
 }
 
-// member is one source a part holds the rows of; a doc's src is its index in
-// the part's members.
 type member struct {
 	parsed
 	hotPos
@@ -121,7 +119,7 @@ func loadSourceRows(store string, si int, c ckpt, from int64) ([]built, error) {
 		if err := c.decodeRow(r, rec); err != nil {
 			return err
 		}
-		out = append(out, built{row: r, src: uint16(si)})
+		out = append(out, built{row: r, memberIdx: uint16(si)})
 		return nil
 	})
 	return out, err
@@ -230,7 +228,7 @@ func memberRows(store string, si int, c ckpt, holder *Part, from int64) ([]built
 			}
 			return err
 		}
-		b := built{row: r, src: uint16(si)}
+		b := built{row: r, memberIdx: uint16(si)}
 		if loc.holder {
 			b.lf, b.li = loc.lf, int(loc.li)
 		}
@@ -298,7 +296,7 @@ type winner struct {
 
 func offerRow(win map[string]winner, b built, m member) {
 	if w, ok := win[b.row.UID]; ok {
-		if w.b.src == b.src {
+		if w.b.memberIdx == b.memberIdx {
 			if b.row.Version < w.b.row.Version {
 				return
 			}
@@ -309,13 +307,13 @@ func offerRow(win map[string]winner, b built, m member) {
 	win[b.row.UID] = winner{b: b, member: m}
 }
 
-func collectAnnotations(store string, c ckpt, src uint16, heavy *heavyReader, into map[string][]annRow) error {
+func collectAnnotations(store string, c ckpt, memberIdx uint16, heavy *heavyReader, into map[string][]annRow) error {
 	return walkLog(store, c, 0, func(rec []byte, _ int64, _ int) error {
 		r := new(Row)
 		if err := c.decodeRow(r, rec); err != nil {
 			return err
 		}
-		hrec, err := heavy.record(src, r)
+		hrec, err := heavy.record(memberIdx, r)
 		if err != nil {
 			return err
 		}
@@ -433,26 +431,26 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 	for i := range locs {
 		k := locs[i]
 		loc := k.rowLoc()
-		rec, err := lights.record(k.src, loc)
+		rec, err := lights.record(k.memberIdx, loc)
 		if err != nil {
 			return err
 		}
 		r = Row{}
-		if err := cks[k.src].decodeRow(&r, rec); err != nil {
-			return fmt.Errorf("%s: %w", cks[k.src].Key, err)
+		if err := cks[k.memberIdx].decodeRow(&r, rec); err != nil {
+			return fmt.Errorf("%s: %w", cks[k.memberIdx].Key, err)
 		}
 		var hrec []byte
 		if loc.holder {
-			h := plan.holder[k.src]
+			h := plan.holder[k.memberIdx]
 			hrecs, err := h.fc.heavyFrame(h, r.HeavyFrame)
 			if err != nil {
-				return fmt.Errorf("%s: holder %s: %w", cks[k.src].Key, h.meta.Fingerprint, err)
+				return fmt.Errorf("%s: holder %s: %w", cks[k.memberIdx].Key, h.meta.Fingerprint, err)
 			}
 			if int(r.HeavyIdx) >= len(hrecs) {
-				return fmt.Errorf("%s: holder %s: heavy index past frame", cks[k.src].Key, h.meta.Fingerprint)
+				return fmt.Errorf("%s: holder %s: heavy index past frame", cks[k.memberIdx].Key, h.meta.Fingerprint)
 			}
 			hrec = hrecs[r.HeavyIdx]
-		} else if hrec, err = heavy.record(k.src, &r); err != nil {
+		} else if hrec, err = heavy.record(k.memberIdx, &r); err != nil {
 			return err
 		}
 		hf, hi, err := hw.add(hrec)
@@ -468,7 +466,7 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 		if k.session != curSession {
 			feed, curSession = acc.session(sessionIDs[k.session]), k.session
 		}
-		if _, err := feed.add(&r, k.src, lf, li); err != nil {
+		if _, err := feed.add(&r, k.memberIdx, lf, li); err != nil {
 			return err
 		}
 	}
@@ -550,7 +548,7 @@ func indexRows(bySession map[string][]built, allRowAuthors map[string][]string, 
 			if err != nil {
 				return indexMeta{}, nil, err
 			}
-			if seqs[k], err = feed.add(r, b.src, lf, li); err != nil {
+			if seqs[k], err = feed.add(r, b.memberIdx, lf, li); err != nil {
 				return indexMeta{}, nil, err
 			}
 		}
@@ -716,39 +714,39 @@ type heavyReader struct {
 }
 
 type heavyKey struct {
-	src   uint16
-	frame uint64
+	memberIdx uint16
+	frame     uint64
 }
 
 func newHeavyReader(store string, cks []ckpt) *heavyReader {
 	return &heavyReader{store: store, cks: cks, recs: map[heavyKey][][]byte{}}
 }
 
-func (h *heavyReader) logAt(src int) (io.ReaderAt, error) {
-	for len(h.logs) <= src {
+func (h *heavyReader) logAt(memberIdx int) (io.ReaderAt, error) {
+	for len(h.logs) <= memberIdx {
 		h.logs = append(h.logs, nil)
 	}
-	if h.logs[src] != nil {
-		return h.logs[src], nil
+	if h.logs[memberIdx] != nil {
+		return h.logs[memberIdx], nil
 	}
-	f, err := os.Open(logPath(h.store, h.cks[src].Key, h.cks[src].Gen, "heavy"))
+	f, err := os.Open(logPath(h.store, h.cks[memberIdx].Key, h.cks[memberIdx].Gen, "heavy"))
 	if err != nil {
 		h.err = err
 		return nil, err
 	}
 	h.files = append(h.files, f)
-	h.logs[src] = f
+	h.logs[memberIdx] = f
 	return f, nil
 }
 
-func (h *heavyReader) record(src uint16, r *Row) ([]byte, error) {
+func (h *heavyReader) record(memberIdx uint16, r *Row) ([]byte, error) {
 	if h.err != nil {
 		return nil, h.err
 	}
-	k := heavyKey{src: src, frame: r.HeavyFrame}
+	k := heavyKey{memberIdx: memberIdx, frame: r.HeavyFrame}
 	recs, ok := h.recs[k]
 	if !ok {
-		log, err := h.logAt(int(k.src))
+		log, err := h.logAt(int(k.memberIdx))
 		if err != nil {
 			return nil, err
 		}

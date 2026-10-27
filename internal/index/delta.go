@@ -228,7 +228,7 @@ func writeDelta(store string, members []ckpt, base delta, did string) (bool, int
 		}
 		heavy := newHeavyReader(store, []ckpt{c})
 		for _, b := range rows {
-			hrec, err := heavy.record(b.src, b.row)
+			hrec, err := heavy.record(b.memberIdx, b.row)
 			if err != nil {
 				heavy.close()
 				return false, 0, nil, err
@@ -342,18 +342,18 @@ func openDelta(dir string, d delta) (*Part, error) {
 	var tail []built
 	k := 0
 	if err := eachFrame(lightD, int64(len(img.lightB)), func(b built) {
-		b.src = binary.LittleEndian.Uint16(srcD[2*k:])
+		b.memberIdx = binary.LittleEndian.Uint16(srcD[2*k:])
 		k++
-		b.row.Author = d.Members[b.src].Author
+		b.row.Author = d.Members[b.memberIdx].Author
 		tail = append(tail, b)
-		offerRow(win, b, d.Members[b.src])
+		offerRow(win, b, d.Members[b.memberIdx])
 	}); err != nil {
 		return fail(err)
 	}
 	if int64(k) != d.Rows {
 		return fail(fmt.Errorf("%s: delta holds %d rows, %s says %d", dd, k, deltaFile, d.Rows))
 	}
-	mergeAuthors(authors, authorsOf(tail, func(src uint16) string { return d.Members[src].Author }))
+	mergeAuthors(authors, authorsOf(tail, func(memberIdx uint16) string { return d.Members[memberIdx].Author }))
 	tail = nil
 	bySession := map[string][]built{}
 	for _, w := range win {

@@ -102,7 +102,7 @@ func (p *partAcc) sealDocs() error {
 	return p.docs.Flush()
 }
 
-func (f *sessionFeed) add(r *Row, src uint16, lf int64, li int) (uint32, error) {
+func (f *sessionFeed) add(r *Row, memberIdx uint16, lf int64, li int) (uint32, error) {
 	p := f.p
 	if p.open != f {
 		return 0, fmt.Errorf("index: doc added to session %d after it ended", f.si)
@@ -160,7 +160,7 @@ func (f *sessionFeed) add(r *Row, src uint16, lf int64, li int) (uint32, error) 
 	rec := p.rec[:]
 	binary.LittleEndian.PutUint64(rec[0:], uint64(lf))
 	binary.LittleEndian.PutUint16(rec[8:], uint16(li))
-	binary.LittleEndian.PutUint16(rec[10:], src)
+	binary.LittleEndian.PutUint16(rec[10:], memberIdx)
 	binary.LittleEndian.PutUint16(rec[12:], uint16(searchFlags(r)))
 	rec[14] = byte(p.harnesses.id(r.Harness))
 	rec[15] = byte(p.sourceNames.id(r.SourceName))
