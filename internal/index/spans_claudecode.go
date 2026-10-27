@@ -44,15 +44,15 @@ type claudeApAgg struct {
 	hasTurn    bool
 }
 
-func claudeCodeSpans(_, sid string, rows iter.Seq[*Row]) []schema.Span {
+func claudeCodeSpans(_, sid string, rows iter.Seq[*borrowedRow]) []schema.Span {
 	rootID := spanIDHex("session", sid)
-	reqOf := func(r *Row) string {
+	reqOf := func(r *borrowedRow) string {
 		if r.RequestID != "" {
 			return r.RequestID
 		}
 		return r.TraceID
 	}
-	subOf := func(r *Row) string {
+	subOf := func(r *borrowedRow) string {
 		if r.IsSubstream != 0 {
 			return r.AgentRunID
 		}
@@ -65,7 +65,7 @@ func claudeCodeSpans(_, sid string, rows iter.Seq[*Row]) []schema.Span {
 	chats := map[string]*claudeChatAgg{}
 	tools := map[string]*claudeToolAgg{}
 	for r := range rows {
-		uid, t := r.UID, eventTimeUs(r)
+		uid, t := r.UID, eventTimeUs((*Row)(r))
 		rb.add(uid, t)
 		sub := subOf(r)
 		seq := uint32(r.TurnIndex)

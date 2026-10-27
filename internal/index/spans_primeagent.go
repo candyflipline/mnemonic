@@ -6,6 +6,6 @@ import (
 	"github.com/candyflipline/mnemonic/internal/schema"
 )
 
-func primeAgentSpans(harness, sid string, rows iter.Seq[*Row]) []schema.Span {
+func primeAgentSpans(harness, sid string, rows iter.Seq[*borrowedRow]) []schema.Span {
 	return flatSpans("prime-agent", piFamilyChatKey)(harness, sid, rows)
 }

@@ -26,8 +26,8 @@ func newSections() *sections {
 
 // addSession folds one session's winner rows, in event order with turn_seq
 // current, into the spans and annotations sections. rows may be ranged over
-// more than once and a yielded row is valid only during its yield.
-func (s *sections) addSession(sid string, rows iter.Seq[*Row], payload func(*Row) string) {
+// more than once.
+func (s *sections) addSession(sid string, rows iter.Seq[*borrowedRow], payload func(*borrowedRow) string) {
 	seen := map[string]bool{}
 	var anns []annRow
 	for r := range rows {
@@ -53,8 +53,8 @@ func (s *sections) addSession(sid string, rows iter.Seq[*Row], payload func(*Row
 	}
 }
 
-func ofHarness(rows iter.Seq[*Row], harness string) iter.Seq[*Row] {
-	return func(yield func(*Row) bool) {
+func ofHarness(rows iter.Seq[*borrowedRow], harness string) iter.Seq[*borrowedRow] {
+	return func(yield func(*borrowedRow) bool) {
 		for r := range rows {
 			if r.Harness == harness && !yield(r) {
 				return

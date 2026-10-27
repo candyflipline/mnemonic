@@ -367,8 +367,7 @@ func (s *lightSource) record(src uint16, loc rowLoc) ([]byte, error) {
 
 // partView hands one session of the new part to the derived sections as the
 // iterators they take, each row decoded from the part's own light log with
-// its member's author. A yielded row is valid during its yield; payload reads
-// the part's own heavy log.
+// its member's author; payload reads the part's own heavy log.
 type partView struct {
 	acc        *partAcc
 	cks        []ckpt
@@ -430,20 +429,20 @@ func (v *partView) load(d int, r *Row) (uint32, bool) {
 	return seq, true
 }
 
-func (v *partView) withSeqs() iter.Seq2[*Row, uint32] {
-	return func(yield func(*Row, uint32) bool) {
+func (v *partView) withSeqs() iter.Seq2[*borrowedRow, uint32] {
+	return func(yield func(*borrowedRow, uint32) bool) {
 		var r Row
 		for d := v.start; d < v.end; d++ {
 			seq, ok := v.load(d, &r)
-			if !ok || !yield(&r, seq) {
+			if !ok || !yield((*borrowedRow)(&r), seq) {
 				return
 			}
 		}
 	}
 }
 
-func (v *partView) rows() iter.Seq[*Row] {
-	return func(yield func(*Row) bool) {
+func (v *partView) rows() iter.Seq[*borrowedRow] {
+	return func(yield func(*borrowedRow) bool) {
 		var r Row
 		for d := v.start; d < v.end; d++ {
 			seq, ok := v.load(d, &r)
@@ -451,11 +450,11 @@ func (v *partView) rows() iter.Seq[*Row] {
 				return
 			}
 			r.TurnIndex = uint64(seq)
-			if !yield(&r) {
+			if !yield((*borrowedRow)(&r)) {
 				return
 			}
 		}
 	}
 }
 
-func (v *partView) payload(r *Row) string { return v.heavy.partPayload(r) }
+func (v *partView) payload(r *borrowedRow) string { return v.heavy.partPayload((*Row)(r)) }

@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -95,7 +94,13 @@ func buildSpans(harness string, rows []*Row) []schema.Span {
 	if !ok || len(rows) == 0 {
 		return nil
 	}
-	return f(harness, rows[0].Session, slices.Values(rows))
+	return f(harness, rows[0].Session, func(yield func(*borrowedRow) bool) {
+		for _, r := range rows {
+			if !yield((*borrowedRow)(r)) {
+				return
+			}
+		}
+	})
 }
 
 func firstUID(uid string) string {

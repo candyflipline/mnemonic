@@ -16,9 +16,8 @@ const otlpMaxEdges = 65
 // emitted spans on a parent cycle the one with the smallest item_id is the
 // root. A chat carries its own usage; an invoke_agent carries the sum over
 // the chats beneath it, else its own. The parent link is origin_event_id, the
-// event_uid of the parent span's row. Walks run at most 65 edges out, the
-// depth the derivation's recursive CTE walks.
-func otlpSpans(_, sid string, session iter.Seq[*Row]) []schema.Span {
+// event_uid of the parent span's row.
+func otlpSpans(_, sid string, session iter.Seq[*borrowedRow]) []schema.Span {
 	rows := map[string]*otlpNode{}
 	for r := range session {
 		if r.PayloadType == "span" && r.UID != "" {
@@ -127,7 +126,7 @@ func otlpSpans(_, sid string, session iter.Seq[*Row]) []schema.Span {
 		}
 		s := spanAcc{sid: sid, id: spanIDHex("otlp", r.Author, r.TraceID, r.ItemID),
 			parent: parent, kind: schema.SpanKind(r.OpKind), name: name,
-			b: spanBounds{startUs: eventTimeUs(r), endUs: eventTimeUs(r) + int64(r.LatencyMs)*1000,
+			b: spanBounds{startUs: eventTimeUs((*Row)(r)), endUs: eventTimeUs((*Row)(r)) + int64(r.LatencyMs)*1000,
 				first: r.UID, last: r.UID},
 			status: schema.SpanOK, model: r.Model}
 		if r.OpStatus == "error" {
@@ -188,7 +187,7 @@ func otlpWalk(rows map[string]*otlpNode, yield func(from, uid string, anc *otlpN
 	}
 }
 
-func otlpCostUsd(r *Row) *float64 {
+func otlpCostUsd(r *borrowedRow) *float64 {
 	if r.Native == "" {
 		return nil
 	}

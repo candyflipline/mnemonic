@@ -37,7 +37,7 @@ type argMax struct {
 	ok  bool
 }
 
-func (a *argMax) offer(r *Row, v string) {
+func (a *argMax) offer(r *borrowedRow, v string) {
 	if !a.ok || r.TsMs > a.ts || (r.TsMs == a.ts && r.UID > a.uid) {
 		*a = argMax{ts: r.TsMs, uid: r.UID, v: v, ok: true}
 	}
@@ -60,9 +60,8 @@ func duckSubstr(s string, n int) string {
 }
 
 // lsAggregate folds a session's winner rows, in event order with each row's
-// turn seq, into its rollup. payload is valid for the row being yielded and
-// no *Row outlives its yield.
-func lsAggregate(rows iter.Seq2[*Row, uint32], payload func(*Row) string) lsRec {
+// turn seq, into its rollup.
+func lsAggregate(rows iter.Seq2[*borrowedRow, uint32], payload func(*borrowedRow) string) lsRec {
 	var rec lsRec
 	var web, mcp, tool bool
 	var term, harness, source argMax
@@ -75,7 +74,7 @@ func lsAggregate(rows iter.Seq2[*Row, uint32], payload func(*Row) string) lsRec 
 		k++
 		rec.TotalEvents++
 		rec.TotalTurns = max(rec.TotalTurns, int(seq))
-		if us := eventTimeUs(r); k == 0 || us > rec.LastUs {
+		if us := eventTimeUs((*Row)(r)); k == 0 || us > rec.LastUs {
 			rec.LastUs = us
 		}
 		if r.PayloadType == "web_search_call" || r.PayloadType == "search_results_received" ||
@@ -154,15 +153,14 @@ func lsAggregate(rows iter.Seq2[*Row, uint32], payload func(*Row) string) lsRec 
 	return rec
 }
 
-// lsMinKey is the fields of a row the arg_min order reads, kept in place of
-// the row.
+// lsMinKey is the fields of a row the arg_min order reads.
 type lsMinKey struct {
 	ts                  int64
 	name, file, uid     string
 	gen, offset, lineNo uint64
 }
 
-func lsMinKeyOf(r *Row) lsMinKey {
+func lsMinKeyOf(r *borrowedRow) lsMinKey {
 	return lsMinKey{ts: r.TsMs, name: r.SourceName, file: r.SourceFile, uid: r.UID, gen: r.Gen, offset: r.Offset, lineNo: r.LineNo}
 }
 

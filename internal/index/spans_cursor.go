@@ -8,6 +8,6 @@ import (
 
 // cursorSpans: flatSpans with no chat key, a cursor session records no model
 // call boundary; every execute_tool hangs under its turn.
-func cursorSpans(harness, sid string, rows iter.Seq[*Row]) []schema.Span {
+func cursorSpans(harness, sid string, rows iter.Seq[*borrowedRow]) []schema.Span {
 	return flatSpans("cursor", nil)(harness, sid, rows)
 }
