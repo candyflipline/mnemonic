@@ -3,6 +3,7 @@ set -euo pipefail
 
 N=${1:-5}
 LABEL=com.mnemonic.fuinit-test
+QUIET_WINDOW_PLUS_MARGIN=1.3
 DOMAIN=gui/$(id -u)
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 
@@ -95,7 +96,7 @@ for i in $(seq 1 "$N"); do
   (while :; do printf '{"tick"}\n' >>"$ITER/live.jsonl"; sleep 0.02; done) &
   TRICKLE=$!
   cp "$STAGE"/s*.jsonl "$ITER"/
-  sleep 1.3 # the watcher's quiet window elapses; the flush is pushing
+  sleep "$QUIET_WINDOW_PLUS_MARGIN"
   OUT=$("$BIN" init --label "$LABEL" 2>&1) && RC=0 || RC=$?
   kill "$TRICKLE" 2>/dev/null || true
   wait "$TRICKLE" 2>/dev/null || true
