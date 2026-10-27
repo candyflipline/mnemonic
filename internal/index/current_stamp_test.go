@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/candyflipline/mnemonic/internal/config"
+	"github.com/candyflipline/mnemonic/internal/redact"
 )
 
 func TestCurrentStampChangesWhenContentChangesInPlace(t *testing.T) {
@@ -49,7 +50,7 @@ func TestOpenCurrentNamingMissingPart(t *testing.T) {
 		Harness:    "claude-code",
 		SourceName: "claude",
 		Glob:       src,
-	}}, "tester", "testbox", IngestOptions{SettleAll: true}); err != nil {
+	}}, "tester", "testbox", redact.Default(), IngestOptions{SettleAll: true}); err != nil {
 		t.Fatal(err)
 	}
 	if err := ix.Close(); err != nil {

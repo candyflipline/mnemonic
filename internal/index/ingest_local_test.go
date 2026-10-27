@@ -39,7 +39,7 @@ func TestIngestPlainReportsToolRecords(t *testing.T) {
 	}
 	defer ix.Close()
 
-	st, err := ix.IngestPlain(globs, author, machine, IngestOptions{SettleAll: true})
+	st, err := ix.IngestPlain(globs, author, machine, redact.Default(), IngestOptions{SettleAll: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestIngestPlainReportsToolRecords(t *testing.T) {
 		t.Fatalf("append annotation: duplicate=%v err=%v", duplicate, err)
 	}
 
-	st, err = ix.IngestPlain(globs, author, machine, IngestOptions{SettleAll: true})
+	st, err = ix.IngestPlain(globs, author, machine, redact.Default(), IngestOptions{SettleAll: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +279,7 @@ func TestIngestPlainOneCheckpointPerKey(t *testing.T) {
 	}
 	defer ix.Close()
 
-	st, err := ix.IngestPlain(globs, author, machine, IngestOptions{SettleAll: true})
+	st, err := ix.IngestPlain(globs, author, machine, redact.Default(), IngestOptions{SettleAll: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +287,7 @@ func TestIngestPlainOneCheckpointPerKey(t *testing.T) {
 		t.Fatalf("lap 0: fresh=%d unchanged=%d, want fresh=3 (a's plain file, b's raw copy, c's plain file)", st[Fresh], st[Unchanged])
 	}
 	for lap := 1; lap <= 3; lap++ {
-		st, err = ix.IngestPlain(globs, author, machine, IngestOptions{SettleAll: true})
+		st, err = ix.IngestPlain(globs, author, machine, redact.Default(), IngestOptions{SettleAll: true})
 		if err != nil {
 			t.Fatalf("lap %d: %v", lap, err)
 		}
@@ -361,7 +361,7 @@ func TestIngestPlainRedactsAtIngest(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ix.Close()
-	st, err := ix.IngestPlain(globs, "tester", "testbox", IngestOptions{SettleAll: true, Red: redact.Default()})
+	st, err := ix.IngestPlain(globs, "tester", "testbox", redact.Default(), IngestOptions{SettleAll: true})
 	if err != nil {
 		t.Fatal(err)
 	}

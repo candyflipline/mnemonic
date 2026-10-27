@@ -111,6 +111,7 @@ type source struct {
 	src   manifest
 	ck    *ckpt
 	raw   string
+	red   *redact.Redactor
 }
 
 func storeSource(root string, m store.Manifest) source {
@@ -323,7 +324,7 @@ func (c ckpt) sameInput(want ckpt) bool {
 		c.SourceFile == want.SourceFile && c.Layout == want.Layout
 }
 
-func (s *source) ingest(store string, red *redact.Redactor) (o Outcome, logBytes int64, err error) {
+func (s *source) ingest(store string) (o Outcome, logBytes int64, err error) {
 	if s.kind == KindArchive {
 		return ingestArchive(store, *s)
 	}
@@ -368,8 +369,8 @@ func (s *source) ingest(store string, red *redact.Redactor) (o Outcome, logBytes
 	if err != nil {
 		return 0, 0, err
 	}
-	if red != nil {
-		zr = newRedactReader(zr, red)
+	if s.red != nil {
+		zr = newRedactReader(zr, s.red)
 	}
 	defer zr.Close()
 
@@ -576,7 +577,7 @@ func withWriterLock(store string, fn func(writerLock) error) error {
 }
 
 func Ingest(root, store string, quiet time.Duration, settleAll bool) (IngestStats, error) {
-	return ingest(store, func() (*sourceSet, error) { return listSources(root) }, quiet, settleAll, nil)
+	return ingest(store, func() (*sourceSet, error) { return listSources(root) }, quiet, settleAll)
 }
 
 // IngestPlain brings store up to the machine's harness files the client globs
@@ -588,12 +589,12 @@ func Ingest(root, store string, quiet time.Duration, settleAll bool) (IngestStat
 // writes covers both and neither ingest drops the other's sources. store is
 // the index dir under the data dir (layout.IndexDir), so root is its parent
 // and the store sources' raw opens under it.
-func IngestPlain(store string, globs []config.SourceGlob, author, machine string, opts IngestOptions) (IngestStats, error) {
+func IngestPlain(store string, globs []config.SourceGlob, author, machine string, red *redact.Redactor, opts IngestOptions) (IngestStats, error) {
 	root := filepath.Dir(store)
-	return ingest(store, func() (*sourceSet, error) { return listPlainAndStore(root, globs, author, machine) }, opts.Quiet, opts.SettleAll, opts.Red)
+	return ingest(store, func() (*sourceSet, error) { return listPlainAndStore(root, globs, author, machine, red) }, opts.Quiet, opts.SettleAll)
 }
 
-func listPlainAndStore(root string, globs []config.SourceGlob, author, machine string) (*sourceSet, error) {
+func listPlainAndStore(root string, globs []config.SourceGlob, author, machine string, red *redact.Redactor) (*sourceSet, error) {
 	plain, err := listPlainSources(globs, author, machine)
 	if err != nil {
 		return nil, err
@@ -613,13 +614,11 @@ func listPlainAndStore(root string, globs []config.SourceGlob, author, machine s
 		plainKeys[sourceKey(s.key)] = true
 	}
 	sources := &sourceSet{}
-	if err := sources.add(plain...); err != nil {
-		return nil, err
-	}
-	for _, s := range tool.list {
+	for _, s := range append(plain, tool.list...) {
 		if s.kind == KindStore && plainKeys[sourceKey(s.key)] {
 			continue
 		}
+		s.red = red
 		if err := sources.add(s); err != nil {
 			return nil, err
 		}
@@ -628,10 +627,8 @@ func listPlainAndStore(root string, globs []config.SourceGlob, author, machine s
 }
 
 // ingest is the cycle both entry points share: parse the sources, publish the
-// plan, and record the lap. red is local mode's redactor: every line a parse
-// reads goes through it, the bytes push's upload carries, so the index holds
-// what the server path's raw holds.
-func ingest(store string, list func() (*sourceSet, error), quiet time.Duration, settleAll bool, red *redact.Redactor) (stats IngestStats, err error) {
+// plan, and record the lap.
+func ingest(store string, list func() (*sourceSet, error), quiet time.Duration, settleAll bool) (stats IngestStats, err error) {
 	err = withWriterLock(store, func(w writerLock) error {
 		sources, err := list()
 		if err != nil {
@@ -639,7 +636,7 @@ func ingest(store string, list func() (*sourceSet, error), quiet time.Duration, 
 		}
 		readCkpts(store, sources.list)
 		var opened map[string]*Part
-		stats, _, opened, err = sources.cycle(w, allOf(sources.list), quiet, settleAll, red)
+		stats, _, opened, err = sources.cycle(w, allOf(sources.list), quiet, settleAll)
 		closeParts(opened)
 		return err
 	})
@@ -657,7 +654,7 @@ func allOf(sources []source) []int {
 // cycle parses the sources work indexes, counts every other one Unchanged,
 // publishes them all and records the lap; each source's ck becomes the one
 // its parse or settle leaves.
-func (ss *sourceSet) cycle(w writerLock, work []int, quiet time.Duration, settleAll bool, red *redact.Redactor) (stats IngestStats, outcomes map[string]Outcome, opened map[string]*Part, err error) {
+func (ss *sourceSet) cycle(w writerLock, work []int, quiet time.Duration, settleAll bool) (stats IngestStats, outcomes map[string]Outcome, opened map[string]*Part, err error) {
 	store, sources := w.store, ss.list
 	debug.SetGCPercent(25)
 	var rec cycleRecord
@@ -666,7 +663,7 @@ func (ss *sourceSet) cycle(w writerLock, work []int, quiet time.Duration, settle
 		return
 	}
 	take := takeCycle(store)
-	outcomes, logBytes, stale, failSweep := parseSources(store, sources, work, take.failSweep, red)
+	outcomes, logBytes, stale, failSweep := parseSources(store, sources, work, take.failSweep)
 	for _, o := range outcomes {
 		stats[o]++
 	}
@@ -687,7 +684,7 @@ func (ss *sourceSet) cycle(w writerLock, work []int, quiet time.Duration, settle
 // the keys already known to fail at their version. A source that failed has no
 // outcome. Each source's ck (readCkpts) is updated to the one its parse
 // leaves.
-func parseSources(store string, sources []source, work []int, skip map[string]int, red *redact.Redactor) (outcomes map[string]Outcome, logBytes int64, stale int, failSweep map[string]int) {
+func parseSources(store string, sources []source, work []int, skip map[string]int) (outcomes map[string]Outcome, logBytes int64, stale int, failSweep map[string]int) {
 	outcomes = make(map[string]Outcome, len(work))
 	failSweep = map[string]int{}
 	for k, v := range skip {
@@ -715,7 +712,7 @@ func parseSources(store string, sources []source, work []int, skip map[string]in
 			var failed []int
 			for i := range jobs {
 				s := &sources[i]
-				o, written, err := s.ingest(store, red)
+				o, written, err := s.ingest(store)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "ingest: %s: %v\n", s.mpath, err)
 					failed = append(failed, i)

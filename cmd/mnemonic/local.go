@@ -160,7 +160,7 @@ func expandSources(srcs []config.SourceGlob) ([]config.SourceGlob, error) {
 
 func firstIngest(ix *index.Index, srcs []config.SourceGlob, logger *log.Logger, author, machine string, red *redact.Redactor) error {
 	start := time.Now()
-	st, err := ix.IngestPlain(srcs, author, machine, index.IngestOptions{Quiet: index.SettleSource, Red: red})
+	st, err := ix.IngestPlain(srcs, author, machine, red, index.IngestOptions{Quiet: index.SettleSource})
 	logger.Printf("index: unchanged=%d resumed=%d fresh=%d reparsed=%d in %s err=%v",
 		st[index.Unchanged], st[index.Resumed], st[index.Fresh], st[index.Reparsed],
 		time.Since(start).Round(time.Millisecond), err)
@@ -228,7 +228,7 @@ type indexSink struct {
 func (s *indexSink) Sync(_ context.Context, _ []string) (pushrun.Stats, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err := s.ix.IngestPlain(s.srcs, s.author, s.machine, index.IngestOptions{Quiet: index.SettleSource, Red: s.red})
+	st, err := s.ix.IngestPlain(s.srcs, s.author, s.machine, s.red, index.IngestOptions{Quiet: index.SettleSource})
 	return pushrun.Stats{
 		Appended:  st[index.Resumed] + st[index.Fresh],
 		Replaced:  st[index.Reparsed],

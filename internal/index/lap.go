@@ -100,7 +100,7 @@ type cycled struct {
 
 func (l *Lap) cycle(w writerLock, work []int, opts IngestOptions) cycled {
 	c := cycled{work: work}
-	c.stats, c.outcomes, c.opened, c.err = l.sources.cycle(w, work, opts.Quiet, opts.SettleAll, opts.Red)
+	c.stats, c.outcomes, c.opened, c.err = l.sources.cycle(w, work, opts.Quiet, opts.SettleAll)
 	return c
 }
 
