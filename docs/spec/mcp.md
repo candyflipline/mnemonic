@@ -6,13 +6,13 @@ Related specs: [wire](wire.md) (how data gets in), [events](events.md) (what the
 
 ## Endpoint and authentication
 
-`POST /mcp` on the server's address (`internal/server/server.go:42`). `mnemonic serve` listens on the address in its config; `mnemonic local` listens on `127.0.0.1:7781` unless told otherwise, refuses any address that is not loopback, and prints the URL at start (`cmd/mnemonic/local.go:50`, `cmd/mnemonic/local.go:121`).
+`POST /mcp` on the server's address (`internal/server/server.go:42`). `mnemonic serve` listens on the UDP address in its `[quic]` config; `mnemonic local` listens on `127.0.0.1:7781` unless told otherwise, refuses any address that is not loopback, and prints the URL at start (`cmd/mnemonic/local.go:50`, `cmd/mnemonic/local.go:121`).
 
-Every request carries `Authorization: Bearer <token>`. A missing or unknown token is `401 unauthorized` (`internal/auth/auth.go:24-33`). The caller's author comes from the token and is what a tool sees as the caller (`internal/auth/auth.go:39-42`).
+The server serves `/mcp` on the QUIC HTTP endpoint, so the caller is the key that completed the handshake and a request carries no credentials; a header a client sends is ignored. A connection with no Identity is `401 unauthorized`, and a key without the `read` scope is `403` (`auth.Require`, `internal/auth`). The caller's author is the key's author and is what a tool sees as the caller. `mnemonic mcp` is the stdio shim that forwards a client's JSON-RPC lines to it.
 
 ## Tenancy
 
-Each token entry names a tenant, `default` when it names none, and every author no token entry names is in `default` too, so a `default` token reads those authors' sessions (`internal/auth/auth.go:106-116`). This is the owner's call, not an oversight.
+Each `[[keys]]` entry names a tenant, `default` when it names none, and every author no key entry names is in `default` too, so a `default` key reads those authors' sessions (`internal/auth/auth.go:106-116`). This is the owner's call, not an oversight.
 
 The engine derives `session_authors(session_id, author)` as a part section: every author of a source whose rows carry one of the session's event uids, whether or not that row won (`internal/index/authors.go`). A session id comes from the pushed file, so any author can put lines in any session; the rules below read only this section, never which author pushed one event (`internal/index/scope.go`).
 
@@ -123,7 +123,6 @@ Tools added after these appear in `tools/list` after `get_ingest_status`, from `
 
 ```
 POST /mcp
-Authorization: Bearer <token>
 Content-Type: application/json
 Accept: application/json
 Mcp-Protocol-Version: 2025-06-18

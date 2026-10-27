@@ -1,18 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -lt 1 || $# -gt 2 ]]; then
-	echo "usage: install-server.sh <mnemonic-binary> [public-hostname]" >&2
+if [[ $# -ne 1 ]]; then
+	echo "usage: install-server.sh <mnemonic-binary>" >&2
 	exit 2
 fi
 BINARY=$1
-PUBLIC_HOST=${2:-}
 if [[ ! -x "$BINARY" ]]; then
 	echo "install-server.sh: not an executable: $BINARY" >&2
-	exit 2
-fi
-if [[ ! -f /etc/mnemonic/server.toml && -z "$PUBLIC_HOST" ]]; then
-	echo "install-server.sh: no /etc/mnemonic/server.toml yet; pass the public hostname (its A record points here) as the second argument" >&2
 	exit 2
 fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,20 +27,30 @@ if [[ ! -f /etc/mnemonic/server.toml ]]; then
 	install -o root -g mnemonic -m 640 /dev/null /etc/mnemonic/server.toml
 	cat > /etc/mnemonic/server.toml <<EOF
 data_dir = "/var/lib/mnemonic"
-listen   = ":443"
-push_listen = ":8741"
 
-[tls]
-hosts = ["$PUBLIC_HOST"]
+[quic]
+listen = ":8741"
 
-# One block per teammate, from: mnemonic token new --author <name>
-# [[tokens]]
+# One block per client machine, from: mnemonic key (run on that machine)
+# [[keys]]
+# key    = "<public key>"
 # author = "chris"
-# sha256 = "<64 lowercase hex digits>"
 EOF
-	echo "install-server.sh: wrote /etc/mnemonic/server.toml; add [[tokens]] entries, then restart"
+	echo "install-server.sh: wrote /etc/mnemonic/server.toml; add [[keys]] entries, then restart"
+fi
+
+if command -v ufw >/dev/null; then
+	rules=$(ufw status)
+	if grep -q '^Status: active' <<<"$rules" && ! grep -qE '^8741/udp +ALLOW' <<<"$rules"; then
+		ufw allow 8741/udp >/dev/null
+	fi
 fi
 
 systemctl daemon-reload
 systemctl enable --now mnemonic.service
 systemctl status mnemonic.service --no-pager || true
+
+if [[ -f /var/lib/mnemonic/server.key ]]; then
+	out=$(/usr/local/bin/mnemonic key --file /var/lib/mnemonic/server.key)
+	echo "server key: ${out%%$'\n'*}"
+fi

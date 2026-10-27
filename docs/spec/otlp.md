@@ -11,7 +11,7 @@ Related specs: [wire](wire.md), [events](events.md), [spans](spans.md), [mcp](mc
 | traces | `POST /v1/traces` | `ExportTraceServiceRequest` |
 | logs | `POST /v1/logs` | `ExportLogsServiceRequest` |
 
-The paths are the OTLP/HTTP defaults; the logs path is `/v1/logs`, and `/v1development/` is the path of the profiles signal only (OTLP spec, "OTLP/HTTP Request"). Metrics are not accepted. Both routes sit behind the same bearer-token middleware as the push store (`internal/server/server.go:45-46`); an exporter sets `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer <token>`. The author a request writes as is the token's author (`internal/otlp/receiver.go:122`).
+The paths are the OTLP/HTTP defaults; the logs path is `/v1/logs`, and `/v1development/` is the path of the profiles signal only (OTLP spec, "OTLP/HTTP Request"). Metrics are not accepted. Both routes sit behind `auth.Require(auth.Push)` on the QUIC HTTP endpoint (`internal/server/server.go`), so only a client that dials QUIC with a listed key reaches them and a plain OTLP/HTTP exporter cannot. The author a request writes as is the key's author (`internal/otlp/receiver.go:122`).
 
 The handler (`internal/otlp/receiver.go:91-145`):
 
@@ -43,7 +43,7 @@ One line per record (`Record`, `internal/otlp/record.go:19`):
 |---|---|
 | `signal` | `span` or `log` |
 | `session_id` | the session the record belongs to (below) |
-| `author` | the token's author, stamped by the receiver |
+| `author` | the key's author, stamped by the receiver |
 | `trace_id`, `span_id`, `parent_span_id` | lowercase hex; a log carries the trace context it was emitted under |
 | `name` | the span name, or a log's event name (`LogRecord.event_name`, else the `event.name` attribute) |
 | `span_kind`, `status_code`, `status_message` | the OTLP enums as integers; the message only with `content_stored` |
