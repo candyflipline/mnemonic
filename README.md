@@ -39,7 +39,7 @@ Put `~/.local/bin` on your `PATH`. The scheduler in the next section runs the bi
 
 3. Check that the push works. `mnemonic push` runs one pass and prints counts. On macOS the agent logs to `~/.mnemonic/push.log`. On Linux, run `journalctl --user -u mnemonic-push`.
 
-`--machine NAME` overrides the machine name (default: the short hostname). To change an existing config, edit `~/.mnemonic/config.toml` or run `init --force` with both flags again. The file looks like this:
+`--machine NAME` overrides the machine name (the short hostname by default). To change an existing config, edit `~/.mnemonic/config.toml` or run `init --force` with both flags again. The file looks like this:
 
 ```
 server     = "quic://HOST:8741"
@@ -71,7 +71,7 @@ A client marked verified was run with the exact settings shown. A client marked 
 
 ### Claude Code
 
-Verified on the spike build (2026-10-26, `claude -p --strict-mcp-config --mcp-config` with this object: server connected, `list_sessions` returned a result). Add it for all projects:
+Verified on the spike build on 2026-10-26. `claude -p --strict-mcp-config --mcp-config` with this object connected the server, and `list_sessions` returned a result. Add it for all projects:
 
 ```
 claude mcp add-json --scope user mnemonic '{"type":"stdio","command":"mnemonic","args":["mcp"]}'
