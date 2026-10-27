@@ -232,3 +232,25 @@ func TestRenderMarkdownEmphasisIsLinear(t *testing.T) {
 		}
 	}
 }
+
+func TestLinkSubagentShowsAsks(t *testing.T) {
+	sub := `,"isSidechain":true,"agentId":"a1b2c3"`
+	db := linkDB(t, []string{
+		record("user", "u1", "2026-10-27T10:00:00.000Z", `,"origin":{"kind":"human"}`, `"Ask."`),
+		toolUse("a1", "2026-10-27T10:00:01.000Z", "", "t1", "Agent", `{"description":"Ask around","prompt":"Ask."}`),
+		toolResult("u2", "2026-10-27T10:00:02.000Z", "", "t1", `"agentId: a1b2c3"`),
+		record("user", "s1", "2026-10-27T10:00:03.000Z", sub, `"Ask."`),
+		toolUse("s2", "2026-10-27T10:00:04.000Z", sub, "t2", "AskUserQuestion", `{"questions":[{"question":"Ship it?","options":[{"label":"Yes"}]}]}`),
+		toolResult("s3", "2026-10-27T10:00:05.000Z", sub, "t2", `"The user answered: \"Ship it?\"=\"Yes\". You can now continue."`),
+		record("assistant", "s4", "2026-10-27T10:00:06.000Z", sub, `[{"type":"text","text":"Shipped."}]`),
+		record("assistant", "a2", "2026-10-27T10:00:07.000Z", "", `[{"type":"text","text":"Done."}]`),
+	})
+	var b bytes.Buffer
+	if err := WriteLinkHTML(&b, db, linkView(time.Date(2026, 10, 27, 11, 0, 0, 0, time.UTC))); err != nil {
+		t.Fatal(err)
+	}
+	want := `<div class="ask"><span class="label">Asked</span>Ship it?<b>Yes</b></div>`
+	if got := b.String(); strings.Count(got, want) != 1 {
+		t.Fatalf("page holds %d copies of %s, want 1:\n%s", strings.Count(got, want), want, got)
+	}
+}

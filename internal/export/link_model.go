@@ -71,6 +71,7 @@ type subagent struct {
 	run    string
 	Prompt string
 	Report string
+	Asks   []qa
 	Steps  []*step
 }
 
@@ -561,6 +562,7 @@ func subagentOf(run string, th *thread) *subagent {
 			}
 			s.Steps = append(s.Steps, &step{Kind: stepNotice, Text: "Message to the agent", Body: body})
 		}
+		s.Asks = append(s.Asks, t.Asks...)
 		s.Steps = append(s.Steps, t.Work...)
 		if i == len(th.Turns)-1 {
 			s.Report = t.Answer

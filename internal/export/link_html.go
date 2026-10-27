@@ -108,12 +108,16 @@ blockquote{margin:.5rem 0;padding-left:.8rem;border-left:3px solid var(--line);c
 <section class="turn" id="{{.ID}}">
 {{if .Human}}<div class="user">{{.PromptHead}}{{if .PromptRest}}<details class="more"><summary>Show more</summary>{{.PromptRest}}</details>{{end}}</div>
 {{else if .Background}}<div class="user bg"><span class="label">Background update · {{pacific .At}}</span>{{.Prompt}}{{if .Detail}}<details><summary>Notification</summary><pre>{{.Detail}}</pre></details>{{end}}</div>
-{{end}}{{range .Asks}}<div class="ask"><span class="label">Asked</span>{{.Question}}<b>{{.Answer}}</b></div>
-{{end}}{{if .Work}}<details class="work"><summary>{{.WorkSummary}}</summary><div class="steps">
+{{end}}{{template "asks" .Asks}}{{if .Work}}<details class="work"><summary>{{.WorkSummary}}</summary><div class="steps">
 {{template "steps" .Work}}</div></details>
 {{end}}{{if .Answer}}<div class="answer">{{md .Answer}}</div>
 {{end}}</section>
 {{end -}}
+
+{{- define "asks" -}}
+{{range .}}<div class="ask"><span class="label">Asked</span>{{.Question}}<b>{{.Answer}}</b></div>
+{{end}}
+{{- end -}}
 
 {{- define "steps" -}}
 {{range .}}{{if eq .Kind "note"}}<div class="note">{{md .Text}}</div>
@@ -125,7 +129,7 @@ blockquote{margin:.5rem 0;padding-left:.8rem;border-left:3px solid var(--line);c
 {{- define "tool" -}}
 <details class="tool"><summary><b>{{if .Sub}}Subagent{{else}}{{.Name}}{{end}}</b> {{.Summary}}{{with .Sub}} · {{stepsSum .Steps}}{{end}}</summary><div class="body">
 {{with .Sub}}{{if .Prompt}}<details><summary>Prompt</summary><pre>{{.Prompt}}</pre></details>
-{{end}}{{if .Report}}<span class="label">Report</span><div class="answer">{{md .Report}}</div>
+{{end}}{{template "asks" .Asks}}{{if .Report}}<span class="label">Report</span><div class="answer">{{md .Report}}</div>
 {{end}}{{if .Steps}}<details class="sub"><summary>Steps · {{stepsSum .Steps}}</summary><div class="steps">
 {{template "steps" .Steps}}</div></details>
 {{end}}{{else}}<span class="label">Arguments</span><pre>{{.Args}}{{if .ArgsCut}} [cut]{{end}}</pre>
