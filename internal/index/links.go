@@ -127,9 +127,9 @@ type ReadLink struct {
 	Cutoff          time.Time
 }
 
-// OpenRead is the read link h names. A session shows while it is not deleted
-// and its sole author is still the one the link recorded, so a foreign line
-// pushed under a linked id hides the session instead of joining the link.
+// OpenRead keeps a session only while its sole author is the one the link
+// recorded, so a foreign line pushed under a linked id hides the session
+// instead of joining the link.
 func (c *Controls) OpenRead(db *DB, h TokenHash, now time.Time) (ReadLink, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
