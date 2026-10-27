@@ -22,24 +22,32 @@ const (
 	tracePrefix = "mnemonic-trace:"
 )
 
+const (
+	spanKindInternal = 1
+	spanKindClient   = 3
+)
+
+const (
+	statusOK    = 1
+	statusError = 2
+)
+
 // spanKindInt maps a spans row's kind to the OTLP SpanKind enum. execute_tool
 // is INTERNAL per genai-spans.md:739-800; invoke_agent is the CLIENT variant
 // per genai-agent.md:189-230. OTLP/JSON carries enums as integers
 // (otlp.txt:1058-1064).
 func spanKindInt(kind string) int {
 	if kind == "invoke_agent" {
-		return 3 // SPAN_KIND_CLIENT
+		return spanKindClient
 	}
-	return 1 // SPAN_KIND_INTERNAL
+	return spanKindInternal
 }
 
-// statusCode maps a spans row's status to the OTLP Status enum:
-// STATUS_CODE_OK = 1, STATUS_CODE_ERROR = 2.
 func statusCode(status string) int {
 	if status == "error" {
-		return 2
+		return statusError
 	}
-	return 1
+	return statusOK
 }
 
 type otlpRequest struct {
