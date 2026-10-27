@@ -36,7 +36,7 @@ func TestIngestPublishesWhatAnEarlierWriterLeft(t *testing.T) {
 		}
 		return sources, err
 	}
-	if _, err := ingest(root, store, list, time.Minute, true, nil); err != nil {
+	if _, err := ingest(store, list, time.Minute, true, nil); err != nil {
 		t.Fatal(err)
 	}
 	otherWriter()

@@ -26,11 +26,11 @@ const (
 
 func (k Kind) sweepable() bool { return k == KindStore }
 
-func (k Kind) open(root string, s source) (*os.File, int64, error) {
+func (k Kind) open(s source) (*os.File, int64, error) {
 	if k == KindPlain {
 		return openPlain(s)
 	}
-	return openRaw(root, s)
+	return openRaw(s)
 }
 
 func (k Kind) extends(f *os.File, end int64, prev ckpt) bool {
