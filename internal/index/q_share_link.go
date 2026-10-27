@@ -184,6 +184,7 @@ func createRead(ctx context.Context, db *DB, c *Controls, st *store.Committer, s
 		return nil, "", argErrorf("note must be at most %d characters", maxNoteRunes)
 	}
 	sessions := make([]string, 0, len(a.SessionIDs))
+	authors := make([]string, 0, len(a.SessionIDs))
 	for _, s := range a.SessionIDs {
 		mid, err := parseMcpID(s)
 		if err != nil {
@@ -195,6 +196,10 @@ func createRead(ctx context.Context, db *DB, c *Controls, st *store.Committer, s
 		if _, err := actor(ctx, db, c, mid.session); err != nil {
 			return nil, "", argErrorf("%s: %s", s, err)
 		}
+		sole := db.sessionAuthors(mid.session)
+		if len(sole) != 1 {
+			return nil, "", argErrorf("%s: session has lines from %d authors; a link needs exactly one", s, len(sole))
+		}
 		if c.deleted(mid.session) {
 			return nil, "", argErrorf("%s: session not found", s)
 		}
@@ -202,18 +207,23 @@ func createRead(ctx context.Context, db *DB, c *Controls, st *store.Committer, s
 			return nil, "", argErrorf("%s is listed twice", s)
 		}
 		sessions = append(sessions, mid.session)
+		authors = append(authors, sole[0])
 	}
 	c.write.Lock()
 	now := time.Now().UTC()
-	r, token, err := c.newLink(st, controlRecord{Kind: linkRead, SessionIDs: sessions, Title: a.Title, Note: a.Note,
+	r, token, err := c.newLink(st, controlRecord{Kind: linkRead, SessionIDs: sessions, SessionAuthors: authors, Title: a.Title, Note: a.Note,
 		Cutoff: now, Expires: now.Add(days), Author: id.Author(), Tenant: id.Tenant()})
 	c.write.Unlock()
 	if err != nil {
 		return nil, "", err
 	}
-	rl := ReadLink{ID: r.LinkID, Title: r.Title, Note: r.Note, SessionIDs: sessions, Cutoff: r.Cutoff}
-	rows := make([]linkSessionRow, len(sessions))
-	for i, s := range sessions {
+	h, _ := ParseToken(token)
+	rl, err := c.OpenRead(db, h, time.Now())
+	if err != nil {
+		return nil, "", fmt.Errorf("link %s was made but did not open: %w", r.LinkID, err)
+	}
+	rows := make([]linkSessionRow, len(rl.SessionIDs))
+	for i, s := range rl.SessionIDs {
 		rows[i] = sessionRow(db, s, r.Cutoff)
 		if rows[i].MarkdownBytes, err = site.MarkdownSize(db, token, rl, i+1); err != nil {
 			return nil, "", fmt.Errorf("link %s was made but session %d did not render: %w", r.LinkID, i+1, err)

@@ -46,25 +46,26 @@ const (
 )
 
 type controlRecord struct {
-	SessionID    string        `json:"session_id,omitempty"`
-	Action       controlAction `json:"action"`
-	Visibility   visibility    `json:"visibility,omitempty"`
-	LinkID       string        `json:"link_id,omitempty"`
-	Kind         linkKind      `json:"kind,omitempty"`
-	TokenSHA256  string        `json:"token_sha256,omitempty"`
-	SessionIDs   []string      `json:"session_ids,omitempty"`
-	Title        string        `json:"title,omitempty"`
-	Note         string        `json:"note,omitempty"`
-	Cutoff       time.Time     `json:"cutoff,omitzero"`
-	Expires      time.Time     `json:"expires,omitzero"`
-	InviteAuthor string        `json:"invite_author,omitempty"`
-	Author       string        `json:"author,omitempty"`
-	Tenant       string        `json:"tenant,omitempty"`
-	Key          string        `json:"key,omitempty"`
-	Machine      string        `json:"machine,omitempty"`
-	TS           time.Time     `json:"ts"`
-	RequestKey   string        `json:"request_key"`
-	Writer       string        `json:"writer,omitempty"`
+	SessionID      string        `json:"session_id,omitempty"`
+	Action         controlAction `json:"action"`
+	Visibility     visibility    `json:"visibility,omitempty"`
+	LinkID         string        `json:"link_id,omitempty"`
+	Kind           linkKind      `json:"kind,omitempty"`
+	TokenSHA256    string        `json:"token_sha256,omitempty"`
+	SessionIDs     []string      `json:"session_ids,omitempty"`
+	SessionAuthors []string      `json:"session_authors,omitempty"`
+	Title          string        `json:"title,omitempty"`
+	Note           string        `json:"note,omitempty"`
+	Cutoff         time.Time     `json:"cutoff,omitzero"`
+	Expires        time.Time     `json:"expires,omitzero"`
+	InviteAuthor   string        `json:"invite_author,omitempty"`
+	Author         string        `json:"author,omitempty"`
+	Tenant         string        `json:"tenant,omitempty"`
+	Key            string        `json:"key,omitempty"`
+	Machine        string        `json:"machine,omitempty"`
+	TS             time.Time     `json:"ts"`
+	RequestKey     string        `json:"request_key"`
+	Writer         string        `json:"writer,omitempty"`
 }
 
 var writer = func() string {
@@ -85,7 +86,7 @@ var writer = func() string {
 var recordShapes = map[string]struct{ required, optional []string }{
 	"delete":      {required: []string{"session_id"}},
 	"visibility":  {required: []string{"session_id", "visibility"}},
-	"link/read":   {required: []string{"link_id", "token_sha256", "session_ids", "cutoff", "expires", "author", "tenant"}, optional: []string{"title", "note"}},
+	"link/read":   {required: []string{"link_id", "token_sha256", "session_ids", "session_authors", "cutoff", "expires", "author", "tenant"}, optional: []string{"title", "note"}},
 	"link/invite": {required: []string{"link_id", "token_sha256", "invite_author", "expires", "author", "tenant"}},
 	"join":        {required: []string{"link_id", "key", "machine"}},
 	"revoke":      {required: []string{"link_id"}},
@@ -98,7 +99,7 @@ func (r controlRecord) set() []string {
 		set  bool
 	}{
 		{"session_id", r.SessionID != ""}, {"visibility", r.Visibility != ""}, {"link_id", r.LinkID != ""},
-		{"token_sha256", r.TokenSHA256 != ""}, {"session_ids", r.SessionIDs != nil}, {"title", r.Title != ""},
+		{"token_sha256", r.TokenSHA256 != ""}, {"session_ids", r.SessionIDs != nil}, {"session_authors", r.SessionAuthors != nil}, {"title", r.Title != ""},
 		{"note", r.Note != ""}, {"cutoff", !r.Cutoff.IsZero()}, {"expires", !r.Expires.IsZero()},
 		{"invite_author", r.InviteAuthor != ""}, {"author", r.Author != ""}, {"tenant", r.Tenant != ""},
 		{"key", r.Key != ""}, {"machine", r.Machine != ""},
@@ -148,6 +149,8 @@ func parseControl(line []byte) (controlRecord, error) {
 		return r, fmt.Errorf("control record token_sha256 is not %d hex digits", 2*sha256.Size)
 	case slices.Contains(r.SessionIDs, "") || (r.SessionIDs != nil && len(r.SessionIDs) == 0):
 		return r, fmt.Errorf("control record session_ids holds an empty id or none")
+	case len(r.SessionAuthors) != len(r.SessionIDs) || slices.ContainsFunc(r.SessionAuthors, func(a string) bool { return !wire.ValidSegment(a) }):
+		return r, fmt.Errorf("control record session_authors must name one author per session id")
 	case r.InviteAuthor != "" && !wire.ValidSegment(r.InviteAuthor):
 		return r, fmt.Errorf("control record invite_author %q", r.InviteAuthor)
 	case r.Machine != "" && !wire.ValidSegment(r.Machine):

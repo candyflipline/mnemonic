@@ -8,7 +8,7 @@ func TestParseControl(t *testing.T) {
 		id    = `"link_id":"0123456789ab"`
 		token = `"token_sha256":"` + "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" + `"`
 		key   = `"key":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"`
-		read  = `"action":"link","kind":"read",` + id + `,` + token + `,"session_ids":["s1","s2"],"cutoff":"2026-10-27T22:00:00Z","expires":"2026-11-26T22:00:00Z","author":"chris","tenant":"default",`
+		read  = `"action":"link","kind":"read",` + id + `,` + token + `,"session_ids":["s1","s2"],"session_authors":["vlad","chris"],"cutoff":"2026-10-27T22:00:00Z","expires":"2026-11-26T22:00:00Z","author":"chris","tenant":"default",`
 		inv   = `"action":"link","kind":"invite",` + id + `,` + token + `,"invite_author":"vlad","expires":"2026-11-03T22:00:00Z","author":"chris","tenant":"default",`
 	)
 	for _, tc := range []struct{ line, err string }{
@@ -29,6 +29,9 @@ func TestParseControl(t *testing.T) {
 		{`{` + inv + `"title":"t",` + ts + `}`, `control record link/invite carries title`},
 		{`{"action":"link","kind":"write",` + id + `,` + ts + `}`, `control record action "link" kind "write"`},
 		{`{"action":"link","kind":"read",` + id + `,` + token + `,"cutoff":"2026-10-27T22:00:00Z","expires":"2026-11-26T22:00:00Z","author":"chris","tenant":"default",` + ts + `}`, `control record link/read lacks session_ids`},
+		{`{` + read + `"session_authors":["vlad"],` + ts + `}`, `control record session_authors must name one author per session id`},
+		{`{` + read + `"session_authors":["vlad","../x"],` + ts + `}`, `control record session_authors must name one author per session id`},
+		{`{"action":"link","kind":"read",` + id + `,` + token + `,"session_ids":["s1"],"cutoff":"2026-10-27T22:00:00Z","expires":"2026-11-26T22:00:00Z","author":"chris","tenant":"default",` + ts + `}`, `control record link/read lacks session_authors`},
 		{`{` + read + `"session_ids":[],` + ts + `}`, `control record session_ids holds an empty id or none`},
 		{`{"action":"join",` + id + `,` + key + `,` + ts + `}`, `control record join lacks machine`},
 		{`{"action":"join",` + id + `,"key":"short","machine":"m",` + ts + `}`, `control record: key "short" must be unpadded base64url of 32 bytes`},

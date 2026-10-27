@@ -61,6 +61,7 @@ type link struct {
 	kind             linkKind
 	token            TokenHash
 	sessions         []string
+	sessionAuthors   []string
 	title, note      string
 	cutoff, expires  time.Time
 	created          time.Time
@@ -85,7 +86,7 @@ func (c *Controls) applyLink(r controlRecord) {
 		if l.kind != "" {
 			return
 		}
-		l.kind, l.sessions, l.title, l.note = r.Kind, r.SessionIDs, r.Title, r.Note
+		l.kind, l.sessions, l.sessionAuthors, l.title, l.note = r.Kind, r.SessionIDs, r.SessionAuthors, r.Title, r.Note
 		l.cutoff, l.expires, l.created = r.Cutoff, r.Expires, r.TS
 		l.author, l.tenant, l.invite = r.Author, r.Tenant, r.InviteAuthor
 		hex.Decode(l.token[:], []byte(r.TokenSHA256))
@@ -124,8 +125,8 @@ type ReadLink struct {
 	Cutoff          time.Time
 }
 
-// OpenRead is the read link h names. A session shows while it is not
-// deleted and the link's author is still its sole author, so a foreign line
+// OpenRead is the read link h names. A session shows while it is not deleted
+// and its sole author is still the one the link recorded, so a foreign line
 // pushed under a linked id hides the session instead of joining the link.
 func (c *Controls) OpenRead(db *DB, h TokenHash, now time.Time) (ReadLink, error) {
 	c.mu.RLock()
@@ -138,8 +139,8 @@ func (c *Controls) OpenRead(db *DB, h TokenHash, now time.Time) (ReadLink, error
 		return ReadLink{}, ErrLinkGone
 	}
 	rl := ReadLink{ID: l.id, Title: l.title, Note: l.note, Cutoff: l.cutoff}
-	for _, s := range l.sessions {
-		if !c.sessions[s].deleted && slices.Equal(db.sessionAuthors(s), []string{l.author}) {
+	for i, s := range l.sessions {
+		if !c.sessions[s].deleted && slices.Equal(db.sessionAuthors(s), []string{l.sessionAuthors[i]}) {
 			rl.SessionIDs = append(rl.SessionIDs, s)
 		}
 	}
