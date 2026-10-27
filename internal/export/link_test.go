@@ -33,7 +33,7 @@ func linkDB(t *testing.T, lines []string) *index.DB {
 func linkView(cutoff time.Time) LinkView {
 	return LinkView{
 		Title:       "QUIC context",
-		SessionIDs:  []string{linkSessionID},
+		ReadableIDs: []string{linkSessionID},
 		Cutoff:      cutoff,
 		MarkdownURL: "https://share.example/s/tok.md",
 		SessionURL: func(n int, ext string) string {

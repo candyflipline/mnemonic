@@ -77,7 +77,7 @@ func linkError(w http.ResponseWriter, err error) {
 func (s *Server) linkView(token string, l index.ReadLink) export.LinkView {
 	base := s.share.BaseURL + "/s/" + token
 	return export.LinkView{
-		Title: l.Title, Note: l.Note, SessionIDs: l.SessionIDs, Cutoff: l.Cutoff,
+		Title: l.Title, Note: l.Note, ReadableIDs: l.SessionIDs, Cutoff: l.Cutoff,
 		MarkdownURL: base + ".md",
 		SessionURL:  func(n int, ext string) string { return fmt.Sprintf("%s/%d.%s", base, n, ext) },
 	}

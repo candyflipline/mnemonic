@@ -13,13 +13,11 @@ import (
 	"github.com/candyflipline/mnemonic/internal/index"
 )
 
-// LinkView is one read link as the renderers see it: the sessions the caller
-// already checked are readable, in the owner's order, read as of Cutoff.
-// MarkdownURL is the whole link's .md URL. SessionURL gives the URL of
-// session n (1-based) in format ext, "md" or "json".
+// LinkView is one read link as the renderers see it. SessionURL gives the
+// URL of ReadableIDs[n-1] in format ext, "md" or "json".
 type LinkView struct {
 	Title, Note string
-	SessionIDs  []string
+	ReadableIDs []string
 	Cutoff      time.Time
 	MarkdownURL string
 	SessionURL  func(n int, ext string) string
@@ -69,10 +67,10 @@ type linkSession struct {
 }
 
 func openCut(db *index.DB, v LinkView, n int) (*trajectory, error) {
-	if n < 1 || n > len(v.SessionIDs) {
-		return nil, fmt.Errorf("export: %w: link has %d sessions, not %d", ErrSessionNotFound, len(v.SessionIDs), n)
+	if n < 1 || n > len(v.ReadableIDs) {
+		return nil, fmt.Errorf("export: %w: link has %d sessions, not %d", ErrSessionNotFound, len(v.ReadableIDs), n)
 	}
-	t, err := newTrajectory(db, v.SessionIDs[n-1], nil)
+	t, err := newTrajectory(db, v.ReadableIDs[n-1], nil)
 	if err != nil {
 		return nil, err
 	}
@@ -81,10 +79,10 @@ func openCut(db *index.DB, v LinkView, n int) (*trajectory, error) {
 }
 
 func openLinkSession(db *index.DB, v LinkView, n int) (*linkSession, error) {
-	if n < 1 || n > len(v.SessionIDs) {
-		return nil, fmt.Errorf("export: %w: link has %d sessions, not %d", ErrSessionNotFound, len(v.SessionIDs), n)
+	if n < 1 || n > len(v.ReadableIDs) {
+		return nil, fmt.Errorf("export: %w: link has %d sessions, not %d", ErrSessionNotFound, len(v.ReadableIDs), n)
 	}
-	s, err := openSession(db, v.SessionIDs[n-1], nil)
+	s, err := openSession(db, v.ReadableIDs[n-1], nil)
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +100,7 @@ func openLinkSession(db *index.DB, v LinkView, n int) (*linkSession, error) {
 }
 
 func openLink(db *index.DB, v LinkView) ([]*linkSession, error) {
-	out := make([]*linkSession, len(v.SessionIDs))
+	out := make([]*linkSession, len(v.ReadableIDs))
 	for i := range out {
 		ls, err := openLinkSession(db, v, i+1)
 		if err != nil {
