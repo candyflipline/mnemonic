@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"slices"
 	"sort"
 )
@@ -21,10 +22,6 @@ type turnRec struct {
 	terminal            int64
 }
 
-// partAcc accumulates the files of one part from its docs, fed through one
-// sessionFeed per session, each session's docs in event order. The four files
-// that grow by a record per doc go to their writers as the docs arrive;
-// everything else is held until finish writes it.
 type partAcc struct {
 	hot, hotOffW, docs, blob flushWriter
 
@@ -64,6 +61,7 @@ type sessionFeed struct {
 	p       *partAcc
 	si      int
 	users   uint32
+	lastUs  int64
 	perTurn map[uint32]*turnRec
 }
 
@@ -76,7 +74,7 @@ func (p *partAcc) session(sid string) *sessionFeed {
 	p.endOpen()
 	p.sessionIDs = append(p.sessionIDs, sid)
 	p.sessions = append(p.sessions, sessRec{start: uint32(p.nDocs)})
-	p.open = &sessionFeed{p: p, si: len(p.sessions) - 1, perTurn: map[uint32]*turnRec{}}
+	p.open = &sessionFeed{p: p, si: len(p.sessions) - 1, lastUs: math.MinInt64, perTurn: map[uint32]*turnRec{}}
 	return p.open
 }
 
@@ -107,6 +105,11 @@ func (f *sessionFeed) add(r *Row, memberIdx uint16, lf int64, li int) (uint32, e
 	if p.open != f {
 		return 0, fmt.Errorf("index: doc added to session %d after it ended", f.si)
 	}
+	us := eventTimeUs(r)
+	if us < f.lastUs {
+		return 0, fmt.Errorf("index: doc at %d us added to session %d after one at %d us", us, f.si, f.lastUs)
+	}
+	f.lastUs = us
 	d := p.nDocs
 	si := f.si
 	s := &p.sessions[si]
@@ -131,12 +134,10 @@ func (f *sessionFeed) add(r *Row, memberIdx uint16, lf int64, li int) (uint32, e
 		t.terminal = int64(d)
 	}
 	ms := timeMs(r)
-	if d == int(s.start) || ms < s.first {
+	if d == int(s.start) {
 		s.first = ms
 	}
-	if d == int(s.start) || ms > s.last {
-		s.last = ms
-	}
+	s.last = ms
 
 	p.offBuf = binary.LittleEndian.AppendUint64(p.offBuf[:0], uint64(p.hotLen))
 	p.hotBuf = hotRow(*r).append(p.hotBuf[:0])
