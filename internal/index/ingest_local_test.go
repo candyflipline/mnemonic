@@ -103,7 +103,7 @@ func TestAnnotateStoresOnlyRedactedText(t *testing.T) {
 		t.Fatal(err)
 	}
 	keys := auth.NewKeys(map[string]auth.Grant{
-		"k-a": {Author: "a", Scopes: []auth.Scope{auth.Read, auth.Annotate}},
+		"k-a": {Tenant: auth.DefaultTenant, Author: "a", Scopes: []auth.Scope{auth.Read, auth.Annotate}},
 	})
 	ctl, err := LoadControls(dir)
 	if err != nil {

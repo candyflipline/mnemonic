@@ -28,11 +28,6 @@ var Scopes = [...]Scope{Read, Push, Annotate, Admin}
 // author no key entry names.
 const DefaultTenant = "default"
 
-var DefaultScopes = []Scope{Read, Push}
-
-// Grant is one configured key's rights: the tenant and author it acts as and
-// what it may do. An empty Tenant is DefaultTenant and nil Scopes are
-// DefaultScopes.
 type Grant struct {
 	Tenant, Author string
 	Scopes         []Scope
@@ -126,16 +121,11 @@ type Keys struct{ byKey map[string]Identity }
 func NewKeys(byKey map[string]Grant) Keys {
 	tenantOf := map[string]string{}
 	for _, g := range byKey {
-		tenantOf[g.Author] = tenantOr(g.Tenant)
+		tenantOf[g.Author] = g.Tenant
 	}
 	ids := make(map[string]Identity, len(byKey))
 	for k, g := range byKey {
-		scopes := g.Scopes
-		if scopes == nil {
-			scopes = DefaultScopes
-		}
-		tenant := tenantOr(g.Tenant)
-		ids[k] = Identity{p: configured{tenantName: tenant, authorName: g.Author, scopes: scopes, set: members(tenantOf, tenant)}}
+		ids[k] = Identity{p: configured{tenantName: g.Tenant, authorName: g.Author, scopes: g.Scopes, set: members(tenantOf, g.Tenant)}}
 	}
 	return Keys{byKey: ids}
 }
@@ -148,13 +138,6 @@ func (k Keys) Identify(key string) (Identity, bool) {
 // Local is the in-process identity of local mode: DefaultTenant, every scope.
 func Local(author string) Identity {
 	return Identity{p: configured{tenantName: DefaultTenant, authorName: author, scopes: slices.Clone(Scopes[:]), set: AuthorSet{Except: true}}}
-}
-
-func tenantOr(t string) string {
-	if t == "" {
-		return DefaultTenant
-	}
-	return t
 }
 
 func members(tenantOf map[string]string, tenant string) AuthorSet {

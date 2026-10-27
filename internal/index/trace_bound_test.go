@@ -92,7 +92,7 @@ func traceBoundCalls(t *testing.T, dir, hid, sid, late string, spansBytes int) (
 		t.Fatal(err)
 	}
 	keys := auth.NewKeys(map[string]auth.Grant{
-		"k-h": {Author: "h", Scopes: []auth.Scope{auth.Read, auth.Annotate}},
+		"k-h": {Tenant: auth.DefaultTenant, Author: "h", Scopes: []auth.Scope{auth.Read, auth.Annotate}},
 		"k-z": {Tenant: "other", Author: "z", Scopes: []auth.Scope{auth.Read}},
 	})
 	base := WithControls(context.Background(), ctl)
