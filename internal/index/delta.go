@@ -168,7 +168,7 @@ func mkdirDeltas(dd string) error {
 // commits part did over them. It reports false, writing nothing, when the
 // delta would outgrow foldRatio times the image, and otherwise the bytes it
 // wrote: the delta logs' growth and the committed delta.json, and the part it
-// opened over them, stamped with the committed dir.
+// opened over them, stamped with the committed dir, which Refresh serves in place of opening the delta again.
 func appendDelta(store string, members []ckpt, base delta, did string) (bool, int64, *Part, error) {
 	ok, written, st, err := writeDelta(store, members, base, did)
 	if st == nil {
