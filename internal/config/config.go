@@ -4,26 +4,24 @@ package config
 
 import "github.com/candyflipline/mnemonic/internal/auth"
 
-// Client is ~/.mnemonic/config.toml.
+// Client is ~/.mnemonic/config.toml. Server is quic://host:port, the only
+// scheme.
 //
-//	server  = "https://mnemonic.example"   # push dials mnemonic.example:8741 over TLS
-//	push_address = "host:port" # optional; overrides the push target, same scheme as server
-//	token   = "..."            # or token_file = "~/.mnemonic/token"
-//	machine = "chris-mbp"      # defaults to the short hostname
+//	server     = "quic://mnemonic.example:8741"
+//	server_key = "..."                # the server's key: `mnemonic key --file` on the server
+//	key_file   = "~/.mnemonic/key"    # this machine's key; this is the default
+//	machine    = "chris-mbp"          # defaults to the short hostname
 //	[[sources]]
 //	harness = "claude-code"; source_name = "claude"; glob = "~/.claude/projects/**/*.jsonl"
 //	[redaction]
 //	extra_patterns = []
 type Client struct {
-	Server      string          `toml:"server"`
-	PushAddress string          `toml:"push_address"`
-	Token       string          `toml:"token"`
-	TokenFile   string          `toml:"token_file"`
-	ServerKey   string          `toml:"server_key"`
-	KeyFile     string          `toml:"key_file"`
-	Machine     string          `toml:"machine"`
-	Sources     []SourceGlob    `toml:"sources"`
-	Redaction   ClientRedaction `toml:"redaction"`
+	Server    string          `toml:"server"`
+	ServerKey string          `toml:"server_key"`
+	KeyFile   string          `toml:"key_file"`
+	Machine   string          `toml:"machine"`
+	Sources   []SourceGlob    `toml:"sources"`
+	Redaction ClientRedaction `toml:"redaction"`
 }
 
 type SourceGlob struct {

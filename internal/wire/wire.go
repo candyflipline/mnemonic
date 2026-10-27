@@ -12,10 +12,6 @@ import (
 
 const HeadCap = 64 << 10
 
-// PushPort is the port an https server URL's push listener answers on: the
-// client dials it, and a server with [tls] must listen on it.
-const PushPort = "8741"
-
 var segmentRe = regexp.MustCompile(`^[a-z0-9._-]+$`)
 
 func ValidSegment(s string) bool {
