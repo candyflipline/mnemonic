@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/candyflipline/mnemonic/internal/schema"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -25,10 +26,6 @@ type built struct {
 	src uint16
 	lf  int64
 	li  int
-	// hrec is the row's heavy record, resolved from the holder part it was
-	// read from; nil reads the record from the member's own heavy log at
-	// place time (heavyReader.record).
-	hrec []byte
 }
 
 // partEncoder and partHeavyEncoder compress a part's frames. A part is
@@ -241,7 +238,9 @@ func walkMember(store string, c ckpt, holder *Part, from int64, fn func(rec []by
 }
 
 // memberRows returns one member's rows for a delta image: walkMember's
-// records decoded, the holder's with their heavy records resolved from it.
+// records decoded, located at their holder frame when the holder carries
+// them. Heavy records are not resolved here; the open's heavyReader reads
+// them when a payload is asked for.
 func memberRows(store string, si int, c ckpt, holder *Part, from int64) ([]built, error) {
 	var out []built
 	err := walkMember(store, c, holder, from, func(rec []byte, loc rowLoc) error {
@@ -257,14 +256,7 @@ func memberRows(store string, si int, c ckpt, holder *Part, from int64) ([]built
 		r.Author = c.Author
 		b := built{row: r, src: uint16(si)}
 		if loc.holder {
-			hrecs, err := holder.fc.heavyFrame(holder, r.HeavyFrame)
-			if err != nil {
-				return fmt.Errorf("%s: holder %s: %w", c.Key, holder.meta.Fingerprint, err)
-			}
-			if int(r.HeavyIdx) >= len(hrecs) {
-				return fmt.Errorf("%s: holder %s: heavy index past frame", c.Key, holder.meta.Fingerprint)
-			}
-			b.lf, b.li, b.hrec = loc.lf, int(loc.li), hrecs[r.HeavyIdx]
+			b.lf, b.li = loc.lf, int(loc.li)
 		}
 		out = append(out, b)
 		return nil
@@ -391,10 +383,36 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 		rows += int(c.Rows)
 	}
 	kp := newKeyPass(members, rows)
+	heavy := newHeavyReader(store, cks)
+	defer heavy.close()
+	annRows := map[string][]annRow{}
 	for si, c := range cks {
 		members[si] = memberOf(c)
 		if cold {
 			members[si].Gen, members[si].LightLen, members[si].HeavyLen = 0, 0, 0
+		}
+		if c.Harness == schema.AnnotationHarness {
+			// An annotation row feeds only the annotations section: it is no
+			// doc, so it never competes for a uid, adds no session author, and
+			// reaches no term, turn or rollup. Its target may be a session
+			// this part holds no rows of.
+			err := walkLog(store, c, 0, func(rec []byte, _ int64, _ int) error {
+				r := new(Row)
+				if _, err := r.decode(rec); err != nil {
+					return err
+				}
+				r.Author = c.Author
+				hrec, err := heavy.record(built{row: r, src: uint16(si)})
+				if err != nil {
+					return err
+				}
+				annRows[r.Session] = append(annRows[r.Session], annRow{payload: heavyPayload(hrec), author: c.Author})
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+			continue
 		}
 		holder := plan.holder[si]
 		if holder != nil && !merged[holder] {
@@ -413,8 +431,6 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 	sessionIDs := kp.sessions.list
 	kp = nil
 
-	heavy := newHeavyReader(store, cks)
-	defer heavy.close()
 	dir := partDir + ".tmp"
 	os.RemoveAll(dir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -541,6 +557,12 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 	}
 	if view.heavy.err != nil {
 		return view.heavy.err
+	}
+	// The annotations section: one entry per annotation_id over the
+	// annotation rows, in (source key, row) order, for sessions this part may
+	// hold no docs of.
+	for sid, rows := range annRows {
+		secs.ann[sid] = buildAnnotations(rows)
 	}
 
 	write := func(name string, b []byte) error { return os.WriteFile(filepath.Join(dir, name), b, 0o644) }
@@ -826,9 +848,6 @@ func (h *heavyReader) logAt(src int) (io.ReaderAt, error) {
 // record is the heavy record of b: payload_json then token_usage_json, each a
 // uvarint length and its bytes.
 func (h *heavyReader) record(b built) ([]byte, error) {
-	if b.hrec != nil {
-		return b.hrec, nil
-	}
 	if h.err != nil {
 		return nil, h.err
 	}

@@ -378,9 +378,13 @@ func eventsOf(t *testing.T, ix *index.Index, session string) string {
 	if !ok {
 		t.Fatalf("session %q missing from the index", session)
 	}
-	lines := make([]string, len(es.Rows))
-	for i, r := range es.Rows {
-		lines[i] = r.ItemID + "|" + r.Session + "|" + r.OpKind + "|" + strconv.FormatUint(r.LatencyMs, 10) + "|" + r.AgentLabel
+	var lines []string
+	err = es.EachRow(func(r *index.Row) error {
+		lines = append(lines, r.ItemID+"|"+r.Session+"|"+r.OpKind+"|"+strconv.FormatUint(r.LatencyMs, 10)+"|"+r.AgentLabel)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -435,11 +439,15 @@ func TestReceiverRows(t *testing.T) {
 		}
 		uids := map[string]bool{}
 		n := 0
-		for _, r := range es.Rows {
+		err = es.EachRow(func(r *index.Row) error {
 			if r.ItemID == "eee19b7ec3c1b175" {
 				n++
 				uids[r.UID] = true
 			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
 		}
 		// 59796bc answered alice|1 and bob|1 for this grouping (per-row
 		// author was an events column); the engine keeps both rows too, and

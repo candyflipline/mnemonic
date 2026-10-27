@@ -20,10 +20,17 @@ type manifestFile struct {
 
 // DB is every part of one committed manifest. Parts partition sessions, so a
 // session's events, turns and rollups live in exactly one part; only BM25's
-// corpus statistics are summed across parts.
+// corpus statistics are summed across parts. A part is shared by every DB
+// that names it and closes with the last of them. Only the annotations
+// section crosses parts: a part may hold annotation entries for a session
+// whose rows live in another part, so annPart indexes, per target session,
+// every part whose annotations section holds it.
 type DB struct {
 	parts      []*Part
+	ids        []string
+	fc         *frameCache
 	sessPart   map[string]int
+	annPart    map[string][]int
 	scoredDocs uint64
 	totalLen   uint64
 	sources    []stSource
@@ -54,30 +61,65 @@ func (e *PartOpenError) Error() string {
 	return fmt.Sprintf("current names part %s, which does not open: %v", e.Part, e.Err)
 }
 
-func OpenDB(store string) (*DB, error) {
+func OpenDB(store string) (*DB, error) { return openDB(store, nil, nil) }
+
+// openDB opens the parts CURRENT names, taking from prev each one it opened
+// from the same dir. A committed part dir is never written again, and the
+// delta logs a delta part reads are truncated only to the length the delta
+// in CURRENT names, so a part taken from prev reads what a fresh open would, and a hot delta is indexed once, not once per Refresh.
+// The caller keeps prev pinned until openDB returns. opened is parts the
+// caller opened, by id, and hands over: each one CURRENT names joins the DB
+// when its stamp matches the dir's, and every other one closes.
+func openDB(store string, prev *DB, opened map[string]*Part) (*DB, error) {
+	defer func() { closeParts(opened) }()
 	m, err := readManifest(store)
 	if err != nil {
 		return nil, err
 	}
+	had := map[string]*Part{}
+	fc := newFrameCache()
+	if prev != nil && prev.fc != nil {
+		fc = prev.fc
+		for i, id := range prev.ids {
+			had[id] = prev.parts[i]
+		}
+	}
 	parts := make([]*Part, len(m.Parts))
+	taken := make([]bool, len(m.Parts))
 	errs := make([]error, len(m.Parts))
 	eachIndex(len(m.Parts), func(i int) {
-		parts[i], errs[i] = OpenPartDir(partDir(store, m.Parts[i]))
+		dir := partDir(store, m.Parts[i])
+		if p := had[m.Parts[i]]; p != nil {
+			if at, err := dirStampOf(dir); err == nil && at == p.at {
+				parts[i], taken[i] = p, true
+				return
+			}
+		}
+		if p := opened[m.Parts[i]]; p != nil {
+			if at, err := dirStampOf(dir); err == nil && at == p.at {
+				parts[i] = p
+				return
+			}
+		}
+		parts[i], errs[i] = OpenPartDir(dir)
 	})
+	for i, p := range parts {
+		if p != nil && opened[m.Parts[i]] == p {
+			delete(opened, m.Parts[i])
+		}
+	}
 	for i, err := range errs {
 		if err != nil {
-			for _, p := range parts {
-				if p != nil {
+			for j, p := range parts {
+				if p != nil && !taken[j] {
 					p.Close()
 				}
 			}
 			return nil, &PartOpenError{Part: m.Parts[i], Err: err}
 		}
 	}
-	db, err := OpenParts(parts)
-	if err != nil {
-		return nil, err
-	}
+	db := newDB(parts, fc)
+	db.ids = m.Parts
 	db.sources = m.Sources
 	return db, nil
 }
@@ -85,22 +127,32 @@ func OpenDB(store string) (*DB, error) {
 // OpenParts is a DB over parts the caller opened. It answers every tool but
 // get_ingest_status, which has no source rows here.
 func OpenParts(parts []*Part) (*DB, error) {
-	db := &DB{parts: parts, sessPart: map[string]int{}}
-	fc := newFrameCache()
+	return newDB(parts, newFrameCache()), nil
+}
+
+// newDB holds each of parts once more. A part another DB already holds keeps
+// its frame cache, which is fc: the DB it came from handed fc on.
+func newDB(parts []*Part, fc *frameCache) *DB {
+	db := &DB{parts: parts, fc: fc, sessPart: map[string]int{}, annPart: map[string][]int{}}
 	for i, st := range parts {
-		st.fc = fc
+		if st.refs.Add(1) == 1 {
+			st.fc = fc
+		}
 		db.scoredDocs += st.meta.ScoredDocs
 		db.totalLen += st.meta.TotalLen
 		for s := 0; s < st.nSessions; s++ {
 			db.sessPart[st.session(s).id] = i
 		}
+		for sid := range st.annAt.of(st.annB) {
+			db.annPart[sid] = append(db.annPart[sid], i)
+		}
 	}
-	return db, nil
+	return db
 }
 
 func (db *DB) Close() {
 	for _, st := range db.parts {
-		st.Close()
+		st.release()
 	}
 }
 

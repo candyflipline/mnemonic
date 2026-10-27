@@ -34,11 +34,29 @@ func buildAnnotations(rows []annRow) []schema.Annotation {
 	return out
 }
 
-// sessionAnnotations is the annotations targeting sessionID.
+// sessionAnnotations is the annotations targeting sessionID, merged from
+// every part whose annotations section holds it: one per annotation_id, a
+// duplicate id across parts keeping the earliest ts (equal ts keeps the one
+// from the lower part index), in the section order ts then id.
 func (db *DB) sessionAnnotations(sessionID string) []schema.Annotation {
-	st, ok := db.part(sessionID)
+	at, ok := db.annPart[sessionID]
 	if !ok {
 		return nil
 	}
-	return st.annOf(sessionID)
+	var out []schema.Annotation
+	seen := map[string]int{}
+	for _, i := range at {
+		for _, a := range db.parts[i].annOf(sessionID) {
+			if j, ok := seen[a.ID]; ok {
+				if a.TS.Before(out[j].TS) {
+					out[j] = a
+				}
+				continue
+			}
+			seen[a.ID] = len(out)
+			out = append(out, a)
+		}
+	}
+	sortAnnotations(out)
+	return out
 }

@@ -1,7 +1,6 @@
 package export
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -25,10 +24,8 @@ import (
 
 // ValidateJSON validates one ATIF document, given as JSON bytes.
 func ValidateJSON(b []byte) []string {
-	var doc any
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.UseNumber()
-	if err := dec.Decode(&doc); err != nil {
+	doc, err := decodeNumbers(b)
+	if err != nil {
 		return []string{"Invalid JSON: " + err.Error()}
 	}
 	return Validate(doc)
@@ -214,6 +211,22 @@ func (v *validator) trajectory(doc any) {
 	if !ok {
 		return
 	}
+	v.trajectoryHead(obj)
+	steps, ok := obj["steps"]
+	if !ok || steps == nil {
+		v.missing("steps") // m-trajectory.py:66-70
+	} else if list, ok := v.wantArray("steps", steps); ok {
+		var c stepsCheck
+		for _, s := range list {
+			c.add(s)
+		}
+		v.errs = append(v.errs, c.errs()...)
+	}
+	v.trajectoryTail(obj)
+}
+
+// trajectoryHead validates the root's fields up to steps.
+func (v *validator) trajectoryHead(obj map[string]any) {
 	v.extraForbid("", obj, trajectoryKeys)
 
 	// schema_version defaults to ATIF-v1.8 when absent, but a present null is
@@ -247,21 +260,10 @@ func (v *validator) trajectory(doc any) {
 	} else {
 		v.agent(join("", "agent"), agent)
 	}
+}
 
-	steps, ok := obj["steps"]
-	if !ok || steps == nil {
-		v.missing("steps") // m-trajectory.py:66-70
-	} else if list, ok := v.wantArray("steps", steps); ok {
-		if len(list) == 0 {
-			v.addf("steps", "List should have at least 1 item after validation, not 0") // m-trajectory.py:68
-		}
-		for i, s := range list {
-			v.step(strconv.Itoa(i), s)
-		}
-		v.stepIDsSequential(list)
-		v.toolCallReferences(list)
-	}
-
+// trajectoryTail validates the root's fields after steps.
+func (v *validator) trajectoryTail(obj map[string]any) {
 	if fm, ok := obj["final_metrics"]; ok && fm != nil {
 		v.finalMetrics("final_metrics", fm)
 	}
@@ -269,6 +271,28 @@ func (v *validator) trajectory(doc any) {
 	if subs, ok := obj["subagent_trajectories"]; ok && subs != nil {
 		v.embeddedSubagents("subagent_trajectories", subs)
 	}
+}
+
+// stepsCheck validates a steps array one element at a time and reports in
+// the whole array's order: every step's own rules, then step-id sequencing,
+// then tool-call references.
+type stepsCheck struct {
+	own, seq, refs validator
+	n              int
+}
+
+func (c *stepsCheck) add(step any) {
+	c.own.step(strconv.Itoa(c.n), step)
+	c.seq.stepIDSequential(c.n, step)
+	c.refs.toolCallReferences(c.n, step)
+	c.n++
+}
+
+func (c *stepsCheck) errs() []string {
+	if c.n == 0 {
+		return []string{"trajectory.steps: List should have at least 1 item after validation, not 0"} // m-trajectory.py:68
+	}
+	return slices.Concat(c.own.errs, c.seq.errs, c.refs.errs)
 }
 
 // agent validates the agent object (m-agent.py:8-32, atif.md AgentSchema
@@ -408,68 +432,65 @@ func (v *validator) step(loc string, doc any) {
 	}
 }
 
-// stepIDsSequential ports the Trajectory.validate_step_ids model validator:
-// step_id counts from 1 without gaps (m-trajectory.py:120-130).
-func (v *validator) stepIDsSequential(steps []any) {
-	for i, s := range steps {
-		obj, ok := s.(map[string]any)
-		if !ok {
-			continue
-		}
-		got, ok := obj["step_id"].(json.Number)
-		if !ok {
-			continue
-		}
-		want := strconv.Itoa(i + 1)
-		if got.String() != want {
-			v.addf("steps."+strconv.Itoa(i)+".step_id",
-				"expected %s (sequential from 1), got %s", want, got.String())
-		}
+// stepIDSequential ports the Trajectory.validate_step_ids model validator
+// for the step at index i: step_id counts from 1 without gaps
+// (m-trajectory.py:120-130).
+func (v *validator) stepIDSequential(i int, s any) {
+	obj, ok := s.(map[string]any)
+	if !ok {
+		return
+	}
+	got, ok := obj["step_id"].(json.Number)
+	if !ok {
+		return
+	}
+	want := strconv.Itoa(i + 1)
+	if got.String() != want {
+		v.addf("steps."+strconv.Itoa(i)+".step_id",
+			"expected %s (sequential from 1), got %s", want, got.String())
 	}
 }
 
-// toolCallReferences ports Trajectory.validate_tool_call_references: every
-// result's source_call_id must name a tool_call_id of the same step
-// (m-trajectory.py:164-185).
-func (v *validator) toolCallReferences(steps []any) {
-	for i, s := range steps {
-		obj, ok := s.(map[string]any)
-		if !ok {
-			continue
-		}
-		where := "steps." + strconv.Itoa(i)
-		obs, ok := obj["observation"].(map[string]any)
-		if !ok {
-			continue
-		}
-		results, ok := obs["results"].([]any)
-		if !ok {
-			continue
-		}
-		ids := map[string]bool{}
-		if tcs, ok := obj["tool_calls"].([]any); ok {
-			for _, tc := range tcs {
-				if m, ok := tc.(map[string]any); ok {
-					if id, ok := m["tool_call_id"].(string); ok {
-						ids[id] = true
-					}
+// toolCallReferences ports Trajectory.validate_tool_call_references for the
+// step at index i: every result's source_call_id must name a tool_call_id of
+// the same step (m-trajectory.py:164-185).
+func (v *validator) toolCallReferences(i int, s any) {
+	obj, ok := s.(map[string]any)
+	if !ok {
+		return
+	}
+	where := "steps." + strconv.Itoa(i)
+	obs, ok := obj["observation"].(map[string]any)
+	if !ok {
+		return
+	}
+	results, ok := obs["results"].([]any)
+	if !ok {
+		return
+	}
+	ids := map[string]bool{}
+	if tcs, ok := obj["tool_calls"].([]any); ok {
+		for _, tc := range tcs {
+			if m, ok := tc.(map[string]any); ok {
+				if id, ok := m["tool_call_id"].(string); ok {
+					ids[id] = true
 				}
 			}
 		}
-		for j, r := range results {
-			m, ok := r.(map[string]any)
-			if !ok {
-				continue
+	}
+	for j, r := range results {
+		m, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+		if id, ok := m["source_call_id"].(string); ok && !ids[id] {
+			stepNo := 0
+			if n, ok := obj["step_id"].(json.Number); ok {
+				stepNo, _ = strconv.Atoi(n.String())
 			}
-			if id, ok := m["source_call_id"].(string); ok && !ids[id] {
-				stepNo := 0
-				if n, ok := obj["step_id"].(json.Number); ok {
-					stepNo, _ = strconv.Atoi(n.String())
-				}
-				v.addf(where+".observation.results."+strconv.Itoa(j)+".source_call_id",
-					"Observation result references source_call_id '%s' which is not found in step %d's tool_calls",
-					id, stepNo)
-			}
+			v.addf(where+".observation.results."+strconv.Itoa(j)+".source_call_id",
+				"Observation result references source_call_id '%s' which is not found in step %d's tool_calls",
+				id, stepNo)
 		}
 	}
 }

@@ -1,35 +1,39 @@
-//go:build server
-
 package main
 
 import (
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
+	"github.com/candyflipline/mnemonic/internal/config"
 	"github.com/candyflipline/mnemonic/internal/export"
-	"github.com/candyflipline/mnemonic/internal/index"
-	"github.com/candyflipline/mnemonic/internal/layout"
 )
 
 func init() { commands["export"] = exportCmd }
 
-const exportUsage = `usage: mnemonic export atif|otlp --data-dir D --session S [--out F]
-       mnemonic export dataset --data-dir D --annotation N[=V] --per-task K [--include-private] [--out F]
+const exportUsage = `usage: mnemonic export atif|otlp --session S [--out F] [target]
+       mnemonic export dataset --annotation N[=V] [--per-task K] [--include-private] [--out F] [target]
+target: [--config C] [--server URL] [--token-file F] | --local [--server URL]
 
-export runs on the server's data dir and sees every author. It honours the
-session controls there: a deleted session is refused ("session not found") by
-atif and otlp and skipped by dataset, and dataset also skips private sessions
-unless --include-private is given. A session that fails ATIF validation is
-skipped by dataset with its id and error on stderr; dataset fails only when
-every matching session did.`
+export asks the server for sessions from the index it serves, with the
+server and token push uses (the client config, or --server and
+--token-file), or a running mnemonic local with --local. It sees what the
+token's MCP read tools see: a session they cannot open is "session not
+found", and a deleted session is never exported. --include-private exports
+every private session too, and needs an admin token over every author. A
+session that fails ATIF validation is skipped by dataset with its id and
+error on stderr; dataset fails only when every matching session did.`
 
-// exportCmd writes sessions out of the index: one ATIF trajectory or OTLP
-// trace per session, or a JSONL dataset filtered by annotation.
+const localServer = "http://127.0.0.1:7781"
+
+// exportCmd streams one ATIF trajectory or OTLP trace, or a JSONL dataset
+// filtered by annotation, from GET /v1/export/{kind} to --out.
 func exportCmd(args []string) error {
 	if len(args) == 0 {
 		return errors.New(exportUsage)
@@ -41,159 +45,139 @@ func exportCmd(args []string) error {
 		return fmt.Errorf("export: unknown kind %q; %s", kind, exportUsage)
 	}
 	fs := flag.NewFlagSet("export "+kind, flag.ContinueOnError)
-	dataDir := fs.String("data-dir", "", "data directory holding raw/ and index/ (required)")
+	configPath := fs.String("config", "~/.mnemonic/config.toml", "client config holding server and token")
+	server := fs.String("server", "", "server URL (default: the config's server, or "+localServer+" with --local)")
+	tokenFile := fs.String("token-file", "", "file holding the bearer token (default: the config's token)")
+	local := fs.Bool("local", false, "ask a running mnemonic local")
 	session := fs.String("session", "", "session id (atif, otlp)")
 	annotation := fs.String("annotation", "", "name[=value] to filter sessions by (dataset)")
 	perTask := fs.Int("per-task", 3, "at most this many sessions per task (dataset)")
-	includePrivate := fs.Bool("include-private", false, "also export private sessions (dataset)")
+	includePrivate := fs.Bool("include-private", false, "also export private sessions (admin token)")
 	out := fs.String("out", "", "output file (default stdout)")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
-	if *dataDir == "" {
-		return errors.New("export: --data-dir is required")
-	}
-	var (
-		sessionID string
-		err       error
-	)
-	if *session != "" {
-		if sessionID, err = rawSessionID(*session); err != nil {
-			return err
-		}
-	}
+	q := url.Values{}
 	if kind == "dataset" {
 		if *annotation == "" {
 			return errors.New("export: --annotation is required")
 		}
-	} else if sessionID == "" {
-		return errors.New("export: --session is required")
+		q.Set("annotation", *annotation)
+		q.Set("per_task", strconv.Itoa(*perTask))
+	} else {
+		if *session == "" {
+			return errors.New("export: --session is required")
+		}
+		q.Set("session", *session)
 	}
-
-	controls, err := index.LoadControls(*dataDir)
+	if *includePrivate {
+		q.Set("include_private", "true")
+	}
+	base, token, err := exportTarget(*configPath, *server, *tokenFile, *local)
 	if err != nil {
 		return err
 	}
-	// A named session is the operator's choice, so only a dataset sweep skips
-	// private ones.
-	hidden := controls.ExportHidden(kind != "dataset" || *includePrivate)
-
-	// One-shot: bring the raw under the data dir into the index, everything
-	// settled, as the converge before an export did. The index dir's writer
-	// lock says whether that is ours to do: under a running writer (the
-	// server) it is not, and export exports the published CURRENT without
-	// ingesting, saying so on stderr.
-	ix, err := index.Open(layout.IndexDir(*dataDir))
+	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(base, "/")+"/v1/export/"+kind+"?"+q.Encode(), nil)
 	if err != nil {
 		return err
 	}
-	defer ix.Close()
-	lock, lockErr := index.HoldIndexLock(layout.IndexDir(*dataDir))
-	switch {
-	case errors.Is(lockErr, index.ErrLocked):
-		fmt.Fprintf(os.Stderr, "export: %v; exporting the published index without ingesting\n", lockErr)
-	case lockErr != nil:
-		return lockErr
-	default:
-		defer lock.Unlock()
-		if _, err := ix.Ingest(*dataDir, index.IngestOptions{SettleAll: true}); err != nil {
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("export: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		io.Copy(io.Discard, resp.Body)
+		printSkipped(resp.Trailer)
+		return fmt.Errorf("export: %s: %s", resp.Status, strings.TrimSpace(string(msg)))
+	}
+	if err := writeOut(*out, resp.Body); err != nil {
+		return err
+	}
+	printSkipped(resp.Trailer)
+	return nil
+}
+
+// exportTarget is the server URL and token to ask: --local's, or the flags
+// over the client config's.
+func exportTarget(configPath, server, tokenFile string, local bool) (string, string, error) {
+	if local {
+		if server == "" {
+			server = localServer
+		}
+		return server, "local", nil
+	}
+	var token string
+	if tokenFile != "" {
+		path, err := config.ExpandHome(tokenFile)
+		if err != nil {
+			return "", "", err
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return "", "", fmt.Errorf("export: token file: %w", err)
+		}
+		token = strings.TrimSpace(string(raw))
+	}
+	if server == "" || token == "" {
+		cfg, err := config.LoadClient(configPath)
+		if err != nil {
+			return "", "", err
+		}
+		if server == "" {
+			server = cfg.Server
+		}
+		if token == "" {
+			token = cfg.Token
+		}
+	}
+	return server, token, nil
+}
+
+// writeOut copies body to path, or to stdout ending in a newline.
+func writeOut(path string, body io.Reader) error {
+	if path != "" && path != "-" {
+		f, err := os.Create(path)
+		if err != nil {
 			return err
 		}
+		if _, err := io.Copy(f, body); err != nil {
+			f.Close()
+			os.Remove(path)
+			return fmt.Errorf("export: %w", err)
+		}
+		return f.Close()
 	}
-	db, release := ix.Snapshot()
-	defer release()
-
-	var body []byte
-	switch kind {
-	case "atif":
-		if body, err = export.MarshalATIF(db, sessionID, hidden); err == nil {
-			body = indent(body)
-		}
-	case "otlp":
-		var doc any
-		if doc, err = export.OTLP(db, sessionID, hidden); err == nil {
-			body, err = json.MarshalIndent(doc, "", "  ")
-		}
-	case "dataset":
-		f, parseErr := parseAnnotation(*annotation)
-		if parseErr != nil {
-			return parseErr
-		}
-		rows, skipped, dsErr := export.Dataset(db, f, *perTask, hidden)
-		for _, s := range skipped {
-			fmt.Fprintf(os.Stderr, "export: skipped session %s: %v\n", s.SessionID, s.Err)
-		}
-		if dsErr != nil {
-			return dsErr
-		}
-		body = datasetLines(rows)
-	default:
-		err = fmt.Errorf("export: unknown kind %q", kind)
+	last := &lastByte{w: os.Stdout}
+	if _, err := io.Copy(last, body); err != nil {
+		return fmt.Errorf("export: %w", err)
 	}
-	if err != nil {
+	if last.n > 0 && last.b != '\n' {
+		_, err := os.Stdout.WriteString("\n")
 		return err
 	}
-	return writeOut(*out, body)
+	return nil
 }
 
-// indent makes a single-session document readable on a terminal.
-func indent(body []byte) []byte {
-	var doc any
-	dec := json.NewDecoder(strings.NewReader(string(body)))
-	dec.UseNumber()
-	if err := dec.Decode(&doc); err != nil {
-		return body
-	}
-	out, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return body
-	}
-	return out
+type lastByte struct {
+	w io.Writer
+	n int64
+	b byte
 }
 
-func datasetLines(rows []export.DatasetRow) []byte {
-	var b strings.Builder
-	for _, row := range rows {
-		line, err := json.Marshal(row)
-		if err != nil {
-			continue
-		}
-		b.Write(line)
-		b.WriteByte('\n')
+func (l *lastByte) Write(p []byte) (int, error) {
+	n, err := l.w.Write(p)
+	if n > 0 {
+		l.n += int64(n)
+		l.b = p[n-1]
 	}
-	return []byte(b.String())
+	return n, err
 }
 
-func writeOut(path string, body []byte) error {
-	if path == "" || path == "-" {
-		_, err := os.Stdout.Write(body)
-		if err == nil && len(body) > 0 && body[len(body)-1] != '\n' {
-			_, err = os.Stdout.WriteString("\n")
-		}
-		return err
+func printSkipped(trailer http.Header) {
+	for _, v := range trailer.Values(export.SkippedTrailer) {
+		fmt.Fprintf(os.Stderr, "export: skipped session %s\n", v)
 	}
-	return os.WriteFile(path, body, 0o644)
-}
-
-// parseAnnotation splits --annotation's name[=value].
-func parseAnnotation(s string) (export.AnnotationFilter, error) {
-	name, value, hasValue := strings.Cut(s, "=")
-	if name == "" {
-		return export.AnnotationFilter{}, errors.New("export: --annotation needs a name")
-	}
-	return export.AnnotationFilter{Name: name, Value: value, HasValue: hasValue}, nil
-}
-
-// rawSessionID accepts the raw session id and the MCP-facing
-// session:<base64> form (59796bc:internal/query/common.go:166).
-func rawSessionID(s string) (string, error) {
-	raw, ok := strings.CutPrefix(s, "session:")
-	if !ok {
-		return s, nil
-	}
-	decoded, err := base64.RawURLEncoding.DecodeString(raw)
-	if err != nil {
-		return "", fmt.Errorf("export: bad session id %q: %w", s, err)
-	}
-	return string(decoded), nil
 }

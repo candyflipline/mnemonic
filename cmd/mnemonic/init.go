@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 
@@ -18,6 +19,21 @@ import (
 )
 
 const launchdLabel = "com.mnemonic.push"
+
+// Bootout returns before a running push watcher has exited, and
+// bootstrapping over the still-loaded job fails with "5: Input/output
+// error", leaving the agent booted out and nothing running. These bound how
+// long init waits for launchd to drop the job before it bootstraps.
+// waitGoneWithin outlasts launchd's own kill: the plist init writes
+// (ops/launchd) sets no ExitTimeOut, so launchd's system-defined default
+// applies (launchctl print shows 5 s on macOS 26.5.2), and a watcher that
+// does not act on SIGTERM (for one, mid-redaction of a large file in
+// redactComplete, internal/push, which has no cancellation point) is only
+// SIGKILLed then. 25 s covers a default of up to 20 s, + 5 s.
+const (
+	waitGoneWithin  = 25 * time.Second
+	waitGonePolling = 200 * time.Millisecond
+)
 
 func initCmd(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
@@ -151,11 +167,30 @@ func initLaunchd(home, exe, label string) error {
 	} else {
 		fmt.Println("booted out " + domain + "/" + label)
 	}
+	if err := waitGone(domain, label, waitGoneWithin); err != nil {
+		return err
+	}
 	if out, err := exec.Command("launchctl", "bootstrap", domain, plistPath).CombinedOutput(); err != nil {
 		return fmt.Errorf("init: launchctl bootstrap %s %s: %s", domain, plistPath, trimOut(out, err))
 	}
 	fmt.Println("bootstrapped " + domain + "/" + label)
 	return nil
+}
+
+// waitGone waits until launchd reports the agent gone (launchctl print exits
+// non-zero), polling every 200 ms up to within; a bootout of a running
+// watcher returns before the job is dropped.
+func waitGone(domain, label string, within time.Duration) error {
+	deadline := time.Now().Add(within)
+	for {
+		if err := exec.Command("launchctl", "print", domain+"/"+label).Run(); err != nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("init: %s/%s did not exit within %s", domain, label, within)
+		}
+		time.Sleep(waitGonePolling)
+	}
 }
 
 func trimOut(out []byte, err error) string {

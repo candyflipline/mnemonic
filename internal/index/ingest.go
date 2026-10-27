@@ -613,7 +613,8 @@ func ingest(root, store string, sources []source, quiet time.Duration, settleAll
 		return IngestStats{}, err
 	}
 	defer release()
-	stats, _, err := cycle(root, store, sources, readCkpts(store, sources), allOf(sources), quiet, settleAll, red)
+	stats, _, opened, err := cycle(root, store, sources, readCkpts(store, sources), allOf(sources), quiet, settleAll, red)
+	closeParts(opened)
 	return stats, err
 }
 
@@ -646,7 +647,7 @@ func allOf(sources []source) []int {
 // publishes them all and records the lap. cks holds each source's checkpoint
 // and is updated to the one its parse or settle leaves. The caller holds the
 // dir's writer lock.
-func cycle(root, store string, sources []source, cks []*ckpt, work []int, quiet time.Duration, settleAll bool, red *redact.Redactor) (stats IngestStats, outcomes map[string]Outcome, err error) {
+func cycle(root, store string, sources []source, cks []*ckpt, work []int, quiet time.Duration, settleAll bool, red *redact.Redactor) (stats IngestStats, outcomes map[string]Outcome, opened map[string]*Part, err error) {
 	debug.SetGCPercent(25)
 	var rec cycleRecord
 	defer func() { recordCycle(store, rec) }()
@@ -661,10 +662,10 @@ func cycle(root, store string, sources []source, cks []*ckpt, work []int, quiet 
 	stats[Unchanged] += len(sources) - len(work)
 	rec = cycleRecord{stats: CycleStats{LogBytes: logBytes}, stale: stale,
 		failed: len(work) - len(outcomes), failSweep: failSweep}
-	cs, deferred, perr := publish(store, sources, cks, quiet, settleAll, outcomes)
+	cs, deferred, opened, perr := publish(store, sources, cks, quiet, settleAll, outcomes)
 	cs.LogBytes = logBytes
 	rec.stats, rec.settle = cs, deferred
-	return stats, outcomes, perr
+	return stats, outcomes, opened, perr
 }
 
 // parseSources runs ingestSource over the sources work indexes on GOMAXPROCS workers and
@@ -770,8 +771,9 @@ func versionStale(s source, c *ckpt) bool {
 // and points CURRENT at them, reporting what it wrote and how many components
 // whose quiet window has passed it left hot for a later cycle (settleSet).
 // cur holds each source's checkpoint (parseSources) and takes the ones a
-// settle writes; outcomes is what this cycle's parse did, by source key.
-func publish(store string, sources []source, cur []*ckpt, quiet time.Duration, settleAll bool, outcomes map[string]Outcome) (CycleStats, int, error) {
+// settle writes; outcomes is what this cycle's parse did, by source key. The
+// delta parts its appends opened come back by id, owned by the caller.
+func publish(store string, sources []source, cur []*ckpt, quiet time.Duration, settleAll bool, outcomes map[string]Outcome) (CycleStats, int, map[string]*Part, error) {
 	parsedAny := false
 	for _, o := range outcomes {
 		parsedAny = parsedAny || o != Unchanged
@@ -830,7 +832,7 @@ func publish(store string, sources []source, cur []*ckpt, quiet time.Duration, s
 		cks[i].ColdZst, cks[i].ColdRows, cks[i].ColdLight, cks[i].ColdSHA = cks[i].ZstSize, cks[i].Rows, cks[i].LightLen, cks[i].WindowSHA
 		b, _ := json.Marshal(cks[i])
 		if err := writeFileAtomic(ckptPath(store, cks[i].Key), b); err != nil {
-			return CycleStats{}, deferred, err
+			return CycleStats{}, deferred, nil, err
 		}
 		if si := from[i]; si >= 0 {
 			c := cks[i]
@@ -842,7 +844,7 @@ func publish(store string, sources []source, cur []*ckpt, quiet time.Duration, s
 	byPrev := prevPartsMap(store, prev)
 	back, err := rematerialize(store, cks, parts, byPrev)
 	if err != nil {
-		return CycleStats{}, deferred, err
+		return CycleStats{}, deferred, nil, err
 	}
 	if back > 0 {
 		parts = planParts(cks)
@@ -850,16 +852,20 @@ func publish(store string, sources []source, cur []*ckpt, quiet time.Duration, s
 	ids := make([]string, 0, len(parts))
 	var hot []string
 	if err := os.MkdirAll(filepath.Join(store, "parts"), 0o755); err != nil {
-		return CycleStats{}, deferred, err
+		return CycleStats{}, deferred, nil, err
 	}
 	keep := map[string]bool{}
 	images := map[string]bool{}
 	planned, err := buildParts(store, parts, prev, byPrev)
 	if err != nil {
-		return CycleStats{}, deferred, err
+		return CycleStats{}, deferred, nil, err
 	}
+	opened := map[string]*Part{}
 	var cs CycleStats
 	for _, p := range planned {
+		if p.opened != nil {
+			opened[p.id] = p.opened
+		}
 		if p.hot {
 			hot = append(hot, p.id)
 			if p.image != "" {
@@ -877,15 +883,15 @@ func publish(store string, sources []source, cur []*ckpt, quiet time.Duration, s
 	mb, _ := json.Marshal(manifestFile{Parts: ids, Hot: hot, Sources: srcs})
 	if cur, err := os.ReadFile(filepath.Join(store, "CURRENT")); err != nil || !bytes.Equal(cur, mb) {
 		if err := writeFileAtomic(filepath.Join(store, "CURRENT"), mb); err != nil {
-			return cs, deferred, err
+			return cs, deferred, opened, err
 		}
 		gcParts(store, keep)
 		gcDeltas(store, images)
 	}
 	if err := retireSettled(store, cks, parts, planned); err != nil {
-		return cs, deferred, err
+		return cs, deferred, opened, err
 	}
-	return cs, deferred, gcLogs(store, cks, keepExtra)
+	return cs, deferred, opened, gcLogs(store, cks, keepExtra)
 }
 
 type builtPart struct {
@@ -894,6 +900,13 @@ type builtPart struct {
 	image   string
 	built   bool
 	written int64
+	opened  *Part
+}
+
+func closeParts(parts map[string]*Part) {
+	for _, p := range parts {
+		p.Close()
+	}
 }
 
 // buildParts builds every part of the plan that is missing on a pool of
@@ -930,6 +943,11 @@ func buildParts(store string, parts [][]ckpt, prev manifestFile, byPrev map[stri
 	wg.Wait()
 	for _, err := range errs {
 		if err != nil {
+			for _, p := range out {
+				if p.opened != nil {
+					p.opened.Close()
+				}
+			}
 			return nil, err
 		}
 	}
@@ -938,15 +956,27 @@ func buildParts(store string, parts [][]ckpt, prev manifestFile, byPrev map[stri
 
 func buildPart(store string, members []ckpt, prev manifestFile, byPrev map[string]string) (builtPart, error) {
 	id := fingerprint(members)
+	if annotationOnly(members) {
+		// An annotation component's part is the annotations section alone: no
+		// docs to delta, and tiny next to any session part, so it is rebuilt
+		// whole each cycle it grows and takes no image or delta.
+		if _, err := os.Stat(partDir(store, id)); err == nil {
+			return builtPart{id: id, hot: slices.ContainsFunc(members, ckpt.hot)}, nil
+		}
+		if err := buildIndex(store, members, id, partDir(store, id), byPrev); err != nil {
+			return builtPart{}, err
+		}
+		return builtPart{id: id, hot: slices.ContainsFunc(members, ckpt.hot), built: true, written: dirSize(partDir(store, id))}, nil
+	}
 	if slices.ContainsFunc(members, ckpt.hot) {
 		if retiredJoinsBase(store, members, prev) {
 			return buildHotImage(store, members, byPrev)
 		}
-		id, built, written, err := hotPart(store, members, prev, byPrev)
+		id, built, written, opened, err := hotPart(store, members, prev, byPrev)
 		if err != nil {
 			return builtPart{}, err
 		}
-		p := builtPart{id: id, hot: true, built: built, written: written}
+		p := builtPart{id: id, hot: true, built: built, written: written, opened: opened}
 		if d, ok := readBase(store, id); ok && d.Image != id {
 			p.image = d.Image
 		}
@@ -1082,18 +1112,23 @@ const partShards = 256
 
 // componentsOf returns each checkpoint's component representative, and per
 // representative the component's least session id (its key when it has no
-// session) and whether any of its sources is hot.
+// session) and whether any of its sources is hot. An annotation checkpoint
+// contributes no session tokens to the join: it is a component of its own,
+// keyed by its source key, whose part holds the annotations alone and joins
+// its targets at read time.
 func componentsOf(cks []ckpt) (root []int, least map[int]string, hot map[int]bool) {
 	tokens := make([][]string, len(cks))
 	for i, c := range cks {
-		tokens[i] = c.Sessions
+		if c.Harness != schema.AnnotationHarness {
+			tokens[i] = c.Sessions
+		}
 	}
 	root = components(tokens)
 	least, hot = map[int]string{}, map[int]bool{}
 	for i, c := range cks {
 		r := root[i]
 		k := c.Key
-		if len(c.Sessions) > 0 {
+		if c.Harness != schema.AnnotationHarness && len(c.Sessions) > 0 {
 			k = c.Sessions[0]
 		}
 		if cur, ok := least[r]; !ok || k < cur {
@@ -1108,6 +1143,13 @@ func shardOf(least string) uint32 {
 	h := fnv.New32a()
 	h.Write([]byte(least))
 	return h.Sum32() % partShards
+}
+
+// annotationOnly reports whether every member parses the annotation harness,
+// so the part build holds annotation rows alone: they feed only the
+// annotations section and the part holds no docs.
+func annotationOnly(members []ckpt) bool {
+	return len(members) > 0 && !slices.ContainsFunc(members, func(c ckpt) bool { return c.Harness != schema.AnnotationHarness })
 }
 
 // settleShards is how many shards that already hold a settled component a
