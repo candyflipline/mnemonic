@@ -15,38 +15,25 @@ import (
 type sections struct {
 	spans map[string][]schema.Span
 	ann   map[string][]schema.Annotation
-	auth  map[string]map[string]bool
 }
 
 func newSections() *sections {
 	return &sections{
 		spans: map[string][]schema.Span{},
 		ann:   map[string][]schema.Annotation{},
-		auth:  map[string]map[string]bool{},
 	}
 }
 
 // addSession folds one session's winner rows, in event order with turn_seq
-// current, into the three sections. rows may be ranged over more than once
-// and a yielded row is valid only during its yield. Spans are derived per
-// harness from that harness's rows; annotation rows carry their payload from
-// the part's heavy log; the authors entry here sees winner rows only, so
-// buildIndex overwrites it with buildSessionAuthors over every row.
+// current, into the spans and annotations sections. rows may be ranged over
+// more than once and a yielded row is valid only during its yield.
 func (s *sections) addSession(sid string, rows iter.Seq[*Row], payload func(*Row) string) {
-	set := s.auth[sid]
-	if set == nil {
-		set = map[string]bool{}
-		s.auth[sid] = set
-	}
 	seen := map[string]bool{}
 	var anns []annRow
 	for r := range rows {
 		seen[r.Harness] = true
 		if r.Harness == schema.AnnotationHarness {
 			anns = append(anns, annRow{payload: payload(r), author: r.Author})
-		}
-		if a := r.Author; a != "" {
-			set[a] = true
 		}
 	}
 	hs := make([]string, 0, len(seen))
@@ -95,9 +82,9 @@ func marshalAnn(ann map[string][]schema.Annotation) []byte {
 	return mustJSON(out)
 }
 
-// files encodes the three section files a part carries: spans and
-// annotations grouped per session id, session authors as its map. Every part
-// write must produce all three, so the reader never sees a missing file.
+// files encodes the spans and annotations section files a part carries,
+// grouped per session id. Every part write must produce both and the
+// authors file, so the reader never sees a missing file.
 func (s *sections) files() map[string][]byte {
 	for _, spans := range s.spans {
 		sortSpans(spans)
@@ -105,14 +92,9 @@ func (s *sections) files() map[string][]byte {
 	for _, ann := range s.ann {
 		sortAnnotations(ann)
 	}
-	authors := make(map[string][]string, len(s.auth))
-	for sid, set := range s.auth {
-		authors[sid] = sortedAuthors(set)
-	}
 	return map[string][]byte{
 		"spans":       mustJSON(s.spans),
 		"annotations": marshalAnn(s.ann),
-		"authors":     mustJSON(authors),
 	}
 }
 

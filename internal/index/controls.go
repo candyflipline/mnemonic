@@ -93,23 +93,25 @@ func validWallet(s string) bool {
 
 type sessionControl struct {
 	visibility visibility
-	ts         time.Time
-	key        string
-	deleted    bool
-	shares     map[wallet.Address]stamp
+	lww
+	deleted bool
+	shares  map[wallet.Address]stamp
 }
 
-// stamp is the latest share or unshare of one session with one wallet, by the
-// same last-writer-wins order as visibility: later ts, then greater key. An
+type lww struct {
+	ts  time.Time
+	key string
+}
+
+func (l lww) losesTo(r controlRecord) bool {
+	return r.TS.After(l.ts) || (r.TS.Equal(l.ts) && r.RequestKey > l.key)
+}
+
+// stamp is the latest share or unshare of one session with one wallet. An
 // unshare stays as a stamp, so replaying an older share cannot revive it.
 type stamp struct {
 	shared bool
-	ts     time.Time
-	key    string
-}
-
-func (s stamp) before(r controlRecord) bool {
-	return r.TS.After(s.ts) || (r.TS.Equal(s.ts) && r.RequestKey > s.key)
+	lww
 }
 
 // Controls is every session control record in raw, the copy reads consult:
@@ -129,19 +131,19 @@ func (c *Controls) apply(r controlRecord) {
 	case actDelete:
 		s.deleted = true
 	case actVisibility:
-		if r.TS.After(s.ts) || (r.TS.Equal(s.ts) && r.RequestKey > s.key) {
-			s.visibility, s.ts, s.key = r.Visibility, r.TS, r.RequestKey
+		if s.losesTo(r) {
+			s.visibility, s.lww = r.Visibility, lww{r.TS, r.RequestKey}
 		}
 	case actShare, actUnshare:
 		w, _ := wallet.ParseAddress(r.Wallet)
 		if s.shares == nil {
 			s.shares = map[wallet.Address]stamp{}
 		}
-		if !s.shares[w].before(r) {
+		if !s.shares[w].losesTo(r) {
 			break
 		}
 		shared := r.Action == actShare
-		s.shares[w] = stamp{shared: shared, ts: r.TS, key: r.RequestKey}
+		s.shares[w] = stamp{shared: shared, lww: lww{r.TS, r.RequestKey}}
 		set := c.byWallet[w]
 		switch {
 		case shared && set == nil:

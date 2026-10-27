@@ -92,12 +92,8 @@ func readArchiveMembers(store, fileKey string) ([]ckpt, bool) {
 }
 
 // memberBeats reports whether a row of version v from member m beats the
-// incumbent row of version wv from member w. Two raw members go by the lake
-// path alone, the greater first, then the lesser key: the oracle's raw
-// versions are parse wall clocks and the engine's a line index, neither
-// comparable across files. Otherwise
-// the cache's winner order: event version first, then a non-archive copy over
-// an archive one, then the lesser archive lake file.
+// incumbent row of version wv from member w. Raw versions are line indexes,
+// not comparable across files, so two raw members go by path alone.
 func memberBeats(v uint64, m member, wv uint64, w member) bool {
 	ma, wa := m.Kind == KindArchive, w.Kind == KindArchive
 	if !ma && !wa {
@@ -118,14 +114,23 @@ func memberBeats(v uint64, m member, wv uint64, w member) bool {
 	return m.Key < w.Key
 }
 
-// archiveClaim is the best copy of a uid seen so far across the store's ch
-// files: the cache's order event_version DESC, ingested_at DESC, lake_file
-// ASC, lake_row ASC (index.go winnerOrder, archive files all alike).
 type archiveClaim struct {
 	version uint64
 	ingest  int64
 	file    int32
 	row     uint32
+}
+
+func claimBeats(a, b archiveClaim) bool {
+	switch {
+	case a.version != b.version:
+		return a.version > b.version
+	case a.ingest != b.ingest:
+		return a.ingest > b.ingest
+	case a.file != b.file:
+		return a.file < b.file
+	}
+	return a.row < b.row
 }
 
 type chKey struct {
@@ -134,19 +139,15 @@ type chKey struct {
 	IngestedAt   int64  `parquet:"ingested_at,timestamp(microsecond)"`
 }
 
-// archiveSet is the store-wide verdict over every ch file under one events
-// dir: keep[i] marks the rows of paths[i] that are their uid's winner. A uid
-// is one row store-wide whatever session or file carries it, as the cache
-// holds it; digest names the files the verdict was drawn from.
 type archiveSet struct {
-	dir    string
-	digest string
-	paths  []string
-	keep   [][]uint64
+	dir            string
+	fileListDigest string
+	paths          []string
+	winnerRows     [][]uint64
 }
 
 func (a *archiveSet) kept(file int, row uint32) bool {
-	return a.keep[file][row>>6]&(1<<(row&63)) != 0
+	return a.winnerRows[file][row>>6]&(1<<(row&63)) != 0
 }
 
 var archiveSetCache struct {
@@ -196,10 +197,10 @@ func archiveSetFor(events string) (*archiveSet, error) {
 		fmt.Fprintf(h, "%s %d %s\n", filepath.ToSlash(rel), w.size, w.sum)
 	}
 	digest := hex.EncodeToString(h.Sum(nil))
-	if c.set != nil && c.set.dir == events && c.set.digest == digest {
+	if c.set != nil && c.set.dir == events && c.set.fileListDigest == digest {
 		return c.set, nil
 	}
-	set := &archiveSet{dir: events, digest: digest, paths: paths, keep: make([][]uint64, len(paths))}
+	set := &archiveSet{dir: events, fileListDigest: digest, paths: paths, winnerRows: make([][]uint64, len(paths))}
 	claims := map[string]archiveClaim{}
 	rows := make([]uint32, len(paths))
 	buf := make([]chKey, archiveReadRows)
@@ -225,9 +226,9 @@ func archiveSetFor(events string) (*archiveSet, error) {
 				k, err := rd.Read(buf)
 				for j := 0; j < k; j++ {
 					r := &buf[j]
-					if w, ok := claims[r.EventUID]; !ok || r.EventVersion > w.version ||
-						(r.EventVersion == w.version && r.IngestedAt > w.ingest) {
-						claims[r.EventUID] = archiveClaim{r.EventVersion, r.IngestedAt, int32(i), n}
+					c := archiveClaim{r.EventVersion, r.IngestedAt, int32(i), n}
+					if w, ok := claims[r.EventUID]; !ok || claimBeats(c, w) {
+						claims[r.EventUID] = c
 					}
 					n++
 				}
@@ -244,10 +245,10 @@ func archiveSetFor(events string) (*archiveSet, error) {
 		}
 		f.Close()
 		rows[i] = n
-		set.keep[i] = make([]uint64, (n+63)/64)
+		set.winnerRows[i] = make([]uint64, (n+63)/64)
 	}
 	for _, w := range claims {
-		set.keep[w.file][w.row>>6] |= 1 << (w.row & 63)
+		set.winnerRows[w.file][w.row>>6] |= 1 << (w.row & 63)
 	}
 	c.set = set
 	return set, nil
@@ -277,7 +278,7 @@ func ingestArchive(store string, s source) (Outcome, int64, error) {
 	if file < 0 {
 		return 0, 0, fmt.Errorf("%s: not in the archive file list", s.mpath)
 	}
-	sum := own + "|" + set.digest
+	sum := own + "|" + set.fileListDigest
 	prev, has := readCkpt(store, key)
 	if has && prev.Kind == KindArchive && prev.Offset == end && prev.WindowSHA == sum {
 		return Unchanged, 0, nil
@@ -823,7 +824,7 @@ func restreamMembers(store, path string, idx []int, cks []ckpt) error {
 	var fileKey string
 	for _, i := range idx {
 		c := cks[i]
-		if c.Offset != fi.Size() || c.WindowSHA != own+"|"+set.digest {
+		if c.Offset != fi.Size() || c.WindowSHA != own+"|"+set.fileListDigest {
 			return fmt.Errorf("%s: %s: the file changed since the member was streamed", path, c.Key)
 		}
 		sid := c.Sessions[0]

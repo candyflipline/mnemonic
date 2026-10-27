@@ -75,9 +75,6 @@ func newKeyPass(members []member, rows int) *keyPass {
 		seen: map[authKey]bool{}, last: authKey{session: ^uint32(0)}}
 }
 
-// offer folds one light record of member src, by the winner rule offerRow
-// holds: within a member the higher version wins, last on a tie; across
-// members memberBeats.
 func (p *keyPass) offer(src uint16, author string, rec []byte, loc rowLoc) error {
 	f, err := p.pos.scan(rec)
 	if err != nil {
@@ -98,7 +95,7 @@ func (p *keyPass) offer(src uint16, author string, rec []byte, loc rowLoc) error
 	if at, ok := p.win[string(f.uid)]; ok {
 		w := &p.keys[at]
 		if w.src == src {
-			if k.version < w.version {
+			if k.version < w.version || k.version == w.version && !k.loc.after(w.loc) {
 				return nil
 			}
 		} else if !memberBeats(k.version, p.members[src], w.version, p.members[w.src]) {

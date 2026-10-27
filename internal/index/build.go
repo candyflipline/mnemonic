@@ -28,6 +28,10 @@ type built struct {
 	li  int
 }
 
+func (b built) after(w built) bool {
+	return b.lf > w.lf || b.lf == w.lf && b.li > w.li
+}
+
 var partEncoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(runtime.GOMAXPROCS(0)), zstd.WithLowerEncoderMem(true))
 var partHeavyEncoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(runtime.GOMAXPROCS(0)), zstd.WithLowerEncoderMem(true))
 
@@ -79,6 +83,16 @@ type rowLoc struct {
 	lf     int64
 	li     uint16
 	holder bool
+}
+
+func (l rowLoc) after(w rowLoc) bool {
+	switch {
+	case l.holder != w.holder:
+		return w.holder
+	case l.lf != w.lf:
+		return l.lf > w.lf
+	}
+	return l.li > w.li
 }
 
 func walkLog(store string, c ckpt, from int64, fn func(rec []byte, off int64, i int) error) error {
@@ -171,13 +185,12 @@ func sameParsed(a, b parsed) bool {
 }
 
 // walkMember calls fn with the light record of every row a part build reads
-// of one member, in the order the rows are offered: the rows the holder part
-// holds for it, then the tail past the holder's copy, read from the member's
-// frame logs. holder is the part of the previous manifest that holds the
-// member, nil to read every row from the logs (a cold build's first run, or a
-// holder a re-parse left behind); from is the tail start, memberFrom when
-// holder is not nil. A member fully covered by its holder is read from the
-// holder alone and its logs are never opened. rec is valid until fn returns.
+// of one member: the rows the holder part holds for it, then the tail from
+// from, read from the member's frame logs. holder is the part of the previous
+// manifest that holds the member, nil to read every row from the logs (a cold
+// build's first run, or a holder a re-parse left behind). A member fully
+// covered by its holder is read from the holder alone and its logs are never
+// opened. rec is valid until fn returns.
 func walkMember(store string, c ckpt, holder *Part, from int64, fn func(rec []byte, loc rowLoc) error) error {
 	if holder == nil && c.retired() {
 		return fmt.Errorf("%s: retired member read without a holder", c.Key)
@@ -298,15 +311,10 @@ type winner struct {
 	member member
 }
 
-// offerRow offers b, a row of member m, to win: within a member the higher
-// version wins, last on a tie; across members memberBeats, the one order
-// every read path (full build, delta image, holder rows) picks a uid's
-// winner by. Two same-kind members of equal path hand the tie to the lesser
-// key, the order buildIndex offers members in.
 func offerRow(win map[string]winner, b built, m member) {
 	if w, ok := win[b.row.UID]; ok {
 		if w.b.src == b.src {
-			if b.row.Version < w.b.row.Version {
+			if b.row.Version < w.b.row.Version || b.row.Version == w.b.row.Version && !b.after(w.b) {
 				return
 			}
 		} else if !memberBeats(b.row.Version, m, w.b.row.Version, w.member) {
@@ -337,7 +345,7 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 		return err
 	}
 	defer closeHolders()
-	authors := map[string][]string{}
+	allRowAuthors := map[string][]string{}
 	plan := planMembers(cks, holders)
 	merged := map[*Part]bool{}
 	rows := 0
@@ -379,7 +387,7 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 		holder := plan.holder[si]
 		if holder != nil && !merged[holder] {
 			merged[holder] = true
-			mergeAuthors(authors, plan.holderAuthors(holder))
+			mergeAuthors(allRowAuthors, plan.holderAuthors(holder))
 		}
 		err := walkMember(store, c, holder, plan.from[si], func(rec []byte, loc rowLoc) error {
 			return kp.offer(uint16(si), c.Author, rec, loc)
@@ -388,7 +396,7 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 			return err
 		}
 	}
-	mergeAuthors(authors, kp.authorsBySession(cks))
+	mergeAuthors(allRowAuthors, kp.authorsBySession(cks))
 	locs := kp.sorted()
 	sessionIDs := kp.sessions.list
 	kp = nil
@@ -532,9 +540,6 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 		}
 	}
 	for name, b := range secs.files() {
-		if name == "authors" {
-			continue
-		}
 		if err := write(name, b); err != nil {
 			return err
 		}
@@ -542,9 +547,7 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 	if err := writeLs(dir, lsRecs); err != nil {
 		return err
 	}
-	// The section build sees winner rows only; the session authors section
-	// is a function of every row, winner or not.
-	ab, err := json.Marshal(authors)
+	ab, err := json.Marshal(allRowAuthors)
 	if err != nil {
 		return err
 	}

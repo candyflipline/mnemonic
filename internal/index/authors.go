@@ -2,14 +2,6 @@ package index
 
 import "sort"
 
-// buildSessionAuthors is a part's session authors section: per session, every
-// author (from the source key) of a source that emitted a row of it, winner or
-// not, sorted and distinct. It runs at part build time over the rows before
-// winner selection.
-func buildSessionAuthors(members []ckpt, rows []built) map[string][]string {
-	return authorsOf(rows, func(src uint16) string { return members[src].Author })
-}
-
 func authorsOf(rows []built, author func(src uint16) string) map[string][]string {
 	set := map[string]map[string]bool{}
 	for _, b := range rows {
