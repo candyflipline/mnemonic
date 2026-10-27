@@ -21,8 +21,8 @@ func TestKeys(t *testing.T) {
 		read, push, ann bool
 		members         AuthorSet
 	}{
-		{"k-chris", "chris", "default", true, true, false, AuthorSet{Names: []string{"ann", "bob"}, Except: true}},
-		{"k-sam", "sam", "default", true, false, false, AuthorSet{Names: []string{"ann", "bob"}, Except: true}},
+		{"k-chris", "chris", "default", true, true, false, AuthorSet{Names: []string{"chris", "sam"}}},
+		{"k-sam", "sam", "default", true, false, false, AuthorSet{Names: []string{"chris", "sam"}}},
 		{"k-acme", "ann", "acme", true, false, true, AuthorSet{Names: []string{"ann", "bob"}}},
 		{"k-bob", "bob", "acme", true, true, false, AuthorSet{Names: []string{"ann", "bob"}}},
 	} {
@@ -38,6 +38,45 @@ func TestKeys(t *testing.T) {
 	}
 	if _, ok := keys.Identify("k-unknown"); ok {
 		t.Error("unknown key identified")
+	}
+}
+
+type roster map[string]Member
+
+func (r roster) Member(key string) (Member, bool) { m, ok := r[key]; return m, ok }
+
+func (r roster) EachMember(fn func(Member)) {
+	for _, m := range r {
+		fn(m)
+	}
+}
+
+func TestUnnamedAuthorIsRefused(t *testing.T) {
+	keys := NewKeys(map[string]Grant{
+		"k-op":  {Tenant: DefaultTenant, Author: "chris", Scopes: []Scope{Read, Push, Admin}},
+		"k-sam": {Tenant: DefaultTenant, Author: "sam", Scopes: []Scope{Read, Push}},
+	}).WithMembers(roster{"k-dana": {Key: "k-dana", Tenant: DefaultTenant, Author: "dana"}})
+	for _, tc := range []struct {
+		key, author string
+		reads       bool
+	}{
+		{"k-sam", "sam", true},
+		{"k-sam", "chris", true},
+		{"k-sam", "dana", true},
+		{"k-sam", "eve", false},
+		{"k-dana", "sam", true},
+		{"k-dana", "eve", false},
+		{"k-op", "dana", true},
+		{"k-op", "eve", true},
+	} {
+		id, _ := keys.Identify(tc.key)
+		if got := id.Members().Has(tc.author); got != tc.reads {
+			t.Errorf("%s reads %s: %v, want %v", tc.key, tc.author, got, tc.reads)
+		}
+	}
+	op, _ := keys.Identify("k-op")
+	if got := op.Members(); !reflect.DeepEqual(got, AuthorSet{Except: true}) {
+		t.Errorf("admin k-op reads %+v, want every author (export include_private's scope)", got)
 	}
 }
 

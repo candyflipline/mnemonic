@@ -63,9 +63,6 @@ var DefaultSources = []SourceGlob{
 //	listen    = "127.0.0.1:8742"            # loopback only; the tunnel publishes it
 //	base_url  = "https://share.askloyal.com"
 //	quic_addr = "mnemonic.askloyal.com:8741" # what a joining machine dials
-//
-// An author no key entry names is in the "default" tenant, so every
-// default-tenant key reads what such an author's data holds.
 type Server struct {
 	DataDir string     `toml:"data_dir"`
 	QUIC    QUIC       `toml:"quic"`

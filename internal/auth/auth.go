@@ -105,7 +105,14 @@ func (id Identity) Members() AuthorSet {
 	case id.keys == nil:
 		return AuthorSet{}
 	}
-	return members(id.keys.tenantOf(), id.tenant)
+	s := AuthorSet{Except: id.tenant == DefaultTenant && id.Can(Admin)}
+	for a, t := range id.keys.tenantOf() {
+		if (t == id.tenant) != s.Except {
+			s.Names = append(s.Names, a)
+		}
+	}
+	sort.Strings(s.Names)
+	return s
 }
 
 func (id Identity) Admitted() bool {
@@ -126,18 +133,6 @@ func (id Identity) TenantOf(author string) (string, bool) {
 
 func Local(author string) Identity {
 	return Identity{tenant: DefaultTenant, author: author, scopes: slices.Clone(Scopes[:]), local: true}
-}
-
-func members(tenantOf map[string]string, tenant string) AuthorSet {
-	var s AuthorSet
-	s.Except = tenant == DefaultTenant
-	for a, t := range tenantOf {
-		if (t == tenant) != s.Except {
-			s.Names = append(s.Names, a)
-		}
-	}
-	sort.Strings(s.Names)
-	return s
 }
 
 // NewContext is ctx carrying id. Only a transport that has proven the caller
