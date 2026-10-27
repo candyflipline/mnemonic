@@ -382,9 +382,9 @@ func TestIngestPlainRedactsAtIngest(t *testing.T) {
 	ctx := context.Background()
 	openID := base64.RawURLEncoding.EncodeToString([]byte(session))
 	probes := []struct {
-		name string
-		args string
-		echo bool // the prose repeats the caller's own query; only data is index content
+		name               string
+		args               string
+		queryEchoedInProse bool
 	}{
 		{"open", `{"id":"session:` + openID + `","limit":10}`, false},
 		{"get_trace", `{"session_id":"session:` + openID + `"}`, false},
@@ -406,7 +406,7 @@ func TestIngestPlainRedactsAtIngest(t *testing.T) {
 			t.Fatalf("%s %s: search found the secret: %s", p.name, p.args, data)
 		}
 		for _, secret := range []string{awsKey, "akiaiosfodnn7example", "BEGIN RSA PRIVATE KEY", "MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn"} {
-			if bytes.Contains(data, []byte(secret)) || (!p.echo && bytes.Contains([]byte(text), []byte(secret))) {
+			if bytes.Contains(data, []byte(secret)) || (!p.queryEchoedInProse && bytes.Contains([]byte(text), []byte(secret))) {
 				t.Fatalf("%s %s: response holds the secret %q:\n%s\n%s", p.name, p.args, secret, data, text)
 			}
 		}
