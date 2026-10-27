@@ -34,10 +34,10 @@ for _, f := range scan(cfg.Sources) {     // the pass a (re)connect starts with
 }
 for {
     select {
-    case a := <-u.acks():                 // in send order, each after its fsync
-        if u.applyAck(a) { dirty[a.path] = true } // conflict: re-decide next flush
+    case a := <-u.acked:                  // in send order, each after its fsync
+        u.consume(a); takeRedo(dirty)     // conflict: re-decide next flush
     case err := <-u.ended():              // backoff 5 s .. 1 min, dial, full pass
-    case p := <-n.changed:                // file events, 1 s quiet / 5 s max, as today
+    case <-n.changes.ready:               // file events, 1 s quiet / 5 s max, as today
     }
 }
 ```
@@ -107,9 +107,9 @@ Three bounds, each with one owner:
 2. Server per-stream: the ticket channel has 64 slots. A client that ignores the window only stalls its own `Recv`.
 3. Server global: `Submit` takes the compressed frame's bytes from a 256 MiB budget and blocks while it is spent. The bytes come back when the batch commits.
 
-On a slow disk, batches take longer and grow to their caps. The budget fills, `Submit` blocks, `Recv` stops, and HTTP/2 flow control closes the stream window. The client's `send` then blocks in the watcher loop and file events queue in the notifier; an overflow already becomes a full pass (`lostEvents`, `watch.go:29`). The native transport stops reading beyond its fixed stream credit; it does not spool the rest of the request into an unbounded handler buffer. The server's state is re-read at the next Welcome. The compressed-frame budget is not a bound on all store memory (see below).
+On a slow disk, batches take longer and grow to their caps. The budget fills, `Submit` blocks, `Recv` stops, and HTTP/2 flow control closes the stream window. The client's `send` then blocks in the watcher loop and file events queue in the notifier; an overflow already becomes a full pass (the `lost` flag of `notifier.take`, which sets `watcher.stale`, `internal/push/notify.go:32`). The native transport stops reading beyond its fixed stream credit; it does not spool the rest of the request into an unbounded handler buffer. The server's state is re-read at the next Welcome. The compressed-frame budget is not a bound on all store memory (see below).
 
-Message size: one chunk is up to 32 MiB (`push.go:219`), so the server sets `grpc.MaxRecvMsgSize(33 MiB)`. The chunk size cannot shrink without breaking C1.
+Message size: one chunk is up to 32 MiB (`maxChunk`, `internal/push/push.go:93`), so the server sets `grpc.MaxRecvMsgSize(33 MiB)`. The chunk size cannot shrink without breaking C1.
 
 Native transport limits (`internal/intake/intake.go`):
 
@@ -296,7 +296,7 @@ Blocking scaffold, first and alone: merge this sketch (proto, generated code, `g
 | L1 store | `internal/store/*`, `cmd/mnemonic/local.go`; the one-token `*store.Store` -> `*store.Committer` rename in `internal/otlp/receiver.go`, `internal/index/controls.go`, `internal/index/q_annotate.go` (by `gofmt -r`) | `Open`, `Close`, `Submit`, `Append`, `Sources`, `Changed`, `TakeChanged`, `Ticket.Wait`, `Ack`, `ParseOp`, `ParseLines`, `NewClientSource`, the batch states, both barriers; deletes the old `Store` and its HTTP handlers | `go test ./internal/store` with one table test: three requests on one source in one batch give the literal frame bytes and manifest of three sequential PUTs at 83b0042 |
 | L2 intake + server | `internal/intake/*`, `internal/server/server.go`, `cmd/mnemonic/server.go`, `cmd/mnemonic/tls.go` | `Mount`, `service.Sync`, `parseAppend`, `ackOf`, `welcome` (the sketch's `adapter.ServeHTTP` — servePut and serveManifest — was deleted on the PUT census instead of built), the native `grpc.Server` on `push_listen` (it replaced the first cut's h2c `Protocols` on the HTTP listener), the `Run` loop over `Boot`/`Next`/`Changed` | `go test ./internal/intake`: an in-process h2c server; Welcome then three Appends return three APPLIED acks with literal sizes |
 | L3 index | `internal/index/lap.go`, `internal/index/ingest.go` | `Boot`, `Lap.Next`, `Lap.patch`; `parseSources` over a work subset; `publish` writing settled checkpoints back | `go test ./internal/index`, the arena parity 126/126, and a scratch count: `Next` with one changed key reads 1 manifest |
-| L4 client | `internal/push/*`, `cmd/mnemonic/main.go`, `cmd/mnemonic/init.go` | `dial`, `send`, `acks`, `applyAck`, `ended`, `close`, `streamSource`; deletes `fetchManifest`, `putSource`, the 409 loop, `reconcileEvery`, `conflictRetry` | `go test ./internal/push` against L2's in-process server (after merging L1 and L2) |
+| L4 client | `internal/push/*`, `cmd/mnemonic/main.go`, `cmd/mnemonic/init.go` | `dial`, `send`, `acked`, `consume`, `ended`, `close`, `streamSource`; deletes `fetchManifest`, `putSource`, the 409 loop, `reconcileEvery`, `conflictRetry` | `go test ./internal/push` against L2's in-process server (after merging L1 and L2) |
 | L5 spec + checks | `docs/spec/wire.md`, `AGENTS.md`, `scripts/` checks | the stream section of the spec; a check that `Ack{` appears once in `internal/store`; a check that regenerating pushpb leaves no diff | the two checks fail on a planted second literal and on a hand-edited `push.pb.go` |
 
 L4 depends on L1 and L2 at test time, not at build time, because the sketch compiles. The foreman merges L1, L2 and L3 first, then L4 and L5. The integration gates (C1 equivalence on the box, the C3 crash script at kill points 2, 5 and 8 on the server and mid-chunk on the client, the C6 strace syncfs count, and the C7 manifest-read count) run after all five merge.
