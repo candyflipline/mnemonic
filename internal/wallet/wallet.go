@@ -14,13 +14,44 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 	"strings"
 	"time"
 )
 
 // Address is a Solana wallet address: the raw ed25519 public key whose
-// base58 text is what wallets display.
-type Address [ed25519.PublicKeySize]byte
+// base58 text is what wallets display. Only AddressOf and ParseAddress make
+// one, so it is never a small-order key.
+type Address struct{ key [ed25519.PublicKeySize]byte }
+
+// smallOrder is every encoding of a point of order 1, 2, 4 or 8 with the sign
+// bit cleared, canonical or not: libsodium's ge25519_has_small_order blocklist.
+var smallOrder = [...][ed25519.PublicKeySize]byte{
+	{},
+	{0x01},
+	{0x26, 0xe8, 0x95, 0x8f, 0xc2, 0xb2, 0x27, 0xb0, 0x45, 0xc3, 0xf4, 0x89, 0xf2, 0xef, 0x98, 0xf0, 0xd5, 0xdf, 0xac, 0x05, 0xd3, 0xc6, 0x33, 0x39, 0xb1, 0x38, 0x02, 0x88, 0x6d, 0x53, 0xfc, 0x05},
+	{0xc7, 0x17, 0x6a, 0x70, 0x3d, 0x4d, 0xd8, 0x4f, 0xba, 0x3c, 0x0b, 0x76, 0x0d, 0x10, 0x67, 0x0f, 0x2a, 0x20, 0x53, 0xfa, 0x2c, 0x39, 0xcc, 0xc6, 0x4e, 0xc7, 0xfd, 0x77, 0x92, 0xac, 0x03, 0x7a},
+	{0xec, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f},
+	{0xed, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f},
+	{0xee, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f},
+}
+
+// AddressOf is the wallet whose public key is pub. It refuses a key of small
+// order in any encoding: ed25519.Verify accepts signatures nobody made under
+// one, so such a key proves no holder.
+func AddressOf(pub []byte) (Address, error) {
+	var a Address
+	if len(pub) != len(a.key) {
+		return a, fmt.Errorf("a Solana address is %d bytes, not %d", len(a.key), len(pub))
+	}
+	copy(a.key[:], pub)
+	k := a.key
+	k[31] &= 0x7f
+	if slices.Contains(smallOrder[:], k) {
+		return Address{}, fmt.Errorf("%s is a small-order ed25519 key, under which signatures can be forged", a)
+	}
+	return a, nil
+}
 
 // AuthorPrefix starts every wallet author; config refuses a [[keys]] author
 // that starts with it, so a wallet author never names a configured one.
@@ -66,30 +97,29 @@ func encode58(b []byte) string {
 }
 
 // ParseAddress reads a base58 Solana address: exactly 32 bytes once decoded,
-// no leading or trailing space, the Bitcoin base58 alphabet.
+// no leading or trailing space, the Bitcoin base58 alphabet, and a key
+// AddressOf accepts.
 func ParseAddress(s string) (Address, error) {
-	var a Address
 	b, err := decode58(s)
 	if err != nil {
-		return a, err
+		return Address{}, err
 	}
-	if len(b) != len(a) {
-		return a, fmt.Errorf("%q is %d bytes, a Solana address is 32", s, len(b))
+	if len(b) != ed25519.PublicKeySize {
+		return Address{}, fmt.Errorf("%q is %d bytes, a Solana address is 32", s, len(b))
 	}
-	copy(a[:], b)
-	return a, nil
+	return AddressOf(b)
 }
 
 // String is the base58 text wallets show.
-func (a Address) String() string { return encode58(a[:]) }
+func (a Address) String() string { return encode58(a.key[:]) }
 
 // Author is the wallet's author name: AuthorPrefix and 64 lowercase hex
 // digits, which matches wire.ValidSegment, so a wallet Identity's author
 // is a legal author everywhere one is printed or compared.
-func (a Address) Author() string { return AuthorPrefix + hex.EncodeToString(a[:]) }
+func (a Address) Author() string { return AuthorPrefix + hex.EncodeToString(a.key[:]) }
 
 // PublicKey is a as the ed25519 key its signatures verify under.
-func (a Address) PublicKey() ed25519.PublicKey { return ed25519.PublicKey(a[:]) }
+func (a Address) PublicKey() ed25519.PublicKey { return ed25519.PublicKey(a.key[:]) }
 
 // ParseSignature reads a 64-byte ed25519 signature as a wallet prints it:
 // base58 (solana sign-offchain-message) or standard base64.

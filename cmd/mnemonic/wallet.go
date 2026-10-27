@@ -146,8 +146,10 @@ func walletBind(args []string) error {
 		if err != nil {
 			return err
 		}
-		var w wallet.Address
-		copy(w[:], key.Public().(ed25519.PublicKey))
+		w, err := wallet.AddressOf(key.Public().(ed25519.PublicKey))
+		if err != nil {
+			return err
+		}
 		b, err := wallet.Sign(d.claim(w, expires), key)
 		if err != nil {
 			return err

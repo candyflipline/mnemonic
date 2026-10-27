@@ -30,7 +30,7 @@ func normalize(c Claim) Claim {
 // does from a Solana id.json; it signs the raw Message.
 func Sign(c Claim, key ed25519.PrivateKey) (Binding, error) {
 	c = normalize(c)
-	if !bytes.Equal(key.Public().(ed25519.PublicKey), c.Wallet[:]) {
+	if !bytes.Equal(key.Public().(ed25519.PublicKey), c.Wallet.key[:]) {
 		return Binding{}, fmt.Errorf("keypair is wallet %s, the claim names %s", encode58(key.Public().(ed25519.PublicKey)), c.Wallet)
 	}
 	b := Binding{claim: c}
@@ -69,7 +69,7 @@ type envelope struct {
 // Claim from them, so a binding moved to another device or server names keys
 // its signature does not cover.
 func (b Binding) Encode() []byte {
-	der, err := asn1.Marshal(envelope{Wallet: b.claim.Wallet[:], Expires: b.claim.Expires.Unix(), Signature: b.sig[:]})
+	der, err := asn1.Marshal(envelope{Wallet: b.claim.Wallet.key[:], Expires: b.claim.Expires.Unix(), Signature: b.sig[:]})
 	if err != nil {
 		panic(err)
 	}
@@ -88,9 +88,11 @@ func decode(ext []byte, device, server ed25519.PublicKey) (Claim, []byte, error)
 	if again, _ := asn1.Marshal(e); !bytes.Equal(again, ext) {
 		return Claim{}, nil, errors.New("binding: not canonical DER")
 	}
-	c := Claim{Device: device, Server: server, Expires: time.Unix(e.Expires, 0).UTC()}
-	copy(c.Wallet[:], e.Wallet)
-	return c, e.Signature, nil
+	w, err := AddressOf(e.Wallet)
+	if err != nil {
+		return Claim{}, nil, fmt.Errorf("binding: %w", err)
+	}
+	return Claim{Wallet: w, Device: device, Server: server, Expires: time.Unix(e.Expires, 0).UTC()}, e.Signature, nil
 }
 
 // Decode reads what Encode writes for the given device and server, without
