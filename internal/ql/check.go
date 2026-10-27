@@ -558,9 +558,10 @@ func hasWords(s string, want []string) bool {
 	return true
 }
 
-// likeMaxPattern caps a like/ilike pattern; the matcher below is linear in
-// the string for a pattern this long.
-const likeMaxPattern = 1000
+const (
+	likeMaxPattern = 1000
+	likeMaxWords   = likeMaxPattern/64 + 1
+)
 
 type likeMatcher struct {
 	n     int
@@ -616,7 +617,7 @@ func (m *likeMatcher) mask(r rune) []uint64 {
 }
 
 func (m *likeMatcher) match(s string) bool {
-	var buf [17]uint64
+	var buf [likeMaxWords]uint64
 	d := buf[:m.words]
 	d[0] = 1
 	acc, accBit := m.n/64, uint64(1)<<(m.n%64)
