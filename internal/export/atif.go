@@ -183,6 +183,7 @@ type trajectory struct {
 	agent Agent
 	plan  []rowPlan
 	last  []int32
+	cut   *stepCut
 }
 
 // rowPlan is where one row lands: the index of its step, or -1 for a row no
@@ -221,6 +222,10 @@ func WriteATIF(w io.Writer, db *index.DB, sessionID string, hidden map[string]bo
 	if err != nil {
 		return err
 	}
+	return t.writeIndented(w)
+}
+
+func (t *trajectory) writeIndented(w io.Writer) error {
 	if err := t.validate(); err != nil {
 		return err
 	}
@@ -394,6 +399,9 @@ func planSteps(harness string, rows iter.Seq[eventRow]) (plan []rowPlan, last []
 // order, as soon as its last row is read. A rows read error comes back after
 // the range, the writers' cue to fail rather than end a short document.
 func (t *trajectory) eachStep(fn func(*Step) error) error {
+	if t.cut != nil {
+		fn = t.cut.filter(fn)
+	}
 	err := buildSteps(t.plan, t.last, t.rows(), fn)
 	if err == nil {
 		err = t.session.rowErr
