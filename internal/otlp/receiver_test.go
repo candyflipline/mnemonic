@@ -289,8 +289,12 @@ func startServer(t *testing.T, author string, storeContent bool) (string, *serve
 }
 
 func serveAs(t *testing.T, srv *server.Server, author string) *httptest.Server {
+	return serveHandler(t, srv.Handler(), author)
+}
+
+func serveHandler(t *testing.T, h http.Handler, author string) *httptest.Server {
 	t.Helper()
-	ts := httptest.NewUnstartedServer(srv.Handler())
+	ts := httptest.NewUnstartedServer(h)
 	ts.Config.ConnContext = func(ctx context.Context, _ net.Conn) context.Context {
 		return auth.NewContext(ctx, auth.Local(author))
 	}
@@ -462,7 +466,19 @@ func TestReceiverRows(t *testing.T) {
 	})
 
 	t.Run("decodes beyond the slots", func(t *testing.T) {
-		_, _, ts := startServer(t, "chris", false)
+		srv, err := server.New(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		handler := srv.Handler()
+		arrived := make(chan struct{}, otlp.DecodeSlots)
+		ts := serveHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case arrived <- struct{}{}:
+			default:
+			}
+			handler.ServeHTTP(w, r)
+		}), "chris")
 		type held struct {
 			w    *io.PipeWriter
 			done chan int
@@ -486,7 +502,9 @@ func TestReceiverRows(t *testing.T) {
 			holds = append(holds, h)
 			t.Cleanup(func() { pw.Close() })
 		}
-		time.Sleep(time.Second) // the client waits 200 ms for a first byte before it sends headers of a streamed body
+		for range otlp.DecodeSlots {
+			<-arrived
+		}
 		var status int
 		var header http.Header
 		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
