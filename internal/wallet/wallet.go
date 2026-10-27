@@ -53,8 +53,6 @@ func AddressOf(pub []byte) (Address, error) {
 	return a, nil
 }
 
-// AuthorPrefix starts every wallet author; config refuses a [[keys]] author
-// that starts with it, so a wallet author never names a configured one.
 const AuthorPrefix = "sol-"
 
 const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"

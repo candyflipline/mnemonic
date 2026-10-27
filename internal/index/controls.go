@@ -343,8 +343,7 @@ func parseControlArgs(raw json.RawMessage) (controlArgs, string, error) {
 
 // actor is the caller on ctx when it may act on session: every author of
 // the session is in the caller's tenant, and the caller is its sole author or
-// holds an admin token. Any other session is not found. A wallet reader has
-// no members, so to it every session is not found.
+// holds an admin token. Any other session is not found.
 func actor(ctx context.Context, db *DB, c *Controls, session string) (auth.Identity, error) {
 	id, ok := auth.From(ctx)
 	if !ok || c == nil || store.From(ctx) == nil {

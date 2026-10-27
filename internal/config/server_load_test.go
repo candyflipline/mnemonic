@@ -37,6 +37,7 @@ func TestLoadServer(t *testing.T) {
 		{"bad key text", strings.Replace(validServerToml, keyA, "abc", 1), `CFG: keys[0] (chris): key "abc" must be unpadded base64url of 32 bytes`},
 		{"duplicate key", validServerToml + "\n[[keys]]\nkey = \"" + keyA + "\"\nauthor = \"sam\"\ntenant = \"acme\"\n", "CFG: keys[1]: key already used by chris"},
 		{"author in two tenants", validServerToml + "\n[[keys]]\nkey = \"" + keyB + "\"\nauthor = \"chris\"\n", "CFG: keys[1]: author chris is in tenant acme and default; an author sits in one tenant"},
+		{"wallet author prefix", strings.Replace(validServerToml, `author = "chris"`, `author = "sol-chris"`, 1), "CFG: keys[0]: author sol-chris: the prefix sol- is for wallet readers"},
 		{"empty scopes", strings.Replace(validServerToml, `["read"]`, `[]`, 1), "CFG: keys[0] (chris): scopes is empty; omit it for the default"},
 		{"unknown scope", strings.Replace(validServerToml, `["read"]`, `["write"]`, 1), `CFG: keys[0] (chris): unknown scope "write"; scopes are [read push annotate admin]`},
 		{"old listen", "listen = \":443\"\n" + validServerToml, "CFG: listen is gone: the one UDP endpoint is [quic] listen"},
