@@ -2,7 +2,6 @@ package index
 
 import (
 	"errors"
-	"io/fs"
 	"sync"
 	"time"
 
@@ -94,10 +93,8 @@ func (ix *Index) refresh(opened map[string]*Part) error {
 		return nil
 	}
 	for try := 1; ; try++ {
-		prev, release := ix.Snapshot()
-		db, err := openDB(ix.store, prev, opened)
+		db, err := openDB(ix.store, ix.Snapshot, opened)
 		opened = nil
-		release()
 		if err == nil {
 			ix.mu.Lock()
 			old := ix.cur
@@ -106,7 +103,7 @@ func (ix *Index) refresh(opened map[string]*Part) error {
 			ix.mu.Unlock()
 			return nil
 		}
-		if errors.Is(err, fs.ErrNotExist) { // no CURRENT: nothing published yet
+		if errors.As(err, new(noCurrentError)) {
 			return nil
 		}
 		var missing *PartOpenError

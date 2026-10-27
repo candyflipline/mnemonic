@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -230,7 +229,7 @@ func writeDelta(store string, members []ckpt, base delta, did string) (bool, int
 		}
 		heavy := newHeavyReader(store, []ckpt{c})
 		for _, b := range rows {
-			hrec, err := heavy.record(b)
+			hrec, err := heavy.record(b.src, b.row)
 			if err != nil {
 				heavy.close()
 				return false, 0, nil, err
@@ -363,16 +362,12 @@ func openDelta(dir string, d delta) (*Part, error) {
 	}
 	win = nil
 
-	heavy := &heavyReader{logs: []io.ReaderAt{segments{img.heavyB, heavyD}}, recs: map[heavyKey][][]byte{}}
+	heavy := newPartHeavy(segments{img.heavyB, heavyD})
 	files := map[string][]byte{}
 	place := func(b built) (*Row, int64, int, error) { return b.row, b.lf, b.li, nil }
-	// Every row's heavy record lives in the open's one heavy reader (the
-	// image's heavy then this delta's), so the payload reads it by the row's
-	// frame alone: built{row: b.row} drops src, which names the member, not
-	// a reader segment.
-	payload := func(b built) string { return heavy.payload(built{row: b.row}) }
+	payload := func(b built) string { return heavy.partPayload(b.row) }
 	write := func(name string, b []byte) error { files[name] = b; return nil }
-	meta, lsRecs, err := indexRows(bySession, place, payload, write)
+	meta, lsRecs, err := indexRows(bySession, authors, place, payload, write)
 	if err != nil {
 		return fail(err)
 	}
@@ -380,9 +375,6 @@ func openDelta(dir string, d delta) (*Part, error) {
 		return fail(heavy.err)
 	}
 	if files["ls.json"], err = json.Marshal(lsRecs); err != nil {
-		return fail(err)
-	}
-	if files["authors"], err = json.Marshal(authors); err != nil {
 		return fail(err)
 	}
 	meta.Members = d.Members

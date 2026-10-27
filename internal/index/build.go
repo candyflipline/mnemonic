@@ -2,7 +2,6 @@ package index
 
 import (
 	"bufio"
-	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -39,14 +38,14 @@ var partHeavyEncoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDe
 // rebuilds its parts instead of opening them.
 const partFormat = 7
 
-// fingerprint names a part by what its members parsed, never by how a disk
-// laid the logs out, so a restored store names every part it did not change
-// exactly as the store it came from does.
+// fingerprint reads only what members parsed, so a restored store names every
+// part it did not change exactly as the store it came from does.
 func fingerprint(cks []ckpt) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "format %d\n", partFormat)
 	for _, c := range cks {
-		fmt.Fprintf(h, "%s %d %d %d %s %d\n", c.Key, c.Parser, c.Layout, c.Offset, c.WindowSHA, c.Rows)
+		p := c.parsed
+		fmt.Fprintf(h, "%s %d %d %d %s %d\n", p.Key, p.Parser, p.Layout, p.Offset, p.WindowSHA, p.Rows)
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -65,18 +64,20 @@ type indexMeta struct {
 }
 
 // member is one source a part holds the rows of; a doc's src is its index in
-// the part's members. Gen and the lengths name one disk's logs, so only a hot
-// part carries them (deltaBase reads them); a cold part's bytes are the same
-// on every disk that parsed the same raw.
+// the part's members.
 type member struct {
 	parsed
+	hotPos
+}
+
+type hotPos struct {
 	Gen      int   `json:"gen,omitempty"`
 	LightLen int64 `json:"light_len,omitempty"`
 	HeavyLen int64 `json:"heavy_len,omitempty"`
 }
 
 func memberOf(c ckpt) member {
-	return member{parsed: c.parsed, Gen: c.Gen, LightLen: c.LightLen, HeavyLen: c.HeavyLen}
+	return member{parsed: c.parsed, hotPos: hotPos{Gen: c.Gen, LightLen: c.LightLen, HeavyLen: c.HeavyLen}}
 }
 
 type rowLoc struct {
@@ -120,14 +121,21 @@ func walkLog(store string, c ckpt, from int64, fn func(rec []byte, off int64, i 
 	return nil
 }
 
+func (c *ckpt) decodeRow(r *Row, rec []byte) error {
+	if _, err := r.decode(rec); err != nil {
+		return err
+	}
+	r.Author = c.Author
+	return nil
+}
+
 func loadSourceRows(store string, si int, c ckpt, from int64) ([]built, error) {
 	var out []built
 	err := walkLog(store, c, from, func(rec []byte, _ int64, _ int) error {
 		r := new(Row)
-		if _, err := r.decode(rec); err != nil {
+		if err := c.decodeRow(r, rec); err != nil {
 			return err
 		}
-		r.Author = c.Author
 		out = append(out, built{row: r, src: uint16(si)})
 		return nil
 	})
@@ -143,38 +151,42 @@ func holderIndexOf(holder *Part, key string) int {
 	return -1
 }
 
-// memberFrom reports where c's tail starts when holder holds it: the light
-// length the holder recorded, or, for a cold holder (a full part zeroes its
-// members' lengths), no tail at all when the member provably has not parsed
-// since — any resume grows Rows and any re-parse changes a parsed field or
-// bumps the generation a hot holder records — or the tail past the length the
-// checkpoint recorded at the settle the cold holder was built from: a resume
-// keeps the generation and a re-parse clears those fields. ok is false when c must be read
-// from its logs whole: the holder does not name it, or is left behind by a
-// growth or re-parse it does not cover.
+// memberFrom reports where c's tail starts when holder holds it. ok is false
+// when c must be read from its logs whole.
 func memberFrom(c ckpt, holder *Part) (from int64, ok bool) {
 	hs := holderIndexOf(holder, c.Key)
 	if hs < 0 {
 		return 0, false
 	}
 	hm := holder.meta.Members[hs]
-	if hm.LightLen > 0 {
-		if hm.Gen == c.Gen && hm.Rows <= c.Rows && hm.LightLen <= c.LightLen && hm.HeavyLen <= c.HeavyLen {
+	switch {
+	case hm.LightLen > 0:
+		if hotHolderIsPrefix(hm, c) {
 			return hm.LightLen, true
 		}
-		return 0, false
-	}
-	if sameParsed(hm.parsed, c.parsed) && hm.Rows == c.Rows {
+	case coldHolderUnchanged(hm, c):
 		return c.LightLen, true
-	}
-	if c.ColdLight > 0 {
-		at := c.parsed
-		at.Offset, at.Rows, at.WindowSHA, at.State = c.ColdZst, c.ColdRows, c.ColdSHA, hm.State
-		if sameParsed(hm.parsed, at) && c.Rows > c.ColdRows && c.LightLen >= c.ColdLight {
-			return c.ColdLight, true
-		}
+	case coldHolderResumed(hm, c):
+		return c.ColdLight, true
 	}
 	return 0, false
+}
+
+func hotHolderIsPrefix(hm member, c ckpt) bool {
+	return hm.Gen == c.Gen && hm.Rows <= c.Rows && hm.LightLen <= c.LightLen && hm.HeavyLen <= c.HeavyLen
+}
+
+func coldHolderUnchanged(hm member, c ckpt) bool {
+	return sameParsed(hm.parsed, c.parsed) && hm.Rows == c.Rows
+}
+
+func coldHolderResumed(hm member, c ckpt) bool {
+	if c.ColdLight == 0 {
+		return false
+	}
+	atColdSettle := c.parsed
+	atColdSettle.Offset, atColdSettle.Rows, atColdSettle.WindowSHA, atColdSettle.State = c.ColdZst, c.ColdRows, c.ColdSHA, hm.State
+	return sameParsed(hm.parsed, atColdSettle) && c.Rows > c.ColdRows && c.LightLen >= c.ColdLight
 }
 
 func sameParsed(a, b parsed) bool {
@@ -236,15 +248,12 @@ func memberRows(store string, si int, c ckpt, holder *Part, from int64) ([]built
 	var out []built
 	err := walkMember(store, c, holder, from, func(rec []byte, loc rowLoc) error {
 		r := new(Row)
-		if _, err := r.decode(rec); err != nil {
+		if err := c.decodeRow(r, rec); err != nil {
 			if loc.holder {
 				return fmt.Errorf("%s: holder %s: %w", c.Key, holder.meta.Fingerprint, err)
 			}
 			return err
 		}
-		// The light record does not carry the author (strs skips it);
-		// rows off the logs get it from the checkpoint, so do these.
-		r.Author = c.Author
 		b := built{row: r, src: uint16(si)}
 		if loc.holder {
 			b.lf, b.li = loc.lf, int(loc.li)
@@ -359,7 +368,7 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 	for si, c := range cks {
 		members[si] = memberOf(c)
 		if cold {
-			members[si].Gen, members[si].LightLen, members[si].HeavyLen = 0, 0, 0
+			members[si].hotPos = hotPos{}
 		}
 		if c.Harness == schema.AnnotationHarness {
 			// An annotation row feeds only the annotations section: it is no
@@ -368,11 +377,10 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 			// this part holds no rows of.
 			err := walkLog(store, c, 0, func(rec []byte, _ int64, _ int) error {
 				r := new(Row)
-				if _, err := r.decode(rec); err != nil {
+				if err := c.decodeRow(r, rec); err != nil {
 					return err
 				}
-				r.Author = c.Author
-				hrec, err := heavy.record(built{row: r, src: uint16(si)})
+				hrec, err := heavy.record(uint16(si), r)
 				if err != nil {
 					return err
 				}
@@ -397,7 +405,7 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 		}
 	}
 	mergeAuthors(allRowAuthors, kp.authorsBySession(cks))
-	locs := kp.sorted()
+	locs := kp.takeWinners()
 	sessionIDs := kp.sessions.list
 	kp = nil
 
@@ -445,6 +453,7 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 	lights := &lightSource{store: store, cks: cks, holders: plan.holder, frames: newFrameLRU(lightFrames)}
 	var r Row
 	var recBuf []byte
+	var feed *sessionFeed
 	curSession := ^uint32(0)
 	for i := range locs {
 		k := locs[i]
@@ -454,10 +463,9 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 			return err
 		}
 		r = Row{}
-		if _, err := r.decode(rec); err != nil {
+		if err := cks[k.src].decodeRow(&r, rec); err != nil {
 			return fmt.Errorf("%s: %w", cks[k.src].Key, err)
 		}
-		r.Author = cks[k.src].Author
 		var hrec []byte
 		if loc.holder {
 			h := plan.holder[k.src]
@@ -469,7 +477,7 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 				return fmt.Errorf("%s: holder %s: heavy index past frame", cks[k.src].Key, h.meta.Fingerprint)
 			}
 			hrec = hrecs[r.HeavyIdx]
-		} else if hrec, err = heavy.record(built{row: &r, src: k.src}); err != nil {
+		} else if hrec, err = heavy.record(k.src, &r); err != nil {
 			return err
 		}
 		hf, hi, err := hw.add(hrec)
@@ -483,18 +491,11 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 			return err
 		}
 		if k.session != curSession {
-			if curSession != ^uint32(0) {
-				acc.endSession()
-			}
-			acc.beginSession(sessionIDs[k.session])
-			curSession = k.session
+			feed, curSession = acc.session(sessionIDs[k.session]), k.session
 		}
-		if _, err := acc.add(&r, k.src, lf, li); err != nil {
+		if _, err := feed.add(&r, k.src, lf, li); err != nil {
 			return err
 		}
-	}
-	if curSession != ^uint32(0) {
-		acc.endSession()
 	}
 	locs = nil
 	if heavy.err != nil {
@@ -506,14 +507,14 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 	if err := lw.flush(); err != nil {
 		return err
 	}
-	if err := docs.Flush(); err != nil {
+	if err := acc.sealDocs(); err != nil {
 		return err
 	}
 
 	secs := newSections()
 	var lsRecs []lsRec
 	view := &partView{acc: acc, cks: cks, docs: docsF, light: lightF,
-		frames: newFrameLRU(sectionFrames), heavy: &heavyReader{logs: []io.ReaderAt{heavyF}, recs: map[heavyKey][][]byte{}}}
+		frames: newFrameLRU(sectionFrames), heavy: newPartHeavy(heavyF)}
 	for si := range acc.sessions {
 		view.begin(si)
 		lsRecs = append(lsRecs, lsAggregate(view.withSeqs(), view.payload))
@@ -534,24 +535,10 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 	if err != nil {
 		return err
 	}
-	for _, w := range []*bufio.Writer{hot, hotOff, blob} {
-		if err := w.Flush(); err != nil {
-			return err
-		}
-	}
-	for name, b := range secs.files() {
-		if err := write(name, b); err != nil {
-			return err
-		}
+	if err := secs.write(allRowAuthors, write); err != nil {
+		return err
 	}
 	if err := writeLs(dir, lsRecs); err != nil {
-		return err
-	}
-	ab, err := json.Marshal(allRowAuthors)
-	if err != nil {
-		return err
-	}
-	if err := write("authors", ab); err != nil {
 		return err
 	}
 	meta.Fingerprint, meta.Members = fp, members
@@ -562,7 +549,7 @@ func buildIndex(store string, cks []ckpt, fp, partDir string, byPrev map[string]
 	return commitPart(dir, partDir)
 }
 
-func indexRows(bySession map[string][]built, place func(built) (*Row, int64, int, error),
+func indexRows(bySession map[string][]built, allRowAuthors map[string][]string, place func(built) (*Row, int64, int, error),
 	payload func(built) string, write func(name string, b []byte) error) (indexMeta, []lsRec, error) {
 	sessionIDs := make([]string, 0, len(bySession))
 	for s := range bySession {
@@ -570,29 +557,28 @@ func indexRows(bySession map[string][]built, place func(built) (*Row, int64, int
 	}
 	sort.Strings(sessionIDs)
 
-	var hot, hotOff, docs, blob bytes.Buffer
 	n := 0
 	for _, evs := range bySession {
 		n += len(evs)
 	}
-	acc := newPartAcc(n, &hot, &hotOff, &docs, &blob)
+	mem := func(name string) *memFile { return &memFile{name: name, write: write} }
+	acc := newPartAcc(n, mem("hot"), mem("hot.off"), mem("docs"), mem("fa.blob"))
 	secs := newSections()
 	var lsRecs []lsRec
 	for _, sid := range sessionIDs {
 		evs := bySession[sid]
 		sort.Slice(evs, func(i, j int) bool { return orderLess(evs[i].row, evs[j].row) })
-		acc.beginSession(sid)
+		feed := acc.session(sid)
 		seqs := make([]uint32, len(evs))
 		for k, b := range evs {
 			r, lf, li, err := place(b)
 			if err != nil {
 				return indexMeta{}, nil, err
 			}
-			if seqs[k], err = acc.add(r, b.src, lf, li); err != nil {
+			if seqs[k], err = feed.add(r, b.src, lf, li); err != nil {
 				return indexMeta{}, nil, err
 			}
 		}
-		acc.endSession()
 		view := &sessionView{evs: evs, seqs: seqs, payloadOf: payload}
 		lsRecs = append(lsRecs, lsAggregate(view.withSeqs(), view.payload))
 		secs.addSession(sid, view.rows(), view.payload)
@@ -602,16 +588,8 @@ func indexRows(bySession map[string][]built, place func(built) (*Row, int64, int
 	if err != nil {
 		return indexMeta{}, nil, err
 	}
-	// finish appends hot.off's closing offset, so the buffers are written after it.
-	for name, b := range map[string][]byte{"hot": hot.Bytes(), "hot.off": hotOff.Bytes(), "docs": docs.Bytes(), "fa.blob": blob.Bytes()} {
-		if err := write(name, b); err != nil {
-			return indexMeta{}, nil, err
-		}
-	}
-	for name, b := range secs.files() {
-		if err := write(name, b); err != nil {
-			return indexMeta{}, nil, err
-		}
+	if err := secs.write(allRowAuthors, write); err != nil {
+		return indexMeta{}, nil, err
 	}
 	return meta, lsRecs, nil
 }
@@ -793,11 +771,11 @@ func (h *heavyReader) logAt(src int) (io.ReaderAt, error) {
 	return f, nil
 }
 
-func (h *heavyReader) record(b built) ([]byte, error) {
+func (h *heavyReader) record(src uint16, r *Row) ([]byte, error) {
 	if h.err != nil {
 		return nil, h.err
 	}
-	k := heavyKey{src: b.src, frame: b.row.HeavyFrame}
+	k := heavyKey{src: src, frame: r.HeavyFrame}
 	recs, ok := h.recs[k]
 	if !ok {
 		log, err := h.logAt(int(k.src))
@@ -816,11 +794,11 @@ func (h *heavyReader) record(b built) ([]byte, error) {
 			h.order = h.order[1:]
 		}
 	}
-	if int(b.row.HeavyIdx) >= len(recs) {
+	if int(r.HeavyIdx) >= len(recs) {
 		h.err = fmt.Errorf("heavy index past frame")
 		return nil, h.err
 	}
-	return recs[b.row.HeavyIdx], nil
+	return recs[r.HeavyIdx], nil
 }
 
 func heavyPayload(rec []byte) string {
@@ -828,8 +806,12 @@ func heavyPayload(rec []byte) string {
 	return string(rec[n : n+int(l)])
 }
 
-func (h *heavyReader) payload(b built) string {
-	rec, err := h.record(b)
+func newPartHeavy(log io.ReaderAt) *heavyReader {
+	return &heavyReader{logs: []io.ReaderAt{log}, recs: map[heavyKey][][]byte{}}
+}
+
+func (h *heavyReader) partPayload(r *Row) string {
+	rec, err := h.record(0, r)
 	if err != nil {
 		return ""
 	}

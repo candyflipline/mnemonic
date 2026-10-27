@@ -414,7 +414,7 @@ type archiveWriters struct {
 	fileKey string
 	prevGen map[string]int
 	ws      map[string]*archiveWriter
-	opened  []string // member session ids of open writers, least recent first
+	openLRU []string
 	limit   int
 }
 
@@ -451,26 +451,26 @@ func (aws *archiveWriters) writerFor(sid string) (*archiveWriter, error) {
 		w = &archiveWriter{key: archiveMemberKey(aws.fileKey, sid), gen: gen + 1}
 		aws.ws[sid] = w
 	}
-	if len(aws.opened) >= aws.limit {
-		if err := aws.closeWriter(aws.ws[aws.opened[0]]); err != nil {
+	if len(aws.openLRU) >= aws.limit {
+		if err := aws.closeWriter(aws.ws[aws.openLRU[0]]); err != nil {
 			return nil, err
 		}
-		aws.opened = aws.opened[1:]
+		aws.openLRU = aws.openLRU[1:]
 	}
 	var err error
 	if w.logs, err = openFrameLogs(aws.store, w.key, w.gen, w.lightLen, w.heavyLen); err != nil {
 		return nil, err
 	}
 	w.isOpen = true
-	aws.opened = append(aws.opened, sid)
+	aws.openLRU = append(aws.openLRU, sid)
 	return w, nil
 }
 
 func (aws *archiveWriters) touch(sid string) {
-	for i, s := range aws.opened {
+	for i, s := range aws.openLRU {
 		if s == sid {
-			copy(aws.opened[i:], aws.opened[i+1:])
-			aws.opened[len(aws.opened)-1] = sid
+			copy(aws.openLRU[i:], aws.openLRU[i+1:])
+			aws.openLRU[len(aws.openLRU)-1] = sid
 			return
 		}
 	}
@@ -507,11 +507,11 @@ func (aws *archiveWriters) commit(k layout.Key, m manifest, size int64, sha stri
 }
 
 func (aws *archiveWriters) closeAll() error {
-	for len(aws.opened) > 0 {
-		if err := aws.closeWriter(aws.ws[aws.opened[0]]); err != nil {
+	for len(aws.openLRU) > 0 {
+		if err := aws.closeWriter(aws.ws[aws.openLRU[0]]); err != nil {
 			return err
 		}
-		aws.opened = aws.opened[1:]
+		aws.openLRU = aws.openLRU[1:]
 	}
 	return nil
 }

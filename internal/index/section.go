@@ -82,20 +82,20 @@ func marshalAnn(ann map[string][]schema.Annotation) []byte {
 	return mustJSON(out)
 }
 
-// files encodes the spans and annotations section files a part carries,
-// grouped per session id. Every part write must produce both and the
-// authors file, so the reader never sees a missing file.
-func (s *sections) files() map[string][]byte {
+func (s *sections) write(allRowAuthors map[string][]string, write func(name string, b []byte) error) error {
 	for _, spans := range s.spans {
 		sortSpans(spans)
 	}
 	for _, ann := range s.ann {
 		sortAnnotations(ann)
 	}
-	return map[string][]byte{
-		"spans":       mustJSON(s.spans),
-		"annotations": marshalAnn(s.ann),
+	if err := write("spans", mustJSON(s.spans)); err != nil {
+		return err
 	}
+	if err := write("annotations", marshalAnn(s.ann)); err != nil {
+		return err
+	}
+	return write("authors", mustJSON(allRowAuthors))
 }
 
 func mustJSON(v any) []byte {
