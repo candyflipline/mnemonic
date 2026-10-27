@@ -18,7 +18,7 @@ port=${PORT:-18878}
 url=http://127.0.0.1:$port
 emptysha=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 mkdir -p "$out"
-SERVE= SAMPLER=
+SERVE= SAMPLER= LOOP=
 cleanup() {
 	set +e
 	[ -n "$SAMPLER" ] && kill "$SAMPLER" 2>/dev/null
