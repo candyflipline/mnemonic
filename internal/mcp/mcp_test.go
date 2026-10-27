@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -41,7 +42,11 @@ func mcpServer(t *testing.T, tools ...index.Tool) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(auth.Middleware(map[string]string{auth.Hash("tok"): "chris"})(Handler(ix, lookup)))
+	srv := httptest.NewUnstartedServer(Handler(ix, lookup))
+	srv.Config.ConnContext = func(ctx context.Context, _ net.Conn) context.Context {
+		return auth.NewContext(ctx, auth.Local("chris"))
+	}
+	srv.Start()
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -54,7 +59,6 @@ func postRPC(t *testing.T, srv *httptest.Server, body string) *http.Response {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer tok")
 	req.Header.Set("Mcp-Protocol-Version", "2025-06-18")
 	resp, err := srv.Client().Do(req)
 	if err != nil {
@@ -253,8 +257,13 @@ func TestToolsCallUnknownToolIsErrorResult(t *testing.T) {
 	}
 }
 
-func TestMissingAuthorizationIs401(t *testing.T) {
-	srv := mcpServer(t)
+func TestNoIdentityIs401(t *testing.T) {
+	ix, err := index.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(Handler(ix, nil))
+	t.Cleanup(srv.Close)
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/mcp",
 		bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
 	if err != nil {

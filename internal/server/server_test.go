@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,7 +29,6 @@ func bootLine(t *testing.T, url string) string {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer tok")
 	req.Header.Set("Mcp-Protocol-Version", "2025-06-18")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -76,12 +76,16 @@ func TestBootFailureKeepsServeUpAndRetries(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.Chmod(harness, 0o700) })
-	srv, err := New(dir, auth.NewTokens(map[string]auth.Token{auth.Hash("tok"): {Author: "a"}}))
+	srv, err := New(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer srv.Close()
-	web := httptest.NewServer(srv.Handler())
+	web := httptest.NewUnstartedServer(srv.Handler())
+	web.Config.ConnContext = func(ctx context.Context, _ net.Conn) context.Context {
+		return auth.NewContext(ctx, auth.Local("a"))
+	}
+	web.Start()
 	defer web.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	ran := make(chan struct{})

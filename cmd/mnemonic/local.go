@@ -18,7 +18,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -140,15 +139,14 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 		return err
 	}
 	sink.drainSettles(ctx, wake, logger) // the boot cycle's deferred settles, as serve sweeps after its own
-	tokens := auth.NewTokens(map[string]auth.Token{
-		auth.Hash("local"): {Author: author, Scopes: slices.Clone(auth.Scopes[:])},
-	})
 	tools := mcp.Handler(ix, index.Lookup)
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", tokens.Require(auth.Read)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/mcp", auth.Require(auth.Read)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tools.ServeHTTP(w, r.WithContext(index.WithControls(store.WithStore(r.Context(), st), ctl)))
 	})))
-	hs := &http.Server{Addr: opts.listen, Handler: mux}
+	hs := &http.Server{Addr: opts.listen, Handler: mux, ConnContext: func(ctx context.Context, _ net.Conn) context.Context {
+		return auth.NewContext(ctx, auth.Local(author))
+	}}
 	go func() {
 		if err := pushrun.WatchSink(ctx, config.Client{Sources: srcs}, sink, out); err != nil {
 			logger.Printf("watch: %v", err)

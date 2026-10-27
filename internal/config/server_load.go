@@ -3,8 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
-	"net/url"
-	"regexp"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,102 +14,84 @@ import (
 	"github.com/candyflipline/mnemonic/internal/wire"
 )
 
-var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
-
 func LoadServer(path string) (Server, error) {
 	var cfg Server
-	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+	md, err := toml.DecodeFile(path, &cfg)
+	if err != nil {
 		return Server{}, fmt.Errorf("read server config: %w", err)
+	}
+	if undecoded := md.Undecoded(); len(undecoded) > 0 {
+		return Server{}, fmt.Errorf("%s: %s", path, removedKey(undecoded[0]))
 	}
 	if cfg.DataDir == "" {
 		return Server{}, fmt.Errorf("%s: data_dir must be set", path)
 	}
-	if cfg.Listen == "" {
-		return Server{}, fmt.Errorf("%s: listen must be set", path)
+	if cfg.QUIC.Listen == "" {
+		return Server{}, fmt.Errorf("%s: [quic] listen must be set", path)
 	}
-	if cfg.PushListen == "" {
-		return Server{}, fmt.Errorf("%s: push_listen must be set", path)
-	}
-	_, port, err := net.SplitHostPort(cfg.PushListen)
+	_, port, err := net.SplitHostPort(cfg.QUIC.Listen)
 	n, portErr := strconv.Atoi(port)
 	if err != nil || portErr != nil || n < 1 || n > 65535 {
-		return Server{}, fmt.Errorf("%s: push_listen must be a host:port with port 1..65535", path)
+		return Server{}, fmt.Errorf("%s: [quic] listen must be a host:port with port 1..65535", path)
 	}
-	if cfg.PushListen == cfg.Listen {
-		return Server{}, fmt.Errorf("%s: push_listen must differ from listen", path)
+	if cfg.QUIC.KeyFile == "" {
+		cfg.QUIC.KeyFile = filepath.Join(cfg.DataDir, "server.key")
 	}
-	if err := cfg.TLS.check(cfg.Listen, cfg.PushListen); err != nil {
-		return Server{}, fmt.Errorf("%s: %w", path, err)
-	}
-	if len(cfg.Tokens) == 0 {
-		return Server{}, fmt.Errorf("%s: at least one [[tokens]] entry is required", path)
+	if len(cfg.Keys) == 0 {
+		return Server{}, fmt.Errorf("%s: at least one [[keys]] entry is required", path)
 	}
 	seen := map[string]string{}
 	tenantOf := map[string]string{}
-	for i, t := range cfg.Tokens {
-		if t.Author == "" {
-			return Server{}, fmt.Errorf("%s: tokens[%d]: author must be set", path, i)
+	for i, k := range cfg.Keys {
+		if k.Author == "" {
+			return Server{}, fmt.Errorf("%s: keys[%d]: author must be set", path, i)
 		}
-		if !sha256Hex.MatchString(t.SHA256) {
-			return Server{}, fmt.Errorf("%s: tokens[%d] (%s): sha256 must be 64 lowercase hex digits", path, i, t.Author)
+		if _, err := auth.ParseKey(k.Key); err != nil {
+			return Server{}, fmt.Errorf("%s: keys[%d] (%s): %w", path, i, k.Author, err)
 		}
-		if prev, dup := seen[t.SHA256]; dup {
-			return Server{}, fmt.Errorf("%s: tokens[%d]: sha256 already used by %s", path, i, prev)
+		if prev, dup := seen[k.Key]; dup {
+			return Server{}, fmt.Errorf("%s: keys[%d]: key already used by %s", path, i, prev)
 		}
-		seen[t.SHA256] = t.Author
-		tenant := t.Tenant
+		seen[k.Key] = k.Author
+		tenant := k.Tenant
 		if tenant == "" {
 			tenant = auth.DefaultTenant
 		} else if !wire.ValidSegment(tenant) {
-			return Server{}, fmt.Errorf("%s: tokens[%d] (%s): tenant %q must be lowercase letters, digits, '.', '_' or '-'", path, i, t.Author, tenant)
+			return Server{}, fmt.Errorf("%s: keys[%d] (%s): tenant %q must be lowercase letters, digits, '.', '_' or '-'", path, i, k.Author, tenant)
 		}
-		if prev, ok := tenantOf[t.Author]; ok && prev != tenant {
-			return Server{}, fmt.Errorf("%s: tokens[%d]: author %s is in tenant %s and %s; an author sits in one tenant", path, i, t.Author, prev, tenant)
+		if prev, ok := tenantOf[k.Author]; ok && prev != tenant {
+			return Server{}, fmt.Errorf("%s: keys[%d]: author %s is in tenant %s and %s; an author sits in one tenant", path, i, k.Author, prev, tenant)
 		}
-		tenantOf[t.Author] = tenant
-		if t.Scopes != nil && len(t.Scopes) == 0 {
-			return Server{}, fmt.Errorf("%s: tokens[%d] (%s): scopes is empty; omit it for the default", path, i, t.Author)
+		tenantOf[k.Author] = tenant
+		if k.Scopes != nil && len(k.Scopes) == 0 {
+			return Server{}, fmt.Errorf("%s: keys[%d] (%s): scopes is empty; omit it for the default", path, i, k.Author)
 		}
-		for _, s := range t.Scopes {
+		for _, s := range k.Scopes {
 			if !slices.Contains(auth.Scopes[:], s) {
-				return Server{}, fmt.Errorf("%s: tokens[%d] (%s): unknown scope %q; scopes are %v", path, i, t.Author, s, auth.Scopes)
+				return Server{}, fmt.Errorf("%s: keys[%d] (%s): unknown scope %q; scopes are %v", path, i, k.Author, s, auth.Scopes)
 			}
 		}
 	}
 	return cfg, nil
 }
 
-func (t TLS) check(listen, pushListen string) error {
-	if len(t.Hosts) == 0 {
-		if t.ACMEDirectory != "" {
-			return fmt.Errorf("tls.acme_directory is set but tls.hosts is empty")
-		}
-		return nil
+func removedKey(k toml.Key) string {
+	switch top := k[0]; top {
+	case "listen", "push_listen":
+		return top + " is gone: the one UDP endpoint is [quic] listen"
+	case "tls":
+		return "[tls] is gone: QUIC pins the server key, so there is no certificate; set [quic] listen and key_file"
+	case "tokens":
+		return "[[tokens]] is gone: admit a client key with [[keys]] (key, author, tenant, scopes); mnemonic key prints one"
 	}
-	if _, port, _ := net.SplitHostPort(listen); port != "443" {
-		return fmt.Errorf("tls.hosts needs listen on port 443 (tls-alpn-01 validates there), not %q", listen)
-	}
-	if _, port, _ := net.SplitHostPort(pushListen); port != wire.PushPort {
-		return fmt.Errorf("tls: push_listen must use port %s, the port clients dial, not %q", wire.PushPort, pushListen)
-	}
-	for i, h := range t.Hosts {
-		if h == "" || strings.ContainsAny(h, ":/ ") {
-			return fmt.Errorf("tls.hosts[%d] = %q must be a bare DNS name", i, h)
-		}
-	}
-	if t.ACMEDirectory != "" {
-		if u, err := url.Parse(t.ACMEDirectory); err != nil || u.Scheme != "https" || u.Host == "" {
-			return fmt.Errorf("tls.acme_directory %q must be an https URL", t.ACMEDirectory)
-		}
-	}
-	return nil
+	return "unknown key " + strings.Join(k, ".")
 }
 
-// Identities is the token table LoadServer validated.
-func (s Server) Identities() auth.Tokens {
-	byHash := make(map[string]auth.Token, len(s.Tokens))
-	for _, t := range s.Tokens {
-		byHash[t.SHA256] = auth.Token{Tenant: t.Tenant, Author: t.Author, Scopes: t.Scopes}
+// Identities is the key table LoadServer validated.
+func (s Server) Identities() auth.Keys {
+	byKey := make(map[string]auth.Grant, len(s.Keys))
+	for _, k := range s.Keys {
+		byKey[k.Key] = auth.Grant{Tenant: k.Tenant, Author: k.Author, Scopes: k.Scopes}
 	}
-	return auth.NewTokens(byHash)
+	return auth.NewKeys(byKey)
 }

@@ -37,12 +37,12 @@ type Server struct {
 }
 
 // New opens the index under dataDir, loads the session controls from raw,
-// and mounts the store (push scope) and MCP (read scope) behind tokens. MCP
+// and mounts the store (push scope) and MCP (read scope) behind auth.Require. MCP
 // tools find the store with store.From and the controls with
 // index.WithControls on their ctx. The server takes the index dir's writer
 // lock for its whole life — it is the dir's one writer — and refuses to start
 // under another one, naming the holder.
-func New(dataDir string, tokens auth.Tokens) (*Server, error) {
+func New(dataDir string) (*Server, error) {
 	ctl, err := index.LoadControls(dataDir)
 	if err != nil {
 		return nil, err
@@ -66,10 +66,10 @@ func New(dataDir string, tokens auth.Tokens) (*Server, error) {
 	boot := &index.BootStatus{}
 	rcv := otlp.NewReceiver(st)
 	mux := http.NewServeMux()
-	push, drain := intake.Mount(st, tokens)
-	mux.Handle("POST /v1/traces", tokens.Require(auth.Push)(rcv.Traces()))
-	mux.Handle("POST /v1/logs", tokens.Require(auth.Push)(rcv.Logs()))
-	mux.Handle("/mcp", tokens.Require(auth.Read)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	push, drain := intake.Mount(st)
+	mux.Handle("POST /v1/traces", auth.Require(auth.Push)(rcv.Traces()))
+	mux.Handle("POST /v1/logs", auth.Require(auth.Push)(rcv.Logs()))
+	mux.Handle("/mcp", auth.Require(auth.Read)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tools.ServeHTTP(w, r.WithContext(index.WithBootStatus(index.WithControls(store.WithStore(r.Context(), st), ctl), boot)))
 	})))
 	return &Server{dataDir: dataDir, ix: ix, lock: lock, st: st, push: push, drain: drain, booted: make(chan struct{}), boot: boot, handler: mux, otlp: rcv}, nil

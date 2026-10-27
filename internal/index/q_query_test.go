@@ -277,11 +277,8 @@ func TestQueryHidesAControlledSession(t *testing.T) {
 	if !ctl.deleted(sid) {
 		t.Fatal("the control record did not load")
 	}
-	tokens := auth.Authors(map[string]string{auth.Hash("tok-b"): "b"})
-	ctx, ok := tokens.Context(WithControls(context.Background(), ctl), "tok-b")
-	if !ok {
-		t.Fatal("token")
-	}
+	id, _ := auth.NewKeys(map[string]auth.Grant{"k-b": {Author: "b"}}).Identify("k-b")
+	ctx := auth.NewContext(WithControls(context.Background(), ctl), id)
 	d, _, err := queryCall(t, ctx, db, "from: sessions | measures: count()", "2026-01-16T00:00:00Z", "2026-02-16T00:00:00Z", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -301,18 +298,16 @@ func TestQueryHidesAPrivateSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tokens := auth.Authors(map[string]string{auth.Hash("tok-a"): "a", auth.Hash("tok-b"): "b"})
-	for _, c := range []struct{ token, want string }{{"tok-a", "[[2]]"}, {"tok-b", "[[1]]"}} {
-		ctx, ok := tokens.Context(WithControls(context.Background(), ctl), c.token)
-		if !ok {
-			t.Fatal("token")
-		}
+	keys := auth.NewKeys(map[string]auth.Grant{"k-a": {Author: "a"}, "k-b": {Author: "b"}})
+	for _, c := range []struct{ key, want string }{{"k-a", "[[2]]"}, {"k-b", "[[1]]"}} {
+		id, _ := keys.Identify(c.key)
+		ctx := auth.NewContext(WithControls(context.Background(), ctl), id)
 		d, _, err := queryCall(t, ctx, db, "from: sessions | measures: count()", "2026-01-16T00:00:00Z", "2026-02-16T00:00:00Z", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got := queryRows(t, d); got != c.want {
-			t.Fatalf("%s sees %s sessions, want %s", c.token, got, c.want)
+			t.Fatalf("%s sees %s sessions, want %s", c.key, got, c.want)
 		}
 	}
 }

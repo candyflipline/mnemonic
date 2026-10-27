@@ -54,29 +54,23 @@ var DefaultSources = []SourceGlob{
 // Server is the server's config file.
 //
 //	data_dir = "/var/lib/mnemonic"
-//	listen   = ":443"
-//	push_listen = ":8741"
-//	[tls]                    # omit for plaintext listeners
-//	hosts = ["mnemonic.example"]
-//	acme_directory = "https://acme-staging-v02.api.letsencrypt.org/directory"  # optional; default Let's Encrypt production
-//	[[tokens]]
-//	author = "chris"; sha256 = "<auth.Hash(token)>"
+//	[quic]
+//	listen   = ":8741"                  # UDP
+//	key_file = "/var/lib/mnemonic/server.key"  # optional; default data_dir/server.key
+//	[[keys]]
+//	key = "<mnemonic key prints this>"; author = "chris"
 //	tenant = "acme"            # optional, default "default"; an author sits in one tenant
 //	scopes = ["read", "push"]  # optional, the default; "annotate" and "admin" opt in
 //	[otlp]
 //	store_content = false    # keep OTLP message and tool content
 //
-// An author no token entry names is in the "default" tenant, so every
-// default-tenant token reads what such an author's data holds.
+// An author no key entry names is in the "default" tenant, so every
+// default-tenant key reads what such an author's data holds.
 type Server struct {
-	DataDir    string       `toml:"data_dir"`
-	Listen     string       `toml:"listen"`
-	PushListen string       `toml:"push_listen"`
-	TLS        TLS          `toml:"tls"`
-	Tokens     []TokenEntry `toml:"tokens"`
-	QUIC       QUIC         `toml:"quic"`
-	Keys       []KeyEntry   `toml:"keys"`
-	OTLP       OTLP         `toml:"otlp"`
+	DataDir string     `toml:"data_dir"`
+	QUIC    QUIC       `toml:"quic"`
+	Keys    []KeyEntry `toml:"keys"`
+	OTLP    OTLP       `toml:"otlp"`
 }
 
 // QUIC is the one UDP endpoint. KeyFile holds the server's ed25519 key and
@@ -94,20 +88,6 @@ type KeyEntry struct {
 	Scopes []auth.Scope `toml:"scopes"`
 }
 
-// TLS serves both listeners with Let's Encrypt certificates for Hosts,
-// cached under data_dir/autocert.
-type TLS struct {
-	Hosts         []string `toml:"hosts"`
-	ACMEDirectory string   `toml:"acme_directory"`
-}
-
 type OTLP struct {
 	StoreContent bool `toml:"store_content"`
-}
-
-type TokenEntry struct {
-	Author string       `toml:"author"`
-	SHA256 string       `toml:"sha256"`
-	Tenant string       `toml:"tenant"`
-	Scopes []auth.Scope `toml:"scopes"`
 }

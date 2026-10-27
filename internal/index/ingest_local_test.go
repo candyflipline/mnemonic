@@ -113,17 +113,15 @@ func TestAnnotateStoresOnlyRedactedText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tokens := auth.NewTokens(map[string]auth.Token{
-		auth.Hash("tok-a"): {Author: "a", Scopes: []auth.Scope{auth.Read, auth.Annotate}},
+	keys := auth.NewKeys(map[string]auth.Grant{
+		"k-a": {Author: "a", Scopes: []auth.Scope{auth.Read, auth.Annotate}},
 	})
 	ctl, err := LoadControls(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, ok := tokens.Context(WithControls(context.Background(), ctl), "tok-a")
-	if !ok {
-		t.Fatal("token")
-	}
+	id, _ := keys.Identify("k-a")
+	ctx := auth.NewContext(WithControls(context.Background(), ctl), id)
 	stc, err := store.Open(dir)
 	if err != nil {
 		t.Fatal(err)
