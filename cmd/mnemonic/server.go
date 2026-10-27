@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"flag"
 	"fmt"
@@ -53,7 +54,7 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
-	qs, err := qnet.Listen(cfg.QUIC.Listen, priv, cfg.Identities().Identify)
+	qs, err := qnet.Listen(cfg.QUIC.Listen, priv, srv.Identify(cfg.Identities(), priv.Public().(ed25519.PublicKey)))
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", cfg.QUIC.Listen, err)
 	}

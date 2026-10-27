@@ -11,9 +11,11 @@ import (
 // session ids. A session is the tenant's when every author in its session
 // authors is a member, so a session whose authors span two tenants is no
 // one's; a delete hides it from everyone, private hides it from all but its
-// sole author, and link opens a session with a sole author by id to any
-// caller. The zero SessionFilter, which a ctx without an auth.Identity gets,
-// passes everything.
+// sole author and the wallets it is shared with, and link opens a session
+// with a sole author by id to any caller. A wallet reader has no members: it
+// lists exactly the sessions shared with its wallet, read from the controls
+// when the filter is made. The zero SessionFilter, which a ctx without an
+// auth.Identity gets, passes everything.
 type SessionFilter struct {
 	db     *DB
 	scoped bool
@@ -21,6 +23,7 @@ type SessionFilter struct {
 	tenant auth.AuthorSet
 	hidden map[string]bool
 	link   map[string]bool
+	shared map[string]bool
 }
 
 // Sessions is the SessionFilter of the caller on ctx over db.
@@ -38,8 +41,11 @@ func Sessions(ctx context.Context, db *DB) (SessionFilter, error) {
 	for _, s := range sets.deleted {
 		f.hidden[s] = true
 	}
+	if w, ok := id.Wallet(); ok {
+		f.shared = c.sharedWith(w)
+	}
 	for _, s := range sets.private {
-		if !f.soleAuthor(s, f.author) {
+		if !f.soleAuthor(s, f.author) && !f.shared[s] {
 			f.hidden[s] = true
 		}
 	}
@@ -79,9 +85,10 @@ func (f SessionFilter) soleAuthor(sessionID, author string) bool {
 	return len(authors) == 1 && (author == "" || authors[0] == author)
 }
 
-// Listed is whether the caller may list or search sessionID.
+// Listed is whether the caller may list or search sessionID: in its tenant,
+// or shared with its wallet.
 func (f SessionFilter) Listed(sessionID string) bool {
-	return !f.hidden[sessionID] && f.inTenant(sessionID)
+	return !f.hidden[sessionID] && (f.inTenant(sessionID) || f.shared[sessionID])
 }
 
 // Opened is whether the caller may open sessionID by id: Listed, plus link
@@ -90,5 +97,5 @@ func (f SessionFilter) Opened(sessionID string) bool {
 	if f.hidden[sessionID] {
 		return false
 	}
-	return f.inTenant(sessionID) || (f.link[sessionID] && f.soleAuthor(sessionID, ""))
+	return f.inTenant(sessionID) || f.shared[sessionID] || (f.link[sessionID] && f.soleAuthor(sessionID, ""))
 }

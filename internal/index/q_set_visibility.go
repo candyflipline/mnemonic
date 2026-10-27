@@ -35,7 +35,7 @@ func (setVisibility) Call(ctx context.Context, db *DB, raw json.RawMessage) (any
 		key = randomKey()
 	}
 	dup, err := c.record(store.From(ctx), id.Author(), controlRecord{SessionID: session, Action: actVisibility, Visibility: a.Visibility,
-		RequestKey: recordKey(actVisibility, session, a.Visibility, key)})
+		RequestKey: recordKey(actVisibility, session, string(a.Visibility), key)})
 	if err != nil {
 		return nil, "", err
 	}

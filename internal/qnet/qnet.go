@@ -1,7 +1,9 @@
 // Package qnet carries gRPC push and HTTP over one QUIC (UDP) endpoint. Each
-// side is an ed25519 key: the server accepts the client keys it lists, the
-// client pins the server's key, and the TLS 1.3 handshake proves both. The
-// Identity of a client key is attached to every conn the server accepts.
+// side is an ed25519 key: the client pins the server's key, the server asks
+// Identify about the client's key and the binding bytes its certificate
+// carries, and the TLS 1.3 handshake proves both keys. The Identity Identify
+// returns is attached to every conn the server accepts. qnet does not read
+// the binding; package wallet does.
 package qnet
 
 import (
@@ -50,16 +52,22 @@ type Server struct {
 	ln       *quic.Listener
 	tr       *quic.Transport
 	pc       net.PacketConn
-	identify func(string) (auth.Identity, bool)
+	identify Identify
 	ctx      context.Context
 	cancel   context.CancelFunc
 	once     sync.Once
 }
 
-// Listen binds the UDP address addr. identify maps a client key to its
-// Identity; a key it refuses fails that client's handshake.
-func Listen(addr string, priv ed25519.PrivateKey, identify func(key string) (auth.Identity, bool)) (*Server, error) {
-	cert, err := certificate(priv)
+// Identify maps a client's proven device key and the binding its certificate
+// carries (nil when none) to its Identity. It runs twice per connection, in
+// the handshake, where a refusal is a TLS alert, and again when the conn is
+// served, so it reads live state and holds no cache of its own.
+type Identify func(device ed25519.PublicKey, binding []byte) (auth.Identity, bool)
+
+// Listen binds the UDP address addr. identify maps a client to its Identity;
+// a client it refuses fails its handshake.
+func Listen(addr string, priv ed25519.PrivateKey, identify Identify) (*Server, error) {
+	cert, err := certificate(Credential{Key: priv})
 	if err != nil {
 		return nil, err
 	}
@@ -71,12 +79,12 @@ func Listen(addr string, priv ed25519.PrivateKey, identify func(key string) (aut
 		NextProtos:             []string{ALPNPush, ALPNHTTP},
 		SessionTicketsDisabled: true,
 		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
-			key, err := peerKey(raw)
+			key, binding, err := peerCert(raw)
 			if err != nil {
 				return err
 			}
-			if _, ok := identify(key); !ok {
-				return fmt.Errorf("client key %s is not allowed", key)
+			if _, ok := identify(key, binding); !ok {
+				return fmt.Errorf("client key %s is not allowed", auth.EncodeKey(key))
 			}
 			return nil
 		},
@@ -134,16 +142,17 @@ func (s *Server) accept() {
 func (s *Server) serve(qc *quic.Conn) {
 	cs := qc.ConnectionState()
 	l := map[string]*listener{ALPNPush: s.Push.(*listener), ALPNHTTP: s.HTTP.(*listener)}[cs.TLS.NegotiatedProtocol]
-	var key string
+	var key ed25519.PublicKey
+	var binding []byte
 	var id auth.Identity
 	ok := l != nil
 	if ok {
 		var err error
-		key, err = peerKeyOf(cs.TLS)
+		key, binding, err = peerOf(cs.TLS)
 		ok = err == nil
 	}
 	if ok {
-		id, ok = s.identify(key)
+		id, ok = s.identify(key, binding)
 	}
 	if !ok {
 		qc.CloseWithError(1, "refused")
@@ -170,18 +179,19 @@ func (s *Server) serve(qc *quic.Conn) {
 	}
 }
 
-func peerKeyOf(cs tls.ConnectionState) (string, error) {
+func peerOf(cs tls.ConnectionState) (ed25519.PublicKey, []byte, error) {
 	raw := make([][]byte, len(cs.PeerCertificates))
 	for i, c := range cs.PeerCertificates {
 		raw[i] = c.Raw
 	}
-	return peerKey(raw)
+	return peerCert(raw)
 }
 
-// Dial opens a QUIC connection and one stream to addr speaking alpn. It
-// fails unless the server proves serverKey and accepts our key.
-func Dial(ctx context.Context, addr string, priv ed25519.PrivateKey, serverKey string, alpn string) (net.Conn, error) {
-	cert, err := certificate(priv)
+// Dial opens a QUIC connection and one stream to addr speaking alpn as cred.
+// It fails unless the server proves serverKey and accepts cred.
+func Dial(ctx context.Context, addr string, cred Credential, serverKey string, alpn string) (net.Conn, error) {
+	priv := cred.Key
+	cert, err := certificate(cred)
 	if err != nil {
 		return nil, err
 	}
@@ -192,11 +202,11 @@ func Dial(ctx context.Context, addr string, priv ed25519.PrivateKey, serverKey s
 		InsecureSkipVerify: true,
 		NextProtos:         []string{alpn},
 		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
-			key, err := peerKey(raw)
+			pub, _, err := peerCert(raw)
 			if err != nil {
 				return err
 			}
-			if key != serverKey {
+			if key := auth.EncodeKey(pub); key != serverKey {
 				return fmt.Errorf("server proved key %s, pinned key is %s", key, serverKey)
 			}
 			return nil

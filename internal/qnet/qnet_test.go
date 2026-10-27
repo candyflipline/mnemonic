@@ -33,8 +33,8 @@ func TestQnet(t *testing.T) {
 		t.Fatal("alice not in table")
 	}
 
-	srv, err := Listen("127.0.0.1:0", serverKey, func(key string) (auth.Identity, bool) {
-		return aliceID, key == PublicKey(alice)
+	srv, err := Listen("127.0.0.1:0", serverKey, func(key ed25519.PublicKey, _ []byte) (auth.Identity, bool) {
+		return aliceID, auth.EncodeKey(key) == PublicKey(alice)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -56,7 +56,7 @@ func TestQnet(t *testing.T) {
 		{"wrong pin", alice, PublicKey(other), []string{"server proved key " + PublicKey(serverKey), "pinned key is " + PublicKey(other)}, false},
 	}
 	for _, d := range dials {
-		c, err := Dial(dctx, addr, d.key, d.pin, ALPNPush)
+		c, err := Dial(dctx, addr, Credential{Key: d.key}, d.pin, ALPNPush)
 		if len(d.wantErr) == 0 {
 			if err != nil {
 				t.Fatalf("%s: %v", d.name, err)
@@ -88,7 +88,7 @@ func TestQnet(t *testing.T) {
 		}
 	}
 
-	c, err := Dial(dctx, addr, alice, PublicKey(serverKey), ALPNHTTP)
+	c, err := Dial(dctx, addr, Credential{Key: alice}, PublicKey(serverKey), ALPNHTTP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestQnet(t *testing.T) {
 	cc, err := grpc.NewClient("passthrough:///"+addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithContextDialer(func(ctx context.Context, a string) (net.Conn, error) {
-			return Dial(ctx, a, alice, PublicKey(serverKey), ALPNPush)
+			return Dial(ctx, a, Credential{Key: alice}, PublicKey(serverKey), ALPNPush)
 		}))
 	if err != nil {
 		t.Fatal(err)
@@ -141,7 +141,7 @@ func TestQnet(t *testing.T) {
 	go hs.Serve(srv.HTTP)
 	defer hs.Close()
 	hc := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, a string) (net.Conn, error) {
-		return Dial(ctx, a, alice, PublicKey(serverKey), ALPNHTTP)
+		return Dial(ctx, a, Credential{Key: alice}, PublicKey(serverKey), ALPNHTTP)
 	}}}
 	hresp, err := hc.Get("http://" + addr + "/")
 	if err != nil {

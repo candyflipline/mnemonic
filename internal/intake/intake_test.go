@@ -29,7 +29,9 @@ func listen(t *testing.T, st *store.Committer, grants map[string]auth.Grant) (ad
 	if err != nil {
 		t.Fatal(err)
 	}
-	qs, err := qnet.Listen("127.0.0.1:0", priv, auth.NewKeys(grants).Identify)
+	qs, err := qnet.Listen("127.0.0.1:0", priv, func(device ed25519.PublicKey, _ []byte) (auth.Identity, bool) {
+		return auth.NewKeys(grants).Identify(auth.EncodeKey(device))
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +55,7 @@ func dial(t *testing.T, addr, serverKey string, priv ed25519.PrivateKey) *grpc.C
 	conn, err := grpc.NewClient("passthrough:///quic",
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
-			return qnet.Dial(ctx, addr, priv, serverKey, qnet.ALPNPush)
+			return qnet.Dial(ctx, addr, qnet.Credential{Key: priv}, serverKey, qnet.ALPNPush)
 		}))
 	if err != nil {
 		t.Fatal(err)

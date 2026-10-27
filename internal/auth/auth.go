@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"slices"
 	"sort"
+
+	"github.com/candyflipline/mnemonic/internal/wallet"
 )
 
 // Scope is one thing a key may do.
@@ -47,17 +49,32 @@ type AuthorSet struct {
 
 func (s AuthorSet) Has(author string) bool { return slices.Contains(s.Names, author) != s.Except }
 
-// Identity is who an authenticated request is; Keys makes it.
+// Identity is who an authenticated request is; Keys, Local and WalletReader
+// make it, and no one else can, so a wallet reader's empty member set and
+// read-only scope hold everywhere an Identity travels.
 type Identity struct {
 	tenant, author string
 	scopes         []Scope
 	members        AuthorSet
+	wallet         wallet.Address
+	isWallet       bool
 }
 
 func (id Identity) Tenant() string     { return id.tenant }
 func (id Identity) Author() string     { return id.author }
 func (id Identity) Can(s Scope) bool   { return slices.Contains(id.scopes, s) }
 func (id Identity) Members() AuthorSet { return id.members }
+
+// Wallet is the wallet a wallet reader reads as, false for a key identity.
+func (id Identity) Wallet() (wallet.Address, bool) { return id.wallet, id.isWallet }
+
+// WalletReader is the Identity of a device a wallet bound: scope Read only,
+// no tenant, and an empty member set, so it lists no author's sessions; what
+// it reads is the sessions shared with the wallet, which the session controls
+// answer per request.
+func WalletReader(w wallet.Address) Identity {
+	return Identity{author: w.Author(), scopes: []Scope{Read}, wallet: w, isWallet: true}
+}
 
 // Keys is the server's key table, keyed by the key text EncodeKey writes.
 type Keys struct{ byKey map[string]Identity }

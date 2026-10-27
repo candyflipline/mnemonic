@@ -99,16 +99,16 @@ func mcpCmd(args []string) error {
 }
 
 // quicClient is an http.Client that reaches the server's HTTP endpoint over
-// QUIC, pinned to cfg.ServerKey and signed by cfg.KeyFile. Its requests go to
-// http://mnemonic/.
+// QUIC, pinned to cfg.ServerKey, signed by cfg.KeyFile and carrying the
+// wallet binding stored beside it. Its requests go to http://mnemonic/.
 func quicClient(cfg config.Client) (*http.Client, error) {
-	priv, err := qnet.LoadOrCreateKey(cfg.KeyFile)
+	cred, err := qnet.LoadCredential(cfg.KeyFile)
 	if err != nil {
 		return nil, err
 	}
 	return &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return qnet.Dial(ctx, cfg.Addr(), priv, cfg.ServerKey, qnet.ALPNHTTP)
+			return qnet.Dial(ctx, cfg.Addr(), cred, cfg.ServerKey, qnet.ALPNHTTP)
 		},
 	}}, nil
 }

@@ -68,7 +68,7 @@ func dialUp(addr, serverKey string, priv ed25519.PrivateKey) (pushpb.PushClient,
 	conn, err := grpc.NewClient("passthrough:///"+addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
-			return qnet.Dial(ctx, addr, priv, serverKey, qnet.ALPNPush)
+			return qnet.Dial(ctx, addr, qnet.Credential{Key: priv}, serverKey, qnet.ALPNPush)
 		}),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxMsg), grpc.MaxCallSendMsgSize(maxMsg)))
 	if err != nil {
@@ -127,7 +127,7 @@ func proxyCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	ln, err := qnet.Listen(*listen, priv, func(string) (auth.Identity, bool) { return auth.Identity{}, true })
+	ln, err := qnet.Listen(*listen, priv, func(ed25519.PublicKey, []byte) (auth.Identity, bool) { return auth.Identity{}, true })
 	if err != nil {
 		return err
 	}

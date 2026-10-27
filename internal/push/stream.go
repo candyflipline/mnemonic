@@ -73,14 +73,14 @@ type uplink struct {
 // is false, and starts the ack reader. The client pings every pingEvery while
 // the stream is open.
 func dial(ctx context.Context, cfg config.Client) (*uplink, error) {
-	priv, err := qnet.LoadOrCreateKey(cfg.KeyFile)
+	cred, err := qnet.LoadCredential(cfg.KeyFile)
 	if err != nil {
 		return nil, err
 	}
 	conn, err := grpc.NewClient("passthrough:///"+cfg.Addr(),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
-			return qnet.Dial(ctx, addr, priv, cfg.ServerKey, qnet.ALPNPush)
+			return qnet.Dial(ctx, addr, cred, cfg.ServerKey, qnet.ALPNPush)
 		}),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: pingEvery, Timeout: pingTimeout}),
 	)

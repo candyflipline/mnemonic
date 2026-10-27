@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"crypto/ed25519"
 	"log"
 	"net"
 	"net/http"
@@ -20,10 +21,12 @@ import (
 	"github.com/candyflipline/mnemonic/internal/mcp"
 	"github.com/candyflipline/mnemonic/internal/otlp"
 	"github.com/candyflipline/mnemonic/internal/store"
+	"github.com/candyflipline/mnemonic/internal/wallet"
 )
 
 type Server struct {
 	dataDir string
+	ctl     *index.Controls
 	ix      *index.Index
 	lock    *index.IndexLock
 	st      *store.Committer
@@ -74,7 +77,30 @@ func New(dataDir string) (*Server, error) {
 	mux.Handle("/mcp", auth.Require(auth.Read)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tools.ServeHTTP(w, r.WithContext(index.WithBootStatus(index.WithControls(store.WithStore(r.Context(), st), ctl), boot)))
 	})))
-	return &Server{dataDir: dataDir, ix: ix, lock: lock, st: st, push: push, drain: drain, booted: make(chan struct{}), boot: boot, handler: mux, otlp: rcv}, nil
+	return &Server{dataDir: dataDir, ctl: ctl, ix: ix, lock: lock, st: st, push: push, drain: drain, booted: make(chan struct{}), boot: boot, handler: mux, otlp: rcv}, nil
+}
+
+// Identify is the handshake's one admission rule over keys, the configured
+// [[keys]] table, and serverKey, this server's public key: a configured key
+// is its Identity, whatever binding it carries; otherwise a binding that
+// wallet.Verify accepts for this device and serverKey now, whose wallet the
+// session controls admit (one share or more), is auth.WalletReader of that
+// wallet; everything else is refused. Shares are read from the controls at
+// each call, never copied.
+func (s *Server) Identify(keys auth.Keys, serverKey ed25519.PublicKey) func(device ed25519.PublicKey, binding []byte) (auth.Identity, bool) {
+	return func(device ed25519.PublicKey, binding []byte) (auth.Identity, bool) {
+		if id, ok := keys.Identify(auth.EncodeKey(device)); ok {
+			return id, true
+		}
+		if binding == nil {
+			return auth.Identity{}, false
+		}
+		w, err := wallet.Verify(binding, device, serverKey, time.Now())
+		if err != nil || !s.ctl.Admits(w) {
+			return auth.Identity{}, false
+		}
+		return auth.WalletReader(w), true
+	}
 }
 
 // Booted is closed once the index has booted: from then on its steady memory

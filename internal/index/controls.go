@@ -23,6 +23,7 @@ import (
 
 	"github.com/candyflipline/mnemonic/internal/auth"
 	"github.com/candyflipline/mnemonic/internal/store"
+	"github.com/candyflipline/mnemonic/internal/wallet"
 )
 
 // controlHarness is the server harness session controls are appended to.
@@ -41,6 +42,8 @@ type controlAction string
 const (
 	actVisibility controlAction = "visibility"
 	actDelete     controlAction = "delete"
+	actShare      controlAction = "share"
+	actUnshare    controlAction = "unshare"
 )
 
 // controlRecord is one raw line of a control source. The actor is the
@@ -50,6 +53,7 @@ type controlRecord struct {
 	SessionID  string        `json:"session_id"`
 	Action     controlAction `json:"action"`
 	Visibility visibility    `json:"visibility,omitempty"`
+	Wallet     string        `json:"wallet,omitempty"`
 	TS         time.Time     `json:"ts"`
 	RequestKey string        `json:"request_key"`
 	Writer     string        `json:"writer,omitempty"`
@@ -76,7 +80,8 @@ func parseControl(line []byte) (controlRecord, error) {
 	switch {
 	case r.SessionID == "" || r.RequestKey == "" || r.TS.IsZero():
 		return r, fmt.Errorf("control record lacks session_id, request_key or ts")
-	case r.Action == actDelete && r.Visibility == "":
+	case r.Action == actDelete && r.Visibility == "" && r.Wallet == "":
+	case (r.Action == actShare || r.Action == actUnshare) && r.Visibility == "" && validWallet(r.Wallet):
 	case r.Action == actVisibility && slices.Contains([]visibility{visPrivate, visTeam, visLink}, r.Visibility):
 	default:
 		return r, fmt.Errorf("control record action %q visibility %q", r.Action, r.Visibility)
@@ -84,19 +89,42 @@ func parseControl(line []byte) (controlRecord, error) {
 	return r, nil
 }
 
+// validWallet is whether s is a base58 wallet address as share_session
+// stores it: wallet.ParseAddress accepts it and String prints it back.
+func validWallet(s string) bool {
+	a, err := wallet.ParseAddress(s)
+	return err == nil && a.String() == s
+}
+
 type sessionControl struct {
 	visibility visibility
 	ts         time.Time
 	key        string
 	deleted    bool
+	shares     map[wallet.Address]stamp
+}
+
+// stamp is the latest share or unshare of one session with one wallet, by the
+// same last-writer-wins order as visibility: later ts, then greater key.
+type stamp struct {
+	shared bool
+	ts     time.Time
+	key    string
+}
+
+func (s stamp) before(r controlRecord) bool {
+	return r.TS.After(s.ts) || (r.TS.Equal(s.ts) && r.RequestKey > s.key)
 }
 
 // Controls is every session control record in raw, the copy reads consult:
 // a record counts from the moment record returns, before any converge.
+// byWallet is derived from sessions by apply alone, under the same lock: the
+// sessions each wallet's latest stamp shares, so the handshake asks one map.
 type Controls struct {
 	write    sync.Mutex
 	mu       sync.RWMutex
 	sessions map[string]sessionControl
+	byWallet map[wallet.Address]map[string]bool
 }
 
 func (c *Controls) apply(r controlRecord) {
@@ -108,15 +136,40 @@ func (c *Controls) apply(r controlRecord) {
 		if r.TS.After(s.ts) || (r.TS.Equal(s.ts) && r.RequestKey > s.key) {
 			s.visibility, s.ts, s.key = r.Visibility, r.TS, r.RequestKey
 		}
+	case actShare, actUnshare:
+		// TODO: w := wallet.ParseAddress(r.Wallet) (parseControl checked it);
+		// if s.shares[w].before(r): set s.shares[w] = stamp{r.Action == actShare, r.TS, r.RequestKey}
+		// and set or clear c.byWallet[w][r.SessionID], deleting an empty inner map.
+		panic("not implemented")
 	}
 	c.sessions[r.SessionID] = s
+}
+
+// Admits is whether w may connect: some session not deleted is shared with
+// it now. The handshake calls it, through server.Identify, on every new
+// connection.
+func (c *Controls) Admits(w wallet.Address) bool {
+	// TODO: RLock; any id in c.byWallet[w] with !c.sessions[id].deleted.
+	panic("not implemented")
+}
+
+// sharedWith is the sessions shared with w now, deleted ones included (the
+// filter hides those), as a set the caller owns.
+func (c *Controls) sharedWith(w wallet.Address) map[string]bool {
+	panic("not implemented")
+}
+
+// walletsOf is the wallets session is shared with now, sorted base58, for
+// share_session's answer.
+func (c *Controls) walletsOf(session string) []string {
+	panic("not implemented")
 }
 
 // LoadControls reads every control source under dataDir up to the length
 // its manifest covers, so a torn append the manifest never recorded is not
 // read.
 func LoadControls(dataDir string) (*Controls, error) {
-	c := &Controls{sessions: map[string]sessionControl{}}
+	c := &Controls{sessions: map[string]sessionControl{}, byWallet: map[wallet.Address]map[string]bool{}}
 	manifests, err := filepath.Glob(filepath.Join(dataDir, "raw", "author=*", "machine="+store.ServerMachine, "harness="+controlHarness, "*.json"))
 	if err != nil {
 		return nil, err
@@ -253,7 +306,8 @@ func parseControlArgs(raw json.RawMessage) (controlArgs, string, error) {
 
 // actor is the caller on ctx when it may act on session: every author of
 // the session is in the caller's tenant, and the caller is its sole author or
-// holds an admin token. Any other session is not found.
+// holds an admin token. Any other session is not found. A wallet reader has
+// no members, so to it every session is not found.
 func actor(ctx context.Context, db *DB, c *Controls, session string) (auth.Identity, error) {
 	id, ok := auth.From(ctx)
 	if !ok || c == nil || store.From(ctx) == nil {
@@ -278,8 +332,8 @@ func actorOn(id auth.Identity, authors []string) (auth.Identity, error) {
 // recordKey is the key a control record is appended under: the client's key
 // bound to what it asks for, so the key reused for another action is
 // another record and only an exact retry is a duplicate.
-func recordKey(action controlAction, session string, v visibility, client string) string {
-	sum := sha256.Sum256([]byte(strings.Join([]string{string(action), session, string(v), client}, "\x1f")))
+func recordKey(action controlAction, session string, arg string, client string) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{string(action), session, arg, client}, "\x1f")))
 	return hex.EncodeToString(sum[:])
 }
 

@@ -5,6 +5,8 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -59,30 +61,69 @@ func PublicKey(priv ed25519.PrivateKey) string {
 	return auth.EncodeKey(priv.Public().(ed25519.PublicKey))
 }
 
-func certificate(priv ed25519.PrivateKey) (tls.Certificate, error) {
+// Credential is what a client proves: its device key and, on a device a
+// wallet bound, the binding bytes wallet.Binding.Encode wrote (nil when none).
+type Credential struct {
+	Key     ed25519.PrivateKey
+	Binding []byte
+}
+
+// bindingSuffix names a key file's binding: the binding of ~/.mnemonic/key is
+// ~/.mnemonic/key.wallet, so a binding never outlives or crosses its key.
+const bindingSuffix = ".wallet"
+
+// LoadCredential is LoadOrCreateKey(keyFile) and the binding stored beside it
+// by SaveBinding, nil when there is none.
+func LoadCredential(keyFile string) (Credential, error) {
+	panic("not implemented")
+}
+
+// SaveBinding stores binding beside keyFile (mode 0600, written to a temp
+// file and renamed), replacing any earlier one.
+func SaveBinding(keyFile string, binding []byte) error {
+	panic("not implemented")
+}
+
+// bindingOID is the non-critical extension a client certificate carries its
+// binding in. It is a placeholder under the IANA private enterprise arc until
+// mnemonic has its own enterprise number; only mnemonic reads it, from
+// certificates mnemonic made.
+var bindingOID = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 99999, 1, 1}
+
+func certificate(cred Credential) (tls.Certificate, error) {
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		NotBefore:    time.Unix(0, 0),
 		NotAfter:     time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC),
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, priv.Public(), priv)
+	if cred.Binding != nil {
+		tmpl.ExtraExtensions = []pkix.Extension{{Id: bindingOID, Value: cred.Binding}}
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, cred.Key.Public(), cred.Key)
 	if err != nil {
 		return tls.Certificate{}, err
 	}
-	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: priv}, nil
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: cred.Key}, nil
 }
 
-func peerKey(raw [][]byte) (string, error) {
+// peerCert is the key a peer's one self-signed certificate proves and the value
+// of its binding extension, nil when it has none.
+func peerCert(raw [][]byte) (ed25519.PublicKey, []byte, error) {
 	if len(raw) != 1 {
-		return "", fmt.Errorf("peer sent %d certificates, want 1", len(raw))
+		return nil, nil, fmt.Errorf("peer sent %d certificates, want 1", len(raw))
 	}
 	c, err := x509.ParseCertificate(raw[0])
 	if err != nil {
-		return "", err
+		return nil, nil, err
 	}
 	pub, ok := c.PublicKey.(ed25519.PublicKey)
 	if !ok {
-		return "", errors.New("peer certificate is not an ed25519 key")
+		return nil, nil, errors.New("peer certificate is not an ed25519 key")
 	}
-	return auth.EncodeKey(pub), nil
+	for _, e := range c.Extensions {
+		if e.Id.Equal(bindingOID) {
+			return pub, e.Value, nil
+		}
+	}
+	return pub, nil, nil
 }
