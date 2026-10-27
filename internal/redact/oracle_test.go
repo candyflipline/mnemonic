@@ -1,8 +1,6 @@
 package redact
 
-// oracleRedactor is a frozen copy of the regex redactor as of main 59796bc.
-// It is the fuzz oracle: never update it when redact.go changes — a
-// divergence between the two is exactly what TestFuzzAgainstOracle catches.
+// oracleRedactor is the regex redactor as of main 59796bc, the oracle for TestFuzzAgainstOracle.
 
 import (
 	"bytes"

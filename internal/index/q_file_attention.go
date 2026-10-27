@@ -277,7 +277,6 @@ func faParseArgs(raw json.RawMessage) (*faArgs, error) {
 	return a, nil
 }
 
-// faMaxResults is the MCP layer's max_results pin for this tool (tools.json).
 const faMaxResults = 25
 
 func faFilterField(fields map[string]json.RawMessage, field string) (string, error) {
