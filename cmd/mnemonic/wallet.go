@@ -76,9 +76,9 @@ func printBound(c wallet.Claim) {
 	fmt.Printf("wallet %s bound to this machine until %s\n", c.Wallet, c.Expires.Local().Format("Jan 2, 2006 3:04 PM MST"))
 }
 
-// maxDays leaves one day under wallet.MaxLifetime for a server clock that
-// runs behind this one.
-var maxDays = int(wallet.MaxLifetime/(24*time.Hour)) - 1
+const serverClockLag = 24 * time.Hour
+
+var maxDays = int((wallet.MaxLifetime - serverClockLag) / (24 * time.Hour))
 
 func expiry(days int) (time.Time, error) {
 	if days < 1 || days > maxDays {
