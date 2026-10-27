@@ -29,9 +29,9 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// Push carries one client machine's uploads. The bearer token rides as
-// "authorization: Bearer <token>" request metadata and needs the push scope;
-// the author is the token's, never a field.
+// Push carries one client machine's uploads over QUIC (ALPN mnemonic-push/1).
+// The client's ed25519 key, proven in the handshake, needs the push scope;
+// the author is the key's, never a field.
 type PushClient interface {
 	// Sync is one upload session. The client opens with Hello; the server
 	// answers with the machine's source states in Welcome pages, the last one
@@ -65,9 +65,9 @@ type Push_SyncClient = grpc.BidiStreamingClient[ClientMsg, ServerMsg]
 // All implementations must embed UnimplementedPushServer
 // for forward compatibility.
 //
-// Push carries one client machine's uploads. The bearer token rides as
-// "authorization: Bearer <token>" request metadata and needs the push scope;
-// the author is the token's, never a field.
+// Push carries one client machine's uploads over QUIC (ALPN mnemonic-push/1).
+// The client's ed25519 key, proven in the handshake, needs the push scope;
+// the author is the key's, never a field.
 type PushServer interface {
 	// Sync is one upload session. The client opens with Hello; the server
 	// answers with the machine's source states in Welcome pages, the last one

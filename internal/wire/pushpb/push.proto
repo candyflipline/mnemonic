@@ -6,9 +6,9 @@ package mnemonic.push.v1;
 
 option go_package = "github.com/candyflipline/mnemonic/internal/wire/pushpb";
 
-// Push carries one client machine's uploads. The bearer token rides as
-// "authorization: Bearer <token>" request metadata and needs the push scope;
-// the author is the token's, never a field.
+// Push carries one client machine's uploads over QUIC (ALPN mnemonic-push/1).
+// The client's ed25519 key, proven in the handshake, needs the push scope;
+// the author is the key's, never a field.
 service Push {
   // Sync is one upload session. The client opens with Hello; the server
   // answers with the machine's source states in Welcome pages, the last one

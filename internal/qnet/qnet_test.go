@@ -17,8 +17,6 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
-type idKey struct{}
-
 func newKey(t *testing.T) ed25519.PrivateKey {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -30,11 +28,10 @@ func newKey(t *testing.T) ed25519.PrivateKey {
 
 func TestQnet(t *testing.T) {
 	serverKey, alice, stranger, other := newKey(t), newKey(t), newKey(t), newKey(t)
-	ctx, ok := auth.Authors(map[string]string{auth.Hash("t"): "alice"}).Context(context.Background(), "t")
+	aliceID, ok := auth.NewKeys(map[string]auth.Grant{PublicKey(alice): {Author: "alice"}}).Identify(PublicKey(alice))
 	if !ok {
-		t.Fatal("token not in table")
+		t.Fatal("alice not in table")
 	}
-	aliceID, _ := auth.From(ctx)
 
 	srv, err := Listen("127.0.0.1:0", serverKey, func(key string) (auth.Identity, bool) {
 		return aliceID, key == PublicKey(alice)
@@ -132,13 +129,12 @@ func TestQnet(t *testing.T) {
 	hs := &http.Server{
 		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
 			if id, ok := IdentityOf(c); ok {
-				return context.WithValue(ctx, idKey{}, id)
+				return auth.NewContext(ctx, id)
 			}
 			return ctx
 		},
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			id, _ := r.Context().Value(idKey{}).(auth.Identity)
-			seen <- id.Author()
+			seen <- auth.Author(r.Context())
 			w.Write([]byte("ok"))
 		}),
 	}
