@@ -24,8 +24,14 @@ const launchdLabel = "com.mnemonic.push"
 // bootstrapping over the still-loaded job fails with "5: Input/output
 // error", leaving the agent booted out and nothing running. These bound how
 // long init waits for launchd to drop the job before it bootstraps.
+// waitGoneWithin outlasts launchd's own kill: the plist init writes
+// (ops/launchd) sets no ExitTimeOut, so launchd's system-defined default
+// applies (launchctl print shows 5 s on macOS 26.5.2), and a watcher that
+// does not act on SIGTERM (for one, mid-redaction of a large file in
+// redactComplete, internal/push, which has no cancellation point) is only
+// SIGKILLed then. 25 s covers a default of up to 20 s, + 5 s.
 const (
-	waitGoneWithin  = 15 * time.Second
+	waitGoneWithin  = 25 * time.Second
 	waitGonePolling = 200 * time.Millisecond
 )
 
