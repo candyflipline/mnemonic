@@ -105,16 +105,25 @@ func (c *Controls) applyLink(r controlRecord) {
 	}
 }
 
-// Members is every device key a live invite admitted, which the handshake
-// and every read of an Identity consult.
-func (c *Controls) Members() []auth.Member {
+// Member is the device key a live invite admitted, which every handshake and
+// request consults.
+func (c *Controls) Member(key string) (auth.Member, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	out := make([]auth.Member, 0, len(c.byKey))
-	for key, l := range c.byKey {
-		out = append(out, auth.Member{Key: key, Tenant: l.tenant, Author: l.invite})
+	l := c.byKey[key]
+	if l == nil {
+		return auth.Member{}, false
 	}
-	return out
+	return auth.Member{Key: key, Tenant: l.tenant, Author: l.invite}, true
+}
+
+// EachMember calls fn for every admitted member, under the read lock.
+func (c *Controls) EachMember(fn func(auth.Member)) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for key, l := range c.byKey {
+		fn(auth.Member{Key: key, Tenant: l.tenant, Author: l.invite})
+	}
 }
 
 // ReadLink is a live read link as its readers see it: the sessions still

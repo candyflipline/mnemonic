@@ -50,28 +50,36 @@ type Member struct{ Key, Tenant, Author string }
 
 var MemberScopes = []Scope{Read, Push}
 
-// Keys is who may connect: the configured grants, and the members live
-// reports at each call, so a member admitted or removed after boot counts at
+// Roster is the members that are admitted right now. Member answers one key
+// in constant time; EachMember visits every member and fn must not call back
+// into the roster.
+type Roster interface {
+	Member(key string) (Member, bool)
+	EachMember(fn func(Member))
+}
+
+// Keys is who may connect: the configured grants, and the members the roster
+// holds at each call, so a member admitted or removed after boot counts at
 // once.
 type Keys struct {
 	grants map[string]Grant
-	live   func() []Member
+	roster Roster
 }
 
 func NewKeys(byKey map[string]Grant) Keys { return Keys{grants: byKey} }
 
-// WithMembers is k admitting the members live reports, which it calls on
-// every Identify and on every read of an Identity's member set.
-func (k Keys) WithMembers(live func() []Member) Keys {
-	k.live = live
+// WithMembers is k admitting the members r holds, which it asks on every
+// Identify and on every read of an Identity's member set.
+func (k Keys) WithMembers(r Roster) Keys {
+	k.roster = r
 	return k
 }
 
-func (k Keys) members() []Member {
-	if k.live == nil {
-		return nil
+func (k Keys) member(key string) (Member, bool) {
+	if k.roster == nil {
+		return Member{}, false
 	}
-	return k.live()
+	return k.roster.Member(key)
 }
 
 // Identify is the Identity of key: its grant, else the live member it is.
@@ -83,10 +91,8 @@ func (k Keys) Identify(key string) (Identity, bool) {
 		}
 		return Identity{tenant: tenantOr(g.Tenant), author: g.Author, scopes: scopes, keys: &k}, true
 	}
-	for _, m := range k.members() {
-		if m.Key == key {
-			return Identity{tenant: m.Tenant, author: m.Author, scopes: MemberScopes, keys: &k, member: key}, true
-		}
+	if m, ok := k.member(key); ok {
+		return Identity{tenant: m.Tenant, author: m.Author, scopes: MemberScopes, keys: &k, member: key}, true
 	}
 	return Identity{}, false
 }
@@ -95,8 +101,8 @@ func (k Keys) Identify(key string) (Identity, bool) {
 // grant wins over a member naming the same author.
 func (k Keys) tenantOf() map[string]string {
 	out := map[string]string{}
-	for _, m := range k.members() {
-		out[m.Author] = m.Tenant
+	if k.roster != nil {
+		k.roster.EachMember(func(m Member) { out[m.Author] = m.Tenant })
 	}
 	for _, g := range k.grants {
 		out[g.Author] = tenantOr(g.Tenant)
@@ -138,12 +144,8 @@ func (id Identity) Admitted() bool {
 	if id.member == "" {
 		return id.scopes != nil
 	}
-	for _, m := range id.keys.members() {
-		if m.Key == id.member {
-			return true
-		}
-	}
-	return false
+	_, ok := id.keys.member(id.member)
+	return ok
 }
 
 // TenantOf is the tenant of author as the configured keys and the live

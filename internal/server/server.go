@@ -96,7 +96,7 @@ func New(dataDir string, share *Share) (*Server, error) {
 // other key is refused. Members are read from the controls at each call, so
 // a join counts at the next handshake and a revoke refuses it.
 func (s *Server) Identify(keys auth.Keys) func(device ed25519.PublicKey) (auth.Identity, bool) {
-	keys = keys.WithMembers(s.ctl.Members)
+	keys = keys.WithMembers(s.ctl)
 	return func(device ed25519.PublicKey) (auth.Identity, bool) {
 		return keys.Identify(auth.EncodeKey(device))
 	}
