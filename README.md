@@ -1,8 +1,8 @@
 # mnemonic
 
-mnemonic keeps the agent traces (Claude Code, Codex, Cursor, and others) of every machine on one server and lets your agents search them over MCP. This page gets a teammate from nothing to a working setup on one machine. The server side (install, tokens, gateway) is in [docs/cutover.md](docs/cutover.md).
+mnemonic keeps the agent traces (Claude Code, Codex, Cursor, and others) of every machine on one server and lets your agents search them over MCP. This page takes one machine from nothing to a working setup. The server side (install, keys, firewall) is in [docs/cutover.md](docs/cutover.md).
 
-You need two things from the operator who runs the server: the server URL, written `https://SERVER` below, and a token file for you, written `NAME.token`. Do not paste the token in chat or commit it.
+A machine reaches the server over one QUIC UDP port, 8741, and proves itself with an ed25519 key. Your network must pass UDP to that port. From the operator you need the server's address, written `HOST` below, and its public key, written `SERVER_KEY`. The server prints that key at boot, and `mnemonic key --file /var/lib/mnemonic/server.key` prints it on the server. The operator needs this machine's key block from you, which step 1 below produces.
 
 ## Install the client
 
@@ -18,14 +18,21 @@ Put `~/.local/bin` on your `PATH`. The scheduler in the next section runs the bi
 
 ## Connect the machine
 
-1. Save your token file somewhere outside any repository, for example `~/NAME.token`.
-2. Run `init` with the server URL and the token file:
+1. Print this machine's key. The command creates `~/.mnemonic/key` (mode 0600) on first run:
 
    ```
-   mnemonic init --server https://SERVER --token-file ~/NAME.token
+   mnemonic key
    ```
 
-   `init` copies the token to `~/.mnemonic/token` (mode 0600), writes `~/.mnemonic/config.toml`, and installs the push agent that uploads new trace lines within about 5 seconds of a write.
+   It prints the public key and a ready `[[keys]]` block. Send the block to the operator. The operator adds it to the server config and restarts the server. The private key never leaves the machine.
+
+2. Run `init` with the server address and key:
+
+   ```
+   mnemonic init --server quic://HOST:8741 --server-key SERVER_KEY
+   ```
+
+   `init` writes `~/.mnemonic/config.toml` and installs the push agent that uploads new trace lines within about 5 seconds of a write.
 
    - **macOS.** `init` writes `~/Library/LaunchAgents/com.mnemonic.push.plist`, then runs `launchctl bootout` and `launchctl bootstrap` for it and prints the result. A "not loaded" message from bootout is normal on the first install.
    - **Linux.** `init` prints a systemd user unit and the commands that start it. Save the unit as `~/.config/systemd/user/mnemonic-push.service`, then run `systemctl --user daemon-reload` and `systemctl --user enable --now mnemonic-push.service`.
@@ -35,18 +42,18 @@ Put `~/.local/bin` on your `PATH`. The scheduler in the next section runs the bi
 `--machine NAME` overrides the machine name (default: the short hostname). To change an existing config, edit `~/.mnemonic/config.toml` or run `init --force` with both flags again. The file looks like this:
 
 ```
-server     = "https://SERVER"
-token_file = "~/.mnemonic/token"
+server     = "quic://HOST:8741"
+server_key = "SERVER_KEY"
 machine    = "chris-mbp"
 ```
 
-Leave out `[[sources]]` to use the built-in list of harness directories.
+`key_file` defaults to `~/.mnemonic/key`. Leave out `[[sources]]` to use the built-in list of harness directories.
 
-Push streams to SERVER on port 8741 over TLS, and MCP uses port 443, so both must be reachable from your machine. To send push somewhere else, add `push_address = "host:port"` to `config.toml`.
+If the handshake fails, the server has no `[[keys]]` block for this machine's key, or `server_key` is not the key the server holds. The error names the keys involved.
 
 ## Upgrade the client
 
-Replace the binary, then run `init` with no flags. It keeps your config and token and registers the agent again.
+Replace the binary, then run `init` with no flags. It keeps your config and key and registers the agent again.
 
 ```
 CGO_ENABLED=0 go install github.com/candyflipline/mnemonic/cmd/mnemonic@latest
@@ -58,53 +65,52 @@ On macOS this boots the agent out and bootstraps it again, which is required: `l
 
 ## Point your agents at the server
 
-The MCP server is named `mnemonic` and its tools appear as `mcp__mnemonic__*`. MCP is served at `https://SERVER/mcp` and takes the same token as a bearer token. Each config below reads the token from the environment variable `MNEMONIC_TOKEN`, so the token never sits in a config file. Set it once in your shell profile (`~/.zshenv` or `~/.bashrc`), then start the client from a shell that has it:
+The MCP server is named `mnemonic` and its tools appear as `mcp__mnemonic__*`. Every client runs the same command, `mnemonic mcp`. It is a stdio server that reads `~/.mnemonic/config.toml` (or the file named by `--config PATH`) and dials the server over QUIC with this machine's key. No token or environment variable is involved. The client must find `mnemonic` on its `PATH`.
 
-```
-export MNEMONIC_TOKEN="$(cat ~/.mnemonic/token)"
-```
-
-Each client was checked on 2026-10-26 from a Mac by one `list_sessions` call, read-only, with the exact settings shown. A client marked unverified was not run.
+A client marked verified was run with the exact settings shown. A client marked unverified was not run.
 
 ### Claude Code
 
-Verified with Claude Code 2.1.302 (`--mcp-config` with this object and `MNEMONIC_TOKEN` set: server connected, `list_sessions` returned a result). Add it for all projects:
+Verified on the spike build (2026-10-26, `claude -p --strict-mcp-config --mcp-config` with this object: server connected, `list_sessions` returned a result). Add it for all projects:
 
 ```
-claude mcp add-json --scope user mnemonic '{"type":"http","url":"https://SERVER/mcp","headers":{"Authorization":"Bearer ${MNEMONIC_TOKEN}"}}'
+claude mcp add-json --scope user mnemonic '{"type":"stdio","command":"mnemonic","args":["mcp"]}'
 ```
 
-The same object works under `mcpServers.mnemonic` in `~/.claude.json`. The `add-json` wrapper itself was not run, because it writes the config file of the machine that did the checking. Claude Code expands `${MNEMONIC_TOKEN}` when it connects.
+The same object works under `mcpServers.mnemonic` in `~/.claude.json`.
 
 ### Codex
 
-Verified with codex-cli 0.160.0 (`codex exec` with `-c mcp_servers.mnemonic.url=...` and `-c mcp_servers.mnemonic.bearer_token_env_var=...` and `MNEMONIC_TOKEN` set: `list_sessions` completed). The file below sets the same two keys. Put it in `~/.codex/config.toml`:
+Unverified. Put this in `~/.codex/config.toml`:
 
 ```
 [mcp_servers.mnemonic]
-url = "https://SERVER/mcp"
-bearer_token_env_var = "MNEMONIC_TOKEN"
+command = "mnemonic"
+args = ["mcp"]
 ```
+
+Check: run `codex exec "Call mnemonic list_sessions for today, limit 1"` and tell the operator whether it returned a result.
 
 ### Cursor
 
-Unverified. The Cursor CLI and app are not installed on the Mac that did the checking, so no call ran. The format below comes from Cursor's MCP documentation (cursor.com/docs/context/mcp), which describes `url`, `headers`, and `${env:NAME}` interpolation. Put it in `~/.cursor/mcp.json` (all projects) or `.cursor/mcp.json` (one project):
+Unverified. Put this in `~/.cursor/mcp.json` (all projects) or `.cursor/mcp.json` (one project):
 
 ```
 {
   "mcpServers": {
-    "mnemonic": {
-      "url": "https://SERVER/mcp",
-      "headers": { "Authorization": "Bearer ${env:MNEMONIC_TOKEN}" }
-    }
+    "mnemonic": { "command": "mnemonic", "args": ["mcp"] }
   }
 }
 ```
 
-Start Cursor from a shell that has `MNEMONIC_TOKEN`. Call `list_sessions` once and tell the operator whether it worked, so this section can be marked verified.
+Check: call `list_sessions` once and tell the operator whether it worked.
 
 ## Check the connection
 
-Ask your agent: "Call `list_sessions` for today, limit 1." A result that starts with `mnemonic.mcp.list_sessions.v1` means the token, the URL, and the config are right. A `401` from the server means the token is wrong or missing. A session you ran a minute ago appears after the next push cycle.
+Ask your agent: "Call `list_sessions` for today, limit 1." A result that starts with `mnemonic.mcp.list_sessions.v1` means the key, the address, and the config are right. A session you ran a minute ago appears after the next push cycle.
 
-The tools are `search_sessions`, `open`, `list_sessions`, `get_trace`, `file_attention`, `get_ingest_status`, `query`, `annotate`, `set_visibility`, and `delete_session`. `annotate` needs the `annotate` scope on your token. `set_visibility` and `delete_session` act on your own sessions with any token and need `admin` for another author's.
+The tools are `search_sessions`, `open`, `list_sessions`, `get_trace`, `file_attention`, `get_ingest_status`, `query`, `annotate`, `set_visibility`, and `delete_session`. `annotate` needs the `annotate` scope on your key. `set_visibility` and `delete_session` act on your own sessions with any key and need `admin` for another author's.
+
+## Known gap
+
+OTLP is served only on the QUIC HTTP endpoint, so an OTLP exporter that speaks plain HTTPS cannot reach the server and no forwarder exists.
