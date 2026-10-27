@@ -14,6 +14,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"flag"
 	"fmt"
@@ -31,8 +32,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
-	"google.golang.org/grpc/metadata"
 
+	"github.com/candyflipline/mnemonic/internal/auth"
+	"github.com/candyflipline/mnemonic/internal/qnet"
 	"github.com/candyflipline/mnemonic/internal/wire/pushpb"
 )
 
@@ -57,9 +59,17 @@ func fatal(err error) {
 	os.Exit(1)
 }
 
-func dialUp(addr string) (pushpb.PushClient, error) {
+func upFlags(fs *flag.FlagSet) (serverKey, keyFile *string) {
+	return fs.String("server-key", "", "the upstream server's key (required)"),
+		fs.String("key-file", "", "this tool's key file, created if missing (required)")
+}
+
+func dialUp(addr, serverKey string, priv ed25519.PrivateKey) (pushpb.PushClient, error) {
 	conn, err := grpc.NewClient("passthrough:///"+addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+			return qnet.Dial(ctx, addr, priv, serverKey, qnet.ALPNPush)
+		}),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxMsg), grpc.MaxCallSendMsgSize(maxMsg)))
 	if err != nil {
 		return nil, err
@@ -90,8 +100,9 @@ type proxy struct {
 
 func proxyCmd(args []string) error {
 	fs := flag.NewFlagSet("proxy", flag.ExitOnError)
-	listen := fs.String("listen", "127.0.0.1:7893", "address the push client dials")
-	upstream := fs.String("upstream", "127.0.0.1:7892", "serve's push_listen address")
+	listen := fs.String("listen", "127.0.0.1:7893", "UDP address the push client dials; it must pin the key printed on stderr")
+	upstream := fs.String("upstream", "127.0.0.1:7892", "serve's QUIC address")
+	serverKey, keyFile := upFlags(fs)
 	logPath := fs.String("log", "", "event log (required)")
 	serial := fs.Bool("serial", false, "forward an Append only after the previous one's Ack arrived")
 	hold := fs.String("hold", "", "kill point: welcome2, acks (stop forwarding Acks after -k), append (hold Append k+1 after Ack k reached the client)")
@@ -108,18 +119,24 @@ func proxyCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	up, err := dialUp(*upstream)
+	priv, err := qnet.LoadOrCreateKey(*keyFile)
 	if err != nil {
 		return err
 	}
-	ln, err := net.Listen("tcp", *listen)
+	up, err := dialUp(*upstream, *serverKey, priv)
 	if err != nil {
 		return err
 	}
-	gs := grpc.NewServer(grpc.MaxRecvMsgSize(maxMsg),
+	ln, err := qnet.Listen(*listen, priv, func(string) (auth.Identity, bool) { return auth.Identity{}, true })
+	if err != nil {
+		return err
+	}
+	defer ln.Close()
+	fmt.Fprintln(os.Stderr, "proxy key", qnet.PublicKey(priv))
+	gs := grpc.NewServer(grpc.Creds(qnet.Credentials()), grpc.MaxRecvMsgSize(maxMsg),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 5 * time.Second, PermitWithoutStream: true}))
 	pushpb.RegisterPushServer(gs, &proxy{up: up, log: &logger{f: f}, serial: *serial, hold: *hold, k: *k, marker: *marker})
-	return gs.Serve(ln)
+	return gs.Serve(ln.Push)
 }
 
 func (p *proxy) mark(what string) {
@@ -131,8 +148,7 @@ func (p *proxy) mark(what string) {
 
 func (p *proxy) Sync(down grpc.BidiStreamingServer[pushpb.ClientMsg, pushpb.ServerMsg]) error {
 	ctx := down.Context()
-	in, _ := metadata.FromIncomingContext(ctx)
-	uctx, cancel := context.WithCancel(metadata.NewOutgoingContext(context.Background(), metadata.MD{"authorization": in.Get("authorization")}))
+	uctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { <-ctx.Done(); cancel() }()
 	up, err := p.up.Sync(uctx)
@@ -234,19 +250,19 @@ func (p *proxy) Sync(down grpc.BidiStreamingServer[pushpb.ClientMsg, pushpb.Serv
 
 func welcomeCmd(args []string) error {
 	fs := flag.NewFlagSet("welcome", flag.ExitOnError)
-	addr := fs.String("addr", "127.0.0.1:7892", "serve's push_listen address")
-	tokenFile := fs.String("token-file", "", "bearer token file")
+	addr := fs.String("addr", "127.0.0.1:7892", "serve's QUIC address")
+	serverKey, keyFile := upFlags(fs)
 	machine := fs.String("machine", "", "Hello.machine")
 	fs.Parse(args)
-	tok, err := os.ReadFile(*tokenFile)
+	priv, err := qnet.LoadOrCreateKey(*keyFile)
 	if err != nil {
 		return err
 	}
-	up, err := dialUp(*addr)
+	up, err := dialUp(*addr, *serverKey, priv)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer "+strings.TrimSpace(string(tok))), time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	s, err := up.Sync(ctx)
 	if err != nil {

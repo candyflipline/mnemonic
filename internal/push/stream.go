@@ -3,21 +3,18 @@ package push
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"net"
-	"net/url"
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
-	"google.golang.org/grpc/metadata"
 
 	"github.com/candyflipline/mnemonic/internal/config"
+	"github.com/candyflipline/mnemonic/internal/qnet"
 	"github.com/candyflipline/mnemonic/internal/wire"
 	"github.com/candyflipline/mnemonic/internal/wire/pushpb"
 )
@@ -71,53 +68,26 @@ type uplink struct {
 	err     error // why the stream ended; valid once fin is closed
 }
 
-// target maps the config's server URL to a gRPC target and credentials:
-// https dials the URL's host on wire.PushPort with the system roots, http dials
-// the URL's host:port in plaintext HTTP/2 (the box and tests). A non-empty
-// pushAddress replaces the host:port and keeps the scheme's credentials.
-func target(server, pushAddress string) (string, credentials.TransportCredentials, error) {
-	u, err := url.Parse(server)
-	if err != nil || u.Hostname() == "" {
-		return "", nil, fmt.Errorf("server %q is not an http(s) URL", server)
-	}
-	var addr string
-	var creds credentials.TransportCredentials
-	switch u.Scheme {
-	case "https":
-		addr = net.JoinHostPort(u.Hostname(), wire.PushPort)
-		creds = credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12})
-	case "http":
-		port := u.Port()
-		if port == "" {
-			port = "80"
-		}
-		addr = net.JoinHostPort(u.Hostname(), port)
-		creds = insecure.NewCredentials()
-	default:
-		return "", nil, fmt.Errorf("server %q is not an http(s) URL", server)
-	}
-	if pushAddress != "" {
-		addr = pushAddress
-	}
-	return "passthrough:///" + addr, creds, nil
-}
-
-// dial opens Sync on cfg.Server, sends Hello with cfg.Machine and the bearer
-// token as metadata, reads Welcome pages until more is false, and starts the
-// ack reader. The client pings every pingEvery while the stream is open.
+// dial opens Sync on cfg.Server over QUIC as the machine's key, pinning
+// cfg.ServerKey, sends Hello with cfg.Machine, reads Welcome pages until more
+// is false, and starts the ack reader. The client pings every pingEvery while
+// the stream is open.
 func dial(ctx context.Context, cfg config.Client) (*uplink, error) {
-	tgt, creds, err := target(cfg.Server, cfg.PushAddress)
+	priv, err := qnet.LoadOrCreateKey(cfg.KeyFile)
 	if err != nil {
 		return nil, err
 	}
-	conn, err := grpc.NewClient(tgt,
-		grpc.WithTransportCredentials(creds),
+	conn, err := grpc.NewClient("passthrough:///"+cfg.Addr(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+			return qnet.Dial(ctx, addr, priv, cfg.ServerKey, qnet.ALPNPush)
+		}),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: pingEvery, Timeout: pingTimeout}),
 	)
 	if err != nil {
 		return nil, err
 	}
-	sctx, cancel := context.WithCancel(metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+cfg.Token))
+	sctx, cancel := context.WithCancel(ctx)
 	u := &uplink{cancel: cancel, sources: make(map[string]*wire.Source), unacked: make(map[string]int), full: make(map[string]bool), fin: make(chan struct{})}
 	stop := time.AfterFunc(welcomeLimit, cancel)
 	err = u.handshake(sctx, conn, cfg.Machine)

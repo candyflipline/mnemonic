@@ -1,13 +1,13 @@
 // Command capdrv is the box tool for the live-session cap proof. Against a
-// plaintext push listener it opens N distinct machines under one token, one
+// QUIC push listener it opens N distinct machines under one key, one
 // connection each, waits for each Welcome, sends one synthetic Append and waits
 // for its Ack, then prints one row per client with the status code the server
 // gave it. It then opens the first acked machine again (a takeover at the
 // cap) and reports the status the displaced stream ended with. Tooling only;
 // counts and codes, never content.
 //
-//	capdrv -server host:port -token T -cap N [-prefix cap]
-//	capdrv -server host:port -token T -cap N -silent [-prefix cap]
+//	capdrv -server host:port -server-key K -key-file F -cap N [-prefix cap]
+//	capdrv -server host:port -server-key K -key-file F -cap N -silent [-prefix cap]
 //
 // Exit 0 when exactly one of the N+1 clients was ResourceExhausted, the other
 // N were acked, the takeover was acked and the displaced stream ended Aborted.
@@ -23,6 +23,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -31,9 +32,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
+	"github.com/candyflipline/mnemonic/internal/qnet"
 	"github.com/candyflipline/mnemonic/internal/wire"
 	"github.com/candyflipline/mnemonic/internal/wire/pushpb"
 )
@@ -48,12 +49,12 @@ type client struct {
 	done    chan codes.Code
 }
 
-func open(server, token, machine string) (*client, error) {
-	conn, err := grpc.NewClient("passthrough:///"+server, grpc.WithTransportCredentials(insecure.NewCredentials()))
+func open(server string, dial grpc.DialOption, machine string) (*client, error) {
+	conn, err := grpc.NewClient("passthrough:///"+server, grpc.WithTransportCredentials(insecure.NewCredentials()), dial)
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithCancel(metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer "+token))
+	ctx, cancel := context.WithCancel(context.Background())
 	stream, err := pushpb.NewPushClient(conn).Sync(ctx)
 	if err != nil {
 		cancel()
@@ -130,12 +131,12 @@ type silent struct {
 	done   chan struct{}
 }
 
-func openSilent(server, token string) (*silent, error) {
-	conn, err := grpc.NewClient("passthrough:///"+server, grpc.WithTransportCredentials(insecure.NewCredentials()))
+func openSilent(server string, dial grpc.DialOption) (*silent, error) {
+	conn, err := grpc.NewClient("passthrough:///"+server, grpc.WithTransportCredentials(insecure.NewCredentials()), dial)
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithCancel(metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer "+token))
+	ctx, cancel := context.WithCancel(context.Background())
 	stream, err := pushpb.NewPushClient(conn).Sync(ctx)
 	if err != nil {
 		cancel()
@@ -152,11 +153,11 @@ func openSilent(server, token string) (*silent, error) {
 	return s, nil
 }
 
-func runSilent(server, token string, capN int, prefix string) bool {
+func runSilent(server string, dial grpc.DialOption, capN int, prefix string) bool {
 	held := capN + 4
 	ss := make([]*silent, 0, held+1)
 	for i := 0; i <= held; i++ {
-		s, err := openSilent(server, token)
+		s, err := openSilent(server, dial)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return false
@@ -182,7 +183,7 @@ func runSilent(server, token string, capN int, prefix string) bool {
 			dropped++
 		}
 	}
-	c, err := open(server, token, prefix+"-after")
+	c, err := open(server, dial, prefix+"-after")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return false
@@ -201,14 +202,23 @@ func runSilent(server, token string, capN int, prefix string) bool {
 }
 
 func main() {
-	server := flag.String("server", "", "host:port of the plaintext push listener")
-	token := flag.String("token", "", "push-scope bearer token")
+	server := flag.String("server", "", "host:port of the QUIC listener")
+	serverKey := flag.String("server-key", "", "the server's key")
+	keyFile := flag.String("key-file", "", "client key file, created if missing")
 	capN := flag.Int("cap", 10, "the server's live-session cap")
 	prefix := flag.String("prefix", "cap", "machine name prefix")
 	quiet := flag.Bool("silent", false, "run the silent pre-Hello stream gate instead of the session cap gate")
 	flag.Parse()
+	priv, err := qnet.LoadOrCreateKey(*keyFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	dial := grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+		return qnet.Dial(ctx, addr, priv, *serverKey, qnet.ALPNPush)
+	})
 	if *quiet {
-		if !runSilent(*server, *token, *capN, *prefix) {
+		if !runSilent(*server, dial, *capN, *prefix) {
 			os.Exit(1)
 		}
 		return
@@ -217,7 +227,7 @@ func main() {
 	cs := make([]*client, n)
 	var wg sync.WaitGroup
 	for i := range cs {
-		c, err := open(*server, *token, fmt.Sprintf("%s%02d", *prefix, i))
+		c, err := open(*server, dial, fmt.Sprintf("%s%02d", *prefix, i))
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -252,7 +262,7 @@ func main() {
 	}
 	ok := exhausted == 1 && acked == n-1
 	if first != nil {
-		t, err := open(*server, *token, first.machine)
+		t, err := open(*server, dial, first.machine)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
