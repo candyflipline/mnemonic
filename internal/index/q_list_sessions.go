@@ -36,15 +36,12 @@ const (
 
 var lsModes = map[string]bool{"web_search": true, "mcp_internal": true, "tool_calling": true, "chat": true}
 
-func (listSessions) Call(ctx context.Context, db *DB, args json.RawMessage) (any, string, error) {
+func (listSessions) Call(ctx context.Context, caller *Caller, db *DB, args json.RawMessage) (any, string, error) {
 	a, err := lsParseArgs(args)
 	if err != nil {
 		return nil, "", err
 	}
-	listed, err := Sessions(ctx, db)
-	if err != nil {
-		return nil, "", err
-	}
+	listed := Sessions(caller, db)
 	page, err := lsQueryPage(a, func(cursor *lsCursor) ([]lsCand, error) { return db.lsCandidates(a, cursor, listed) })
 	if err != nil {
 		return nil, "", err

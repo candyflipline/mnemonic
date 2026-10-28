@@ -56,7 +56,7 @@ func newQueryDB(t *testing.T) (*DB, string) {
 	return db, dir
 }
 
-func queryCall(t *testing.T, ctx context.Context, db *DB, q, from, to string, limit *int) (map[string]any, string, error) {
+func queryCall(t *testing.T, ctx context.Context, c *Caller, db *DB, q, from, to string, limit *int) (map[string]any, string, error) {
 	t.Helper()
 	args := map[string]any{"query": q, "from": from, "to": to}
 	if limit != nil {
@@ -66,7 +66,7 @@ func queryCall(t *testing.T, ctx context.Context, db *DB, q, from, to string, li
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, text, err := Call(ctx, db, "query", raw)
+	data, text, err := Call(ctx, c, db, "query", raw)
 	if err != nil {
 		return nil, text, err
 	}
@@ -122,7 +122,7 @@ func TestQueryResultsOnTheEngine(t *testing.T) {
 		{"the claude-code text block stamps its type", "from: events | filter: content_types includes 'text' | measures: count()", jan, nil, `[[1]]`, "", nil},
 		{"names are case-insensitive", "FROM: EVENTS | MEASURES: COUNT(*)", all, nil, `[[21]]`, "", nil},
 	} {
-		d, _, err := queryCall(t, ctx, db, c.q, c.rng[0], c.rng[1], c.limit)
+		d, _, err := queryCall(t, ctx, nil, db, c.q, c.rng[0], c.rng[1], c.limit)
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
@@ -130,7 +130,7 @@ func TestQueryResultsOnTheEngine(t *testing.T) {
 			t.Fatalf("%s: rows %s, want %s", c.name, got, c.wantRows)
 		}
 		if c.wantText != "" {
-			if _, text, err := Call(ctx, db, "query", mustRaw(map[string]any{"query": c.q, "from": c.rng[0], "to": c.rng[1]})); err != nil || text != c.wantText {
+			if _, text, err := Call(ctx, nil, db, "query", mustRaw(map[string]any{"query": c.q, "from": c.rng[0], "to": c.rng[1]})); err != nil || text != c.wantText {
 				t.Fatalf("%s: text %q (%v), want %q", c.name, text, err, c.wantText)
 			}
 		}
@@ -149,14 +149,14 @@ func TestQueryRowCapOnTheEngine(t *testing.T) {
 	db, _ := newQueryDB(t)
 	ctx := context.Background()
 	two := 2
-	d, _, err := queryCall(t, ctx, db, "from: events | select: event_uid", "2026-01-16T00:00:00Z", "2026-02-16T00:00:00Z", &two)
+	d, _, err := queryCall(t, ctx, nil, db, "from: events | select: event_uid", "2026-01-16T00:00:00Z", "2026-02-16T00:00:00Z", &two)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if d["row_count"] != float64(2) || d["truncated"] != true || d["limit"] != float64(2) {
 		t.Fatalf("limit 2: row_count %v truncated %v limit %v", d["row_count"], d["truncated"], d["limit"])
 	}
-	d, _, err = queryCall(t, ctx, db, "from: events | select: event_uid", "2026-01-16T00:00:00Z", "2026-02-16T00:00:00Z", nil)
+	d, _, err = queryCall(t, ctx, nil, db, "from: events | select: event_uid", "2026-01-16T00:00:00Z", "2026-02-16T00:00:00Z", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestQueryRowCapOnTheEngine(t *testing.T) {
 		t.Fatalf("default limit: row_count %v truncated %v limit %v", d["row_count"], d["truncated"], d["limit"])
 	}
 	for _, limit := range []int{0, 10001} {
-		_, _, err := queryCall(t, ctx, db, "from: events | measures: count()", "2026-01-16T00:00:00Z", "2026-02-16T00:00:00Z", &limit)
+		_, _, err := queryCall(t, ctx, nil, db, "from: events | measures: count()", "2026-01-16T00:00:00Z", "2026-02-16T00:00:00Z", &limit)
 		if err == nil || err.Error() != "limit must be between 1 and 10000" {
 			t.Fatalf("limit %d: %v", limit, err)
 		}
@@ -195,13 +195,13 @@ func TestQueryRefusalsOnTheEngine(t *testing.T) {
 			"the range from..to spans more than 31 days; query at most 31 days at a time", true, false},
 		{"from: events", "2026-02-01T00:00:00Z", "2026-02-01T00:00:00Z", nil, "from must be before to", true, false},
 	} {
-		_, _, err := queryCall(t, ctx, db, c.q, c.from, c.to, c.limit)
+		_, _, err := queryCall(t, ctx, nil, db, c.q, c.from, c.to, c.limit)
 		var ae *ArgError
 		if err == nil || err.Error() != c.want || !errors.As(err, &ae) {
 			t.Fatalf("%q: error %v, want %q", c.q, err, c.want)
 		}
 	}
-	d, _, err := queryCall(t, ctx, db, "FROM: EVENTS | MEASURES: COUNT(*)", "2026-01-16T00:00:00Z", "2026-02-16T00:00:00Z", nil)
+	d, _, err := queryCall(t, ctx, nil, db, "FROM: EVENTS | MEASURES: COUNT(*)", "2026-01-16T00:00:00Z", "2026-02-16T00:00:00Z", nil)
 	if err != nil || queryRows(t, d) != "[[21]]" {
 		t.Fatalf("relation names are case-insensitive: %v %v", d, err)
 	}
@@ -213,13 +213,10 @@ func TestQueryBoundedScanAndPatternCap(t *testing.T) {
 		t.Fatalf("the store holds %d part(s), want several", len(db.parts))
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	src, err := newQLSource(ctx, db, time.Unix(0, 0), time.Date(2999, 1, 1, 0, 0, 0, 0, time.UTC))
-	if err != nil {
-		t.Fatal(err)
-	}
+	src := newQLSource(nil, db, time.Unix(0, 0), time.Date(2999, 1, 1, 0, 0, 0, 0, time.UTC))
 	cancel()
 	calls := 0
-	err = src.Scan(ctx, ql.ScanRequest{Relation: "events", Columns: []ql.Column{{Name: "event_uid", Type: ql.TString}}},
+	err := src.Scan(ctx, ql.ScanRequest{Relation: "events", Columns: []ql.Column{{Name: "event_uid", Type: ql.TString}}},
 		func(ql.Row) error { calls++; return nil })
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("scan error %v, want context.Canceled", err)
@@ -228,7 +225,7 @@ func TestQueryBoundedScanAndPatternCap(t *testing.T) {
 		t.Fatalf("the scan delivered %d row(s) after the context was cancelled", calls)
 	}
 	const want = "1:37: like pattern must be at most 1000 bytes"
-	_, _, err = queryCall(t, context.Background(), db, "from: events | filter: text_content like '"+strings.Repeat("a", 1001)+"'",
+	_, _, err = queryCall(t, context.Background(), nil, db, "from: events | filter: text_content like '"+strings.Repeat("a", 1001)+"'",
 		"2026-01-16T00:00:00Z", "2026-02-16T00:00:00Z", nil)
 	if err == nil || err.Error() != want {
 		t.Fatalf("over-long like pattern: error %v, want %q", err, want)
@@ -266,8 +263,7 @@ func TestQueryHidesAControlledSession(t *testing.T) {
 		t.Fatal("the control record did not load")
 	}
 	id, _ := auth.NewKeys(map[string]auth.Grant{"k-b": {Tenant: auth.DefaultTenant, Author: "b", Scopes: []auth.Scope{auth.Read, auth.Push}}}).Identify("k-b")
-	ctx := auth.NewContext(WithControls(context.Background(), ctl), id)
-	d, _, err := queryCall(t, ctx, db, "from: sessions | measures: count()", "2026-01-16T00:00:00Z", "2026-02-16T00:00:00Z", nil)
+	d, _, err := queryCall(t, context.Background(), &Caller{Identity: id, Controls: ctl}, db, "from: sessions | measures: count()", "2026-01-16T00:00:00Z", "2026-02-16T00:00:00Z", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,8 +286,7 @@ func TestQueryHidesAPrivateSession(t *testing.T) {
 	})
 	for _, c := range []struct{ key, want string }{{"k-a", "[[2]]"}, {"k-b", "[[1]]"}} {
 		id, _ := keys.Identify(c.key)
-		ctx := auth.NewContext(WithControls(context.Background(), ctl), id)
-		d, _, err := queryCall(t, ctx, db, "from: sessions | measures: count()", "2026-01-16T00:00:00Z", "2026-02-16T00:00:00Z", nil)
+		d, _, err := queryCall(t, context.Background(), &Caller{Identity: id, Controls: ctl}, db, "from: sessions | measures: count()", "2026-01-16T00:00:00Z", "2026-02-16T00:00:00Z", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -304,10 +299,7 @@ func TestQueryHidesAPrivateSession(t *testing.T) {
 func TestQuerySpanAndAnnotationRows(t *testing.T) {
 	db, _ := newQueryDB(t)
 	const sid = "7c666c01-d38e-4658-8650-854ffb5b626e"
-	f, err := Sessions(context.Background(), db)
-	if err != nil {
-		t.Fatal(err)
-	}
+	f := Sessions(nil, db)
 	cost := 0.25
 	spans := []schema.Span{{
 		SessionID: sid, SpanID: "sp1", Kind: schema.SpanChat, Name: "call", Status: schema.SpanOK,

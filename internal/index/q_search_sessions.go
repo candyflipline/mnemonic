@@ -138,15 +138,13 @@ func (a canonicalSearchSessionsArgs) searchQuery() searchQuery {
 	return q
 }
 
-func (searchSessionsTool) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, string, error) {
+func (searchSessionsTool) Call(ctx context.Context, caller *Caller, db *DB, raw json.RawMessage) (any, string, error) {
 	args, err := parseSearchSessionsArgs(raw)
 	if err != nil {
 		return nil, "", err
 	}
 	q := args.searchQuery()
-	if q.listed, err = Sessions(ctx, db); err != nil {
-		return nil, "", err
-	}
+	q.listed = Sessions(caller, db)
 	result, err := db.search(q)
 	if err != nil {
 		return nil, "", err

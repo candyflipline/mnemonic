@@ -60,7 +60,7 @@ func New(dataDir string, share *Share) (*Server, error) {
 		ix.Close()
 		return nil, err
 	}
-	tools := mcp.Handler(ix, index.Lookup)
+	tools := mcp.Handler(ix, ctl, st, index.Lookup)
 	boot := &index.BootStatus{}
 	s := &Server{dataDir: dataDir, ctl: ctl, ix: ix, lock: lock, st: st, booted: make(chan struct{}), boot: boot, share: share}
 	rcv := otlp.NewReceiver(st)
@@ -70,7 +70,7 @@ func New(dataDir string, share *Share) (*Server, error) {
 	mux.Handle("POST /v1/logs", auth.Require(auth.Push)(rcv.Logs()))
 	mux.Handle("GET /v1/export/{kind}", auth.Require(auth.Read)(export.Handler(ix, ctl)))
 	mux.Handle("/mcp", auth.Require(auth.Read)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := index.WithBootStatus(index.WithControls(store.WithStore(r.Context(), st), ctl), boot)
+		ctx := index.WithBootStatus(r.Context(), boot)
 		if share != nil {
 			ctx = index.WithLinkSite(ctx, index.LinkSite{BaseURL: share.BaseURL, MarkdownSize: s.markdownSize})
 		}

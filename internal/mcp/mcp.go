@@ -16,6 +16,7 @@ import (
 
 	"github.com/candyflipline/mnemonic/internal/auth"
 	"github.com/candyflipline/mnemonic/internal/index"
+	"github.com/candyflipline/mnemonic/internal/store"
 )
 
 //go:embed tools.json
@@ -118,9 +119,10 @@ type rpcResponse struct {
 // reads the index snapshot ix serves when it starts. Results are not redacted
 // here: push redacts each line on the client before upload and local mode as
 // it parses, so the index holds no secret for a result to carry.
-func Handler(ix *index.Index, lookup func(name string) (index.Tool, bool)) http.Handler {
+func Handler(ix *index.Index, ctl *index.Controls, st *store.Committer, lookup func(name string) (index.Tool, bool)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := auth.From(r.Context()); !ok {
+		identity, ok := auth.From(r.Context())
+		if !ok {
 			statusError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -205,7 +207,7 @@ func Handler(ix *index.Index, lookup func(name string) (index.Tool, bool)) http.
 				w.WriteHeader(http.StatusAccepted)
 				return
 			}
-			h := handler{ix: ix, lookup: lookup}
+			h := handler{ix: ix, lookup: lookup, caller: &index.Caller{Identity: identity, Controls: ctl, Store: st}}
 			result := h.toolsCall(r, paramsJSON)
 			switch result := result.(type) {
 			case *rpcErrorObj:
@@ -229,6 +231,7 @@ func Handler(ix *index.Index, lookup func(name string) (index.Tool, bool)) http.
 type handler struct {
 	ix     *index.Index
 	lookup func(name string) (index.Tool, bool)
+	caller *index.Caller
 }
 
 // toolsCall runs one tool and wraps it in the tool envelope. Only a params
@@ -253,7 +256,7 @@ func (h handler) toolsCall(r *http.Request, paramsJSON json.RawMessage) any {
 	}
 	start := time.Now()
 	db, release := h.ix.Snapshot()
-	data, text, err := tool.Call(r.Context(), db, args)
+	data, text, err := tool.Call(r.Context(), h.caller, db, args)
 	release()
 	perf := performance{ElapsedMS: time.Since(start).Milliseconds()}
 	if err != nil {

@@ -70,7 +70,7 @@ type traceResult struct {
 	Tree        []*traceSpan      `json:"tree"`
 }
 
-func (getTrace) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, string, error) {
+func (getTrace) Call(ctx context.Context, caller *Caller, db *DB, raw json.RawMessage) (any, string, error) {
 	var a traceArgs
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -84,13 +84,10 @@ func (getTrace) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, str
 	if id.kind != kindSession {
 		return nil, "", argErrorf("session_id must be a session id")
 	}
-	if err := requireTarget(ctx, db, id.session, ""); err != nil {
+	if err := requireTarget(caller, db, id.session, ""); err != nil {
 		return nil, "", err
 	}
-	f, err := Sessions(ctx, db)
-	if err != nil {
-		return nil, "", err
-	}
+	f := Sessions(caller, db)
 	if n := db.sessionSpansSize(id.session); n > traceBudget && f.Readable(id.session) {
 		return nil, "", argErrorf("trace too large for get_trace: %d MB of spans (limit %d MB); export it with: mnemonic export otlp --data-dir <data dir> --session %s",
 			(n+1<<20-1)>>20, traceBudget>>20, a.SessionID)

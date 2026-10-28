@@ -19,14 +19,12 @@ const (
 	faScanCap         = 2000
 )
 
-func (fileAttention) Call(ctx context.Context, db *DB, args json.RawMessage) (any, string, error) {
+func (fileAttention) Call(ctx context.Context, caller *Caller, db *DB, args json.RawMessage) (any, string, error) {
 	c, err := newFaCall(args)
 	if err != nil {
 		return nil, "", err
 	}
-	if c.q.listed, err = Sessions(ctx, db); err != nil {
-		return nil, "", err
-	}
+	c.q.listed = Sessions(caller, db)
 	touches, err := db.faTouches(c.q)
 	if err != nil {
 		return nil, "", err

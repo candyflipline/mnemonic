@@ -57,7 +57,7 @@ func TestOpenedPartListsSessionsAfterItsDirIsGone(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := json.RawMessage(`{"start_datetime":"2000-01-01T00:00:00Z","end_datetime":"2100-01-01T00:00:00Z"}`)
-	out, _, err := Call(context.Background(), db, "list_sessions", args)
+	out, _, err := Call(context.Background(), nil, db, "list_sessions", args)
 	if err != nil {
 		t.Fatalf("list_sessions after the part dir was removed: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestConcurrentToolCallsOnOneSnapshot(t *testing.T) {
 
 	listArgs := `{"start_datetime":"2000-01-01T00:00:00Z","end_datetime":"2100-01-01T00:00:00Z"}`
 	searchArgs := `{"query":"project"}`
-	sdata, _, err := Call(ctx, db, "search_sessions", json.RawMessage(searchArgs))
+	sdata, _, err := Call(ctx, nil, db, "search_sessions", json.RawMessage(searchArgs))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestConcurrentToolCallsOnOneSnapshot(t *testing.T) {
 	}
 	want := make([]string, len(calls))
 	for i, c := range calls {
-		data, _, err := Call(ctx, db, c.tool, json.RawMessage(c.args))
+		data, _, err := Call(ctx, nil, db, c.tool, json.RawMessage(c.args))
 		if err != nil {
 			t.Fatalf("%s: %v", c.tool, err)
 		}
@@ -129,7 +129,7 @@ func TestConcurrentToolCallsOnOneSnapshot(t *testing.T) {
 			<-start
 			for round := 0; round < 25; round++ {
 				for i, c := range calls {
-					data, _, err := Call(ctx, racing, c.tool, json.RawMessage(c.args))
+					data, _, err := Call(ctx, nil, racing, c.tool, json.RawMessage(c.args))
 					if err != nil {
 						errs[g] = fmt.Errorf("%s: %w", c.tool, err)
 						return

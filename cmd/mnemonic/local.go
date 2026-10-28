@@ -102,12 +102,9 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 		return err
 	}
 	sink.drainSettles(ctx, wake, logger)
-	tools := mcp.Handler(ix, index.Lookup)
 	mux := http.NewServeMux()
 	mux.Handle("GET /v1/export/{kind}", auth.Require(auth.Read)(export.Handler(ix, ctl)))
-	mux.Handle("/mcp", auth.Require(auth.Read)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tools.ServeHTTP(w, r.WithContext(index.WithControls(store.WithStore(r.Context(), st), ctl)))
-	})))
+	mux.Handle("/mcp", auth.Require(auth.Read)(mcp.Handler(ix, ctl, st, index.Lookup)))
 	hs := &http.Server{Addr: opts.listen, Handler: mux, ConnContext: func(ctx context.Context, _ net.Conn) context.Context {
 		return auth.NewContext(ctx, auth.Local(author))
 	}}

@@ -24,7 +24,7 @@ type stubTool struct {
 
 func (s stubTool) Name() string { return s.name }
 
-func (s stubTool) Call(_ context.Context, _ *index.DB, _ json.RawMessage) (any, string, error) {
+func (s stubTool) Call(_ context.Context, _ *index.Caller, _ *index.DB, _ json.RawMessage) (any, string, error) {
 	return s.data, s.text, s.err
 }
 
@@ -42,7 +42,7 @@ func mcpServer(t *testing.T, tools ...index.Tool) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewUnstartedServer(Handler(ix, lookup))
+	srv := httptest.NewUnstartedServer(Handler(ix, nil, nil, lookup))
 	srv.Config.ConnContext = func(ctx context.Context, _ net.Conn) context.Context {
 		return auth.NewContext(ctx, auth.Local("chris"))
 	}
@@ -262,7 +262,7 @@ func TestNoIdentityIs401(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(Handler(ix, nil))
+	srv := httptest.NewServer(Handler(ix, nil, nil, nil))
 	t.Cleanup(srv.Close)
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/mcp",
 		bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))

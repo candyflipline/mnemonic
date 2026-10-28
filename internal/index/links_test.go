@@ -34,9 +34,9 @@ func TestAdminLinksAnotherAuthorsSession(t *testing.T) {
 		}
 	}
 	site := LinkSite{BaseURL: "https://share.example", MarkdownSize: func(*DB, string, ReadLink, int) (int64, error) { return 1, nil }}
-	ctx := WithLinkSite(store.WithStore(WithControls(auth.NewContext(context.Background(), admin), ctl), st), site)
+	ctx := WithLinkSite(context.Background(), site)
 	raw, _ := json.Marshal(map[string]any{"session_ids": []string{FormatSessionID(sb)}})
-	d, _, err := Call(ctx, db, "share_link", raw)
+	d, _, err := Call(ctx, &Caller{Identity: admin, Controls: ctl, Store: st}, db, "share_link", raw)
 	if err != nil {
 		t.Fatal(err)
 	}

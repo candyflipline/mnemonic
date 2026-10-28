@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
-
-	"github.com/candyflipline/mnemonic/internal/store"
 )
 
 type setVisibility struct{}
@@ -14,7 +12,7 @@ func init() { register(setVisibility{}) }
 
 func (setVisibility) Name() string { return "set_visibility" }
 
-func (setVisibility) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, string, error) {
+func (setVisibility) Call(ctx context.Context, caller *Caller, db *DB, raw json.RawMessage) (any, string, error) {
 	a, session, err := parseControlArgs(raw)
 	if err != nil {
 		return nil, "", err
@@ -22,11 +20,11 @@ func (setVisibility) Call(ctx context.Context, db *DB, raw json.RawMessage) (any
 	if !slices.Contains([]visibility{visPrivate, visTeam}, a.Visibility) {
 		return nil, "", argErrorf("visibility must be private or team")
 	}
-	c := controlsFrom(ctx)
-	id, err := actor(ctx, db, c, session)
+	id, err := actor(caller, db, session)
 	if err != nil {
 		return nil, "", err
 	}
+	c := caller.Controls
 	if c.deleted(session) {
 		return nil, "", argErrorf("session not found")
 	}
@@ -34,7 +32,7 @@ func (setVisibility) Call(ctx context.Context, db *DB, raw json.RawMessage) (any
 	if key == "" {
 		key = randomKey()
 	}
-	dup, err := c.record(store.From(ctx), id.Author(), controlRecord{SessionID: session, Action: actVisibility, Visibility: a.Visibility,
+	dup, err := c.record(caller.Store, id.Author(), controlRecord{SessionID: session, Action: actVisibility, Visibility: a.Visibility,
 		RequestKey: recordKey(actVisibility, session, string(a.Visibility), key)})
 	if err != nil {
 		return nil, "", err

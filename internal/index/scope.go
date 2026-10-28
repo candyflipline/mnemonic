@@ -1,11 +1,6 @@
 package index
 
-import (
-	"context"
-	"errors"
-
-	"github.com/candyflipline/mnemonic/internal/auth"
-)
+import "github.com/candyflipline/mnemonic/internal/auth"
 
 type SessionFilter struct {
 	db     *DB
@@ -15,17 +10,12 @@ type SessionFilter struct {
 	hidden map[string]bool
 }
 
-func Sessions(ctx context.Context, db *DB) (SessionFilter, error) {
-	id, ok := auth.From(ctx)
-	if !ok {
-		return SessionFilter{}, nil
-	}
-	c := controlsFrom(ctx)
+func Sessions(c *Caller, db *DB) SessionFilter {
 	if c == nil {
-		return SessionFilter{}, errors.New("index: an identity without session controls on its ctx")
+		return SessionFilter{}
 	}
-	sets := c.sets()
-	f := SessionFilter{db: db, scoped: true, author: id.Author(), tenant: id.Members(), hidden: map[string]bool{}}
+	sets := c.Controls.sets()
+	f := SessionFilter{db: db, scoped: true, author: c.Identity.Author(), tenant: c.Identity.Members(), hidden: map[string]bool{}}
 	for _, s := range sets.deleted {
 		f.hidden[s] = true
 	}
@@ -34,7 +24,7 @@ func Sessions(ctx context.Context, db *DB) (SessionFilter, error) {
 			f.hidden[s] = true
 		}
 	}
-	return f, nil
+	return f
 }
 
 func (f SessionFilter) all() bool {

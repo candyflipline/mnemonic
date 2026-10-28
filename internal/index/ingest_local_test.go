@@ -110,15 +110,14 @@ func TestAnnotateStoresOnlyRedactedText(t *testing.T) {
 		t.Fatal(err)
 	}
 	id, _ := keys.Identify("k-a")
-	ctx := auth.NewContext(WithControls(context.Background(), ctl), id)
 	stc, err := store.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stc.Close()
-	ctx = store.WithStore(ctx, stc)
+	ctx, caller := context.Background(), &Caller{Identity: id, Controls: ctl, Store: stc}
 
-	data, text, err := Call(ctx, db, "annotate", args)
+	data, text, err := Call(ctx, caller, db, "annotate", args)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +172,7 @@ func TestAnnotateStoresOnlyRedactedText(t *testing.T) {
 		}
 	}
 
-	_, text, err = Call(ctx, db, "annotate", args)
+	_, text, err = Call(ctx, caller, db, "annotate", args)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +234,7 @@ func plainSession(t *testing.T, path, session, text string) {
 
 func searchCount(t *testing.T, db *DB, word string) int {
 	t.Helper()
-	data, _, err := Call(context.Background(), db, "search_sessions", json.RawMessage(`{"query":"`+word+`"}`))
+	data, _, err := Call(context.Background(), nil, db, "search_sessions", json.RawMessage(`{"query":"`+word+`"}`))
 	if err != nil {
 		t.Fatalf("search_sessions %q: %v", word, err)
 	}
@@ -398,7 +397,7 @@ func TestIngestPlainRedactsAtIngest(t *testing.T) {
 		{"query", `{"query":"from: events | filter: payload_json like '%MIIEowIBAAKCAQEA%' | select: event_uid","from":"2026-01-01T00:00:00Z","to":"2026-02-01T00:00:00Z"}`, true},
 	}
 	for _, p := range probes {
-		data, text, err := Call(ctx, db, p.name, json.RawMessage(p.args))
+		data, text, err := Call(ctx, nil, db, p.name, json.RawMessage(p.args))
 		if err != nil {
 			t.Fatalf("%s %s: %v", p.name, p.args, err)
 		}

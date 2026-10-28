@@ -83,7 +83,7 @@ func parseQueryArgs(raw json.RawMessage) (a queryArgs, from, to time.Time, limit
 	return a, from, to, limit, nil
 }
 
-func (queryTool) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, string, error) {
+func (queryTool) Call(ctx context.Context, caller *Caller, db *DB, raw json.RawMessage) (any, string, error) {
 	a, from, to, limit, err := parseQueryArgs(raw)
 	if err != nil {
 		return nil, "", err
@@ -96,7 +96,7 @@ func (queryTool) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, st
 	}
 	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
 	defer cancel()
-	data, text, err := runQuery(ctx, db, a.Query, from, to, limit)
+	data, text, err := runQuery(ctx, caller, db, a.Query, from, to, limit)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return nil, "", argErrorf("statement timeout: the query was stopped at its time limit of %d s", int(queryTimeout.Seconds()))
@@ -106,7 +106,7 @@ func (queryTool) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, st
 	return data, text, nil
 }
 
-func runQuery(ctx context.Context, db *DB, q string, from, to time.Time, limit int) (any, string, error) {
+func runQuery(ctx context.Context, caller *Caller, db *DB, q string, from, to time.Time, limit int) (any, string, error) {
 	parsed, err := ql.Parse(q)
 	if err != nil {
 		return nil, "", argErrorf("%s", err)
@@ -115,11 +115,7 @@ func runQuery(ctx context.Context, db *DB, q string, from, to time.Time, limit i
 	if err != nil {
 		return nil, "", argErrorf("%s", err)
 	}
-	src, err := newQLSource(ctx, db, from, to)
-	if err != nil {
-		return nil, "", err
-	}
-	res, err := ql.Run(ctx, plan, src, ql.Limits{Rows: limit, Held: queryMaxHeld})
+	res, err := ql.Run(ctx, plan, newQLSource(caller, db, from, to), ql.Limits{Rows: limit, Held: queryMaxHeld})
 	if err != nil {
 		return nil, "", err
 	}

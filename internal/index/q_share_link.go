@@ -67,18 +67,17 @@ type shareLinkArgs struct {
 	Revoke     string   `json:"revoke"`
 }
 
-func (shareLink) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, string, error) {
+func (shareLink) Call(ctx context.Context, caller *Caller, db *DB, raw json.RawMessage) (any, string, error) {
 	var a shareLinkArgs
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&a); err != nil {
 		return nil, "", argErrorf("invalid arguments: %s", err)
 	}
-	id, ok := auth.From(ctx)
-	c, st := controlsFrom(ctx), store.From(ctx)
-	if !ok || c == nil || st == nil {
-		return nil, "", errors.New("index: share_link needs an identity, controls and a store on ctx")
+	if caller == nil {
+		return nil, "", errors.New("index: share_link needs an identity, controls and a store")
 	}
+	id, c, st := caller.Identity, caller.Controls, caller.Store
 	modes := 0
 	for _, set := range []bool{a.SessionIDs != nil, a.Invite != "", a.Revoke != ""} {
 		if set {
@@ -120,7 +119,7 @@ func (shareLink) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, st
 	if err != nil {
 		return nil, "", err
 	}
-	return createRead(ctx, db, c, st, site, id, a, days)
+	return createRead(caller, db, site, a, days)
 }
 
 func linkDays(days, def int) (time.Duration, error) {
@@ -170,7 +169,8 @@ type linkSessionRow struct {
 	MarkdownBytes int64  `json:"markdown_bytes"`
 }
 
-func createRead(ctx context.Context, db *DB, c *Controls, st *store.Committer, site LinkSite, id auth.Identity, a shareLinkArgs, days time.Duration) (any, string, error) {
+func createRead(caller *Caller, db *DB, site LinkSite, a shareLinkArgs, days time.Duration) (any, string, error) {
+	c, st, id := caller.Controls, caller.Store, caller.Identity
 	switch {
 	case len(a.SessionIDs) == 0 || len(a.SessionIDs) > maxLinkSessions:
 		return nil, "", argErrorf("session_ids must hold 1 to %d session ids", maxLinkSessions)
@@ -189,7 +189,7 @@ func createRead(ctx context.Context, db *DB, c *Controls, st *store.Committer, s
 		if mid.kind != kindSession {
 			return nil, "", argErrorf("%s is not a session id", s)
 		}
-		if _, err := actor(ctx, db, c, mid.session); err != nil {
+		if _, err := actor(caller, db, mid.session); err != nil {
 			return nil, "", argErrorf("%s: %s", s, err)
 		}
 		sole := db.sessionAuthors(mid.session)

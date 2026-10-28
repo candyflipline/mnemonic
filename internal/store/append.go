@@ -1,7 +1,6 @@
 package store
 
 import (
-	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -54,15 +53,4 @@ func (src ServerSource) validate() error {
 		return fmt.Errorf("store: day %s is not a UTC midnight", src.Day)
 	}
 	return nil
-}
-
-type ctxKey struct{}
-
-func WithStore(ctx context.Context, st *Committer) context.Context {
-	return context.WithValue(ctx, ctxKey{}, st)
-}
-
-func From(ctx context.Context) *Committer {
-	st, _ := ctx.Value(ctxKey{}).(*Committer)
-	return st
 }

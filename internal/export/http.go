@@ -1,7 +1,6 @@
 package export
 
 import (
-	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -34,7 +33,8 @@ func Handler(ix *index.Index, ctl *index.Controls) http.Handler {
 		}
 		db, release := ix.Snapshot()
 		defer release()
-		sessions, err := scope(index.WithControls(r.Context(), ctl), db, req.includePrivate)
+		id, _ := auth.From(r.Context())
+		sessions, err := scope(&index.Caller{Identity: id, Controls: ctl}, db, req.includePrivate)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusForbidden)
 			return
@@ -91,13 +91,12 @@ func (c *Counted) Fail(w http.ResponseWriter, err error, status int) {
 	http.Error(w, err.Error(), status)
 }
 
-func scope(ctx context.Context, db *index.DB, includePrivate bool) (index.SessionFilter, error) {
+func scope(c *index.Caller, db *index.DB, includePrivate bool) (index.SessionFilter, error) {
 	if !includePrivate {
-		return index.Sessions(ctx, db)
+		return index.Sessions(c, db), nil
 	}
-	id, _ := auth.From(ctx)
-	members := id.Members()
-	if !id.Can(auth.Admin) || !members.Except || len(members.Names) > 0 {
+	members := c.Identity.Members()
+	if !c.Identity.Can(auth.Admin) || !members.Except || len(members.Names) > 0 {
 		return index.SessionFilter{}, errors.New("export: include_private needs an admin token over every author")
 	}
 	return index.SessionFilter{}, nil

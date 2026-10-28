@@ -124,7 +124,7 @@ func TestArchiveKind(t *testing.T) {
 	if b := findRow(t, db, "arch-uid-s2a"); b.Buckets != `{"input":7}` || b.Native != `{"tokens":1.5}` {
 		t.Fatalf("map columns: buckets %q native %q", b.Buckets, b.Native)
 	}
-	data, _, err := Call(ctx, db, "list_sessions",
+	data, _, err := Call(ctx, nil, db, "list_sessions",
 		json.RawMessage(`{"start_datetime":"2026-03-01T00:00:00Z","end_datetime":"2026-03-02T00:00:00Z"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -146,7 +146,7 @@ func TestArchiveKind(t *testing.T) {
 			t.Fatalf("list_sessions misses %s: %s", sid, data)
 		}
 	}
-	data, _, err = Call(ctx, db, "search_sessions", json.RawMessage(`{"query":"archthree"}`))
+	data, _, err = Call(ctx, nil, db, "search_sessions", json.RawMessage(`{"query":"archthree"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func TestArchiveKind(t *testing.T) {
 			t.Fatalf("authors of %s: %v, want [a]", sid, got)
 		}
 	}
-	data, _, err = Call(ctx, db, "get_ingest_status", nil)
+	data, _, err = Call(ctx, nil, db, "get_ingest_status", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +324,7 @@ func TestArchiveKind(t *testing.T) {
 	if docs := docsTotal(db); docs != 70 {
 		t.Fatalf("big-file docs %d, want 70 (the reopen must not lose rows)", docs)
 	}
-	data, _, err = Call(ctx, db, "search_sessions", json.RawMessage(`{"query":"evword17"}`))
+	data, _, err = Call(ctx, nil, db, "search_sessions", json.RawMessage(`{"query":"evword17"}`))
 	if err != nil {
 		t.Fatal(err)
 	}

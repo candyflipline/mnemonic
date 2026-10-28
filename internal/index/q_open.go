@@ -137,14 +137,12 @@ func (a canonicalOpenArgs) requestShape() map[string]any {
 	return map[string]any{"id": a.target.String()}
 }
 
-func (openTool) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, string, error) {
+func (openTool) Call(ctx context.Context, caller *Caller, db *DB, raw json.RawMessage) (any, string, error) {
 	args, err := parseOpenArgs(raw)
 	if err != nil {
 		return nil, "", err
 	}
-	if args.opened, err = Sessions(ctx, db); err != nil {
-		return nil, "", err
-	}
+	args.opened = Sessions(caller, db)
 	request := args.requestShape()
 
 	switch args.target.kind {

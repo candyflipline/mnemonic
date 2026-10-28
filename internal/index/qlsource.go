@@ -22,13 +22,8 @@ type qlSource struct {
 	annotationsOf func(sessionID string) []schema.Annotation
 }
 
-func newQLSource(ctx context.Context, db *DB, from, to time.Time) (*qlSource, error) {
-	f, err := Sessions(ctx, db)
-	if err != nil {
-		return nil, err
-	}
-	s := &qlSource{db: db, f: f, from: from, to: to, spansOf: db.sessionSpans, annotationsOf: db.sessionAnnotations}
-	return s, nil
+func newQLSource(c *Caller, db *DB, from, to time.Time) *qlSource {
+	return &qlSource{db: db, f: Sessions(c, db), from: from, to: to, spansOf: db.sessionSpans, annotationsOf: db.sessionAnnotations}
 }
 
 const scanCtxEvery = 4096

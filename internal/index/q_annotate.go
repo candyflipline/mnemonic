@@ -156,11 +156,11 @@ type annotateResult struct {
 	Duplicate    bool   `json:"duplicate"`
 }
 
-func (annotate) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, string, error) {
-	id, ok := auth.From(ctx)
-	if !ok || store.From(ctx) == nil {
-		return nil, "", fmt.Errorf("index: annotate needs an identity and a store on ctx")
+func (annotate) Call(ctx context.Context, caller *Caller, db *DB, raw json.RawMessage) (any, string, error) {
+	if caller == nil {
+		return nil, "", fmt.Errorf("index: annotate needs an identity and a store")
 	}
+	id := caller.Identity
 	if !id.Can(auth.Annotate) {
 		return nil, "", argErrorf("token lacks scope annotate")
 	}
@@ -168,7 +168,7 @@ func (annotate) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, str
 	if err != nil {
 		return nil, "", err
 	}
-	if err := requireTarget(ctx, db, r.target.SessionID, r.target.SpanID); err != nil {
+	if err := requireTarget(caller, db, r.target.SessionID, r.target.SpanID); err != nil {
 		return nil, "", err
 	}
 	key, err := r.key()
@@ -187,7 +187,7 @@ func (annotate) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, str
 	if err != nil {
 		return nil, "", err
 	}
-	_, duplicate, err := store.From(ctx).Append(store.Today(id.Author(), schema.AnnotationHarness, ""), key, append(line, '\n'))
+	_, duplicate, err := caller.Store.Append(store.Today(id.Author(), schema.AnnotationHarness, ""), key, append(line, '\n'))
 	if err != nil {
 		return nil, "", err
 	}
@@ -199,11 +199,8 @@ func (annotate) Call(ctx context.Context, db *DB, raw json.RawMessage) (any, str
 	return data, text, nil
 }
 
-func requireTarget(ctx context.Context, db *DB, session, spanID string) error {
-	f, err := Sessions(ctx, db)
-	if err != nil {
-		return err
-	}
+func requireTarget(caller *Caller, db *DB, session, spanID string) error {
+	f := Sessions(caller, db)
 	has, err := db.sessionHasEvents(session)
 	if err != nil {
 		return err

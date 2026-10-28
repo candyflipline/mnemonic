@@ -130,7 +130,7 @@ func lsAndAuthors(t *testing.T, store string) (map[string]int64, map[string][]st
 	defer ix.Close()
 	db, release := ix.Snapshot()
 	defer release()
-	data, _, err := Call(t.Context(), db, "list_sessions",
+	data, _, err := Call(t.Context(), nil, db, "list_sessions",
 		json.RawMessage(`{"start_datetime":"2026-01-01T00:00:00Z","end_datetime":"2027-01-01T00:00:00Z","limit":20}`))
 	if err != nil {
 		t.Fatal(err)

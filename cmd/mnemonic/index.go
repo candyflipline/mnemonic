@@ -77,7 +77,7 @@ func indexBatch(store string) error {
 				rep.ID = c.ID
 				start := time.Now()
 				db, release := ix.Snapshot()
-				data, text, cerr := index.Call(context.Background(), db, c.Tool, c.Args)
+				data, text, cerr := index.Call(context.Background(), nil, db, c.Tool, c.Args)
 				release()
 				rep.Us = time.Since(start).Microseconds()
 				rep.Data, rep.Text = data, text

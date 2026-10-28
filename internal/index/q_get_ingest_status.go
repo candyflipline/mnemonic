@@ -14,15 +14,11 @@ type getIngestStatus struct{}
 
 func (getIngestStatus) Name() string { return "get_ingest_status" }
 
-func (getIngestStatus) Call(ctx context.Context, db *DB, args json.RawMessage) (any, string, error) {
+func (getIngestStatus) Call(ctx context.Context, caller *Caller, db *DB, args json.RawMessage) (any, string, error) {
 	if !stEmptyArgs(args) {
 		return nil, "", argErrorf("get_ingest_status expects an empty JSON object")
 	}
-	f, err := Sessions(ctx, db)
-	if err != nil {
-		return nil, "", err
-	}
-	read, err := stReadSources(db, f)
+	read, err := stReadSources(db, Sessions(caller, db))
 	if err != nil {
 		return nil, "", err
 	}

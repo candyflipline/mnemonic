@@ -95,17 +95,16 @@ func traceBoundCalls(t *testing.T, dir, hid, sid, late string, spansBytes int) (
 		"k-h": {Tenant: auth.DefaultTenant, Author: "h", Scopes: []auth.Scope{auth.Read, auth.Annotate}},
 		"k-z": {Tenant: "other", Author: "z", Scopes: []auth.Scope{auth.Read}},
 	})
-	base := WithControls(context.Background(), ctl)
+	ctx := context.Background()
 	idH, _ := keys.Identify("k-h")
-	ctxH := auth.NewContext(base, idH)
 	stc, err := store.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stc.Close()
-	ctxH = store.WithStore(ctxH, stc)
+	h := &Caller{Identity: idH, Controls: ctl, Store: stc}
 	idZ, _ := keys.Identify("k-z")
-	ctxZ := auth.NewContext(base, idZ)
+	z := &Caller{Identity: idZ, Controls: ctl}
 	args := func(session string) json.RawMessage {
 		b, _ := json.Marshal(map[string]any{"session_id": FormatSessionID(session)})
 		return b
@@ -119,7 +118,7 @@ func traceBoundCalls(t *testing.T, dir, hid, sid, late string, spansBytes int) (
 
 	var refusal error
 	refuseGrowth = peakAbove(func() {
-		_, _, refusal = Call(ctxH, db, "get_trace", args(hid))
+		_, _, refusal = Call(ctx, h, db, "get_trace", args(hid))
 	})
 	mb := (spansBytes + 1<<20 - 1) >> 20
 	want := fmt.Sprintf("trace too large for get_trace: %d MB of spans (limit 1 MB); export it with: mnemonic export otlp --data-dir <data dir> --session %s", mb, FormatSessionID(hid))
@@ -127,25 +126,25 @@ func traceBoundCalls(t *testing.T, dir, hid, sid, late string, spansBytes int) (
 		t.Errorf("get_trace on H: %v, want %q", refusal, want)
 	}
 
-	_, text, err := Call(ctxH, db, "get_trace", args(sid))
+	_, text, err := Call(ctx, h, db, "get_trace", args(sid))
 	if err != nil || !strings.HasPrefix(text, "Trace "+FormatSessionID(sid)+": 6 span(s), tokens in 6 / out 4") {
 		t.Errorf("get_trace on S: %v %q, want a 6 span trace", err, text)
 	}
 
-	if _, _, err := Call(ctxZ, db, "get_trace", args(hid)); err == nil || err.Error() != "session not found" {
+	if _, _, err := Call(ctx, z, db, "get_trace", args(hid)); err == nil || err.Error() != "session not found" {
 		t.Errorf("get_trace on H by a caller outside its tenant: %v, want session not found", err)
 	}
 
 	scanGrowth = peakAbove(func() {
-		if err := requireTarget(ctxH, db, hid, late); err != nil {
+		if err := requireTarget(h, db, hid, late); err != nil {
 			t.Errorf("late span of H: %v, want found", err)
 		}
 	})
-	if err := requireTarget(ctxH, db, hid, "no-such-span"); err == nil || err.Error() != "span not found in the session" {
+	if err := requireTarget(h, db, hid, "no-such-span"); err == nil || err.Error() != "span not found in the session" {
 		t.Errorf("absent span of H: %v, want span not found in the session", err)
 	}
 	annotate, _ := json.Marshal(map[string]any{"session_id": FormatSessionID(hid), "span_id": late, "name": "n", "text": "t"})
-	if _, _, err := Call(ctxH, db, "annotate", annotate); err != nil {
+	if _, _, err := Call(ctx, h, db, "annotate", annotate); err != nil {
 		t.Errorf("annotate the late span of H: %v", err)
 	}
 	return refuseGrowth, scanGrowth

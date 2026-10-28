@@ -3,7 +3,6 @@ package index
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -305,17 +304,6 @@ func (c *Controls) deleted(sessionID string) bool {
 	return c.sessions[sessionID].deleted
 }
 
-type controlsKey struct{}
-
-func WithControls(ctx context.Context, c *Controls) context.Context {
-	return context.WithValue(ctx, controlsKey{}, c)
-}
-
-func controlsFrom(ctx context.Context) *Controls {
-	c, _ := ctx.Value(controlsKey{}).(*Controls)
-	return c
-}
-
 type controlArgs struct {
 	SessionID  string     `json:"session_id"`
 	Visibility visibility `json:"visibility"`
@@ -342,12 +330,11 @@ func parseControlArgs(raw json.RawMessage) (controlArgs, string, error) {
 	return a, id.session, nil
 }
 
-func actor(ctx context.Context, db *DB, c *Controls, session string) (auth.Identity, error) {
-	id, ok := auth.From(ctx)
-	if !ok || c == nil || store.From(ctx) == nil {
-		return id, errors.New("index: control tools need an identity, controls and a store on ctx")
+func actor(c *Caller, db *DB, session string) (auth.Identity, error) {
+	if c == nil {
+		return auth.Identity{}, errors.New("index: control tools need an identity, controls and a store")
 	}
-	return actorOn(id, db.sessionAuthors(session))
+	return actorOn(c.Identity, db.sessionAuthors(session))
 }
 
 func actorOn(id auth.Identity, authors []string) (auth.Identity, error) {
