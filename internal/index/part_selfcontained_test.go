@@ -48,10 +48,7 @@ func TestOpenedPartListsSessionsAfterItsDirIsGone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := OpenParts([]*Part{p})
-	if err != nil {
-		t.Fatal(err)
-	}
+	db := newDB([]*Part{p}, newFrameCache())
 	defer db.Close()
 	if err := os.RemoveAll(pd); err != nil {
 		t.Fatal(err)

@@ -124,12 +124,6 @@ func openDB(store string, pin func() (*DB, func()), opened map[string]*Part) (*D
 	return db, nil
 }
 
-// OpenParts is a DB over parts the caller opened. It answers every tool but
-// get_ingest_status, which has no source rows here.
-func OpenParts(parts []*Part) (*DB, error) {
-	return newDB(parts, newFrameCache()), nil
-}
-
 func newDB(parts []*Part, fc *frameCache) *DB {
 	db := &DB{parts: parts, fc: fc, sessPart: map[string]int{}, annPart: map[string][]int{}}
 	for i, st := range parts {
