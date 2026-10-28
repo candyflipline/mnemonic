@@ -628,9 +628,11 @@ func eventTimeUs(r *Row) int64 {
 	return ingestedAtUs
 }
 
-// ingestedAtUs stands in for the lake's ingested_at on rows without a
+// IngestedAt stands in for the lake's ingested_at on rows without a
 // parseable record_ts, so their order does not depend on when a source was parsed.
-var ingestedAtUs = time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC).UnixMicro()
+var IngestedAt = time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
+
+var ingestedAtUs = IngestedAt.UnixMicro()
 
 func orderLess(a, b *Row) bool {
 	ta, tb := eventTimeUs(a), eventTimeUs(b)

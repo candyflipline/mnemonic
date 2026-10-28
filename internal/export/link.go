@@ -25,9 +25,10 @@ type LinkView struct {
 
 const (
 	maxResultBytes = 4096
-	unstamped      = "2100-01-01T00:00:00.000Z"
 	timeLayout     = "2006-01-02 15:04 MST"
 )
+
+var unstamped = isoMillis(index.IngestedAt)
 
 // The server binary may run where no zoneinfo is installed, so the zone data
 // ships in the binary through the time/tzdata import.
@@ -40,9 +41,8 @@ var pacific = func() *time.Location {
 }()
 
 // stepCut keeps the steps stamped at or before until, an isoMillis string, so
-// that string order is time order. The index stamps a row with no parseable
-// time at unstamped, a year no cutoff reaches. A step with that stamp or none
-// is dropped, as the owner's count of messages at create drops it.
+// that string order is time order. A step stamped index.IngestedAt or not at
+// all is dropped, as the owner's count of messages at create drops it.
 type stepCut struct{ until string }
 
 func (c *stepCut) filter(fn func(*Step) error) func(*Step) error {
