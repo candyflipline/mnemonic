@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/candyflipline/mnemonic/internal/config"
@@ -77,13 +78,29 @@ func TestOpenCurrentNamingMissingPart(t *testing.T) {
 		t.Fatal("Open with a deleted part: err=<nil>, want the missing part named")
 	}
 
-	openRetryHook = func() {
+	gone := filepath.Join(store, "parts", m.Parts[0])
+	if err := os.Mkdir(gone, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta := filepath.Join(gone, "meta.json")
+	if err := syscall.Mkfifo(meta, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	published := make(chan struct{})
+	go func() {
+		defer close(published)
+		f, err := os.OpenFile(meta, os.O_WRONLY, 0)
+		if err != nil {
+			t.Error(err)
+			return
+		}
 		if err := os.WriteFile(filepath.Join(store, "CURRENT"), []byte(`{"parts":[],"sources":[]}`), 0o644); err != nil {
 			t.Error(err)
 		}
-	}
-	defer func() { openRetryHook = nil }()
+		f.Close()
+	}()
 	ix2, err := Open(store)
+	<-published
 	if err != nil {
 		t.Fatalf("open after the newer CURRENT: %v", err)
 	}

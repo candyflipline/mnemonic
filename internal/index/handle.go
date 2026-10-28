@@ -43,9 +43,6 @@ func OpenExclusive(store string) (*Index, error) {
 
 func emptyDB() *DB { return &DB{sessPart: map[string]int{}} }
 
-// openRetryHook, non-nil in tests, runs between open retries.
-var openRetryHook func()
-
 func (ix *Index) Ingest(root string, opts IngestOptions) (IngestStats, error) {
 	st, err := Ingest(root, ix.store, opts.Quiet, opts.SettleAll)
 	return st, errors.Join(err, ix.Refresh())
@@ -91,9 +88,6 @@ func (ix *Index) refresh(opened map[string]*Part) error {
 		var missing *PartOpenError
 		if !errors.As(err, &missing) || try == openTries {
 			return err
-		}
-		if openRetryHook != nil {
-			openRetryHook()
 		}
 	}
 }
