@@ -154,9 +154,10 @@ path.
    a layer that exists only for the other package. One file per tool keeps
    lanes disjoint; each tool registers itself in `init`.
 2. **Handle.** Tools take `*index.DB` (one pinned snapshot); `internal/mcp`
-   and `internal/server` take `*index.Index`. ctx carries the identity
-   (`auth.From`), the store (`store.WithStore`) and the session controls
-   (`index.WithControls`), as main did.
+   and `internal/server` take `*index.Index`. A tool's `Call` takes an
+   `index.Caller`: the identity the transport proved (`auth.From`, read once
+   by the MCP handler) plus the store and session controls the handler was
+   built with.
 3. **Derived Oct 22 relations are part sections built at part build time**
    (spans, annotations, session authors): a part holds every row of its
    sessions, winners and losers, so each section is a function of the part's
