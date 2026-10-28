@@ -2,6 +2,7 @@ package index
 
 import (
 	"errors"
+	"slices"
 	"sync"
 	"time"
 
@@ -63,17 +64,24 @@ const openTries = 3
 func (ix *Index) Refresh() error { return ix.refresh(nil) }
 
 func (ix *Index) refresh(opened map[string]*Part) error {
+	var db *DB
+	defer func() {
+		for _, p := range opened {
+			if db == nil || !slices.Contains(db.parts, p) {
+				p.Close()
+			}
+		}
+	}()
 	stamp, ok := CurrentStamp(ix.store)
 	ix.mu.Lock()
 	same := !ok || stamp == ix.cur.stamp
 	ix.mu.Unlock()
 	if same {
-		closeParts(opened)
 		return nil
 	}
 	for try := 1; ; try++ {
-		db, err := openDB(ix.store, ix.Snapshot, opened)
-		opened = nil
+		var err error
+		db, err = openDB(ix.store, ix.Snapshot, opened)
 		if err == nil {
 			ix.mu.Lock()
 			old := ix.cur

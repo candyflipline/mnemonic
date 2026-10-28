@@ -65,11 +65,7 @@ func (e *PartOpenError) Error() string {
 
 func OpenDB(store string) (*DB, error) { return openDB(store, nil, nil) }
 
-// openDB opens the parts CURRENT names, taking each one whose dir stamp still
-// matches from the DB pin returns, held until openDB returns, or from opened:
-// parts the caller opened, by id, and hands over; every other one closes.
 func openDB(store string, pin func() (*DB, func()), opened map[string]*Part) (*DB, error) {
-	defer func() { closeParts(opened) }()
 	var prev *DB
 	if pin != nil {
 		var release func()
@@ -98,16 +94,11 @@ func openDB(store string, pin func() (*DB, func()), opened map[string]*Part) (*D
 			return
 		}
 		if p := opened[m.Parts[i]]; reusable(p, dir) {
-			parts[i] = p
+			parts[i], taken[i] = p, true
 			return
 		}
 		parts[i], errs[i] = OpenPartDir(dir)
 	})
-	for i, p := range parts {
-		if p != nil && opened[m.Parts[i]] == p {
-			delete(opened, m.Parts[i])
-		}
-	}
 	for i, err := range errs {
 		if err != nil {
 			for j, p := range parts {
