@@ -12,7 +12,7 @@ The server serves `/mcp` on the QUIC HTTP endpoint, so the caller is the key tha
 
 ## Tenancy
 
-Each `[[keys]]` entry names a tenant, `default` when it names none, and every author no key entry names is in `default` too, so a `default` key reads those authors' sessions (`internal/auth/auth.go:106-116`). This is the owner's call, not an oversight.
+Each `[[keys]]` entry names a tenant, `default` when it names none. A key reads the authors its tenant names, through a key entry, a grant or a live invited member (`Identity.Members`, `internal/auth/auth.go`). An author none of these names is refused to a non-admin key, and only a `default` key holding `admin` reads every author outside other tenants. This is the owner's call, not an oversight.
 
 The engine derives `session_authors(session_id, author)` as a part section: every author of a source whose rows carry one of the session's event uids, whether or not that row won (`internal/index/authors.go`). A session id comes from the pushed file, so any author can put lines in any session; the rules below read only this section, never which author pushed one event (`internal/index/scope.go`).
 
@@ -23,7 +23,7 @@ The engine derives `session_authors(session_id, author)` as a part section: ever
 | a `private` session | the caller is its only author |
 | `set_visibility`, `delete_session` | every author is in the caller's tenant, and the caller is the only author or holds `admin` |
 
-A session whose authors sit in two tenants is no one's: no read shows it and no control tool finds it. That covers a line pushed into another tenant's session and an exact copy of its lines, which can win the engine's per-uid dedup and move the rows to the copier's author. A single `default` tenant filters nothing, as before.
+A session whose authors sit in two tenants is no one's: no read shows it and no control tool finds it. That covers a line pushed into another tenant's session and an exact copy of its lines, which can win the engine's per-uid dedup and move the rows to the copier's author. A non-admin key in the `default` tenant reads only the authors a key entry, a grant or a live invited member names in it, and a `default` admin key reads every author outside other tenants.
 
 The control tools append each record under a key bound to the action, session, visibility and the client's `request_key` (`internal/index/q_set_visibility.go`, `internal/index/q_delete_session.go`), so only an exact retry reports `duplicate`. Control records ignore fields a later build added and record the build that wrote them; malformed JSON or a missing required field still stops `serve` from starting, since a skipped delete would show a deleted session (`internal/index/controls.go`).
 
