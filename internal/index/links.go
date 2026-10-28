@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
-	"slices"
 	"sort"
 	"time"
 
@@ -127,9 +126,6 @@ type ReadLink struct {
 	Cutoff          time.Time
 }
 
-// OpenRead keeps a session only while its sole author is the one the link
-// recorded, so a foreign line pushed under a linked id hides the session
-// instead of joining the link.
 func (c *Controls) OpenRead(db *DB, h TokenHash, now time.Time) (ReadLink, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -142,7 +138,7 @@ func (c *Controls) OpenRead(db *DB, h TokenHash, now time.Time) (ReadLink, error
 	}
 	rl := ReadLink{ID: l.id, Title: l.title, Note: l.note, Cutoff: l.cutoff}
 	for i, s := range l.sessions {
-		if !c.sessions[s].deleted && slices.Equal(db.sessionAuthors(s), []string{l.sessionAuthors[i]}) {
+		if !c.sessions[s].deleted && db.soleAuthor(s, l.sessionAuthors[i]) {
 			rl.SessionIDs = append(rl.SessionIDs, s)
 		}
 	}

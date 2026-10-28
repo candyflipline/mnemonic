@@ -30,7 +30,7 @@ func Sessions(ctx context.Context, db *DB) (SessionFilter, error) {
 		f.hidden[s] = true
 	}
 	for _, s := range sets.private {
-		if !f.soleAuthor(s, f.author) {
+		if !db.soleAuthor(s, f.author) {
 			f.hidden[s] = true
 		}
 	}
@@ -60,11 +60,11 @@ func (f SessionFilter) inTenant(sessionID string) bool {
 	return len(authors) > 0
 }
 
-func (f SessionFilter) soleAuthor(sessionID, author string) bool {
-	authors := f.db.sessionAuthors(sessionID)
-	return len(authors) == 1 && (author == "" || authors[0] == author)
-}
-
 func (f SessionFilter) Readable(sessionID string) bool {
 	return !f.hidden[sessionID] && f.inTenant(sessionID)
+}
+
+func (db *DB) soleAuthor(sessionID, author string) bool {
+	authors := db.sessionAuthors(sessionID)
+	return len(authors) == 1 && (author == "" || authors[0] == author)
 }
