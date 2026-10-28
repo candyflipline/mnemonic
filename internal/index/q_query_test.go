@@ -284,14 +284,19 @@ func TestQueryHidesAPrivateSession(t *testing.T) {
 		"k-a": {Tenant: auth.DefaultTenant, Author: "a", Scopes: []auth.Scope{auth.Read, auth.Push}},
 		"k-b": {Tenant: auth.DefaultTenant, Author: "b", Scopes: []auth.Scope{auth.Read, auth.Push}},
 	})
-	for _, c := range []struct{ key, want string }{{"k-a", "[[2]]"}, {"k-b", "[[1]]"}} {
-		id, _ := keys.Identify(c.key)
-		d, _, err := queryCall(t, context.Background(), &Caller{Identity: id, Controls: ctl}, db, "from: sessions | measures: count()", "2026-01-16T00:00:00Z", "2026-02-16T00:00:00Z", nil)
+	ka, _ := keys.Identify("k-a")
+	kb, _ := keys.Identify("k-b")
+	for _, c := range []struct {
+		name string
+		id   auth.Identity
+		want string
+	}{{"k-a", ka, "[[2]]"}, {"k-b", kb, "[[1]]"}, {"empty author", auth.Local(""), "[[1]]"}} {
+		d, _, err := queryCall(t, context.Background(), &Caller{Identity: c.id, Controls: ctl}, db, "from: sessions | measures: count()", "2026-01-16T00:00:00Z", "2026-02-16T00:00:00Z", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got := queryRows(t, d); got != c.want {
-			t.Fatalf("%s sees %s sessions, want %s", c.key, got, c.want)
+			t.Fatalf("%s sees %s sessions, want %s", c.name, got, c.want)
 		}
 	}
 }

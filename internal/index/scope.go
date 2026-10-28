@@ -56,5 +56,5 @@ func (f SessionFilter) Readable(sessionID string) bool {
 
 func (db *DB) soleAuthor(sessionID, author string) bool {
 	authors := db.sessionAuthors(sessionID)
-	return len(authors) == 1 && (author == "" || authors[0] == author)
+	return len(authors) == 1 && authors[0] == author
 }
