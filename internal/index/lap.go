@@ -30,29 +30,37 @@ type Lap struct {
 	carry   map[layout.Key]bool
 }
 
-// Boot is today's cycle over a full listing (the store's manifests,
-// readCkpts), and keeps what it read. The Lap comes back whenever the listing
-// and checkpoints were read, even when the cycle failed: a later Next
-// publishes again. manifests is the store's table: the committer has already
-// read every manifest file once at Open, so boot does not read them again.
-func (ix *Index) Boot(root string, manifests []store.Manifest, opts IngestOptions) (*Lap, IngestStats, error) {
-	l := &Lap{ix: ix, root: root}
-	var c cycled
-	err := withWriterLock(ix.store, func(w writerLock) error {
+func (ix *Index) Boot(root string, manifests []store.Manifest) (*Lap, error) {
+	var l *Lap
+	err := withWriterLock(ix.store, func(writerLock) error {
 		sources, err := sourcesOf(root, manifests)
 		if err != nil {
 			return err
 		}
 		readCkpts(ix.store, sources.list)
-		l.sources = sources
-		c = l.cycle(w, allOf(sources.list), opts)
+		l = &Lap{ix: ix, root: root, sources: sources, carry: map[layout.Key]bool{}}
+		for _, s := range sources.list {
+			l.carry[s.key] = true
+		}
 		return nil
 	})
 	if err != nil {
-		return nil, IngestStats{}, err
+		return nil, err
 	}
-	stats, err := l.serve(c)
-	return l, stats, err
+	return l, nil
+}
+
+// First cycles what Boot carried without patching it: manifests is the
+// store's table, read once at Open, so the listing is already current.
+func (l *Lap) First(opts IngestOptions) (IngestStats, error) {
+	var c cycled
+	if err := withWriterLock(l.ix.store, func(w writerLock) error {
+		c = l.cycle(w, l.work(), opts)
+		return nil
+	}); err != nil {
+		return IngestStats{}, err
+	}
+	return l.serve(c)
 }
 
 func (l *Lap) Next(changed []layout.Key, opts IngestOptions) (IngestStats, error) {
