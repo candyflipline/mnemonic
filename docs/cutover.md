@@ -111,6 +111,12 @@ Once a `link`, `join` or `revoke` record exists, a build older than links
 refuses the control log at boot. Roll back only to a build that reads
 those records.
 
+## Server key and rollback
+
+The server key is created at the first boot and is not derived from anything else. If `/var/lib/mnemonic/server.key` is lost, no client can reach the server until each one re-pins with `mnemonic init --server-key`. Keep a copy of it outside any snapshot you rely on to restore the box.
+
+`ops/deploy.sh` builds on the box and replaces `/usr/local/bin/mnemonic`; it keeps no previous binary. Before a deploy, copy the running binary, `server.toml` and `mnemonic.service` to `/root/mnemonic.bin.prev-<sha>` and the `.prev-<sha>` siblings. To roll back, copy them back over `/usr/local/bin/mnemonic`, `/etc/mnemonic/server.toml` and `/etc/systemd/system/mnemonic.service`, then `systemctl restart mnemonic`. Take a Hetzner snapshot before a deploy that changes stored formats. A rollback target must read every record kind the server has written (see Links above).
+
 ## Client onboarding
 
 Installing the client, pointing Claude Code, Codex and Cursor at the server,
