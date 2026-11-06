@@ -1,10 +1,12 @@
 package push
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -76,5 +78,53 @@ func TestWatchPicksUpHarnessDirCreatedAfterStart(t *testing.T) {
 			t.Fatalf("%s not synced within the wake window after its harness dir appeared", session)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+type lockedBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuf) lines() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return strings.Count(l.b.String(), "\n")
+}
+
+func TestWatchBacksOffWhileServerUnreachable(t *testing.T) {
+	home := t.TempDir()
+	projects := filepath.Join(home, ".claude", "projects")
+	if err := os.MkdirAll(projects, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	blocker := filepath.Join(home, "blocker")
+	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Client{
+		KeyFile: filepath.Join(blocker, "key"),
+		Sources: []config.SourceGlob{{Harness: "claude-code", SourceName: "claude", Glob: filepath.Join(projects, "**", "*.jsonl")}},
+	}
+	out := &lockedBuf{}
+	w := newWatcher(cfg, nil)
+	w.within = 100 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.run(ctx, out)
+	}()
+	time.Sleep(1500 * time.Millisecond)
+	cancel()
+	<-done
+	if got := out.lines(); got != 1 {
+		t.Fatalf("%d dial errors in 1.5s, want 1 (the first dial at start, then the %s backoff)", got, errorRetryMin)
 	}
 }
