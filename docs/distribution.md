@@ -1,17 +1,17 @@
 # About distributing mnemonic
 
-This page explains how mnemonic reaches a developer's machine once `candyflipline/mnemonic` is public, and why the channels rank in the order they do. It does not give install steps. The steps belong in the README, and the installer and archive facts are in [docs/release.md](release.md). Making the repository public, pushing a tag, and creating a tap are the owner's calls. This page assumes none of them has a date.
+This page explains how mnemonic reaches a developer's machine once `candyflipline/mnemonic` is public, and why the channels rank in the order they do. It does not give install steps. The steps belong in the README, and the installer and archive facts are in [docs/release.md](release.md). Making the repository public, pushing a tag, and creating a tap are the owner's calls. The release-day runbook in [docs/release.md](release.md#release-day) lists them in order for `v0.8.0`, the first release and a full release.
 
 ## Recommendation
 
 1. **The `install.sh` installer.** `curl -fsSL https://raw.githubusercontent.com/candyflipline/mnemonic/main/install.sh | sh` needs no extra repository and no token. It works on macOS and Linux the moment a tag has a release. Because `curl` writes the file, macOS does not quarantine the binary [8].
 2. **The release archive.** The same URLs the installer reads, downloaded by hand and checked against `checksums.txt`. It serves people who will not pipe a script into `sh`.
-3. **`go install -tags server github.com/candyflipline/mnemonic/cmd/mnemonic@<tag>`.** It serves Go users and needs Go 1.26.6 (`go.mod`). Name the tag. `@latest` prefers any release version over a prerelease [7], so it does not reliably reach `v0.8.0-rc.1` (see [release.md](release.md#install-from-a-release)). The `-tags server` flag is required because `mnemonic local` exists only in that build (`cmd/mnemonic/local.go:1`).
-4. **A Homebrew formula in `candyflipline/homebrew-tap`, once the owner creates it.** `brew install candyflipline/tap/mnemonic` suits macOS developers who already use Homebrew. It needs a repository and a write token, so it comes last.
+3. **`go install -tags server github.com/candyflipline/mnemonic/cmd/mnemonic@<tag>`.** It serves Go users and needs Go 1.26.6 (`go.mod`). Name the tag. Until the tag exists, `@latest` resolves to a pseudo-version of `main`, and `@latest` prefers the highest release version over any prerelease [7] (see [release.md](release.md#install-from-a-release)). The `-tags server` flag is required because `mnemonic local` exists only in that build (`cmd/mnemonic/local.go:1`).
+4. **A Homebrew formula in `candyflipline/homebrew-tap`.** `brew install candyflipline/tap/mnemonic` suits developers who already use Homebrew. GoReleaser renders the formula and pushes it to the tap on every release, authenticated by an SSH deploy key with write access, held in the Actions secret `HOMEBREW_TAP_DEPLOY_KEY`. The formula has a `test do` block that runs `mnemonic version` and a `service do` block that runs `mnemonic local`, so `brew services start mnemonic` keeps it running in the background. It needs a tap repository and a key, so it comes last.
 
 Not now: Apple notarization (99 USD per year) and homebrew-core.
 
-While the repository is private, anonymous downloads fail, so the installer cannot run. A collaborator runs `gh release download v0.8.0-rc.1 -R candyflipline/mnemonic -p '*darwin_arm64*'` instead [1][2][3]. That the anonymous failure follows from the two access rules is an inference, not a quoted sentence. Today `https://github.com/candyflipline/mnemonic/releases/download/v0.8.0-rc.1/checksums.txt` and the releases API both answer 404.
+While the repository is private, anonymous downloads fail, so the installer cannot run. A collaborator runs `gh release download v0.8.0 -R candyflipline/mnemonic -p '*darwin_arm64*'` instead [1][2][3]. That the anonymous failure follows from the two access rules is an inference, not a quoted sentence. On 2026-11-06 the releases API for this repository answered an anonymous request with 404.
 
 ## What the release contains
 
@@ -23,7 +23,7 @@ Two facts decide most of the channel choice. A public repository serves release 
 
 A public repository is "accessible to everyone on the internet" [2]. Release assets live at `https://github.com/<owner>/<repo>/releases/download/<tag>/<file>`. That shape answers anonymous requests with a redirect to the asset: a request to a public GoReleaser release returned 302, then 200 on 2026-11-06. The GitHub page on release links documents only the `releases/latest/download` form [29].
 
-`releases/latest/download` is the wrong URL for a first release. GitHub defines the latest release as "the most recent non-prerelease, non-draft release" [6], and the first mnemonic release is the prerelease `v0.8.0-rc.1`. So `install.sh` resolves the tag itself. It reads `MNEMONIC_VERSION` if set. Otherwise it asks `https://api.github.com/repos/candyflipline/mnemonic/releases?per_page=1`, which lists prereleases, and takes the first tag. The REST page says published releases "are available to everyone" and does not state the order of the list [6]. Lists from two public repositories were newest first by `created_at` on 2026-11-06, including prereleases, and the installer relies on that observed order.
+GitHub defines the latest release as "the most recent non-prerelease, non-draft release" [6]. The first mnemonic release, `v0.8.0`, is a full release, so GitHub's `releases/latest` resolves to it and `install.sh` can ask for the latest release instead of picking a tag from a list. The script reads `MNEMONIC_VERSION` if set, and otherwise takes the `tag_name` of `https://api.github.com/repos/candyflipline/mnemonic/releases/latest`. The REST page says published releases "are available to everyone" [6].
 
 A `curl | sh` installer asks users to run code they have not read. The archive channel exists for them. The script stays short, takes its checksums from the same release, and stops on a mismatch.
 
@@ -53,9 +53,9 @@ Homebrew changes this by package type.
 
 - A cask quarantines the download, so an unsigned binary needs the xattr hook that Apple and Homebrew are moving against [5].
 - The cask page's examples are macOS-specific, and I found no source that says casks install on Linux. The two Linux targets may be left without a Homebrew channel (not found, so unconfirmed).
-- A formula also lets a later release add `brew services`. The pull request I read says a cask has no `service` stanza [11], which is again one project's account.
+- A formula carries a `service` block, which gives Homebrew users `brew services start mnemonic` for `mnemonic local`. The pull request I read says a cask has no `service` stanza [11], which is again one project's account.
 
-I recommend the formula and accepting the deprecation. The deprecations page gives no removal date or version for `brews` [18]. The owner can switch to `homebrew_casks` with `tap_migrations.json` later, and users who tapped the formula upgrade to the cask without action [18]. If the owner decides to sign and notarize, the cask path becomes the better one.
+mnemonic ships the formula and accepts the deprecation. The deprecations page gives no removal date or version for `brews` [18]. The owner can switch to `homebrew_casks` with `tap_migrations.json` later, and users who tapped the formula upgrade to the cask without action [18]. If the owner decides to sign and notarize, the cask path becomes the better one.
 
 ## Notarization, and why it waits
 
@@ -86,7 +86,7 @@ The agent-native doors are not install channels, and they stay separate from the
 | 1 | `install.sh` | `curl -fsSL https://raw.githubusercontent.com/candyflipline/mnemonic/main/install.sh \| sh` | No quarantine [8] | The script in the repository, public repo, a tag | Keep it in step with the archive names |
 | 2 | Release archive | `curl` the archive and `checksums.txt`, `shasum -a 256 -c`, `tar -xzf` | No quarantine from `curl` [8]. A browser download is quarantined [9] | None beyond the tag | None |
 | 3 | `go install` | `go install -tags server github.com/candyflipline/mnemonic/cmd/mnemonic@<tag>` | None, the user builds it | None | Users need Go 1.26.6 |
-| 4 | Own tap, formula (`brews`) | `brew install candyflipline/tap/mnemonic` | Likely not quarantined [11] | One repository, one token, one config section | Track GoReleaser's `brews` deprecation [18] |
+| 4 | Own tap, formula (`brews`) | `brew install candyflipline/tap/mnemonic` | Likely not quarantined [11] | One repository, one deploy key, one config section | Track GoReleaser's `brews` deprecation [18] |
 | | Own tap, cask (`homebrew_casks`) | `brew install --cask candyflipline/tap/mnemonic` | Quarantined, so needs the xattr hook or a signature [5] | Same, plus the hook | The hook may stop working [5] |
 | | homebrew-core | `brew install mnemonic` | Not quarantined if built from source (inference) | Needs 225 stars or 90 forks or 90 watchers [12] | Homebrew maintainers own updates |
 | | Claude Code plugin | `/plugin marketplace add candyflipline/<marketplace>` | Not applicable, no binary | A marketplace repository and `.mcp.json` | A second thing to version |
@@ -95,11 +95,11 @@ The agent-native doors are not install channels, and they stay separate from the
 
 ## Decisions for the owner
 
-1. **Visibility and the first tag.** Every channel above waits for the repository to be public and for `v0.8.0-rc.1` to be pushed. Before pushing tags from any clone, list them: a local clone also holds the Rust seed's 32 tags, `v0.1.0` through `v0.7.3`,, and `git push --tags` would publish them (`docs/release.md`).
+1. **Visibility and the first tag.** Every channel above waits for the repository to be public and for `v0.8.0` to be pushed. A local clone also holds the Rust seed's 32 tags, `v0.1.0` through `v0.7.3`, and `git push --tags` would publish them. Push `v0.8.0` by name (see [release day](release.md#release-day)).
 2. **Whether to pay for notarization.** Default is no for the first release, and yes before a wide launch, because browser downloads and Homebrew's direction both push toward a signature [15][16].
-3. **Formula now or cask now.** Default is the formula, for Linux coverage and no xattr hook. Switch if `brews` is removed or if the owner signs.
-4. **Tap repository and token.** Naming `candyflipline/homebrew-tap` and issuing a write-scoped token are the owner's. Adding the `brews` section to `.goreleaser.yaml` follows once both exist.
-5. **The path `init` records (blocks the tap).** `runningBinary` resolves the running binary with `filepath.EvalSymlinks` (`cmd/mnemonic/init.go:217-226`), and the launchd plist records that resolved path. Under Homebrew it is the versioned Cellar path. `brew upgrade` followed by cleanup deletes that directory, and the push agent then points at a binary that no longer exists. Before the formula channel ships, `init` must record a stable path, such as Homebrew's `opt` prefix. Read from the code, not run, because running `init` is off limits on this machine.
+3. **Formula now or cask now.** Decided: the formula, for Linux coverage and no xattr hook. Switch if `brews` is removed or if the owner signs.
+4. **Tap repository and deploy key.** Decided: the tap is `candyflipline/homebrew-tap`, and GoReleaser pushes to it over SSH with a deploy key that has write access, held in the Actions secret `HOMEBREW_TAP_DEPLOY_KEY`. Creating the tap and the key are release-day steps 3 and 4 and the owner's.
+5. **The path `init` records.** Settled. `mnemonic init` records Homebrew's stable path `<prefix>/opt/mnemonic/bin/mnemonic` and not the versioned `<prefix>/Cellar/mnemonic/<version>/bin/mnemonic`. `brew upgrade` followed by cleanup deletes the Cellar directory, and a push agent that pointed there would be left without a binary. The path that survives is the `opt` prefix.
 
 ## Sources
 
