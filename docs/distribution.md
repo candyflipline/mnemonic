@@ -99,7 +99,7 @@ The agent-native doors are not install channels, and they stay separate from the
 2. **Whether to pay for notarization.** Default is no for the first release, and yes before a wide launch, because browser downloads and Homebrew's direction both push toward a signature [15][16].
 3. **Formula now or cask now.** Default is the formula, for Linux coverage and no xattr hook. Switch if `brews` is removed or if the owner signs.
 4. **Tap repository and token.** Naming `candyflipline/homebrew-tap` and issuing a write-scoped token are the owner's. Adding the `brews` section to `.goreleaser.yaml` follows once both exist.
-5. **The path `init` records.** `docs/team.md` says the push agent runs the binary at the path `init` ran from. A Homebrew install puts the binary under a versioned directory behind a symlink, so confirm which path `init` writes into the launchd plist before the tap ships (not verified, I did not run `init`).
+5. **The path `init` records (blocks the tap).** `runningBinary` resolves the running binary with `filepath.EvalSymlinks` (`cmd/mnemonic/init.go:217-226`), and the launchd plist records that resolved path. Under Homebrew it is the versioned Cellar path. `brew upgrade` followed by cleanup deletes that directory, and the push agent then points at a binary that no longer exists. Before the formula channel ships, `init` must record a stable path, such as Homebrew's `opt` prefix. Read from the code, not run, because running `init` is off limits on this machine.
 
 ## Sources
 
