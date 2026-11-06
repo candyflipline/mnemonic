@@ -1,0 +1,20 @@
+name: prune-branches
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: prune-branches
+  cancel-in-progress: false
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - run: scripts/branches.sh --prune
+        env:
+          PRUNE_LANE_BRANCHES: ${{ vars.PRUNE_LANE_BRANCHES }}
