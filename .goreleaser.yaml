@@ -1,0 +1,29 @@
+version: 2
+project_name: mnemonic
+
+builds:
+  - id: mnemonic
+    main: ./cmd/mnemonic
+    binary: mnemonic
+    tags: [server]
+    env: [CGO_ENABLED=0]
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{ .Version }} -X main.commit={{ .ShortCommit }}
+
+archives:
+  - id: mnemonic
+    formats: [tar.gz]
+    name_template: "mnemonic_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files: [LICENSE, NOTICE, README.md]
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}"
+
+changelog:
+  disable: true

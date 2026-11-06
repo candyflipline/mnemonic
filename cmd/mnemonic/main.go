@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"sort"
+	"strings"
 	"syscall"
 
 	"github.com/candyflipline/mnemonic/internal/config"
@@ -21,7 +23,12 @@ var commands = map[string]func(args []string) error{
 
 func main() {
 	if len(os.Args) < 2 || commands[os.Args[1]] == nil {
-		fmt.Fprintln(os.Stderr, "usage: mnemonic init|join|key|mcp|push|serve|share [flags]")
+		names := make([]string, 0, len(commands))
+		for name := range commands {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		fmt.Fprintf(os.Stderr, "usage: mnemonic %s [flags]\n", strings.Join(names, "|"))
 		os.Exit(2)
 	}
 	if err := commands[os.Args[1]](os.Args[2:]); err != nil {
