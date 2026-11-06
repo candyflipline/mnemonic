@@ -38,6 +38,14 @@ merged_state() {
     1) ;;
     *) echo "branches.sh: merge-base failed (exit $rc) for $1, treating as not merged" >&2; echo no; return ;;
   esac
+  if ! out=$(git rev-list --merges origin/main.."origin/$1"); then
+    echo "branches.sh: git rev-list failed for $1, treating as not merged" >&2
+    echo no
+    return
+  elif [[ -n $out ]]; then
+    echo no
+    return
+  fi
   if ! out=$(git cherry origin/main "origin/$1"); then
     echo "branches.sh: git cherry failed for $1, treating as not merged" >&2
     echo no
