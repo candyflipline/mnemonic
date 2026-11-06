@@ -28,7 +28,7 @@ go run github.com/goreleaser/goreleaser/v2@v2.19.0 check
 go run github.com/goreleaser/goreleaser/v2@v2.19.0 release --snapshot --clean
 ```
 
-`check` validates the config. `release --snapshot --clean` builds the four archives and `checksums.txt` into `dist/` (git-ignored) and publishes nothing. The first run downloads GoReleaser's module graph; later runs reuse the Go build cache.
+`release --snapshot --clean` builds the four archives and `checksums.txt` into `dist/` (git-ignored) and publishes nothing. It is the check that works. `check` exits with code 2 on v2.19.0 even for a valid config, because `brews` is deprecated in favor of casks and `check` exits 2 for a deprecated property. The release ships a formula, so the warning stays. The first run downloads GoReleaser's module graph; later runs reuse the Go build cache.
 
 A snapshot is named from the latest tag reachable from `HEAD`: `{{ incpatch .Version }}-snapshot-<short commit>`. While the newest tag is the Rust seed's `v0.7.3`, a snapshot reads `0.7.4-snapshot-<short commit>`. Once `v0.8.0` is tagged, it reads `0.8.1-snapshot-<short commit>`.
 
@@ -50,7 +50,7 @@ What a binary prints depends on how it was built.
 
 The binary uses the module version only when the build records no `vcs.revision`. A binary that records neither prints `dev`. `mnemonic` with no arguments prints every registered command, sorted, built from the `commands` map in `cmd/mnemonic/main.go`.
 
-The 32 tags `v0.1.0` through `v0.7.3` belong to the Rust seed (branch `archive/rust-seed`). `v0.8.0` sorts above them. It has no prerelease suffix, so GoReleaser publishes it as a full release, and `release.make_latest: true` in `.goreleaser.yaml` makes it the release that GitHub's `releases/latest` resolves to.
+The 32 tags `v0.1.0` through `v0.7.3` belong to the Rust seed (branch `archive/rust-seed`). `v0.8.0` sorts above them. It has no prerelease suffix, so `release.prerelease: auto` in `.goreleaser.yaml` publishes it as a full release, and `release.make_latest: true` makes it the release that GitHub's `releases/latest` resolves to. A tag with a suffix, such as `v0.9.0-rc.1`, publishes as a prerelease. GoReleaser then marks it not latest whatever `make_latest` says, and `skip_upload: auto` on the `brews` entry keeps the formula out of the tap.
 
 ## Install from a release
 
@@ -79,7 +79,7 @@ The script does these steps in order, and stops with a message that names the ca
 | `MNEMONIC_INSTALL_DIR` | `$HOME/.local/bin` | The directory that receives `mnemonic`. The script creates it. |
 | `MNEMONIC_BASE_URL` | `https://github.com/candyflipline/mnemonic/releases/download` | The URL that holds one directory per tag. Point it at a local file server to test the script against `dist/`. |
 
-GitHub defines the latest release as the most recent release that is neither a prerelease nor a draft. `v0.8.0` is a full release, so `releases/latest` resolves to it. A later prerelease tag would not move `releases/latest`, and the installer would keep installing the previous full release.
+GitHub defines the latest release as the most recent release that is neither a prerelease nor a draft. `v0.8.0` is a full release, so `releases/latest` resolves to it. A later prerelease tag does not move `releases/latest`, because `prerelease: auto` publishes it as a prerelease, and the installer keeps installing the previous full release.
 
 ### Homebrew
 
@@ -87,12 +87,12 @@ GitHub defines the latest release as the most recent release that is neither a p
 brew install candyflipline/tap/mnemonic
 ```
 
-`brew install` adds the tap `candyflipline/homebrew-tap` on first use. The formula is `Formula/mnemonic.rb`. GoReleaser (`brews` in `.goreleaser.yaml`) renders it and pushes it to the tap on every release, authenticated by an SSH deploy key that sits in the Actions secret `HOMEBREW_TAP_DEPLOY_KEY`.
+`brew install` adds the tap `candyflipline/homebrew-tap` on first use. The formula is `Formula/mnemonic.rb`. GoReleaser (`brews` in `.goreleaser.yaml`) renders it and pushes it to the tap on every full release, and skips the push on a prerelease. It authenticates with an SSH deploy key that sits in the Actions secret `HOMEBREW_TAP_DEPLOY_KEY`.
 
 The formula has two blocks beyond `install`.
 
 - `test do` runs `mnemonic version` and asserts that the output holds the formula's version. Run it with `brew test mnemonic`.
-- `service do` runs `mnemonic local` with `keep_alive`, and writes its log to `$(brew --prefix)/var/log/mnemonic.log`. `brew services start mnemonic` keeps `mnemonic local` running in the background and `brew services stop mnemonic` stops it.
+- `service do` runs `mnemonic local` with `keep_alive`, and writes its log to `$(brew --prefix)/var/log/mnemonic.log`. `brew services start mnemonic` keeps `mnemonic local` running in the background and `brew services stop mnemonic` stops it. The service runs under launchd or systemd with the account's real `HOME`, so it indexes and serves that account's real agent sessions.
 
 `mnemonic init` records `<prefix>/opt/mnemonic/bin/mnemonic`, Homebrew's stable path, so the push agent keeps working after `brew upgrade` removes the versioned Cellar directory.
 
@@ -114,13 +114,14 @@ Two workflows build a release.
 
 `.github/workflows/smoke.yml` builds the GoReleaser snapshot once and runs `scripts/smoke.sh` on the `linux_amd64`, `linux_arm64`, `darwin_arm64` and `darwin_amd64` archives, each on a runner of that platform. It runs on every push to `main` and to `lane/**`, and `release.yml` reuses it through `workflow_call`.
 
-`.github/workflows/release.yml` runs on a push of a tag matching `v*`. It runs these jobs in order.
+`.github/workflows/release.yml` runs on a push of a tag matching `v*`. It has four jobs.
 
-1. The gates from `AGENTS.md`.
-2. `smoke.yml`.
-3. GoReleaser v2.19.0 with `release --clean`, under `contents: write`. The job needs the first two to pass. It creates the GitHub release for the tag, attaches the four archives and `checksums.txt`, and pushes the formula to the tap with `HOMEBREW_TAP_DEPLOY_KEY`.
+1. `tap-key` fails when the Actions secret `HOMEBREW_TAP_DEPLOY_KEY` is empty or unset, and the error names the secret. GoReleaser skips the Homebrew step without a key and still passes, so this job is the only check that the formula will publish. It runs first, so a missing key stops the run before anything builds. Every tag needs the key, a prerelease included.
+2. `gates` runs the gates from `AGENTS.md`.
+3. `smoke` calls `smoke.yml`.
+4. `release` runs GoReleaser v2.19.0 with `release --clean`, under `contents: write`. It creates the GitHub release for the tag, attaches the four archives and `checksums.txt`, and pushes the formula to the tap with `HOMEBREW_TAP_DEPLOY_KEY`.
 
-A tag whose gates or smoke fail publishes nothing.
+`gates` and `smoke` both need `tap-key` and run in parallel. `release` needs `gates` and `smoke`. A tag whose key check, gates, or smoke fail publishes nothing.
 
 ## Smoke check
 
@@ -140,7 +141,7 @@ Never run the smoke with the real `HOME`: `mnemonic local` would ingest the real
 
 - `mnemonic local` serves only while it runs. Under Homebrew, `brew services start mnemonic` runs it in the background. The archive and installer give no background service.
 - The binaries are not code-signed or notarized. A `curl` download leaves no quarantine attribute on the binary, and a browser download of the archive does (see [distribution.md](distribution.md#what-macos-does-to-an-unsigned-binary)). Whether a Homebrew formula install is quarantined is unconfirmed, and step 7 of the runbook checks it.
-- Nobody has run the formula or its service on Linux. Step 7 of the runbook is the first run.
+- Nobody has run the formula on Linux. Step 7 of the runbook is the first run. Nobody has run its service on either platform, and the runbook does not, because the service serves real sessions.
 
 ## Release day
 
@@ -153,7 +154,7 @@ The runbook for publishing `v0.8.0`. Nothing here has run. Every step belongs to
    gh api repos/candyflipline/mnemonic --jq .delete_branch_on_merge
    ```
 
-   Success is a census with no delete or ask row left, and the second command printing `true`. If it prints `false`, run `gh repo edit candyflipline/mnemonic --delete-branch-on-merge`.
+   The `lane/quic-*` and `lane/spike-quic` branches stay on origin as a record (`docs/open.md`), so expect them as ask rows and keep them. Success is every ask row decided by you, kept or deleted, no delete row left, and the second command printing `true`. If it prints `false`, run `gh repo edit candyflipline/mnemonic --delete-branch-on-merge`.
 
 2. **Make the repository public.** Run `gh repo edit candyflipline/mnemonic --visibility public --accept-visibility-change-consequences`. Success is `curl -sI https://github.com/candyflipline/mnemonic` answering `200` without a token.
 
@@ -178,7 +179,7 @@ The runbook for publishing `v0.8.0`. Nothing here has run. Every step belongs to
 
    Push this one tag by name. Never run `git push --tags`, because the 32 Rust-seed tags in local clones would publish too. Success is `git ls-remote --tags origin` listing `v0.8.0` and no other tag.
 
-6. **Watch the release.** Find the run with `gh run list --workflow release.yml --limit 1 -R candyflipline/mnemonic`, then run `gh run watch <run id> -R candyflipline/mnemonic`. Success is a green run, the four archives and `checksums.txt` on the release page, a commit on `candyflipline/homebrew-tap` that adds `Formula/mnemonic.rb`, and `gh api repos/candyflipline/mnemonic/releases/latest --jq .tag_name` printing `v0.8.0`. If the gates or the smoke fail, GoReleaser never ran and nothing published. If GoReleaser fails, look at the release page and the tap before you retry. Either way, fix forward on a new commit, delete the failed release and the tag (`git push origin :refs/tags/v0.8.0` and `git tag -d v0.8.0`), and start again at step 5.
+6. **Watch the release.** Find the run with `gh run list --workflow release.yml --limit 1 -R candyflipline/mnemonic`, then run `gh run watch <run id> -R candyflipline/mnemonic`. Success is a green run, the four archives and `checksums.txt` on the release page, a commit on `candyflipline/homebrew-tap` that adds `Formula/mnemonic.rb`, and `gh api repos/candyflipline/mnemonic/releases/latest --jq .tag_name` printing `v0.8.0`. If the key check, the gates, or the smoke fail, GoReleaser never ran and nothing published. If GoReleaser fails, look at the release page and the tap before you retry. Either way, fix forward on a new commit, delete the failed release and the tag (`git push origin :refs/tags/v0.8.0` and `git tag -d v0.8.0`), and start again at step 5.
 
 7. **Verify on clean machines.** Do this on one Mac and one Linux machine. Use `export HOME=$(mktemp -d)` with every `XDG_*` variable unset, so that no real sessions are indexed. Never run `mnemonic init`, `mnemonic join` or `mnemonic push --watch`. On each machine, check the three install paths.
 
@@ -188,12 +189,12 @@ The runbook for publishing `v0.8.0`. Nothing here has run. Every step belongs to
    shasum -a 256 --ignore-missing -c checksums.txt
    ```
 
-   Run the `shasum` line in the directory that holds the downloaded archive and `checksums.txt`. Then copy `testdata/fixtures/claude-code/session.jsonl` to `$HOME/.claude/projects/demo/session.jsonl`, run `mnemonic local` in one terminal, and call it from another.
+   Run the `shasum` line in the directory that holds the downloaded archive and `checksums.txt`. Then copy `testdata/fixtures/claude-code/session.jsonl` to `$HOME/.claude/projects/demo/session.jsonl`, run `mnemonic local --listen 127.0.0.1:7781` in one terminal, and call it from another. The `--listen` address and the port in the `curl` below must match. Run this only in the throwaway `HOME`. A service that `brew services` starts runs under launchd with the account's real `HOME`.
 
    ```sh
    curl -s http://127.0.0.1:7781/mcp -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H 'Mcp-Protocol-Version: 2025-06-18' -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_sessions","arguments":{"query":"inspect sample project"}}}'
    ```
 
-   Success is `mnemonic version` printing `mnemonic 0.8.0 (<short commit>)` on every path, `brew test mnemonic` and `shasum` reporting `OK`, and the `curl` answer listing a hit for session `7c666c01-d38e-4658-8650-854ffb5b626e`. On the Mac, also run `brew services start mnemonic` and confirm `brew services list` shows `mnemonic` as `started`, then stop it.
+   Success is `mnemonic version` printing `mnemonic 0.8.0 (<short commit>)` on every path, `brew test mnemonic` and `shasum` reporting `OK`, and the `curl` answer listing a hit for session `7c666c01-d38e-4658-8650-854ffb5b626e`. Do not run `brew services start mnemonic` for this check. It serves the account's real sessions, because launchd ignores the throwaway `HOME`. Check the service block's text in `Formula/mnemonic.rb` in the tap instead.
 
 8. **Land the README commit.** Merge branch `lane/release-day` into `main` and push `main`. That commit adds the install lines to `README.md`, and it must not land before step 7 passes, because the lines fail before the tag exists. Success is `main` carrying the install lines and its `check.yml` and `smoke.yml` runs green.

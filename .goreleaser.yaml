@@ -29,10 +29,12 @@ changelog:
   disable: true
 
 release:
+  prerelease: auto
   make_latest: true
 
 brews:
   - name: mnemonic
+    skip_upload: auto
     repository:
       owner: candyflipline
       name: homebrew-tap
