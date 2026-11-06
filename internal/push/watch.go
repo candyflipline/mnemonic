@@ -149,7 +149,7 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 		case <-periodic:
 			w.stale = true
 		case <-recheck.C:
-			if !w.baseAppeared() {
+			if retry != nil || !w.baseAppeared() {
 				continue
 			}
 			w.stale = true
