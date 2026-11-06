@@ -31,10 +31,10 @@ trap 'exit 143' TERM
 
 tag=${MNEMONIC_VERSION:-}
 if [ -z "$tag" ]; then
-	curl -fsSL -o "$work/releases.json" "https://api.github.com/repos/$repo/releases?per_page=1" ||
-		fail "could not ask GitHub for the newest release. Set MNEMONIC_VERSION to a tag such as v0.8.0-rc.1."
-	tag=$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$work/releases.json" | head -n 1)
-	[ -n "$tag" ] || fail "$repo has no published release. Set MNEMONIC_VERSION to a tag."
+	curl -fsSL -o "$work/latest.json" "https://api.github.com/repos/$repo/releases/latest" ||
+		fail "could not ask GitHub for the latest release. Set MNEMONIC_VERSION to a tag such as v0.8.0."
+	tag=$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$work/latest.json" | head -n 1)
+	[ -n "$tag" ] || fail "$repo has no published full release. Set MNEMONIC_VERSION to a tag."
 fi
 version=${tag#v}
 archive=mnemonic_${version}_${os}_${arch}.tar.gz
