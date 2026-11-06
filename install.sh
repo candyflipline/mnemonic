@@ -24,7 +24,10 @@ arm64 | aarch64) arch=arm64 ;;
 esac
 
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT HUP INT TERM
+trap 'rm -rf "$work"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 tag=${MNEMONIC_VERSION:-}
 if [ -z "$tag" ]; then
