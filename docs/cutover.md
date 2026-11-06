@@ -70,8 +70,8 @@ The server serves read links and invite links only when its config has a `[share
 ```toml
 [share]
 listen    = "127.0.0.1:8742"
-base_url  = "https://share.askloyal.com"
-quic_addr = "5.78.147.233:8741"
+base_url  = "https://share.example.com"
+quic_addr = "203.0.113.10:8741"
 ```
 
 - `listen` is a loopback address.
@@ -80,7 +80,7 @@ quic_addr = "5.78.147.233:8741"
 
 To invite a new author, the inviter's key needs the `admin` scope.
 
-The tunnel is `mnemonic-share` in the askloyal Cloudflare account, routed by a CNAME for `share.askloyal.com`. On the box:
+The tunnel is `mnemonic-share` in your Cloudflare account, routed by a CNAME for the `base_url` host. On the server:
 
 - `/usr/local/bin/cloudflared` is pinned to 2026.10.5, with no autoupdate.
 - `/etc/cloudflared/config.yml` is `ops/cloudflared/config.yml`.
@@ -93,9 +93,15 @@ Once a `link`, `join`, or `revoke` record exists, a build older than links refus
 
 `serve` creates the server key at the first boot and derives it from nothing else. If `/var/lib/mnemonic/server.key` is lost, no machine can reach the server until each one pins the new key with `mnemonic init --server quic://HOST:8741 --server-key NEW_KEY --force`. Keep a copy of the key outside any snapshot you rely on to restore the box.
 
-`ops/deploy.sh` builds on the box and replaces `/usr/local/bin/mnemonic`. It keeps no previous binary. Before a deploy, copy the running binary to `/root/mnemonic.bin.prev-<sha>`, and copy `server.toml` and `mnemonic.service` to `.prev-<sha>` siblings next to it.
+To deploy, set `MNEMONIC_DEPLOY_HOST` to the ssh target and run `ops/deploy.sh`. The script exits naming the variable when it is unset.
 
-To roll back, copy them back over `/usr/local/bin/mnemonic`, `/etc/mnemonic/server.toml`, and `/etc/systemd/system/mnemonic.service`, then run `systemctl restart mnemonic`. Take a Hetzner snapshot before a deploy that changes stored formats. A rollback target must read every record kind that the server has written (see [Serve links](#serve-links)).
+```
+MNEMONIC_DEPLOY_HOST=root@your-server ops/deploy.sh
+```
+
+`ops/deploy.sh` builds on the server and replaces `/usr/local/bin/mnemonic`. It keeps no previous binary. Before a deploy, copy the running binary to `/root/mnemonic.bin.prev-<sha>`, and copy `server.toml` and `mnemonic.service` to `.prev-<sha>` siblings next to it.
+
+To roll back, copy them back over `/usr/local/bin/mnemonic`, `/etc/mnemonic/server.toml`, and `/etc/systemd/system/mnemonic.service`, then run `systemctl restart mnemonic`. Take a snapshot of the server before a deploy that changes stored formats. A rollback target must read every record kind that the server has written (see [Serve links](#serve-links)).
 
 ## Known gap
 

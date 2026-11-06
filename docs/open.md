@@ -1,13 +1,13 @@
 # Open items
 
-Production runs the QUIC-only server on one Hetzner box, deployed with `ops/deploy.sh`. The cutover and operations are in [cutover.md](cutover.md). Every item below is unscheduled until the owner picks it.
+Production runs the QUIC-only server on one server, deployed with `ops/deploy.sh`. The cutover and operations are in [cutover.md](cutover.md). Every item below is unscheduled until the owner picks it.
 
 ## Server and client
 
-- Cleanup after a clean week on the QUIC cutover: the old `MNEMONIC_TOKEN` in the owner's shell profile, `~/.mnemonic/token`, `/root/mnemonic-tokens` and the autocert directory on the box. The `arena/` scripts still use tokens.
+- Cleanup after a clean week on the QUIC cutover: the old `MNEMONIC_TOKEN` in the owner's shell profile, `~/.mnemonic/token`, the old token files and the autocert directory on the server. The `arena/` scripts still use tokens.
 - OTLP has no forwarder.
 - The Mac client dials with one retry (one extra round trip); kept on purpose.
-- The compose directory `/opt/loyal-agent-memory/hetzner` on the box still names Caddy, and the image `hetzner-clickhouse` (1.13 GB) is still there. Both are the owner's to delete.
+- The old compose directory on the server still names Caddy, and the old ClickHouse image (1.13 GB) is still there. Both are the owner's to delete.
 - Five pre-rebase `lane/quic-*` sub-lane branches and `lane/spike-quic` remain on origin as a record.
 - A later `[[keys]]` author in another tenant can strand a live member (config collision with a joined member).
 - `F4`: the local-mode annotation ask.

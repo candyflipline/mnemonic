@@ -1,4 +1,4 @@
-tunnel: a45033c5-caca-454e-85a0-a2d6a807785f
+tunnel: mnemonic-share
 credentials-file: /etc/cloudflared/mnemonic-share.json
 no-autoupdate: true
 ingress:

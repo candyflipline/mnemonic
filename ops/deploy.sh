@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-HOST=${1:-root@5.78.147.233}
+HOST=${MNEMONIC_DEPLOY_HOST:?set MNEMONIC_DEPLOY_HOST to the ssh target, e.g. root@your-server}
 tgz=$(mktemp -t mnemonic-src).tgz
 git archive --format=tar.gz -o "$tgz" HEAD
 scp -q "$tgz" "$HOST:/root/mnemonic-src.tgz"
