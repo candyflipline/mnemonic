@@ -95,7 +95,7 @@ The agent-native doors are not install channels, and they stay separate from the
 
 ## Decisions for the owner
 
-1. **Visibility and the first tag.** Every channel above waits for the repository to be public and for `v0.8.0-rc.1` to be pushed. Before pushing tags from any clone, list them: a local clone also holds the Rust seed's `v0.5.6` through `v0.7.3`, and `git push --tags` would publish them (`docs/release.md`).
+1. **Visibility and the first tag.** Every channel above waits for the repository to be public and for `v0.8.0-rc.1` to be pushed. Before pushing tags from any clone, list them: a local clone also holds the Rust seed's 32 tags, `v0.1.0` through `v0.7.3`,, and `git push --tags` would publish them (`docs/release.md`).
 2. **Whether to pay for notarization.** Default is no for the first release, and yes before a wide launch, because browser downloads and Homebrew's direction both push toward a signature [15][16].
 3. **Formula now or cask now.** Default is the formula, for Linux coverage and no xattr hook. Switch if `brews` is removed or if the owner signs.
 4. **Tap repository and token.** Naming `candyflipline/homebrew-tap` and issuing a write-scoped token are the owner's. Adding the `brews` section to `.goreleaser.yaml` follows once both exist.

@@ -40,7 +40,7 @@ mnemonic 0.7.4-snapshot-3553b0af (3553b0af)
 
 A binary built without the flags prints the module version that `go install` records, without its leading `v`. `go install -tags server github.com/candyflipline/mnemonic/cmd/mnemonic@v0.8.0-rc.1` prints `mnemonic 0.8.0-rc.1 (none)`. When the binary records no module version, or `(devel)`, it prints `dev`. The revision is the `vcs.revision` that `go build` records, or `none` when there is none. `mnemonic` with no arguments prints every registered command, sorted, built from the `commands` map in `cmd/mnemonic/main.go`.
 
-Tags `v0.5.6` through `v0.7.3` belong to the Rust seed (branch `archive/rust-seed`). The first Go release proposed is `v0.8.0-rc.1`, which sorts above them. GoReleaser marks a tag with a prerelease suffix as a prerelease.
+The 32 tags `v0.1.0` through `v0.7.3` belong to the Rust seed (branch `archive/rust-seed`). The first Go release proposed is `v0.8.0-rc.1`, which sorts above them. GoReleaser marks a tag with a prerelease suffix as a prerelease.
 
 ## Install from a release
 
@@ -81,7 +81,7 @@ Download `mnemonic_<version>_<os>_<arch>.tar.gz` and `checksums.txt` from `https
 
 Go's `@latest` selects the highest release version, then the highest prerelease, then a pseudo-version of the default branch's tip. A release version beats a higher prerelease. Origin holds no tags today, so `@latest` resolves to a pseudo-version of `main`. After `v0.8.0-rc.1` is pushed it resolves to that tag, unless `v0.7.3` is also on origin, in which case `@latest` resolves to `v0.7.3`. Install by tag in the docs and in support answers.
 
-Tags `v0.5.6` through `v0.7.3` exist only in local clones. `git push --tags` from such a clone publishes them. Push the release tag by name: `git push origin v0.8.0-rc.1`.
+The 32 Rust-seed tags `v0.1.0` through `v0.7.3` exist only in local clones. `git push --tags` from such a clone publishes them. Push the release tag by name: `git push origin v0.8.0-rc.1`.
 
 ## CI
 
