@@ -62,10 +62,60 @@ func (id mcpID) String() string {
 	}
 }
 
+var rawUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+const textCutWarning = `Some texts are cut (truncated: true). Open their event_id with open {"id": "event:..."} for the full text.`
+
+func hasCutText(v any) bool {
+	switch v := v.(type) {
+	case map[string]any:
+		if cut, _ := v["truncated"].(bool); cut {
+			_, hasText := v["text"]
+			_, hasSummary := v["summary"]
+			if hasText || hasSummary {
+				return true
+			}
+		}
+		for _, x := range v {
+			if hasCutText(x) {
+				return true
+			}
+		}
+	case []any:
+		for _, x := range v {
+			if hasCutText(x) {
+				return true
+			}
+		}
+	case []map[string]any:
+		for _, x := range v {
+			if hasCutText(x) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func withCutTextWarning(data any, text string) (any, string) {
+	m, ok := data.(map[string]any)
+	if !ok || !hasCutText(m) {
+		return data, text
+	}
+	m["warnings"] = []string{textCutWarning}
+	return m, text + "\n" + textCutWarning
+}
+
 func parseMcpID(input string) (mcpID, error) {
 	switch {
+	case rawUUID.MatchString(input):
+		return mcpID{kind: kindSession, session: input}, nil
 	case strings.HasPrefix(input, "session:"):
-		raw, err := decodeRawID("session_id", strings.TrimPrefix(input, "session:"))
+		payload := strings.TrimPrefix(input, "session:")
+		if rawUUID.MatchString(payload) {
+			return mcpID{kind: kindSession, session: payload}, nil
+		}
+		raw, err := decodeRawID("session_id", payload)
 		if err != nil {
 			return mcpID{}, err
 		}

@@ -87,36 +87,63 @@ func (s *qlSource) scanEvents(ctx context.Context, req ql.ScanRequest, fn func(q
 		return err
 	}
 	lo, hi := s.from.UnixMilli(), s.to.UnixMilli()
+	w := newDocWindow(lo, hi)
 	var ticks int
 	for _, st := range s.db.parts {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		cand, narrowed := s.candidates(st, req.Match)
-		n := len(st.docs) / docWidth
-		for d := 0; d < n; d++ {
-			if err := tickCtx(ctx, &ticks); err != nil {
-				return err
-			}
-			if narrowed && !cand[d] {
+		for i := 0; i < st.nSessions; i++ {
+			info := st.session(i)
+			if w.skipSession(info) || !s.f.Readable(info.id) {
 				continue
 			}
-			if !s.f.Readable(st.session(st.sessionOf(d)).id) {
-				continue
-			}
-			r, err := st.row(d)
-			if err != nil {
-				return err
-			}
-			if r.TsMs < lo || r.TsMs >= hi {
-				continue
-			}
-			if err := fn(eventRow{st: st, r: r, d: d, cells: cells}); err != nil {
-				return err
+			for d := info.start; d < info.end; d++ {
+				if err := tickCtx(ctx, &ticks); err != nil {
+					return err
+				}
+				if narrowed && !cand[d] {
+					continue
+				}
+				if w.skipDoc(st.timeMsOf(d)) {
+					continue
+				}
+				r, err := st.row(d)
+				if err != nil {
+					return err
+				}
+				if r.TsMs < lo || r.TsMs >= hi {
+					continue
+				}
+				if err := fn(eventRow{st: st, r: r, d: d, cells: cells}); err != nil {
+					return err
+				}
 			}
 		}
 	}
 	return nil
+}
+
+var ingestedAtMs = floorDiv(ingestedAtUs, 1000)
+
+// docWindow prunes by the stored doc ms. r.TsMs comes from a second parser,
+// so it equals the doc ms except for rows whose record time Go's parser
+// rejects (TsMs 0, which only a range reaching the epoch can match) and rows
+// whose doc ms is the ingestedAt sentinel; both are kept.
+type docWindow struct {
+	lo, hi int64
+	prune  bool
+}
+
+func newDocWindow(lo, hi int64) docWindow { return docWindow{lo: lo, hi: hi, prune: lo > 0} }
+
+func (w docWindow) skipSession(info sessInfo) bool {
+	return w.prune && (info.last < w.lo || (info.first >= w.hi && info.last != ingestedAtMs))
+}
+
+func (w docWindow) skipDoc(ms int64) bool {
+	return w.prune && ms != ingestedAtMs && (ms < w.lo || ms >= w.hi)
 }
 
 type eventRow struct {
@@ -490,10 +517,13 @@ func (s *qlSource) scanTurns(ctx context.Context, req ql.ScanRequest, fn func(ql
 		return err
 	}
 	return s.eachSession(ctx, true, func(st *Part, i int, info sessInfo) error {
-		for t := 0; t < st.nTurns; t++ {
+		first := sort.Search(st.nTurns, func(t int) bool {
+			return int(binary.LittleEndian.Uint32(st.turns[t*turnWidth:])) >= i
+		})
+		for t := first; t < st.nTurns; t++ {
 			b := st.turns[t*turnWidth:]
 			if int(binary.LittleEndian.Uint32(b)) != i {
-				continue
+				break
 			}
 			row := turnRow{st: st, b: b, cells: cells}
 			if err := fn(row); err != nil {

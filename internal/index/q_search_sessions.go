@@ -175,8 +175,8 @@ func searchAnswer(args canonicalSearchSessionsArgs, result *searchResult) (any, 
 		"truncated":    result.truncated,
 		"results":      results,
 	}
-	text := formatSearchSessionsText(request, data)
-	return data, text, nil
+	out, text := withCutTextWarning(data, formatSearchSessionsText(request, data))
+	return out, text, nil
 }
 
 func searchHitJSON(hit searchHit) map[string]any {

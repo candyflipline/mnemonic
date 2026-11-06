@@ -145,14 +145,21 @@ func (openTool) Call(ctx context.Context, caller *Caller, db *DB, raw json.RawMe
 	args.opened = Sessions(caller, db)
 	request := args.requestShape()
 
+	var data any
+	var text string
 	switch args.target.kind {
 	case kindSession:
-		return openSessionFlow(db, request, args)
+		data, text, err = openSessionFlow(db, request, args)
 	case kindTurn:
-		return openTurnFlow(db, request, args)
+		data, text, err = openTurnFlow(db, request, args)
 	default:
-		return openEventFlow(db, request, args)
+		data, text, err = openEventFlow(db, request, args)
 	}
+	if err != nil {
+		return nil, "", err
+	}
+	data, text = withCutTextWarning(data, text)
+	return data, text, nil
 }
 
 func openSessionFlow(db *DB, request map[string]any, args canonicalOpenArgs) (any, string, error) {
