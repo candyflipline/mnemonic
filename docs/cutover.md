@@ -91,7 +91,7 @@ Once a `link`, `join`, or `revoke` record exists, a build older than links refus
 
 ## Keep the server key and roll back
 
-`serve` creates the server key at the first boot and derives it from nothing else. If `/var/lib/mnemonic/server.key` is lost, no machine can reach the server until each one pins the new key with `mnemonic init --server-key`. Keep a copy of the key outside any snapshot you rely on to restore the box.
+`serve` creates the server key at the first boot and derives it from nothing else. If `/var/lib/mnemonic/server.key` is lost, no machine can reach the server until each one pins the new key with `mnemonic init --server quic://HOST:8741 --server-key NEW_KEY --force`. Keep a copy of the key outside any snapshot you rely on to restore the box.
 
 `ops/deploy.sh` builds on the box and replaces `/usr/local/bin/mnemonic`. It keeps no previous binary. Before a deploy, copy the running binary to `/root/mnemonic.bin.prev-<sha>`, and copy `server.toml` and `mnemonic.service` to `.prev-<sha>` siblings next to it.
 
