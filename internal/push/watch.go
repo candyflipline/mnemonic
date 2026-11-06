@@ -111,6 +111,8 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 		periodic = periodicT.C
 		defer periodicT.Stop()
 	}
+	recheck := time.NewTicker(w.within)
+	defer recheck.Stop()
 	var fresh bool
 	for {
 		var acks <-chan ack
@@ -145,6 +147,11 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 		case <-retry:
 			retry = nil
 		case <-periodic:
+			w.stale = true
+		case <-recheck.C:
+			if !w.baseAppeared() {
+				continue
+			}
 			w.stale = true
 		case a := <-acks:
 			if err := w.up.consume(a); err != nil {
@@ -220,6 +227,18 @@ func (w *watcher) run(ctx context.Context, out io.Writer) error {
 			flushAt.Reset(w.quiet)
 		}
 	}
+}
+
+func (w *watcher) baseAppeared() bool {
+	for _, g := range w.globs {
+		if w.dirs[g.base] {
+			continue
+		}
+		if info, err := os.Stat(g.base); err == nil && info.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *watcher) abandon() {
