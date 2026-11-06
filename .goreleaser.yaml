@@ -27,3 +27,6 @@ snapshot:
 
 changelog:
   disable: true
+
+release:
+  prerelease: auto
