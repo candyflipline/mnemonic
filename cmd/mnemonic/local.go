@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"os/user"
@@ -137,7 +138,7 @@ func localServer(listen, author string, ix *index.Index, ctl *index.Controls, st
 	mux := http.NewServeMux()
 	mux.Handle("GET /v1/export/{kind}", auth.Require(auth.Read)(export.Handler(ix, ctl)))
 	mux.Handle("/mcp", auth.Require(auth.Read)(mcp.Handler(ix, ctl, st, index.Lookup)))
-	return &http.Server{Addr: listen, Handler: mux, ConnContext: func(ctx context.Context, _ net.Conn) context.Context {
+	return &http.Server{Addr: listen, Handler: loopbackOnly(mux), ConnContext: func(ctx context.Context, _ net.Conn) context.Context {
 		return auth.NewContext(ctx, auth.Local(author))
 	}}
 }
@@ -286,13 +287,37 @@ func requireLoopback(addr string) error {
 	if err != nil {
 		return fmt.Errorf("--listen %q: %w", addr, err)
 	}
-	if host == "localhost" {
-		return nil
-	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+	if isLoopbackName(host) {
 		return nil
 	}
 	return fmt.Errorf("--listen %q is not a loopback address; local mode serves this machine only (use 127.0.0.1 or ::1, or run mnemonic serve for a team server)", addr)
+}
+
+// loopbackOnly refuses a request whose Host, or Origin when present, names
+// anything but this machine: binding loopback does not stop a page whose
+// domain resolves to 127.0.0.1 (DNS rebinding).
+func loopbackOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isLoopbackName((&url.URL{Host: r.Host}).Hostname()) {
+			http.Error(w, "forbidden: Host must be 127.0.0.1, ::1 or localhost", http.StatusForbidden)
+			return
+		}
+		if origin := r.Header.Get("Origin"); origin != "" {
+			if u, err := url.Parse(origin); err != nil || !isLoopbackName(u.Hostname()) {
+				http.Error(w, "forbidden: Origin must be 127.0.0.1, ::1 or localhost", http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func isLoopbackName(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 var unsafeSegment = regexp.MustCompile(`[^a-z0-9._-]+`)
