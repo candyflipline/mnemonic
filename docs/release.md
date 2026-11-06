@@ -38,7 +38,15 @@ The linker stamps `main.version` and `main.commit` (`cmd/mnemonic/version.go`). 
 mnemonic 0.7.4-snapshot-3553b0af (3553b0af)
 ```
 
-A binary built without the flags prints the module version that `go install` records, without its leading `v`. `go install -tags server github.com/candyflipline/mnemonic/cmd/mnemonic@v0.8.0-rc.1` prints `mnemonic 0.8.0-rc.1 (none)`. When the binary records no module version, or `(devel)`, it prints `dev`. The revision is the `vcs.revision` that `go build` records, or `none` when there is none. `mnemonic` with no arguments prints every registered command, sorted, built from the `commands` map in `cmd/mnemonic/main.go`.
+What a binary prints depends on how it was built.
+
+| Build | Prints |
+|---|---|
+| GoReleaser | `mnemonic <version> (<short commit>)`, from the flags |
+| `go install -tags server github.com/candyflipline/mnemonic/cmd/mnemonic@v0.8.0-rc.1` | `mnemonic 0.8.0-rc.1 (none)`. The module version replaces `dev`, and no revision is recorded. |
+| `go build` in a git checkout | `mnemonic dev (<7-character revision>)`. Go also records a pseudo-version here, and the binary ignores it. In a linked `git worktree`, Go records no revision and the binary prints `mnemonic dev (none)`. |
+
+The binary uses the module version only when the build records no `vcs.revision`. A binary that records neither prints `dev`. `mnemonic` with no arguments prints every registered command, sorted, built from the `commands` map in `cmd/mnemonic/main.go`.
 
 The 32 tags `v0.1.0` through `v0.7.3` belong to the Rust seed (branch `archive/rust-seed`). The first Go release proposed is `v0.8.0-rc.1`, which sorts above them. GoReleaser marks a tag with a prerelease suffix as a prerelease.
 

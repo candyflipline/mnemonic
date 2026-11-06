@@ -19,10 +19,20 @@ func stampedVersion() string {
 	if version != "dev" {
 		return version
 	}
-	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
-		return strings.TrimPrefix(info.Main.Version, "v")
+	info, ok := debug.ReadBuildInfo()
+	if !ok || info.Main.Version == "" || info.Main.Version == "(devel)" || buildSetting(info, "vcs.revision") != "" {
+		return version
 	}
-	return version
+	return strings.TrimPrefix(info.Main.Version, "v")
+}
+
+func buildSetting(info *debug.BuildInfo, key string) string {
+	for _, s := range info.Settings {
+		if s.Key == key {
+			return s.Value
+		}
+	}
+	return ""
 }
 
 func revision() string {
@@ -30,10 +40,8 @@ func revision() string {
 		return commit
 	}
 	if info, ok := debug.ReadBuildInfo(); ok {
-		for _, s := range info.Settings {
-			if s.Key == "vcs.revision" && len(s.Value) >= 7 {
-				return s.Value[:7]
-			}
+		if rev := buildSetting(info, "vcs.revision"); len(rev) >= 7 {
+			return rev[:7]
 		}
 	}
 	return "none"
