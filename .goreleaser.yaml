@@ -29,4 +29,26 @@ changelog:
   disable: true
 
 release:
-  prerelease: auto
+  make_latest: true
+
+brews:
+  - name: mnemonic
+    repository:
+      owner: candyflipline
+      name: homebrew-tap
+      git:
+        url: git@github.com:candyflipline/homebrew-tap.git
+        private_key: '{{ index .Env "HOMEBREW_TAP_DEPLOY_KEY" }}'
+    directory: Formula
+    homepage: https://github.com/candyflipline/mnemonic
+    description: Agent session traces from every machine, served to agents over MCP
+    license: Apache-2.0
+    install: |
+      bin.install "mnemonic"
+    test: |
+      assert_match version.to_s, shell_output("#{bin}/mnemonic version")
+    service: |
+      run [opt_bin/"mnemonic", "local"]
+      keep_alive true
+      log_path var/"log/mnemonic.log"
+      error_log_path var/"log/mnemonic.log"
