@@ -47,7 +47,7 @@ If the handshake fails, either the server has no `[[keys]]` block for this machi
 
 ## Upgrade the binary
 
-Replace the binary at the same path, then run `init` with no flags. `init` keeps your config and key and registers the push agent again:
+Replace the binary at the same path. With Homebrew, run `brew upgrade mnemonic`. Otherwise run the installer again, with `MNEMONIC_INSTALL_DIR` set to the binary's directory if that is not `~/.local/bin`, or copy the new binary over the old one. Then run `init` with no flags. `init` keeps your config and key and registers the push agent again:
 
 ```
 ~/.local/bin/mnemonic init

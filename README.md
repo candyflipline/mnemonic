@@ -1,20 +1,53 @@
 # mnemonic
 
-mnemonic indexes the session transcripts your coding agents write (Claude Code, Codex, Cursor, and others) and lets an agent search them over MCP. In this guide you build mnemonic, index the sessions already on your machine, and connect Claude Code so it can search them. You need no server and no account.
+mnemonic indexes the session transcripts your coding agents write (Claude Code, Codex, Cursor, and others) and lets an agent search them over MCP. In this guide you install mnemonic, index the sessions already on your machine, and connect Claude Code so it can search them. You need no server and no account.
 
 ## Install mnemonic
 
-To build from source, you need Go 1.26.6 or later and read access to this repository:
+Releases cover macOS and Linux on amd64 and arm64. Pick one install method. On a Mac or a Linux machine with Homebrew, run:
 
 ```
-git clone https://github.com/candyflipline/mnemonic
-cd mnemonic
-CGO_ENABLED=0 go build -tags server -o mnemonic ./cmd/mnemonic
+brew install candyflipline/tap/mnemonic
+```
+
+To keep `mnemonic local` running in the background, run `brew services start mnemonic`.
+
+Without Homebrew, run the installer. It picks the newest release for your OS and architecture, checks the archive against the release's `checksums.txt`, and puts `mnemonic` in `~/.local/bin`:
+
+```
+curl -fsSL https://raw.githubusercontent.com/candyflipline/mnemonic/main/install.sh | sh
+```
+
+The installer prints the installed version. If `~/.local/bin` is not on your `PATH`, it also prints the line that adds it.
+
+To read the script first, or to avoid piping it to `sh`, download the archive yourself. Set `os` to `darwin` or `linux` and `arch` to `arm64` or `amd64`:
+
+```
+tag=v0.8.0
+os=darwin
+arch=arm64
+base=https://github.com/candyflipline/mnemonic/releases/download/$tag
+curl -fsSLO "$base/mnemonic_${tag#v}_${os}_${arch}.tar.gz"
+curl -fsSLO "$base/checksums.txt"
+shasum -a 256 --ignore-missing -c checksums.txt
+tar -xzf "mnemonic_${tag#v}_${os}_${arch}.tar.gz" mnemonic
 mkdir -p ~/.local/bin
 install -m 755 mnemonic ~/.local/bin/mnemonic
 ```
 
-Put `~/.local/bin` on your `PATH`. Then `command -v mnemonic` prints the path of the binary.
+`shasum` prints `OK` for the archive. On Linux, run `sha256sum --ignore-missing -c checksums.txt` instead. The archives and the installer are not code-signed or notarized. [Build a release](docs/release.md) lists every archive name.
+
+With Go 1.26.6 or later, you can build the same release on your machine. Name the tag, and keep `-tags server`, because `mnemonic local` exists only in that build:
+
+```
+go install -tags server github.com/candyflipline/mnemonic/cmd/mnemonic@v0.8.0
+```
+
+`go install` puts the binary in `$(go env GOPATH)/bin`.
+
+If an earlier `mnemonic` sits first on your `PATH`, such as `~/.local/bin/mnemonic` from the installer, it hides the Homebrew one. Use one install method, and run `command -v mnemonic` to see which binary runs.
+
+Run `mnemonic version`. It prints `mnemonic 0.8.0`, then the release's short commit in parentheses. A `go install` build prints `(none)` there.
 
 ## Index your sessions
 
