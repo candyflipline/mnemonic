@@ -31,12 +31,20 @@ kept() {
 }
 
 merged_state() {
-  if git merge-base --is-ancestor "origin/$1" origin/main; then
-    echo yes
-  elif ! git cherry origin/main "origin/$1" | grep -q '^+'; then
-    echo patch-equivalent
-  else
+  local rc=0 out
+  git merge-base --is-ancestor "origin/$1" origin/main || rc=$?
+  case $rc in
+    0) echo yes; return ;;
+    1) ;;
+    *) echo "branches.sh: merge-base failed (exit $rc) for $1, treating as not merged" >&2; echo no; return ;;
+  esac
+  if ! out=$(git cherry origin/main "origin/$1"); then
+    echo "branches.sh: git cherry failed for $1, treating as not merged" >&2
     echo no
+  elif grep -q '^+' <<<"$out"; then
+    echo no
+  else
+    echo patch-equivalent
   fi
 }
 
