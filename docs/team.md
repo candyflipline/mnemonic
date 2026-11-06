@@ -8,7 +8,7 @@ A machine reaches the server over one QUIC UDP port, 8741, and proves itself wit
 
 Install the binary as the [README](../README.md#install-mnemonic) describes. The same binary runs `mnemonic local` and connects to a team server. It runs on macOS and Linux.
 
-Keep the binary at one stable path, such as `~/.local/bin/mnemonic`. The push agent that `init` installs runs the binary that ran `init`, at its path with symlinks resolved.
+Keep the binary at one stable path, such as `~/.local/bin/mnemonic`. The push agent that `init` installs runs the binary that ran `init`, at its path with symlinks resolved. When that path is inside a Homebrew Cellar, `init` records Homebrew's stable path instead, `<prefix>/opt/mnemonic/bin/mnemonic`, so `brew upgrade` does not leave the agent pointing at a deleted version directory.
 
 ## Connect the machine
 

@@ -214,6 +214,13 @@ systemctl --user enable --now mnemonic-push.service
 }
 
 func brewStablePath(resolved string) string {
+	parts := strings.Split(resolved, "/")
+	for i, p := range parts {
+		if p == "Cellar" && len(parts) == i+5 && parts[i+3] == "bin" {
+			prefix := strings.Join(parts[:i], "/")
+			return prefix + "/opt/" + parts[i+1] + "/bin/" + parts[i+4]
+		}
+	}
 	return resolved
 }
 
@@ -225,6 +232,12 @@ func runningBinary() (string, error) {
 	real, err := filepath.EvalSymlinks(exe)
 	if err != nil {
 		return "", fmt.Errorf("init: %s: %w", exe, err)
+	}
+	stable := brewStablePath(real)
+	if stable != real {
+		if _, err := os.Stat(stable); err == nil {
+			return stable, nil
+		}
 	}
 	return real, nil
 }
