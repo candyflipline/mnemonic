@@ -102,12 +102,7 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 		return err
 	}
 	sink.drainSettles(ctx, wake, logger)
-	mux := http.NewServeMux()
-	mux.Handle("GET /v1/export/{kind}", auth.Require(auth.Read)(export.Handler(ix, ctl)))
-	mux.Handle("/mcp", auth.Require(auth.Read)(mcp.Handler(ix, ctl, st, index.Lookup)))
-	hs := &http.Server{Addr: opts.listen, Handler: mux, ConnContext: func(ctx context.Context, _ net.Conn) context.Context {
-		return auth.NewContext(ctx, auth.Local(author))
-	}}
+	hs := localServer(opts.listen, author, ix, ctl, st)
 	go func() {
 		if err := pushrun.WatchSink(ctx, config.Client{Sources: srcs}, sink, out); err != nil {
 			logger.Printf("watch: %v", err)
@@ -136,6 +131,15 @@ func runLocal(ctx context.Context, opts localOptions, out, logOut io.Writer) err
 		return fmt.Errorf("listen on %s: %w", opts.listen, err)
 	}
 	return nil
+}
+
+func localServer(listen, author string, ix *index.Index, ctl *index.Controls, st *store.Committer) *http.Server {
+	mux := http.NewServeMux()
+	mux.Handle("GET /v1/export/{kind}", auth.Require(auth.Read)(export.Handler(ix, ctl)))
+	mux.Handle("/mcp", auth.Require(auth.Read)(mcp.Handler(ix, ctl, st, index.Lookup)))
+	return &http.Server{Addr: listen, Handler: mux, ConnContext: func(ctx context.Context, _ net.Conn) context.Context {
+		return auth.NewContext(ctx, auth.Local(author))
+	}}
 }
 
 // expandSources resolves the ~ in the client's source globs against this

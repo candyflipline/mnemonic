@@ -7,9 +7,14 @@ import (
 	"context"
 	"io"
 	"log"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +22,7 @@ import (
 	"github.com/candyflipline/mnemonic/internal/index"
 	"github.com/candyflipline/mnemonic/internal/layout"
 	"github.com/candyflipline/mnemonic/internal/redact"
+	"github.com/candyflipline/mnemonic/internal/store"
 )
 
 func TestRefuseClientDir(t *testing.T) {
@@ -122,5 +128,90 @@ func TestWakeCycleDrainsSettles(t *testing.T) {
 	sink.wakeCycle(context.Background(), wake, logger)
 	if got := ix.SweepStale(); got != 0 {
 		t.Fatalf("after the wake cycle SweepStale() = %d, want 0: the cycle that parsed a's append settles nothing, and the wake path left b hot", got)
+	}
+}
+
+func TestLocalRefusesForeignHostAndOrigin(t *testing.T) {
+	const sid = "7c666c01-d38e-4658-8650-854ffb5b626e"
+	dir := t.TempDir()
+	ix, err := index.Open(layout.IndexDir(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ix.Close()
+	red, err := redact.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	glob := filepath.Join("..", "..", "testdata", "fixtures", "claude-code", "*.jsonl")
+	srcs := []config.SourceGlob{{Harness: "claude-code", SourceName: "claude", Glob: glob}}
+	if err := firstIngest(ix, srcs, log.New(io.Discard, "", 0), "tester", "testbox", red); err != nil {
+		t.Fatal(err)
+	}
+	ctl, err := index.LoadControls(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ts := httptest.NewUnstartedServer(nil)
+	ts.Config = localServer("127.0.0.1:0", "tester", ix, ctl, st)
+	ts.Start()
+	defer ts.Close()
+	port := ts.Listener.Addr().(*net.TCPAddr).Port
+
+	const initialize = `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}`
+	cases := []struct {
+		route, host, origin string
+		want                int
+	}{
+		{"mcp", "evil.example", "", http.StatusForbidden},
+		{"export", "evil.example", "", http.StatusForbidden},
+		{"mcp", "evil.example:" + strconv.Itoa(port), "", http.StatusForbidden},
+		{"export", "evil.example:7781", "", http.StatusForbidden},
+		{"mcp", "127.0.0.1:" + strconv.Itoa(port), "", http.StatusOK},
+		{"export", "127.0.0.1:" + strconv.Itoa(port), "", http.StatusOK},
+		{"mcp", "localhost:7781", "", http.StatusOK},
+		{"export", "localhost:7781", "", http.StatusOK},
+		{"mcp", "[::1]:7781", "", http.StatusOK},
+		{"export", "[::1]:7781", "", http.StatusOK},
+		{"export", "localhost", "", http.StatusOK},
+		{"mcp", "127.0.0.1:7781", "http://evil.example", http.StatusForbidden},
+		{"export", "127.0.0.1:7781", "http://evil.example", http.StatusForbidden},
+		{"export", "127.0.0.1:7781", "null", http.StatusForbidden},
+		{"export", "127.0.0.1:7781", "http://localhost:7781", http.StatusOK},
+		{"mcp", "127.0.0.1:7781", "http://127.0.0.1:7781", http.StatusOK},
+	}
+	for _, c := range cases {
+		var req *http.Request
+		if c.route == "mcp" {
+			req, err = http.NewRequest(http.MethodPost, ts.URL+"/mcp", strings.NewReader(initialize))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "application/json, text/event-stream")
+		} else {
+			req, err = http.NewRequest(http.MethodGet, ts.URL+"/v1/export/otlp?session="+sid, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		req.Host = c.host
+		if c.origin != "" {
+			req.Header.Set("Origin", c.origin)
+		}
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != c.want {
+			t.Errorf("%s Host %q Origin %q: status %d, want %d: %.60q", c.route, c.host, c.origin, resp.StatusCode, c.want, body)
+		}
 	}
 }
