@@ -32,7 +32,7 @@ A snapshot is named from the latest tag reachable from `HEAD`: `{{ incpatch .Ver
 
 ## Version
 
-The linker stamps `main.version` and `main.commit` (`cmd/mnemonic/version.go`). `mnemonic version` prints both on one line.
+The linker stamps `main.version` and `main.commit` (`cmd/mnemonic/version.go`), and stamps `internal/mcp.Version`, which the MCP `initialize` answer reports as `serverInfo.version`. `mnemonic version` prints the first two on one line.
 
 ```
 mnemonic 0.7.4-snapshot-3553b0af (3553b0af)
@@ -110,4 +110,3 @@ Never run the steps with the real `HOME`: `mnemonic local` would ingest the real
 ## Limits
 
 - `mnemonic local` serves only while it runs. No resident agent keeps it up.
-- `serverInfo.version` in the MCP `initialize` answer is `dev` in every build. It comes from `internal/mcp`, not from the stamped `main.version`.
