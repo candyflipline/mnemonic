@@ -42,3 +42,17 @@ func TestGuardTakeover(t *testing.T) {
 		}
 	}
 }
+
+func TestBrewStablePath(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"/opt/homebrew/Cellar/mnemonic/0.8.0/bin/mnemonic", "/opt/homebrew/opt/mnemonic/bin/mnemonic"},
+		{"/usr/local/Cellar/mnemonic/0.8.0/bin/mnemonic", "/usr/local/opt/mnemonic/bin/mnemonic"},
+		{"/home/linuxbrew/.linuxbrew/Cellar/mnemonic/0.8.0_1/bin/mnemonic", "/home/linuxbrew/.linuxbrew/opt/mnemonic/bin/mnemonic"},
+		{"/Users/a/.local/bin/mnemonic", "/Users/a/.local/bin/mnemonic"},
+		{"/opt/homebrew/Cellar/mnemonic/0.8.0/libexec/mnemonic", "/opt/homebrew/Cellar/mnemonic/0.8.0/libexec/mnemonic"},
+	} {
+		if got := brewStablePath(tc.in); got != tc.want {
+			t.Errorf("brewStablePath(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

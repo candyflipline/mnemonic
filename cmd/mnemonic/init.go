@@ -213,6 +213,10 @@ systemctl --user enable --now mnemonic-push.service
 `, exe)
 }
 
+func brewStablePath(resolved string) string {
+	return resolved
+}
+
 func runningBinary() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
