@@ -60,7 +60,7 @@ claude mcp get mnemonic
 
 `claude mcp get` prints `Status: ✔ Connected`. Start Claude Code and ask it to search your past sessions for something you worked on. The tools appear as `mcp__mnemonic__search_sessions`, `mcp__mnemonic__open`, `mcp__mnemonic__list_sessions`, and others.
 
-The endpoint has no key or token. Any process on this machine can read your sessions through it. mnemonic refuses a request whose `Origin` header names anything other than a loopback IP address, so a web page in your browser cannot read them. `mnemonic local` listens only on a loopback address.
+The endpoint has no key or token. Any process on this machine can read your sessions through it. `mnemonic local` listens only on a loopback address, so other machines cannot reach it.
 
 ## Connect Codex or Cursor
 
