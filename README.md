@@ -4,8 +4,6 @@ mnemonic indexes the session transcripts your coding agents write (Claude Code, 
 
 ## Install mnemonic
 
-<!-- INSTALL: pass 2 -->
-
 To build from source, you need Go 1.26.6 or later and read access to this repository:
 
 ```
